@@ -16,6 +16,7 @@ mod memory;
 mod model;
 mod outcome;
 mod page;
+mod recorder;
 mod replay;
 mod send;
 
@@ -24,547 +25,9 @@ pub use http::*;
 pub use model::*;
 pub use outcome::*;
 pub use page::*;
+pub use recorder::*;
 pub use replay::*;
 pub use send::*;
-
-/// Values `--capture` accepts.
-pub const CAPTURE_MODES: &[&str] = &["flow"];
-
-/// Check a `--capture` value list; only `flow` is supported.
-pub fn parse_capture(values: &[String]) -> Result<(), String> {
-    for v in values {
-        if !CAPTURE_MODES.contains(&v.as_str()) {
-            return Err(format!(
-                "unknown --capture value '{}'. Supported: {}",
-                v,
-                CAPTURE_MODES.join(", ")
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// What the recorder knows about a command besides its arguments.
-#[derive(Clone, Default)]
-pub struct StepMeta {
-    pub ok: bool,
-    /// Page URL before the command ran.
-    pub from_url: Option<String>,
-    /// Page URL after the command finished.
-    pub url: Option<String>,
-}
-
-/// Commands and request tags recorded while the session runs with
-/// `--capture flow`.
-#[derive(Default)]
-pub struct FlowRecorder {
-    capturing: bool,
-    suspended: bool,
-    pub commands: Vec<(u64, Value)>,
-    pub meta: HashMap<u64, StepMeta>,
-    /// HAR request id to the sequence number of the command that was
-    /// running when the request started.
-    pub request_tags: HashMap<String, u64>,
-    pub current_seq: Option<u64>,
-    /// A paste whose value is read once the command has finished.
-    pub paste_pending: Option<u64>,
-    /// Steps that put a value of unknown content into a secret field.
-    pub unknown_secret_seqs: Vec<u64>,
-    /// Keys pressed so far in the secret field that has focus.
-    key_buffer: String,
-    /// The last entry of `secrets` is the current `key_buffer`.
-    key_active: bool,
-    /// A typed step saved as a param before its field could be read.
-    pub needs_traits: Option<u64>,
-    /// Sequence number the command being executed was recorded under.
-    pub begun: Option<u64>,
-    /// Values typed into secret fields, kept in memory only, so save can
-    /// drop any captured request that carries one.
-    pub secrets: Vec<String>,
-    /// The tab's URL when capture began, for flows that start on an open page.
-    pub page_url: Option<String>,
-    /// Values typed into fields that are not secrets, as (param name, value, seq).
-    pub typed: Vec<(String, String, u64)>,
-    /// Sequence number of the last step covered by a save.
-    pub last_save_seq: u64,
-    /// Flows saved during this session, as (origin, name).
-    pub saved: Vec<(String, String)>,
-    next_seq: u64,
-}
-
-impl FlowRecorder {
-    pub fn active(&self) -> bool {
-        self.capturing
-    }
-
-    pub fn begin_capture(&mut self, page_url: Option<String>) {
-        *self = FlowRecorder {
-            capturing: true,
-            page_url,
-            ..FlowRecorder::default()
-        };
-    }
-
-    /// Stop recording and report the steps no save covers.
-    pub fn end_capture(&mut self) -> usize {
-        let unsaved = self.unsaved_steps();
-        *self = FlowRecorder::default();
-        unsaved
-    }
-
-    pub fn unsaved_steps(&self) -> usize {
-        self.commands
-            .iter()
-            .filter(|(seq, _)| *seq > self.last_save_seq)
-            .count()
-    }
-
-    /// Commands run by a replay are not part of the recording.
-    pub fn set_suspended(&mut self, suspended: bool) {
-        self.suspended = suspended;
-    }
-
-    /// Record a command and return its sequence number. The step counts as
-    /// failed until `finish_command` says otherwise.
-    pub fn records(&self, action: &str) -> bool {
-        self.active() && !self.suspended && is_recordable(action)
-    }
-
-    pub fn begin_command(
-        &mut self,
-        action: &str,
-        cmd: &Value,
-        from_url: Option<String>,
-        traits: Option<&FieldTraits>,
-    ) -> Option<u64> {
-        if !self.active() || self.suspended || !is_recordable(action) {
-            return None;
-        }
-        self.next_seq += 1;
-        let mut recorded = cmd.clone();
-        if let Some(obj) = recorded.as_object_mut() {
-            obj.remove("id");
-        }
-        let is_key = matches!(action, "press" | "keydown" | "keyup");
-        if !is_key {
-            self.reset_keys();
-        }
-        if let Some(secret) = redact_secret(&mut recorded, traits) {
-            self.secrets.push(secret);
-        } else if is_key {
-            self.record_key(action, &mut recorded, traits);
-        } else if action == "clipboard" {
-            self.record_clipboard(&mut recorded, traits);
-        } else if let Some(field) = typed_field(&recorded) {
-            self.keep_typed_as_param(&mut recorded, field, traits);
-        }
-        self.commands.push((self.next_seq, recorded));
-        self.meta.insert(
-            self.next_seq,
-            StepMeta {
-                ok: false,
-                from_url,
-                url: None,
-            },
-        );
-        self.current_seq = Some(self.next_seq);
-        self.begun = Some(self.next_seq);
-        Some(self.next_seq)
-    }
-
-    /// A value typed into an ordinary field is saved as a param, so the flow
-    /// file carries a placeholder in the step and the value only as the
-    /// param's recorded example.
-    fn keep_typed_as_param(&mut self, cmd: &mut Value, field: &str, traits: Option<&FieldTraits>) {
-        let Some(value) = cmd[field]
-            .as_str()
-            .filter(|v| !v.is_empty())
-            .map(String::from)
-        else {
-            return;
-        };
-        let name = match self.typed.iter().find(|(_, v, _)| *v == value) {
-            Some((name, _, _)) => name.clone(),
-            None => {
-                let taken: Vec<String> = self.typed.iter().map(|(n, _, _)| n.clone()).collect();
-                typed_param_name(traits, &taken)
-            }
-        };
-        if traits.is_none() {
-            self.needs_traits = Some(self.next_seq);
-        }
-        self.typed.push((name.clone(), value, self.next_seq));
-        cmd[field] = json!(format!("{{{{{}}}}}", name));
-    }
-
-    /// A typed command whose field could not be read beforehand: once it has
-    /// run, the focused element says whether it was a secret.
-    pub fn redact_if_secret(&mut self, seq: u64, traits: &FieldTraits) {
-        if self.needs_traits != Some(seq) {
-            return;
-        }
-        self.needs_traits = None;
-        let Some(i) = self.commands.iter().position(|(s, _)| *s == seq) else {
-            return;
-        };
-        let Some(field) = typed_field(&self.commands[i].1) else {
-            return;
-        };
-        if !traits.looks_secret() {
-            return;
-        }
-        let Some(pos) = self.typed.iter().position(|(_, _, s)| *s == seq) else {
-            return;
-        };
-        let (_, value, _) = self.typed.remove(pos);
-        let cmd = &mut self.commands[i].1;
-        cmd[field] = json!(REDACTED);
-        cmd["redacted"] = json!(true);
-        if !value.is_empty() {
-            self.secrets.push(value);
-        }
-    }
-
-    pub fn finish_command(&mut self, seq: u64, ok: bool, url: Option<String>) {
-        if let Some(m) = self.meta.get_mut(&seq) {
-            m.ok = ok;
-            m.url = url;
-        }
-    }
-
-    pub fn tag_request(&mut self, request_id: &str) {
-        if self.suspended {
-            return;
-        }
-        if let Some(seq) = self.current_seq {
-            self.request_tags.insert(request_id.to_string(), seq);
-        }
-    }
-
-    /// The first and last step a save covers. `from` is a sequence number,
-    /// `open` (the last navigation) or `last-save`; without it the save
-    /// starts at the last navigation after the previous save.
-    pub fn resolve_range(&self, from: Option<&str>, to: Option<u64>) -> Result<(u64, u64), String> {
-        let last = self.next_seq;
-        if last == 0 {
-            return Err("nothing recorded yet; run commands first, then `flow save`".to_string());
-        }
-        let to = to.unwrap_or(last);
-        if to == 0 || to > last {
-            return Err(format!(
-                "--to {} is outside the recorded steps (1-{})",
-                to, last
-            ));
-        }
-        let navigations: Vec<u64> = self
-            .commands
-            .iter()
-            .filter(|(seq, c)| {
-                *seq <= to && c.get("action").and_then(|a| a.as_str()) == Some("navigate")
-            })
-            .map(|(seq, _)| *seq)
-            .collect();
-        let after_save = self.last_save_seq + 1;
-        let from = match from {
-            None => navigations
-                .iter()
-                .rev()
-                .find(|seq| **seq > self.last_save_seq)
-                .copied()
-                .unwrap_or(after_save),
-            Some("open") => navigations
-                .last()
-                .copied()
-                .ok_or("no `open <url>` step to start from; pass --from <seq>")?,
-            Some("last-save") => after_save,
-            Some(n) => n.parse::<u64>().map_err(|_| {
-                format!(
-                    "invalid --from '{}': use a step number, `open` or `last-save`",
-                    n
-                )
-            })?,
-        };
-        if from == 0 || from > to {
-            return Err(format!(
-                "no recorded steps from {} to {}; run `flow steps` to see them",
-                from, to
-            ));
-        }
-        Ok((from, to))
-    }
-
-    /// A command that is not recorded starts: requests it sends belong to no
-    /// step, so a later save does not keep them.
-    pub fn untag_current(&mut self) {
-        self.current_seq = None;
-        self.reset_keys();
-    }
-
-    pub fn add_secret(&mut self, value: &str) {
-        if !value.is_empty() && !self.secrets.iter().any(|s| s == value) {
-            self.secrets.push(value.to_string());
-        }
-    }
-
-    fn reset_keys(&mut self) {
-        self.key_buffer.clear();
-        self.key_active = false;
-    }
-
-    fn set_key_buffer(&mut self, buffer: String) {
-        if self.key_active {
-            self.secrets.pop();
-        }
-        self.key_buffer = buffer;
-        self.key_active = !self.key_buffer.is_empty();
-        if self.key_active {
-            self.secrets.push(self.key_buffer.clone());
-        }
-    }
-
-    /// A key sent to a secret field is part of a secret: it is redacted from
-    /// the step and joined to the keys before it, so a request carrying the
-    /// whole value is dropped at save.
-    fn record_key(&mut self, action: &str, cmd: &mut Value, traits: Option<&FieldTraits>) {
-        if !traits.is_some_and(FieldTraits::looks_secret) {
-            self.reset_keys();
-            return;
-        }
-        let Some(key) = cmd["key"].as_str().map(String::from) else {
-            return;
-        };
-        let (mods, last): (Vec<String>, String) = if key == "+" {
-            (Vec::new(), key.clone())
-        } else {
-            let mut parts: Vec<&str> = key.split('+').collect();
-            let last = parts.pop().unwrap_or("").to_string();
-            (parts.iter().map(|m| m.to_ascii_lowercase()).collect(), last)
-        };
-        // Only a bare key or Shift plus a key adds a character.
-        let plain = mods.iter().all(|m| m == "shift");
-        let has = |names: &[&str]| mods.iter().any(|m| names.contains(&m.as_str()));
-        let paste = (has(&["control", "ctrl", "meta", "command", "cmd"])
-            && last.eq_ignore_ascii_case("v"))
-            || (has(&["shift"]) && last.eq_ignore_ascii_case("insert"));
-        if plain && last.chars().count() == 1 {
-            if action != "keyup" {
-                let mut buffer = self.key_buffer.clone();
-                buffer.push_str(&last);
-                self.set_key_buffer(buffer);
-            }
-            cmd["key"] = json!(REDACTED);
-            cmd["redacted"] = json!(true);
-        } else if plain && last == "Backspace" {
-            if action != "keyup" {
-                let mut buffer = self.key_buffer.clone();
-                buffer.pop();
-                self.set_key_buffer(buffer);
-            }
-        } else if paste {
-            // The pasted value is unknown, so the step is redacted and the
-            // requests it tagged are not saved.
-            if action != "keyup" {
-                self.unknown_secret_seqs.push(self.next_seq);
-                self.paste_pending = Some(self.next_seq);
-                self.reset_keys();
-            }
-            cmd["key"] = json!(REDACTED);
-            cmd["redacted"] = json!(true);
-        } else if action != "keyup" {
-            self.reset_keys();
-        }
-    }
-
-    /// `clipboard write` text is a secret; a `clipboard paste` into a secret
-    /// field puts an unknown value there.
-    fn record_clipboard(&mut self, cmd: &mut Value, traits: Option<&FieldTraits>) {
-        match cmd["operation"].as_str() {
-            Some("write") => {
-                if let Some(text) = cmd["text"].as_str().map(String::from) {
-                    cmd["text"] = json!(REDACTED);
-                    cmd["redacted"] = json!(true);
-                    self.add_secret(&text);
-                }
-            }
-            Some("paste") if traits.is_some_and(FieldTraits::looks_secret) => {
-                cmd["redacted"] = json!(true);
-                self.unknown_secret_seqs.push(self.next_seq);
-                self.paste_pending = Some(self.next_seq);
-                self.reset_keys();
-            }
-            _ => {}
-        }
-    }
-
-    /// The paste step has finished: the field's value, read from the page,
-    /// becomes a secret in full (any typed prefix included) and later keys
-    /// extend it. When the value cannot be read the step stays unknown and
-    /// the requests it tagged are dropped.
-    pub fn resolve_paste(&mut self, seq: u64, value: Option<String>) {
-        if self.paste_pending != Some(seq) {
-            return;
-        }
-        self.paste_pending = None;
-        if let Some(value) = value.filter(|v| !v.is_empty()) {
-            self.unknown_secret_seqs.retain(|s| *s != seq);
-            self.reset_keys();
-            self.set_key_buffer(value);
-        }
-    }
-
-    pub fn mark_saved(&mut self, last: u64) {
-        self.last_save_seq = self.last_save_seq.max(last);
-    }
-
-    pub fn is_ok(&self, seq: u64) -> bool {
-        self.meta.get(&seq).is_some_and(|m| m.ok)
-    }
-}
-
-/// What the page says about the field a command types into.
-#[derive(Clone, Default, Debug)]
-pub struct FieldTraits {
-    /// The `type` property: `password`, `text`, `email`, ...
-    pub input_type: String,
-    /// The `autocomplete` attribute.
-    pub autocomplete: String,
-    /// Name, id, aria-label, placeholder and label text, space separated.
-    pub hint: String,
-}
-
-impl FieldTraits {
-    pub fn from_value(v: &Value) -> FieldTraits {
-        let text = |k: &str| v[k].as_str().unwrap_or("").to_string();
-        FieldTraits {
-            input_type: text("type"),
-            autocomplete: text("autocomplete"),
-            hint: text("hint"),
-        }
-    }
-
-    /// A credential field by its type or autocomplete, or by what it is called.
-    fn looks_secret(&self) -> bool {
-        self.is_secret() || has_secret_marker(&self.hint)
-    }
-
-    /// Fields whose value is a credential, whatever the page calls them.
-    fn is_secret(&self) -> bool {
-        let ac = self.autocomplete.trim().to_ascii_lowercase();
-        self.input_type.eq_ignore_ascii_case("password")
-            || ac.split_whitespace().any(|t| {
-                matches!(t, "current-password" | "new-password" | "one-time-code")
-                    || t.starts_with("cc-")
-            })
-    }
-}
-
-fn has_secret_marker(text: &str) -> bool {
-    let text = text.to_lowercase();
-    SECRET_MARKERS.iter().any(|m| text.contains(m))
-}
-
-const SECRET_MARKERS: &[&str] = &[
-    "pass",
-    "contraseña",
-    "secret",
-    "token",
-    "otp",
-    "pin",
-    "cvv",
-    "card",
-];
-
-/// The field a command stores typed input in: `fill` and `find ... fill` use
-/// `value`, `type` uses `text`.
-fn typed_field(cmd: &Value) -> Option<&'static str> {
-    let action = cmd["action"].as_str().unwrap_or("");
-    let sub = cmd["subaction"].as_str().unwrap_or("");
-    let kind = if matches!(action, "fill" | "type" | "inserttext") {
-        action
-    } else {
-        sub
-    };
-    let field = match kind {
-        "fill" => "value",
-        "type" | "inserttext" | "insertText" => "text",
-        _ => return None,
-    };
-    cmd[field].as_str().map(|_| field)
-}
-
-/// A value typed into a field that looks like a password or code is never
-/// stored; the flow keeps a marker and cannot be replayed through the UI.
-/// Returns the removed value. `fill` stores input in `value`, `type` in `text`.
-fn redact_secret(cmd: &mut Value, traits: Option<&FieldTraits>) -> Option<String> {
-    let typed = typed_field(cmd);
-    let obj = cmd.as_object_mut()?;
-    let field = match typed {
-        Some(f) => f,
-        None => ["value", "text"]
-            .into_iter()
-            .find(|k| obj.get(*k).and_then(|v| v.as_str()).is_some())?,
-    };
-    let mut target = ["selector", "name", "label", "placeholder"]
-        .iter()
-        .filter_map(|k| obj.get(*k).and_then(|v| v.as_str()))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if let Some(t) = traits {
-        target.push(' ');
-        target.push_str(&t.hint);
-    }
-    let target = target.to_lowercase();
-    if !(traits.is_some_and(|t| t.is_secret()) || has_secret_marker(&target)) {
-        return None;
-    }
-    let original = obj.get(field)?.as_str()?.to_string();
-    obj.insert(field.to_string(), json!(REDACTED));
-    obj.insert("redacted".to_string(), json!(true));
-    (!original.is_empty()).then_some(original)
-}
-
-/// A param name from what the page calls the field: lowercase letters,
-/// digits and underscores, starting with a letter.
-fn typed_param_name(traits: Option<&FieldTraits>, taken: &[String]) -> String {
-    let base: String = traits
-        .and_then(|t| t.hint.split_whitespace().next())
-        .map(|w| {
-            w.chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() {
-                        c.to_ascii_lowercase()
-                    } else {
-                        '_'
-                    }
-                })
-                .collect::<String>()
-        })
-        .map(|w| w.trim_matches('_').chars().take(24).collect::<String>())
-        .filter(|w| w.chars().next().is_some_and(|c| c.is_ascii_lowercase()))
-        .unwrap_or_else(|| "typed".to_string());
-    let mut name = base.clone();
-    let mut n = 1;
-    while taken.contains(&name) {
-        n += 1;
-        name = format!("{}{}", base, n);
-    }
-    name
-}
-
-pub const REDACTED: &str = "<redacted>";
-
-fn is_recordable(action: &str) -> bool {
-    !(action.is_empty()
-        || action.starts_with("flow_")
-        || action.starts_with("har_")
-        || action.starts_with("auth_")
-        || action.starts_with("credentials")
-        || matches!(action, "cookies_set" | "storage_set")
-        || matches!(
-            action,
-            "launch" | "close" | "session_info" | "requests" | "request_detail" | "cookies_get"
-        ))
-}
 
 // ---------------------------------------------------------------------------
 // Request selection
@@ -2557,9 +2020,9 @@ mod tests {
             None,
             None,
         );
-        r.tag_request("doc");
-        r.tag_request("api");
-        r.tag_request("ga");
+        r.tag("doc");
+        r.tag("api");
+        r.tag("ga");
         r.begin_command(
             "click",
             &json!({ "id": "2", "action": "click", "selector": "@e4" }),
@@ -2880,7 +2343,7 @@ mod tests {
             None,
         );
         for id in ["theaters", "token", "seats"] {
-            r.tag_request(id);
+            r.tag(id);
         }
         let entries = vec![
             entry(
@@ -3053,7 +2516,7 @@ mod tests {
         let mut r = FlowRecorder::default();
         r.begin_capture(None);
         r.begin_command("navigate", &json!({ "action": "navigate", "url": "https://www.shop.example/l/?keyword=kettle&page=1" }), None, None);
-        r.tag_request("api");
+        r.tag("api");
         let mut api = entry(
             "api",
             "https://www.shop.example/api/v2",
@@ -3206,7 +2669,7 @@ mod tests {
         );
         buy.method = "POST".to_string();
         let mut r = rec;
-        r.tag_request("buy");
+        r.tag("buy");
         let entries = vec![
             entry(
                 "api",
@@ -3277,8 +2740,8 @@ mod tests {
             None,
         );
         assert_eq!(r.commands[1].1["text"], REDACTED);
-        r.tag_request("login");
-        r.tag_request("me");
+        r.tag("login");
+        r.tag("me");
         let mut login = entry(
             "login",
             "https://api.example.com.ar/login",
@@ -3398,7 +2861,7 @@ mod tests {
         let mut r = recorded(&[("navigate", true)]);
         r.set_suspended(true);
         assert!(r.begin_command("click", &json!({}), None, None).is_none());
-        r.tag_request("late");
+        r.tag("late");
         assert!(r.request_tags.is_empty());
     }
 
@@ -3538,7 +3001,7 @@ mod tests {
             None,
         );
         for t in tag {
-            r.tag_request(t);
+            r.tag(t);
         }
         build_flow_value(SaveInput {
             name: "w",
@@ -3595,7 +3058,7 @@ mod tests {
             None,
         );
         for t in ["data", "out"] {
-            r.tag_request(t);
+            r.tag(t);
         }
         let entries = vec![
             entry(
@@ -3701,7 +3164,7 @@ mod tests {
             None,
             Some(&traits("email", "username", "email Email address")),
         );
-        r.tag_request("lookup");
+        r.tag("lookup");
         r.begin_command(
             "fill",
             &json!({ "action": "fill", "selector": "@e3", "value": "482913" }),
@@ -3766,7 +3229,7 @@ mod tests {
             None,
             Some(&traits("text", "", "q")),
         );
-        r.tag_request("search");
+        r.tag("search");
         let entries = vec![entry(
             "search",
             "https://api.example.com.ar/s?q=kettle",
@@ -3968,7 +3431,7 @@ mod tests {
             None,
             None,
         );
-        r.tag_request("api");
+        r.tag("api");
         let mut api = entry(
             "api",
             "https://api.example.com.ar/items",
@@ -4115,7 +3578,7 @@ mod tests {
             None,
             Some(&traits("text", "", "q")),
         );
-        r.tag_request("s");
+        r.tag("s");
         let entries = vec![entry(
             "s",
             "https://api.example.com.ar/s?q=ab",
@@ -4230,9 +3693,9 @@ mod tests {
     #[test]
     fn a_command_that_is_not_recorded_stops_tagging_requests_to_the_last_step() {
         let mut r = recorded(&[("navigate", true)]);
-        r.tag_request("belongs-to-step-1");
+        r.tag("belongs-to-step-1");
         r.untag_current();
-        r.tag_request("from-an-unrecorded-command");
+        r.tag("from-an-unrecorded-command");
         assert_eq!(r.request_tags.len(), 1);
         assert!(r.request_tags.contains_key("belongs-to-step-1"));
     }
@@ -4323,8 +3786,8 @@ mod tests {
             None,
             Some(&secret),
         );
-        r.tag_request("login");
-        r.tag_request("me");
+        r.tag("login");
+        r.tag("me");
         let mut login = entry(
             "login",
             "https://api.example.com.ar/login",
@@ -4422,8 +3885,8 @@ mod tests {
             None,
             Some(&secret),
         );
-        r.tag_request("login");
-        r.tag_request("me");
+        r.tag("login");
+        r.tag("me");
         let mut login = entry(
             "login",
             "https://api.example.com.ar/login",
@@ -4446,7 +3909,7 @@ mod tests {
             None,
             None,
         );
-        r.tag_request("home");
+        r.tag("home");
         let home = entry(
             "home",
             "https://api.example.com.ar/home",
@@ -4533,8 +3996,8 @@ mod tests {
             None,
             None,
         );
-        r.tag_request("login");
-        r.tag_request("me");
+        r.tag("login");
+        r.tag("me");
         let mut login = entry(
             "login",
             "https://api.example.com.ar/login",
@@ -4670,8 +4133,8 @@ mod tests {
             None,
             None,
         );
-        r.tag_request("login");
-        r.tag_request("me");
+        r.tag("login");
+        r.tag("me");
         let mut login = entry(
             "login",
             "https://api.example.com.ar/login",
@@ -4770,14 +4233,14 @@ mod tests {
             None,
             None,
         );
-        r.tag_request("session");
+        r.tag("session");
         r.begin_command(
             "click",
             &json!({ "action": "click", "selector": "#add" }),
             None,
             None,
         );
-        r.tag_request("cart");
+        r.tag("cart");
         let session = entry(
             "session",
             "https://api.example.com.ar/api/session",

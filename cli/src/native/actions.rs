@@ -2129,7 +2129,7 @@ impl DaemonState {
                                         response_body: None,
                                         response_body_base64: false,
                                     });
-                                    self.flow.tag_request(&request_id);
+                                    self.flow.tag(&request_id);
                                 }
                                 if self.request_tracking {
                                     let headers =
@@ -2872,25 +2872,26 @@ fn append_launch_policy_actions(
 }
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
-    let outer = state.flow.begun.take();
+    let outer = state.flow.enter();
     let mut resp = execute_command_inner(cmd, state).await;
-    let mine = std::mem::replace(&mut state.flow.begun, outer);
-    if let Some(seq) = mine {
+    if let Some(seq) = state.flow.exit(outer) {
         let ok = resp.get("success") == Some(&json!(true));
         let url = match state.browser.as_ref() {
             Some(mgr) => mgr.get_url().await.ok(),
             None => None,
         };
-        if state.flow.paste_pending == Some(seq) {
-            let value = flow_active_field_value(state).await;
-            state.flow.resolve_paste(seq, value);
-        }
-        if state.flow.needs_traits == Some(seq) {
-            if let Some(traits) = flow_active_field_traits(state).await {
-                state.flow.redact_if_secret(seq, &traits);
-            }
-        }
-        state.flow.finish_command(seq, ok, url);
+        let (wants_value, wants_traits) = state.flow.after_reads(seq);
+        let value = if wants_value {
+            flow_active_field_value(state).await
+        } else {
+            None
+        };
+        let traits = if wants_traits {
+            flow_active_field_traits(state).await
+        } else {
+            None
+        };
+        state.flow.end(seq, ok, url, value, traits);
         resp["recorded"] = json!({ "seq": seq });
     }
     resp
@@ -2985,8 +2986,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     // After the drain, so late requests from the previous command keep its tag.
-    if state.flow.records(action) {
-        let stable = flow_stable_command(action, cmd, &state.ref_map);
+    if state.flow.wants_context(action) {
         let from_url = match state.browser.as_ref() {
             Some(mgr) => mgr.get_url().await.ok(),
             None => None,
@@ -2994,9 +2994,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         let traits = flow_field_traits(action, cmd, state).await;
         state
             .flow
-            .begin_command(action, &stable, from_url, traits.as_ref());
-    } else if state.flow.active() {
-        state.flow.untag_current();
+            .begin(action, cmd, &state.ref_map, from_url, traits.as_ref());
+    } else {
+        state.flow.begin(action, cmd, &state.ref_map, None, None);
     }
 
     // Keep element resolution in sync with the `frame` selection (see
@@ -10589,7 +10589,7 @@ async fn handle_mainframe(state: &mut DaemonState) -> Result<Value, String> {
 /// the validation guard, the error message, and the accepted-actions test,
 /// so drift between the guard and the match arms fails a test instead of
 /// silently reopening the "Unknown subaction: type" bug this fixes.
-const FIND_ACTIONS: &[&str] = &["click", "fill", "check", "hover", "text"];
+pub(crate) const FIND_ACTIONS: &[&str] = &["click", "fill", "check", "hover", "text"];
 
 /// The daemon commands that dispatch a `find` subaction through
 /// `execute_subaction` after resolving their locator.
@@ -12069,30 +12069,10 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 // ---------------------------------------------------------------------------
 
 fn handle_flow_steps(_cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let rec = &state.flow;
-    if !rec.active() {
+    if !state.flow.active() {
         return Err(NOT_CAPTURING.to_string());
     }
-    let steps: Vec<Value> = rec
-        .commands
-        .iter()
-        .map(|(seq, c)| {
-            let tagged = rec.request_tags.values().filter(|s| *s == seq).count();
-            json!({
-                "seq": seq,
-                "command": super::flow::describe_command(c),
-                "url": rec.meta.get(seq).and_then(|m| m.url.clone()),
-                "requests": tagged,
-                "ok": rec.is_ok(*seq),
-                "saved": *seq <= rec.last_save_seq,
-            })
-        })
-        .collect();
-    Ok(json!({
-        "steps": steps,
-        "lastSave": rec.last_save_seq,
-        "unsaved": rec.unsaved_steps(),
-    }))
+    Ok(state.flow.steps())
 }
 
 const NOT_CAPTURING: &str =
@@ -12109,16 +12089,6 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .to_string();
     super::flow::validate_name(&name)?;
     let params = super::flow::parse_params(cmd)?;
-    let from = cmd.get("from").and_then(|v| v.as_str());
-    let to = cmd.get("to").and_then(|v| v.as_u64());
-    let (first, last) = state.flow.resolve_range(from, to)?;
-    let commands: Vec<(u64, Value)> = state
-        .flow
-        .commands
-        .iter()
-        .filter(|(seq, _)| *seq >= first && *seq <= last)
-        .cloned()
-        .collect();
     let login_wall = match state.browser.as_ref() {
         Some(mgr) => mgr
             .evaluate(
@@ -12131,24 +12101,17 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             .unwrap_or(false),
         None => false,
     };
-    let (flow, mut report) = super::flow::build_flow(super::flow::SaveInput {
+    let entries = state.har_entries.clone();
+    state.flow.save(super::flow::SaveArgs {
         name: &name,
-        recorder: &state.flow,
-        commands: &commands,
+        from: cmd.get("from").and_then(|v| v.as_str()),
+        to: cmd.get("to").and_then(|v| v.as_u64()),
         description: cmd.get("description").and_then(|v| v.as_str()),
-        entries: &state.har_entries,
         params: &params,
         output: cmd.get("output").and_then(|v| v.as_str()),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        entries: &entries,
         login_wall,
-    })?;
-    let path = super::flow::write_flow(&flow)?;
-    state.flow.mark_saved(last);
-    state.flow.saved.push((flow.origin.clone(), name));
-    report["path"] = json!(path.to_string_lossy());
-    report["from"] = json!(first);
-    report["to"] = json!(last);
-    Ok(report)
+    })
 }
 
 fn flow_for_command(cmd: &Value) -> Option<super::flow::Flow> {
@@ -12421,34 +12384,6 @@ async fn flow_field_traits(
     Some(super::flow::FieldTraits::from_value(&value))
 }
 
-/// Snapshot refs only live until the next snapshot, so a recorded command
-/// that targets one is stored as the role and name the ref pointed at.
-fn flow_stable_command(action: &str, cmd: &Value, refs: &super::element::RefMap) -> Value {
-    if !FIND_ACTIONS.contains(&action) {
-        return cmd.clone();
-    }
-    let Some(entry) = cmd
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.strip_prefix('@'))
-        .and_then(|r| refs.get(r))
-        .filter(|e| !e.role.is_empty() && !e.name.is_empty())
-    else {
-        return cmd.clone();
-    };
-    let mut out = json!({
-        "action": "getbyrole",
-        "role": entry.role,
-        "name": entry.name,
-        "exact": true,
-        "subaction": action,
-    });
-    if let Some(v) = cmd.get("value") {
-        out["value"] = v.clone();
-    }
-    out
-}
-
 /// The session route that would answer this request in the page, if any.
 async fn flow_routed_response(
     state: &DaemonState,
@@ -12668,7 +12603,7 @@ async fn attach_flow_availability(resp: &mut Value, action: &str, state: &mut Da
         resp,
         url.as_deref(),
         &mut state.flow_hinted,
-        &state.flow.saved,
+        state.flow.saved(),
     );
 }
 
@@ -19900,17 +19835,18 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     async fn requests_of_an_unrecorded_command_are_not_tagged_to_the_previous_step() {
         let mut state = DaemonState::new();
         state.flow.begin_capture(None);
-        state.flow.begin_command(
+        state.flow.begin(
             "click",
             &json!({ "action": "click", "selector": "#a" }),
+            &RefMap::new(),
             None,
             None,
         );
         let resp =
             execute_command(&json!({ "id": "s", "action": "session_info" }), &mut state).await;
         assert!(resp.get("recorded").is_none(), "{resp}");
-        state.flow.tag_request("sent-by-the-unrecorded-command");
-        assert!(state.flow.request_tags.is_empty());
+        state.flow.tag("sent-by-the-unrecorded-command");
+        assert_eq!(state.flow.steps()["steps"][0]["requests"], 0);
     }
 
     #[tokio::test]
@@ -20170,17 +20106,18 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.flow.begin_capture(None);
         let seq = state
             .flow
-            .begin_command(
+            .begin(
                 "click",
                 &json!({ "action": "click", "selector": "#a" }),
+                &RefMap::new(),
                 None,
                 None,
             )
             .unwrap();
-        state.flow.tag_request("r1");
+        state.flow.tag("r1");
         state
             .flow
-            .finish_command(seq, false, Some("https://a.test/".to_string()));
+            .end(seq, false, Some("https://a.test/".to_string()), None, None);
         let steps = handle_flow_steps(&json!({}), &state).unwrap();
         assert_eq!(steps["steps"][0]["ok"], false);
         assert_eq!(steps["steps"][0]["requests"], 1);
