@@ -965,11 +965,33 @@ fn carries_secret(e: &HarEntry, secrets: &[String]) -> bool {
             text.contains(secret.as_str())
                 || text.contains(encoded.as_ref())
                 || text.contains(escaped)
+                || decoded_forms(text)
+                    .iter()
+                    .any(|d| d.contains(secret.as_str()))
         };
         found(&e.url)
             || e.post_data.as_deref().is_some_and(found)
             || e.request_headers.iter().any(|(_, v)| found(v))
     })
+}
+
+/// A request text as the server reads it: form encoding (`+` is a space),
+/// percent encoding, and the strings inside a JSON body, whose escapes the
+/// parser resolves.
+fn decoded_forms(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(plus) = urlencoding::decode(&text.replace('+', " ")) {
+        out.push(plus.into_owned());
+    }
+    if let Ok(pct) = urlencoding::decode(text) {
+        out.push(pct.into_owned());
+    }
+    if let Ok(json) = serde_json::from_str::<Value>(text) {
+        let mut strings = Vec::new();
+        collect_scalars(&json, &mut strings);
+        out.extend(strings);
+    }
+    out
 }
 
 /// Data a recorded request can answer with: the JSON body of an API call,
@@ -1536,14 +1558,27 @@ fn link_requests(
         references: Vec::new(),
     };
     let given_values: Vec<&str> = given.iter().map(|(_, v)| v.as_str()).collect();
-    let order: Vec<String> = bodies.iter().map(|(id, _)| id.clone()).collect();
+    // Position of every request, writes included, so a write can take a value
+    // from any response that came before it.
+    let rank: HashMap<String, usize> = steps
+        .iter()
+        .flat_map(|s| s["requests"].as_array().into_iter().flatten())
+        .filter_map(|r| r["id"].as_str())
+        .enumerate()
+        .map(|(i, id)| (id.to_string(), i))
+        .collect();
     for step in steps.iter_mut() {
         let Some(requests) = step["requests"].as_array_mut() else {
             continue;
         };
         for req in requests.iter_mut() {
             let id = req["id"].as_str().unwrap_or("").to_string();
-            let earlier = &bodies[..order.iter().position(|o| *o == id).unwrap_or(0)];
+            let own = rank.get(&id).copied().unwrap_or(0);
+            let earlier: Vec<(String, Value)> = bodies
+                .iter()
+                .filter(|(from, _)| rank.get(from).is_some_and(|r| *r < own))
+                .cloned()
+                .collect();
             for value in sent_values(req) {
                 // The page's own path (owner, repo, section) is the site's
                 // structure, not a choice the run makes.
@@ -2344,6 +2379,16 @@ pub fn replay_only_writes(flow: &Value) -> Vec<Value> {
         .flatten()
         .filter(|w| !own.iter().any(|id| w["id"] == id.as_str()))
         .cloned()
+        .collect()
+}
+
+/// Ids of every write the recording caused.
+pub fn all_write_ids(flow: &Value) -> Vec<String> {
+    flow["writes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|w| w["id"].as_str().map(String::from))
         .collect()
 }
 
@@ -5433,5 +5478,212 @@ mod tests {
         r.resolve_paste(paste, None);
         assert_eq!(r.unknown_secret_seqs, vec![paste]);
         assert_eq!(r.paste_pending, None);
+    }
+
+    // ctate review comments, reproduced against the saved-flow code.
+
+    #[test]
+    fn comment_3_params_with_quotes_keep_commands_and_bodies_valid() {
+        let value = r#"a "quoted" item"#.to_string();
+        let flow = json!({
+            "startUrl": "https://a.test/",
+            "params": [{ "name": "q", "source": "typed" }],
+            "steps": [{ "ok": true, "command": { "action": "fill", "selector": "#q", "value": "{{q}}" },
+                "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/s?q={{q}}",
+                    "headers": { "x-q": "{{q}}" }, "body": "{\"q\":\"{{q}}\"}",
+                    "expect": { "signature": signature(&json!({})) } }] }]
+        });
+        let cmds = replay_commands(&flow, &[("q".to_string(), value.clone())]).unwrap();
+        assert_eq!(cmds[1]["value"], value.as_str());
+        assert!(serde_json::from_str::<Value>(&serde_json::to_string(&cmds[1]).unwrap()).is_ok());
+        let prepared = prepare_all(&flow, &[("q".to_string(), value.clone())]).unwrap();
+        let body: Value = serde_json::from_str(prepared[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["q"], value.as_str());
+        assert!(prepared[0].url.contains("%22quoted%22"));
+        assert_eq!(prepared[0].headers[0].1, value);
+    }
+
+    #[test]
+    fn comment_4_type_into_a_password_selector_is_redacted() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "type",
+            &json!({ "action": "type", "selector": "#password", "text": "secret" }),
+            None,
+            None,
+        );
+        assert_eq!(r.commands[0].1["text"], REDACTED);
+        assert_eq!(r.secrets, vec!["secret".to_string()]);
+    }
+
+    #[test]
+    fn comment_5_a_json_login_that_carries_a_filled_password_is_not_saved() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/login" }),
+            None,
+            None,
+        );
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "#password", "value": "hunter2" }),
+            None,
+            None,
+        );
+        r.begin_command(
+            "click",
+            &json!({ "action": "click", "selector": "#go" }),
+            None,
+            None,
+        );
+        r.tag_request("login");
+        r.tag_request("me");
+        let mut login = entry(
+            "login",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            r#"{"ok":true}"#,
+        );
+        login.method = "POST".to_string();
+        login.post_data = Some(r#"{"user":"a","password":"hunter2"}"#.to_string());
+        let me = entry(
+            "me",
+            "https://api.example.com.ar/me",
+            "Fetch",
+            "application/json",
+            r#"{"name":"a"}"#,
+        );
+        let (flow, _) = build_flow(SaveInput {
+            name: "l",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[login, me],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let text = serde_json::to_string(&flow).unwrap();
+        assert!(
+            !text.contains("hunter2") && !text.contains("api.example.com.ar/login"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn comment_6_form_and_query_encodings_of_a_secret_are_recognized() {
+        let secret = vec!["hunter two".to_string(), "p&ss/w=rd+1".to_string()];
+        let mut form = entry(
+            "a",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        form.post_data = Some("user=a&password=hunter+two".to_string());
+        assert!(carries_secret(&form, &secret), "plus-encoded form body");
+        form.post_data = Some("user=a&password=hunter%20two".to_string());
+        assert!(carries_secret(&form, &secret), "percent-encoded form body");
+        let query = entry(
+            "b",
+            "https://api.example.com.ar/login?password=hunter+two",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        assert!(carries_secret(&query, &secret), "plus-encoded query");
+        let mut mixed = entry(
+            "c",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        mixed.post_data = Some("password=p%26ss%2Fw%3Drd%2B1".to_string());
+        assert!(carries_secret(&mixed, &secret), "reserved characters");
+        let mut json_escaped = entry(
+            "d",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        json_escaped.post_data = Some(r#"{"password":"hunter\u0020two"}"#.to_string());
+        assert!(
+            carries_secret(&json_escaped, &secret),
+            "json unicode escape"
+        );
+        let mut clean = entry(
+            "e",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        clean.post_data = Some("user=a&note=hunter+three".to_string());
+        assert!(!carries_secret(&clean, &secret));
+    }
+
+    #[test]
+    fn comment_7_a_write_takes_a_value_from_an_earlier_response_and_depends_on_it() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+            None,
+        );
+        r.tag_request("session");
+        r.begin_command(
+            "click",
+            &json!({ "action": "click", "selector": "#add" }),
+            None,
+            None,
+        );
+        r.tag_request("cart");
+        let session = entry(
+            "session",
+            "https://api.example.com.ar/api/session",
+            "Fetch",
+            "application/json",
+            r#"{"csrf":"a8f3c9d2e1b04f7a"}"#,
+        );
+        let mut cart = entry(
+            "cart",
+            "https://api.example.com.ar/api/cart",
+            "Fetch",
+            "application/json",
+            r#"{"cart":[7]}"#,
+        );
+        cart.method = "POST".to_string();
+        cart.post_data = Some(r#"{"id":7,"csrf":"a8f3c9d2e1b04f7a"}"#.to_string());
+        let (flow, report) = build_flow(SaveInput {
+            name: "c",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[session, cart],
+            params: &[],
+            output: Some("s2r1"),
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let body = flow["steps"][1]["requests"][0]["body"].as_str().unwrap();
+        assert!(
+            !body.contains("a8f3c9d2e1b04f7a"),
+            "token saved literally: {body}"
+        );
+        assert!(body.contains("{{@s1r1.csrf}}"), "{body}");
+        assert_eq!(dependencies(&flow, "s2r1"), vec!["s1r1", "s2r1"]);
+        assert!(report["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["request"] == "s2r1"));
     }
 }

@@ -15654,3 +15654,100 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
     .await;
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_comment_8_replay_runs_once_per_run() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("c{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#items" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&exec(&run(&mut n, cmd), &mut state).await);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "ci" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let requests = saved["data"]["requests"].as_array().unwrap();
+    let id_of = |suffix: &str| {
+        requests
+            .iter()
+            .find(|r| r["url"].as_str().unwrap().ends_with(suffix))
+            .and_then(|r| r["id"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    let (session_id, items_id) = (id_of("/api/session"), id_of("/api/items"));
+    let resaved = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_save", "name": "ci", "from": "1", "output": items_id }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resaved);
+
+    // The output reads the session response, and both fall back to the replay.
+    let path = dir.path().join("127.0.0.1").join("ci.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["id"] == items_id.as_str() {
+                req["url"] = json!(format!(
+                    "{}/api/items?u={{{{@{}.user}}}}",
+                    fx.site, session_id
+                ));
+            }
+            if req["id"] == items_id.as_str() || req["id"] == session_id.as_str() {
+                req["tier"] = json!("replay");
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    assert!(
+        dir.path().join("127.0.0.1").join("ci.json").exists()
+            && flow["writes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["url"].as_str().unwrap().ends_with("/api/cart"))
+    );
+
+    let before = fx.hits("POST /api/cart");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert_eq!(
+        fx.hits("POST /api/cart"),
+        before + 1,
+        "an approved write is sent once per run: {sent}"
+    );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}

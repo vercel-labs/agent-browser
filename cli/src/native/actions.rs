@@ -12194,7 +12194,12 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
     let client = super::flow::http_client(filter.clone(), &flow)?;
     let mut results = Vec::new();
     let mut bodies: HashMap<String, Value> = HashMap::new();
-    for prepared in &requests {
+    // The recording replays at most once per run; every request that falls
+    // back to it reads its answer from that one replay.
+    let mut replay_run: Option<ReplayRun> = None;
+    // Writes already sent in this run, by any tier.
+    let mut completed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (index, prepared) in requests.iter().enumerate() {
         let req = &match prepared.resolve(&bodies) {
             Ok(r) => r,
             Err(e) => {
@@ -12229,7 +12234,31 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
                     super::flow::run_http(&client, req, cookie.as_deref(), routed).await
                 }
                 "page" => run_flow_in_page(&flow, req, state).await,
-                _ => run_flow_replay(&flow, &params, req, &allow, state).await,
+                _ => {
+                    let wanted: Vec<&super::flow::PreparedRequest> = requests[index..]
+                        .iter()
+                        .filter(|r| {
+                            r.id == req.id
+                                || super::flow::tiers_for(&flow, &r.id).first() == Some(&"replay")
+                        })
+                        .collect();
+                    let result = run_flow_replay(
+                        &flow,
+                        &params,
+                        req,
+                        &allow,
+                        state,
+                        &mut replay_run,
+                        &wanted,
+                        &completed,
+                    )
+                    .await;
+                    if replay_run.is_some() {
+                        // The replay repeated every recorded command, writes included.
+                        completed.extend(super::flow::all_write_ids(&flow));
+                    }
+                    result
+                }
             };
             let (ok, drift, stopped) = (result.ok, result.drift, result.kind.is_some());
             if let Some(body) = result.body.as_ref().filter(|_| ok) {
@@ -12238,6 +12267,11 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
             // A write the site accepted must not be sent again by a lower tier.
             let accepted_write = super::flow::is_flow_write(&flow, &req.id)
                 && result.status.is_some_and(|st| (200..400).contains(&st));
+            if super::flow::is_flow_write(&flow, &req.id)
+                && (result.status.is_some() || result.kind == Some("outcome_unknown"))
+            {
+                completed.insert(req.id.clone());
+            }
             results.push(result);
             // The site answered with something every tier would get again.
             if stopped {
@@ -12575,57 +12609,107 @@ fn replay_write_approved(
     }
 }
 
+/// What the single replay of a run captured.
+struct ReplayRun {
+    entries: Vec<HarEntry>,
+    failure: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_flow_replay(
     flow: &Value,
     params: &[(String, String)],
     req: &super::flow::PreparedRequest,
     allow: &super::flow::AllowWrite,
     state: &mut DaemonState,
+    run: &mut Option<ReplayRun>,
+    wanted: &[&super::flow::PreparedRequest],
+    completed: &std::collections::HashSet<String>,
 ) -> super::flow::TierResult {
     let started = std::time::Instant::now();
-    // A replay repeats every recorded command, so it also sends the writes
-    // no kept request covers; each must be allowed, confirmed and in policy.
-    for w in super::flow::replay_only_writes(flow) {
-        let id = w["id"].as_str().unwrap_or("");
-        if let Err(reason) = replay_write_approved(state, allow, id) {
+    if run.is_none() {
+        // A replay repeats every recorded command, so it also sends the writes
+        // no kept request covers; each must be allowed, confirmed and in policy.
+        for w in super::flow::replay_only_writes(flow) {
+            let id = w["id"].as_str().unwrap_or("");
+            if let Err(reason) = replay_write_approved(state, allow, id) {
+                return super::flow::replay_unavailable(
+                    req,
+                    started,
+                    format!(
+                        "replaying the recorded commands would also send {} {} ({}): {}",
+                        w["method"].as_str().unwrap_or(""),
+                        w["url"].as_str().unwrap_or(""),
+                        id,
+                        reason
+                    ),
+                );
+            }
+        }
+        // A write another tier already sent would go out a second time.
+        if let Some(id) = super::flow::all_write_ids(flow)
+            .into_iter()
+            .find(|id| completed.contains(id))
+        {
             return super::flow::replay_unavailable(
                 req,
                 started,
                 format!(
-                    "replaying the recorded commands would also send {} {} ({}): {}",
-                    w["method"].as_str().unwrap_or(""),
-                    w["url"].as_str().unwrap_or(""),
-                    id,
-                    reason
+                    "replaying the recorded commands would send write {} again; it was already sent in this run",
+                    id
                 ),
             );
         }
-    }
-    if let Err(e) = flow_ensure_browser(state).await {
-        return super::flow::replay_failed(req, started, e);
-    }
-    let started_har = !state.har_recording;
-    if started_har {
-        if let Err(e) = handle_har_start(&json!({}), state).await {
-            return super::flow::replay_failed(req, started, e);
+        match capture_flow_replay(flow, params, state, wanted, started).await {
+            Ok(captured) => *run = Some(captured),
+            Err(Ok(reason)) => return super::flow::replay_unavailable(req, started, reason),
+            Err(Err(reason)) => return super::flow::replay_failed(req, started, reason),
         }
     }
+    let Some(captured) = run.as_ref() else {
+        return super::flow::replay_failed(req, started, "the replay did not run".to_string());
+    };
+    if let Some(reason) = captured.failure.clone() {
+        return super::flow::replay_failed(req, started, reason);
+    }
+    let entry = super::flow::replay_match(&captured.entries, req);
+    super::flow::replay_result(req, started, entry)
+}
+
+/// Run the recorded commands once and capture the requests they send.
+/// `Err(Ok(reason))` means the replay cannot run at all, `Err(Err(reason))`
+/// that it could not start.
+async fn capture_flow_replay(
+    flow: &Value,
+    params: &[(String, String)],
+    state: &mut DaemonState,
+    wanted: &[&super::flow::PreparedRequest],
+    started: std::time::Instant,
+) -> Result<ReplayRun, Result<String, String>> {
+    flow_ensure_browser(state).await.map_err(Err)?;
+    let started_har = !state.har_recording;
+    if started_har {
+        handle_har_start(&json!({}), state).await.map_err(Err)?;
+    }
+    let stop_har = |state: &mut DaemonState| {
+        if started_har {
+            state.har_recording = false;
+            state.har_entries.clear();
+            state.har_body_total_bytes = 0;
+        }
+    };
     let before = state.har_entries.len();
     let mut failed = None;
     let commands = match super::flow::replay_commands(flow, params) {
         Ok(c) => c,
         Err(e) => {
-            if started_har {
-                state.har_recording = false;
-            }
-            return super::flow::replay_unavailable(req, started, e);
+            stop_har(state);
+            return Err(Ok(e));
         }
     };
     if let Err(reason) = super::flow::check_replay_commands(flow, &commands) {
-        if started_har {
-            state.har_recording = false;
-        }
-        return super::flow::replay_unavailable(req, started, reason);
+        stop_har(state);
+        return Err(Ok(reason));
     }
     for (i, c) in commands.into_iter().enumerate() {
         let mut c = c;
@@ -12667,31 +12751,31 @@ async fn run_flow_replay(
             break;
         }
     }
-    // Bodies arrive on later event drains; wait within the request timeout.
+    // Bodies arrive on later event drains; wait within the request timeout
+    // until every request that may fall back to the replay has its answer.
     let deadline = started + std::time::Duration::from_secs(20);
-    let result = loop {
-        if let Some(reason) = failed.take() {
-            break super::flow::replay_failed(req, started, reason);
+    loop {
+        if failed.is_some() {
+            break;
         }
         let _ = state.drain_cdp_events_background().await;
-        let entry = super::flow::replay_match(
-            &state.har_entries[before.min(state.har_entries.len())..],
-            req,
-        );
-        let ready = entry.is_some_and(|e| {
-            e.response_body.is_some() || e.status.is_some_and(|s| !(200..300).contains(&s))
-        });
-        if ready || std::time::Instant::now() >= deadline {
-            break super::flow::replay_result(req, started, entry);
+        let slice = &state.har_entries[before.min(state.har_entries.len())..];
+        let ready = |w: &&super::flow::PreparedRequest| {
+            super::flow::replay_match(slice, w).is_some_and(|e| {
+                e.response_body.is_some() || e.status.is_some_and(|s| !(200..300).contains(&s))
+            })
+        };
+        if wanted.iter().all(ready) || std::time::Instant::now() >= deadline {
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    };
-    if started_har {
-        state.har_recording = false;
-        state.har_entries.clear();
-        state.har_body_total_bytes = 0;
     }
-    result
+    let entries = state.har_entries[before.min(state.har_entries.len())..].to_vec();
+    stop_har(state);
+    Ok(ReplayRun {
+        entries,
+        failure: failed,
+    })
 }
 
 /// After a navigation, tell the agent which saved flows exist for the page's
@@ -19977,6 +20061,106 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(resp.get("recorded").is_none(), "{resp}");
         state.flow.tag_request("sent-by-the-unrecorded-command");
         assert!(state.flow.request_tags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn comment_1_a_blocked_host_is_not_fetched_after_the_allowlist_tightens() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let (port, hits) = serve_counting("HTTP/1.1 200 OK\r\ncontent-length: 11\r\nconnection: close\r\ncontent-type: application/json\r\n\r\n{\"ok\":true}");
+        write_flow_fixture(dir.path(), port);
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        *state.domain_filter.write().await =
+            Some(super::super::network::DomainFilter::new("example.test"));
+        let run = json!({ "id": "r", "action": "flow_run", "name": "cart", "params": {}, "allowWrite": "all" });
+        let resp = execute_command(&run, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "{resp}");
+        // Redirects obey the same filter: the second host is never contacted.
+        let (other, other_hits) =
+            serve_counting("HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}");
+        let redirect: &'static str = Box::leak(
+            format!("HTTP/1.1 302 Found\r\nLocation: http://localhost:{}/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", other).into_boxed_str(),
+        );
+        let (port, hits) = serve_counting(redirect);
+        write_flow_fixture(dir.path(), port);
+        *state.domain_filter.write().await =
+            Some(super::super::network::DomainFilter::new("127.0.0.1"));
+        let resp = execute_command(&json!({ "id": "r2", "action": "flow_run", "name": "cart", "params": {}, "allowWrite": "all" }), &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(other_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn comment_2_the_replay_does_not_send_a_write_nobody_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let flow = json!({
+            "version": 2, "name": "buy", "origin": "127.0.0.1",
+            "startUrl": "http://127.0.0.1:9/", "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s2r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1w1", "method": "POST", "url": "http://127.0.0.1:9/buy", "kind": "explicit", "step": 1 }],
+            "steps": [
+                { "seq": 1, "ok": true, "command": { "action": "click", "selector": "#buy" }, "requests": [] },
+                { "seq": 2, "ok": true, "command": { "action": "click", "selector": "#list" }, "requests": [{
+                    "id": "s2r1", "method": "GET", "url": "http://127.0.0.1:9/items", "headers": {}, "body": null, "tier": "replay",
+                    "expect": { "status": 200, "mime": "application/json", "signature": super::super::flow::signature(&json!({ "items": [] })), "bytes": 12, "itemFields": [], "extract": null }
+                }] }
+            ]
+        });
+        super::super::flow::write_flow(&flow).unwrap();
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let resp = execute_command(&json!({ "id": "r", "action": "flow_run", "name": "buy", "params": {}, "allowWrite": "false" }), &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("s1w1") && error.contains("allow"), "{error}");
+        assert!(
+            state.browser.is_none(),
+            "no browser launched, so no click ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_sent_by_one_tier_is_not_sent_again_by_the_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let (port, hits) = serve_counting(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nconnection: close\r\n\r\n{\"ok\":true}",
+        );
+        let base = format!("http://127.0.0.1:{}", port);
+        let sig = super::super::flow::signature(&json!({ "ok": true }));
+        let expect = json!({ "status": 200, "mime": "application/json", "signature": sig, "bytes": 11, "itemFields": [], "extract": null });
+        let flow = json!({
+            "version": 2, "name": "twice", "origin": "127.0.0.1",
+            "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s2r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1r1", "method": "POST", "url": format!("{}/api/cart", base), "kind": "explicit", "step": 1 }],
+            "steps": [
+                { "seq": 1, "ok": true, "command": { "action": "click", "selector": "#add" }, "requests": [{
+                    "id": "s1r1", "method": "POST", "url": format!("{}/api/cart", base), "headers": {}, "body": "{}", "expect": expect }] },
+                { "seq": 2, "ok": true, "command": { "action": "click", "selector": "#list" }, "requests": [{
+                    "id": "s2r1", "method": "GET", "url": format!("{}/api/items?c={{{{@s1r1.ok}}}}", base), "headers": {}, "body": null,
+                    "tier": "replay", "expect": expect }] }
+            ]
+        });
+        super::super::flow::write_flow(&flow).unwrap();
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let run = json!({ "id": "r", "action": "flow_run", "name": "twice", "params": {}, "allowWrite": "all" });
+        let resp = execute_command(&run, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(resp["error"].as_str().unwrap().contains("again"), "{resp}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "{resp}");
+        assert!(state.browser.is_none(), "the replay never started");
     }
 
     #[tokio::test]
