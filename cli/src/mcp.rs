@@ -2076,6 +2076,10 @@ const WAITING_TOOLS: &[&str] = &[
     TOOL_WAIT_FOR_SELECTOR,
     TOOL_WAIT_FOR_TEXT,
     TOOL_WAIT_FOR_LOAD,
+    TOOL_WAIT_FOR_URL,
+    TOOL_WAIT_FOR_FUNCTION,
+    TOOL_WAIT_FOR_DOWNLOAD,
+    TOOL_TAB_NEW,
 ];
 
 /// Shared arguments listed in this tool's input schema.
@@ -2154,7 +2158,6 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
     let mut schema = serde_json::Map::new();
     schema.insert("type".to_string(), json!("object"));
     schema.insert("properties".to_string(), Value::Object(props));
-    schema.insert("additionalProperties".to_string(), json!(false));
     if !required.is_empty() {
         schema.insert("required".to_string(), json!(required));
     }
@@ -5647,6 +5650,28 @@ mod tests {
                     "{name} {key}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn tool_schemas_allow_unlisted_shared_arguments() {
+        for tool in tools() {
+            let name = tool["name"].as_str().unwrap();
+            assert!(
+                tool["inputSchema"].get("additionalProperties").is_none(),
+                "{name}"
+            );
+        }
+        for name in [
+            TOOL_WAIT_FOR_URL,
+            TOOL_WAIT_FOR_FUNCTION,
+            TOOL_WAIT_FOR_DOWNLOAD,
+            TOOL_TAB_NEW,
+        ] {
+            assert!(
+                advertised_shared_arguments(name).contains(&"timeoutMs"),
+                "{name}"
+            );
         }
     }
 
