@@ -109,12 +109,12 @@ pub fn get_socket_dir() -> PathBuf {
         } else if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
             if !runtime_dir.is_empty() {
                 PathBuf::from(runtime_dir).join("agent-browser")
-            } else if let Some(home) = dirs::home_dir() {
+            } else if let Some(home) = std::env::home_dir() {
                 home.join(".agent-browser")
             } else {
                 env::temp_dir().join("agent-browser")
             }
-        } else if let Some(home) = dirs::home_dir() {
+        } else if let Some(home) = std::env::home_dir() {
             home.join(".agent-browser")
         } else {
             env::temp_dir().join("agent-browser")
@@ -122,12 +122,12 @@ pub fn get_socket_dir() -> PathBuf {
     } else if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
         if !runtime_dir.is_empty() {
             PathBuf::from(runtime_dir).join("agent-browser")
-        } else if let Some(home) = dirs::home_dir() {
+        } else if let Some(home) = std::env::home_dir() {
             home.join(".agent-browser")
         } else {
             env::temp_dir().join("agent-browser")
         }
-    } else if let Some(home) = dirs::home_dir() {
+    } else if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser")
     } else {
         env::temp_dir().join("agent-browser")

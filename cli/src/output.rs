@@ -3953,13 +3953,14 @@ agent-browser - fast browser automation CLI for AI agents
 Usage: agent-browser <command> [args] [options]
 
 Start here (for AI agents):
-  agent-browser skills get core --full
+  agent-browser skills get core
 
   Skills ship with the CLI (always version-matched) and include workflow
   patterns, ref/selector usage, and copy-paste examples. Prefer this over
-  guessing commands from flag docs alone. Specialized skills cover Electron
-  apps, Slack, exploratory testing, protected Vercel deployments, and cloud
-  browser providers.
+  guessing commands from flag docs alone. The core guide routes to its
+  references for detail; --full prints all of them at once. Specialized
+  skills cover Electron apps, Slack, exploratory testing, protected Vercel
+  deployments, and cloud browser providers.
 
   skills [list]                List available skills
   skills get core              Core usage guide (overview + common patterns)
