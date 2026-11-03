@@ -198,7 +198,11 @@ fn batch_rejects_item_global_flags_across_cli_and_mcp() {
         assert_eq!(rows.as_array().unwrap().len(), 1, "{flag}: {rows}");
         assert_identity(&rows[0], &commands[0], 0, false);
         assert_eq!(rows[0]["success"], false, "{flag}: {rows}");
-        assert_eq!(rows[0]["error"].as_str(), expected_error.as_deref(), "{flag}");
+        assert_eq!(
+            rows[0]["error"].as_str(),
+            expected_error.as_deref(),
+            "{flag}"
+        );
     }
 }
 
