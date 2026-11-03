@@ -2517,6 +2517,10 @@ Usage: agent-browser mouse <subcommand> [args]
 
 Performs low-level mouse operations for precise control.
 
+Coordinates and wheel deltas accept finite numbers, including decimals.
+Invalid values return an error. Omitted wheel deltas default to 100 vertically
+and 0 horizontally. Explicit zero values remain zero.
+
 Subcommands:
   move <x> <y>         Move mouse to coordinates
   down [button]        Press mouse button (left, right, middle)

@@ -180,6 +180,8 @@ agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 
 The wheel scrolls at the current tracked pointer, which starts at `0,0`. Failed wheel dispatches leave the tracked pointer unchanged.
 
+Mouse coordinates and wheel deltas accept finite decimal values; invalid supplied values are rejected. For `mouse wheel`, omitted `dy` and `dx` default to `100` and `0`, respectively, and explicit `0` values are preserved.
+
 To scroll elsewhere, move the pointer first:
 
 ```bash

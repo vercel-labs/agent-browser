@@ -186,6 +186,8 @@ Use `--human` with `click` or `drag` when pointer-path events matter. Movement s
 
 The wheel starts at `0,0`; move the pointer first to scroll elsewhere. Failed wheel dispatches leave the tracked pointer unchanged.
 
+Mouse coordinates and wheel deltas accept finite decimal values; invalid supplied values are rejected. For `mouse wheel`, omitted `dy` and `dx` default to `100` and `0`, respectively, and explicit `0` values are preserved.
+
 ## Semantic Locators (alternative to refs)
 
 ```bash
