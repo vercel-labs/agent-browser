@@ -438,6 +438,8 @@ The dashboard runs on port 4848 by default, independent of browser sessions. It 
 
 `agent-browser install` downloads Chrome for Testing. On macOS versions below 13, the command stops before the download and prints instructions to update macOS or install Chrome manually. If `sw_vers -productVersion` is unavailable, exits with an error, returns no version, or returns a malformed version, the command reports a detection error and stops before making a network request. On Linux, `--with-deps` also installs system dependencies and exits nonzero if the package manager cannot install every required browser library.
 
+At launch, agent-browser uses the browser from `agent-browser install` first. When that is missing, it falls back to a system Chrome (on macOS, Chrome, Chrome Canary, Chromium, and Brave in `/Applications`, then in `~/Applications`), then to the Puppeteer and Playwright caches.
+
 ## Diagnostics
 
 Run `doctor` first when a command fails unexpectedly (`Unknown command`, `Failed to connect`, stale daemons, version mismatches after `upgrade`, missing Chrome).

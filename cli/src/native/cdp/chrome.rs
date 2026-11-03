@@ -2026,6 +2026,33 @@ exec sleep 60
     }
 
     #[test]
+    fn test_find_macos_chrome_searches_system_before_home() {
+        let dir = TempDir::new("macos-chrome");
+        let system = dir.join("system");
+        let home_applications = dir.join("home/Applications");
+        let user_chrome = home_applications.join("Google Chrome.app/Contents/MacOS/Google Chrome");
+        std::fs::create_dir_all(user_chrome.parent().unwrap()).unwrap();
+        std::fs::write(&user_chrome, b"").unwrap();
+
+        assert_eq!(
+            find_macos_chrome(&system, Some(&home_applications)),
+            Some(user_chrome)
+        );
+
+        let system_brave = system.join("Brave Browser.app/Contents/MacOS/Brave Browser");
+        std::fs::create_dir_all(system_brave.parent().unwrap()).unwrap();
+        std::fs::write(&system_brave, b"").unwrap();
+        assert_eq!(
+            find_macos_chrome(&system, Some(&home_applications)),
+            Some(system_brave.clone())
+        );
+        assert_eq!(find_macos_chrome(&system, None), Some(system_brave));
+
+        let missing = dir.join("missing");
+        assert_eq!(find_macos_chrome(&missing, None), None);
+    }
+
+    #[test]
     fn test_expand_tilde() {
         let expanded = expand_tilde("~/test/path");
         assert!(!expanded.starts_with('~'));
