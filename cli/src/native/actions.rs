@@ -12,7 +12,7 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
 use crate::session_files::SessionFile;
-use crate::session_settings::{Connection, Running};
+use crate::session_settings::{Connection, Effect, Key, Patch, Requested, Running};
 use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
@@ -286,78 +286,6 @@ fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
         || !drained.destroyed_targets.is_empty()
 }
 
-/// Compute a hash of the [`LaunchOptions`] fields that require a browser
-/// relaunch when changed (baked into the Chrome process at startup).
-///
-/// Fields NOT hashed:
-/// ignore_https_errors, color_scheme, download_path
-///
-/// `storage_state` is handled separately in `handle_launch()`: explicit
-/// `storageState` launches always require a clean local browser so the loaded
-/// state replaces the prior session instead of merging into it.
-#[allow(clippy::too_many_arguments)]
-fn launch_hash(
-    opts: &LaunchOptions,
-    allowed_domains: &[String],
-    plugin_init_scripts: &[String],
-    enable_features: &[String],
-    init_script_paths: &[String],
-    engine: Option<&str>,
-    connection_kind: &str,
-    connection_target: Option<&str>,
-) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut h = DefaultHasher::new();
-    engine.hash(&mut h);
-    connection_kind.hash(&mut h);
-    connection_target.hash(&mut h);
-    opts.headless.hash(&mut h);
-    opts.extensions.hash(&mut h);
-    opts.profile.hash(&mut h);
-    opts.executable_path.hash(&mut h);
-    opts.args.hash(&mut h);
-    opts.proxy.hash(&mut h);
-    opts.proxy_bypass.hash(&mut h);
-    opts.proxy_username.hash(&mut h);
-    opts.proxy_password.hash(&mut h);
-    opts.user_agent.hash(&mut h);
-    opts.ca_cert_digest.hash(&mut h);
-    opts.allow_file_access.hash(&mut h);
-    opts.hide_scrollbars.hash(&mut h);
-    opts.webgpu.hash(&mut h);
-    opts.webmcp.hash(&mut h);
-    opts.no_xvfb.hash(&mut h);
-    opts.restrict_webrtc.hash(&mut h);
-    allowed_domains.hash(&mut h);
-    enable_features.hash(&mut h);
-    init_script_paths.hash(&mut h);
-    plugin_init_scripts.hash(&mut h);
-    h.finish()
-}
-
-fn launch_connection_identity(
-    cdp_url: Option<&str>,
-    cdp_port: Option<u64>,
-    auto_connect: bool,
-    provider_name: Option<&str>,
-) -> (&'static str, Option<String>) {
-    if let Some(url) = cdp_url {
-        return ("cdp-url", Some(url.to_string()));
-    }
-    if let Some(port) = cdp_port {
-        return ("cdp-port", Some(port.to_string()));
-    }
-    if auto_connect {
-        return ("auto-connect", None);
-    }
-    if let Some(provider) = provider_name {
-        return ("provider", Some(provider.to_ascii_lowercase()));
-    }
-    ("local", None)
-}
-
 /// Launch fields that only describe a browser agent-browser starts itself. The CLI never
 /// sends them with an external target, so a launch that inherits one drops them.
 const LOCAL_ONLY_LAUNCH_FIELDS: &[&str] = &[
@@ -435,15 +363,6 @@ fn resolve_launch_target(cmd: &Value, attached: Option<&AttachedTarget>) -> Opti
     }
     attached.insert_into(&mut resolved);
     Some(Value::Object(resolved))
-}
-
-fn launch_connection_is_external(
-    cdp_url: Option<&str>,
-    cdp_port: Option<u64>,
-    auto_connect: bool,
-    provider_name: Option<&str>,
-) -> bool {
-    launch_connection_identity(cdp_url, cdp_port, auto_connect, provider_name).0 != "local"
 }
 
 fn validate_ca_cert_launch_mode(
@@ -732,7 +651,7 @@ pub struct DaemonState {
     /// Daemon-owned activity clock shared by commands and stream servers.
     pub idle_activity: Arc<IdleActivity>,
     /// Hash of launch options used for the current browser, for relaunch detection.
-    launch_hash: Option<u64>,
+    launch_identity: Option<u64>,
     /// CDP endpoint and headers from the last explicit CDP launch, reused when
     /// the daemon reconnects to that same endpoint on its own.
     cdp_headers: Option<(String, Vec<(String, String)>)>,
@@ -884,7 +803,7 @@ impl DaemonState {
             stream_client: None,
             stream_server: None,
             idle_activity: Arc::new(IdleActivity::new()),
-            launch_hash: None,
+            launch_identity: None,
             cdp_headers: None,
             attached_target: None,
             effective_ca_cert: None,
@@ -2662,7 +2581,7 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
     let browser = state.browser.take();
-    state.launch_hash = None;
+    state.launch_identity = None;
     state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
     state.iframe_sessions.clear();
@@ -2728,19 +2647,6 @@ async fn close_after_network_control_failure(
         ),
         None => format!("Failed to install browser network controls: {}", error),
     })
-}
-
-fn provider_plugin_launch_options_from_command(cmd: &Value) -> Value {
-    let mut options = serde_json::Map::new();
-    if let Some(headless) = cmd.get("headless").and_then(|v| v.as_bool()) {
-        options.insert("headed".to_string(), json!(!headless));
-    }
-    for key in ["engine", "userAgent", "colorScheme"] {
-        if let Some(value) = cmd.get(key) {
-            options.insert(key.to_string(), value.clone());
-        }
-    }
-    Value::Object(options)
 }
 
 /// Returns whether an action can run without implicitly launching a browser.
@@ -2948,6 +2854,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     if let Some(ref server) = state.stream_server {
         let mut broadcast_cmd;
         let has_internal_fields = cmd.get("plugins").is_some()
+            || cmd.get("settings").is_some()
             || cmd.get("pinTab").is_some()
             || cmd.get("restoreKey").is_some()
             || cmd.get("restoreSave").is_some()
@@ -2958,6 +2865,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             broadcast_cmd = cmd.clone();
             if let Some(obj) = broadcast_cmd.as_object_mut() {
                 obj.remove("plugins");
+                obj.remove("settings");
                 obj.remove("pinTab");
                 obj.remove("restoreKey");
                 obj.remove("restoreSave");
@@ -3030,6 +2938,21 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         _ => {}
     }
 
+    // The settings this invocation set ride on the command. Apply them before
+    // the policy checks so a changed policy governs this command too.
+    let settings_outcome = if action == "close" {
+        SettingsOutcome::default()
+    } else {
+        let patch = match Patch::from_wire(cmd.get("settings")) {
+            Ok(patch) => patch,
+            Err(e) => return error_response(&id, &e.to_string()),
+        };
+        match apply_settings_patch(state, &patch).await {
+            Ok(outcome) => outcome,
+            Err(e) => return error_response(&id, &e),
+        }
+    };
+
     let skip_launch = skip_launch_action(action);
     let restore_key_change_needs_launch = !skip_launch
         && command_changes_restore_key(cmd, state)
@@ -3050,7 +2973,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     };
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
-    let mut lifecycle_relaunched_browser = false;
+    let mut lifecycle_relaunched_browser = settings_outcome.relaunched_browser;
     let policy_actions = policy_actions_for_command(
         cmd,
         action,
@@ -3143,7 +3066,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if !skip_launch {
         if needs_launch {
-            lifecycle_relaunched_browser = restore_transition_closed_browser
+            lifecycle_relaunched_browser |= restore_transition_closed_browser
                 || state.browser.is_some()
                 || state.active_provider_session.is_some();
             if state.browser.is_some() || state.active_provider_session.is_some() {
@@ -3237,13 +3160,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     let mut result = match action {
         "launch" => {
-            let webmcp_enabled = cmd
-                .get("webmcp")
-                .and_then(Value::as_bool)
-                .unwrap_or_else(|| state.settings.webmcp());
             let result = handle_launch(cmd, state).await;
             if result.is_ok() {
-                state.webmcp_enabled = webmcp_enabled;
+                state.webmcp_enabled = state.settings.webmcp();
             }
             result
         }
@@ -3512,6 +3431,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         lifecycle_launched,
         lifecycle_relaunched_browser,
     );
+    attach_settings_outcome(&mut resp, &settings_outcome);
 
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
@@ -3525,6 +3445,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_launched,
             lifecycle_relaunched_browser,
         );
+        attach_settings_outcome(&mut resp, &settings_outcome);
     }
     attach_webmcp_availability(&mut resp, action, state).await;
 
@@ -4379,24 +4300,35 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
 async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
-) -> Result<(), String> {
-    if state.attached_target.is_some() {
-        return handle_launch(&json!({ "action": "launch", "plugins": plugins }), state)
-            .await
-            .map(|_| ());
+) -> Result<Value, String> {
+    auto_launch_with(state, plugins, &Value::Null).await
+}
+
+/// Launches or attaches the session's browser from its settings. `cmd` is the
+/// launch command that asked for it, when there is one; it carries only what
+/// the settings do not (device selection for the WebDriver providers).
+async fn auto_launch_with(
+    state: &mut DaemonState,
+    plugins: Vec<crate::plugins::PluginConfig>,
+    cmd: &Value,
+) -> Result<Value, String> {
+    if state.attached_target.is_some() && cmd.is_null() {
+        // Resume the attached browser; the launch handler resolves the target.
+        let launch = json!({ "action": "launch", "plugins": plugins });
+        return Box::pin(handle_launch(&launch, state)).await;
     }
     let connection = state.settings.connection();
     if matches!(connection, Connection::Cdp(_) | Connection::AutoConnect)
         || !matches!(&connection, Connection::Provider(provider) if provider_is_browser_use(provider))
     {
-        return auto_launch_inner(state, plugins).await;
+        return auto_launch_inner(state, plugins, cmd).await;
     }
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
     let result = match tokio::time::timeout(
         BROWSER_USE_SETUP_DEADLINE,
-        auto_launch_inner(state, plugins),
+        auto_launch_inner(state, plugins, cmd),
     )
     .await
     {
@@ -4414,7 +4346,8 @@ async fn auto_launch(
 async fn auto_launch_inner(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
-) -> Result<(), String> {
+    cmd: &Value,
+) -> Result<Value, String> {
     if has_active_browser_session(state) {
         close_before_implicit_relaunch(state).await?;
     }
@@ -4482,20 +4415,11 @@ async fn auto_launch_inner(
         })?;
         let headers =
             cdp_headers_for(state, &cdp).or_else(|| cdp_headers_from_settings(&state.settings));
-        let mgr = BrowserManager::connect_cdp_when_listening(&cdp, headers).await?;
-        let hash = launch_hash(
-            &options,
-            &allowed_domains,
-            &state.plugin_init_scripts,
-            &enable_features,
-            &init_script_paths,
-            engine.as_deref(),
-            "cdp-url",
-            Some(cdp.as_str()),
-        );
+        let mgr = BrowserManager::connect_cdp_when_listening(&cdp, headers.clone()).await?;
+        state.cdp_headers = headers.map(|headers| (cdp.clone(), headers));
         state.reset_input_state();
         state.browser = Some(mgr);
-        state.launch_hash = Some(hash);
+        state.launch_identity = Some(state.settings.launch_identity());
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -4505,7 +4429,7 @@ async fn auto_launch_inner(
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         try_load_storage_state(state, &storage_state_path).await;
-        return Ok(());
+        return Ok(json!({}));
     }
 
     if auto_connect {
@@ -4520,16 +4444,6 @@ async fn auto_launch_inner(
             restore_key: restore_key.as_deref(),
             storage_state,
         })?;
-        let hash = launch_hash(
-            &options,
-            &allowed_domains,
-            &state.plugin_init_scripts,
-            &enable_features,
-            &init_script_paths,
-            engine.as_deref(),
-            "auto-connect",
-            None,
-        );
         state.reset_input_state();
         state.browser = Some(BrowserManager::connect_auto().await?);
         if !apply_tab_binding_on_attach_or_rollback(state).await? {
@@ -4538,7 +4452,7 @@ async fn auto_launch_inner(
                 return Err(e);
             }
         }
-        state.launch_hash = Some(hash);
+        state.launch_identity = Some(state.settings.launch_identity());
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -4547,7 +4461,7 @@ async fn auto_launch_inner(
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         try_load_storage_state(state, &storage_state_path).await;
-        return Ok(());
+        return Ok(json!({}));
     }
 
     // Cloud provider: when AGENT_BROWSER_PROVIDER is set, connect via the
@@ -4567,10 +4481,25 @@ async fn auto_launch_inner(
             restore_key: restore_key.as_deref(),
             storage_state,
         })?;
-        // ios/safari are device providers handled via explicit launch command
-        if !p.is_empty() && p != "ios" && p != "safari" {
+        // ios and safari are WebDriver-backed device providers.
+        if p == "ios" {
+            let result = launch_ios(cmd, state).await;
+            if result.is_ok() {
+                state.effective_ca_cert = effective_ca_cert;
+            }
+            return result;
+        }
+        if p == "safari" {
+            let result = launch_safari(cmd, state).await;
+            if result.is_ok() {
+                state.effective_ca_cert = effective_ca_cert;
+            }
+            return result;
+        }
+        if !p.is_empty() {
             let conn =
                 providers::connect_provider_with_plugins(&p, &plugins, &state.settings).await?;
+            let provider_metadata = conn.metadata.clone();
             if conn.direct_page && !allowed_domains.is_empty() {
                 if let Some(ref ps) = conn.session {
                     let _ = providers::close_provider_session_with_plugins(ps, &plugins).await;
@@ -4584,19 +4513,9 @@ async fn auto_launch_inner(
             };
             match attach_provider_cdp(&p, &conn, ws_headers, state, &plugins).await {
                 Ok(mgr) => {
-                    let hash = launch_hash(
-                        &options,
-                        &allowed_domains,
-                        &state.plugin_init_scripts,
-                        &enable_features,
-                        &init_script_paths,
-                        engine.as_deref(),
-                        "provider",
-                        Some(p.as_str()),
-                    );
                     state.reset_input_state();
                     state.browser = Some(mgr);
-                    state.launch_hash = Some(hash);
+                    state.launch_identity = Some(state.settings.launch_identity());
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
                     state.start_dialog_handler();
@@ -4606,7 +4525,15 @@ async fn auto_launch_inner(
                     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
                     try_auto_restore_state(state).await;
                     try_load_storage_state(state, &storage_state_path).await;
-                    return Ok(());
+                    state.effective_ca_cert = effective_ca_cert;
+                    let mut extras = json!({ "provider": provider });
+                    if let Some(info) = providers::get_agentcore_info() {
+                        extras["agentCoreSessionId"] = json!(info.session_id);
+                        extras["agentCoreLiveViewUrl"] = json!(info.live_view_url);
+                    } else if let Some(metadata) = provider_metadata {
+                        extras["providerMetadata"] = metadata;
+                    }
+                    return Ok(extras);
                 }
                 Err(e) => {
                     let cleanup_error = close_active_provider_session(state).await.err();
@@ -4649,16 +4576,6 @@ async fn auto_launch_inner(
         &state.settings,
         options.extensions.as_deref(),
     );
-    let hash = launch_hash(
-        &options,
-        &allowed_domains,
-        &state.plugin_init_scripts,
-        &enable_features,
-        &init_script_paths,
-        engine.as_deref(),
-        "local",
-        None,
-    );
     if let Some(ref ca) = effective_ca_cert {
         options.prepared_nss_home = Some(prepare_nss_home(&ca.bundle)?);
     }
@@ -4666,7 +4583,7 @@ async fn auto_launch_inner(
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.reset_input_state();
     state.browser = Some(mgr);
-    state.launch_hash = Some(hash);
+    state.launch_identity = Some(state.settings.launch_identity());
     state.effective_ca_cert = effective_ca_cert;
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
@@ -4677,7 +4594,7 @@ async fn auto_launch_inner(
     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
     try_auto_restore_state(state).await;
     try_load_storage_state(state, &storage_state_path).await;
-    Ok(())
+    Ok(json!({}))
 }
 
 fn string_array_from_command(cmd: &Value, key: &str) -> Option<Vec<String>> {
@@ -4797,24 +4714,6 @@ async fn apply_launch_mutator_plugins(
     }
 
     Ok(())
-}
-
-fn hide_scrollbars_from_launch_cmd(cmd: &Value, default: bool) -> bool {
-    cmd.get("hideScrollbars")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default)
-}
-
-fn webgpu_from_launch_cmd(cmd: &Value, default: bool) -> bool {
-    cmd.get("webgpu")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default)
-}
-
-fn no_xvfb_from_launch_cmd(cmd: &Value, default: bool) -> bool {
-    cmd.get("noXvfb")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default)
 }
 
 async fn try_auto_restore_state(state: &mut DaemonState) {
@@ -5152,18 +5051,6 @@ fn cdp_headers_from_command(cmd: &Value) -> Option<Vec<(String, String)>> {
     }
 }
 
-/// CDP connect headers carry credentials, so a changed token must not reuse
-/// the existing connection.
-fn with_cdp_headers(target: Option<String>, cmd: &Value) -> Option<String> {
-    match (target, cdp_headers_from_command(cmd)) {
-        (Some(target), Some(mut headers)) => {
-            headers.sort();
-            Some(format!("{target}\n{headers:?}"))
-        }
-        (target, _) => target,
-    }
-}
-
 async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     handle_launch_with_deadline(cmd, state, BROWSER_USE_SETUP_DEADLINE).await
 }
@@ -5217,467 +5104,350 @@ async fn handle_launch_for_target(
     result
 }
 
-/// A local launch without an explicit profile or storage state keeps the
-/// daemon's spawn-time profile, so the launch hash stays stable.
-fn launch_profile_from_command_or_settings(cmd: &Value, settings: &Running) -> Option<String> {
-    if let Some(profile) = cmd.get("profile").and_then(|v| v.as_str()) {
-        return Some(profile.to_string());
+/// The settings a `launch` command names, as a patch. A client that speaks
+/// the launch protocol directly (rather than through the CLI) sets session
+/// settings this way; the CLI sends the same settings as a patch on every
+/// command.
+fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
+    let mut entries: Vec<(Key, Requested)> = Vec::new();
+    let mut set = |key: Key, value: Value| entries.push((key, Requested::Set(value)));
+    let string = |field: &str| cmd.get(field).and_then(Value::as_str).map(Value::from);
+    let flag = |field: &str| cmd.get(field).and_then(Value::as_bool).map(Value::Bool);
+    let list = |field: &str| string_array_from_command(cmd, field).map(Value::from);
+
+    if let Some(url) = string("cdpUrl") {
+        set(Key::Cdp, url);
+    } else if let Some(port) = cmd.get("cdpPort").and_then(Value::as_u64) {
+        set(Key::Cdp, Value::from(port.to_string()));
+    } else if cmd.get("autoConnect").and_then(Value::as_bool) == Some(true) {
+        set(Key::AutoConnect, Value::Bool(true));
+    } else if let Some(provider) = cmd
+        .get("provider")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty())
+    {
+        set(Key::Provider, Value::from(provider));
     }
-    let external_or_stateful = ["cdpUrl", "cdpPort", "provider", "storageState"]
+    if let Some(headers) = cmd.get("cdpHeaders").filter(|h| h.is_object()) {
+        set(Key::CdpHeaders, Value::from(headers.to_string()));
+    }
+    if let Some(headless) = cmd.get("headless").and_then(Value::as_bool) {
+        set(Key::Headed, Value::Bool(!headless));
+    }
+    for (field, key) in [
+        ("profile", Key::Profile),
+        ("storageState", Key::StorageState),
+        ("executablePath", Key::ExecutablePath),
+        ("userAgent", Key::UserAgent),
+        ("colorScheme", Key::ColorScheme),
+        ("downloadPath", Key::DownloadPath),
+        ("engine", Key::Engine),
+        ("caCert", Key::CaCert),
+    ] {
+        if let Some(value) = string(field) {
+            set(key, value);
+        }
+    }
+    for (field, key) in [
+        ("ignoreHTTPSErrors", Key::IgnoreHttpsErrors),
+        ("allowFileAccess", Key::AllowFileAccess),
+        ("hideScrollbars", Key::HideScrollbars),
+        ("webgpu", Key::Webgpu),
+        ("webmcp", Key::Webmcp),
+        ("noXvfb", Key::NoXvfb),
+        ("clearCaCert", Key::ClearCaCert),
+    ] {
+        if let Some(value) = flag(field) {
+            set(key, value);
+        }
+    }
+    for (field, key) in [
+        ("args", Key::Args),
+        ("extensions", Key::Extensions),
+        ("initScripts", Key::InitScripts),
+        ("enable", Key::Enable),
+    ] {
+        if let Some(value) = list(field) {
+            set(key, value);
+        }
+    }
+    if let Some(proxy) = cmd.get("proxy") {
+        let (server, username, password, bypass) = match proxy {
+            Value::String(raw) => {
+                let parsed = crate::session_settings::parse_proxy(raw);
+                (Some(parsed.server), parsed.username, parsed.password, None)
+            }
+            other => {
+                let field = |name: &str| other.get(name).and_then(Value::as_str).map(String::from);
+                (
+                    field("server"),
+                    field("username"),
+                    field("password"),
+                    field("bypass"),
+                )
+            }
+        };
+        for (key, value) in [
+            (Key::Proxy, server),
+            (Key::ProxyUsername, username),
+            (Key::ProxyPassword, password),
+            (Key::ProxyBypass, bypass),
+        ] {
+            if let Some(value) = value {
+                set(key, Value::from(value));
+            }
+        }
+    }
+    drop(set);
+    // Obscura takes its proxy bypass from every launch, so an explicit null
+    // clears it.
+    if engine == Some("obscura") {
+        match cmd.get("proxyBypass") {
+            Some(Value::String(bypass)) => {
+                entries.retain(|(key, _)| *key != Key::ProxyBypass);
+                entries.push((
+                    Key::ProxyBypass,
+                    Requested::Set(Value::from(bypass.as_str())),
+                ));
+            }
+            Some(Value::Null) => {
+                entries.retain(|(key, _)| *key != Key::ProxyBypass);
+                entries.push((Key::ProxyBypass, Requested::Default));
+            }
+            _ => {}
+        }
+    }
+    if let Some(domains) = allowed_domains_from_launch_command(cmd) {
+        entries.push((
+            Key::AllowedDomains,
+            if domains.is_empty() {
+                Requested::Default
+            } else {
+                Requested::Set(Value::from(domains))
+            },
+        ));
+    }
+    Patch::from_entries(entries)
+}
+
+/// What applying a settings patch did to the session.
+#[derive(Default)]
+struct SettingsOutcome {
+    /// Each change, as reported in `lifecycle.settings.changes`.
+    changes: Vec<Value>,
+    /// The patch asked for a relaunch whether or not anything changed.
+    forced: bool,
+    /// A running browser was closed so the next launch uses the new settings.
+    relaunched_browser: bool,
+}
+
+/// Plans `patch` against the session's settings and applies the plan. Live
+/// settings change in place; launch settings close the running browser so the
+/// next launch picks them up. The command then dispatches as usual.
+async fn apply_settings_patch(
+    state: &mut DaemonState,
+    patch: &Patch,
+) -> Result<SettingsOutcome, String> {
+    let mut patch = patch.clone();
+    if let Some(path) = patch
+        .value(Key::CaCert)
+        .and_then(Value::as_str)
+        .map(String::from)
+    {
+        // CA trust is compared by content, not by path.
+        let requested = resolve_effective_ca_cert(&json!({ "caCert": path }), state)?;
+        let digest = |ca: &Option<EffectiveCaCert>| ca.as_ref().map(|ca| *ca.bundle.digest());
+        let running_path = state.settings.get(Key::CaCert).and_then(Value::as_str);
+        match ca_trust_change(
+            running_path,
+            digest(&state.effective_ca_cert),
+            &path,
+            digest(&requested),
+        ) {
+            CaTrustChange::Unchanged => {
+                patch.remove(Key::CaCert);
+                state.settings.set(Key::CaCert, Value::from(path));
+            }
+            CaTrustChange::EditedInPlace => patch.mark_changed_in_place(Key::CaCert),
+            CaTrustChange::Replaced => {}
+        }
+    }
+    let patch = &patch;
+    let plan = state.settings.plan(patch);
+    if plan.is_empty() {
+        return Ok(SettingsOutcome::default());
+    }
+    let changed = |key: Key| plan.changes.iter().any(|change| change.key == key);
+
+    // Load the CA trust first: a bad bundle fails before anything changes.
+    let ca_cert = if changed(Key::CaCert) || changed(Key::ClearCaCert) {
+        let request = match plan.next.get(Key::CaCert).and_then(Value::as_str) {
+            Some(path) => json!({ "caCert": path }),
+            None => json!({ "clearCaCert": true }),
+        };
+        Some(resolve_effective_ca_cert(&request, state)?)
+    } else {
+        None
+    };
+
+    let had_browser = has_active_browser_session(state);
+    let relaunched_browser = plan.relaunch && had_browser;
+    let changes: Vec<Value> = plan
+        .changes
         .iter()
-        .any(|key| cmd.get(*key).is_some_and(|v| !v.is_null()))
-        || cmd
-            .get("autoConnect")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-    if external_or_stateful {
-        return None;
+        .map(|change| {
+            let applied = match change.effect() {
+                Effect::Live => true,
+                Effect::Launch => had_browser,
+            };
+            change.to_json(applied)
+        })
+        .collect();
+    let connection_changed = [Key::Cdp, Key::AutoConnect, Key::Provider, Key::CdpHeaders]
+        .into_iter()
+        .any(changed);
+    let (next, relaunch) = (plan.next.clone(), plan.relaunch);
+    let touched: Vec<Key> = plan.changes.iter().map(|change| change.key).collect();
+    let was = |key: Key| touched.contains(&key);
+
+    if was(Key::DefaultTimeout) {
+        state.default_timeout_ms = next.default_timeout_ms();
     }
-    settings.profile()
+    if was(Key::IdleTimeout) {
+        state.idle_activity.set_timeout(next.idle_timeout());
+        state.idle_activity.mark();
+    }
+    if was(Key::NoAutoDialog) {
+        state.auto_dialog = !next.no_auto_dialog();
+    }
+    if was(Key::ActionPolicy) {
+        state.policy = next
+            .security()
+            .action_policy_path
+            .as_deref()
+            .map(ActionPolicy::from_path);
+    }
+    if was(Key::ConfirmActions) {
+        state.confirm_actions = next
+            .security()
+            .confirm_actions
+            .as_deref()
+            .and_then(ConfirmActions::parse);
+    }
+    if was(Key::AllowedDomains) {
+        *state.domain_filter.write().await = next
+            .security()
+            .allowed_domains
+            .filter(|domains| !domains.is_empty())
+            .map(|domains| DomainFilter::new(&domains.join(",")));
+    }
+    if let Some(ca_cert) = ca_cert {
+        state.effective_ca_cert = ca_cert;
+    }
+    if connection_changed {
+        state.attached_target = None;
+    }
+    state.settings = next;
+
+    if relaunch && had_browser {
+        let _ = auto_save_restore_state(state).await;
+        close_current_browser(state).await?;
+    }
+
+    Ok(SettingsOutcome {
+        changes,
+        forced: patch.forces_relaunch(),
+        relaunched_browser,
+    })
+}
+
+/// How a requested CA file compares to the trust in effect.
+#[derive(Debug, PartialEq)]
+enum CaTrustChange {
+    /// The same certificates, whichever path they come from.
+    Unchanged,
+    /// The same path, different certificates.
+    EditedInPlace,
+    Replaced,
+}
+
+fn ca_trust_change(
+    running_path: Option<&str>,
+    running_digest: Option<[u8; 32]>,
+    requested_path: &str,
+    requested_digest: Option<[u8; 32]>,
+) -> CaTrustChange {
+    let same_content = running_digest.is_some() && running_digest == requested_digest;
+    let same_path = running_path == Some(requested_path);
+    match (same_content, same_path) {
+        (true, _) => CaTrustChange::Unchanged,
+        (false, true) => CaTrustChange::EditedInPlace,
+        (false, false) => CaTrustChange::Replaced,
+    }
+}
+
+/// Reports what a settings patch did in `lifecycle.settings`.
+fn attach_settings_outcome(resp: &mut Value, outcome: &SettingsOutcome) {
+    if outcome.changes.is_empty() && !outcome.forced {
+        return;
+    }
+    let Some(lifecycle) = resp
+        .get_mut("data")
+        .and_then(|data| data.get_mut("lifecycle"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    lifecycle.insert(
+        "settings".to_string(),
+        json!({ "changes": outcome.changes, "forcedRelaunch": outcome.forced }),
+    );
 }
 
 async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let effective_ca_cert = resolve_effective_ca_cert(cmd, state)?;
-    // Absent field falls back to the session's settings (mirrors
-    // hideScrollbars/webgpu), keeping the launch hash stable when follow-up
-    // commands send launch envelopes without an explicit headed choice.
-    let headless = cmd
-        .get("headless")
-        .and_then(|v| v.as_bool())
-        .unwrap_or_else(|| !state.settings.headed());
-    let cdp_url = cmd.get("cdpUrl").and_then(|v| v.as_str());
-    let cdp_port = cmd.get("cdpPort").and_then(|v| v.as_u64());
-    let auto_connect = cmd
-        .get("autoConnect")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let provider_name = cmd.get("provider").and_then(|v| v.as_str());
-    let enable_features = string_array_from_command(cmd, "enable")
-        .unwrap_or_else(|| state.settings.enable_features());
-    let init_script_paths = string_array_from_command(cmd, "initScripts")
-        .unwrap_or_else(|| state.settings.init_scripts());
-
-    let extensions: Option<Vec<String>> =
-        cmd.get("extensions").and_then(|v| v.as_array()).map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        });
-    let storage_state = cmd.get("storageState").and_then(|v| v.as_str());
-    let storage_state_owned = storage_state.map(|s| s.to_string());
     let engine = cmd
         .get("engine")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .map(String::from)
         .or_else(|| state.settings.engine());
-    let profile = launch_profile_from_command_or_settings(cmd, &state.settings);
+    let patch = launch_envelope_patch(cmd, engine.as_deref());
 
-    let requested_allowed_domains = allowed_domains_from_launch_command(cmd);
-    let previous_domain_filter = state.domain_filter.read().await.clone();
-    let existing_allowed_domains = current_allowed_domains(state).await;
-    let allowed_domains = requested_allowed_domains
-        .clone()
-        .unwrap_or(existing_allowed_domains);
-    let restrict_webrtc = !allowed_domains.is_empty();
-    let restore_key = cmd
-        .get("restoreKey")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| state.session_name.clone());
-    let launch_args: Vec<String> = cmd
-        .get("args")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let settings_before = state.settings.clone();
+    let filter_before = state.domain_filter.read().await.clone();
+    let ca_cert_before = state.effective_ca_cert.clone();
+    let had_browser_before_launch = has_active_browser_session(state);
 
-    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        allowed_domains: &allowed_domains,
-        cdp_url,
-        cdp_port,
-        auto_connect,
-        profile: profile.as_deref(),
-        provider_name,
-        args: &launch_args,
-        restore_key: restore_key.as_deref(),
-        storage_state,
-    })?;
+    let attached_before = state.attached_target.clone();
 
-    let mut launch_options = LaunchOptions {
-        headless,
-        executable_path: cmd
-            .get("executablePath")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| state.settings.executable_path()),
-        proxy: cmd.get("proxy").and_then(|v| {
-            v.as_str().map(|s| s.to_string()).or_else(|| {
-                v.get("server")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string())
-            })
-        }),
-        proxy_bypass: cmd
-            .get("proxy")
-            .and_then(|v| v.get("bypass"))
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        proxy_username: cmd
-            .get("proxy")
-            .and_then(|v| v.get("username"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| state.settings.proxy_username()),
-        proxy_password: cmd
-            .get("proxy")
-            .and_then(|v| v.get("password"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| state.settings.proxy_password()),
-        profile,
-        allow_file_access: cmd
-            .get("allowFileAccess")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        args: launch_args,
-        extensions,
-        storage_state: storage_state.map(String::from),
-        user_agent: cmd
-            .get("userAgent")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        ignore_https_errors: cmd
-            .get("ignoreHTTPSErrors")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        ca_cert: None,
-        ca_bundle: None,
-        ca_cert_digest: None,
-        prepared_nss_home: None,
-        color_scheme: cmd
-            .get("colorScheme")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        download_path: cmd
-            .get("downloadPath")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        hide_scrollbars: hide_scrollbars_from_launch_cmd(cmd, state.settings.hide_scrollbars()),
-        viewport_size: None,
-        use_real_keychain: false,
-        webgpu: webgpu_from_launch_cmd(cmd, state.settings.webgpu()),
-        webmcp: cmd
-            .get("webmcp")
-            .and_then(Value::as_bool)
-            .unwrap_or_else(|| state.settings.webmcp()),
-        no_xvfb: no_xvfb_from_launch_cmd(cmd, state.settings.no_xvfb()),
-        restrict_webrtc,
-    };
-    if engine.as_deref() == Some("obscura") {
-        if let Some(bypass) = cmd.get("proxyBypass") {
-            launch_options.proxy_bypass = bypass.as_str().map(String::from);
-        }
-    }
-    apply_effective_ca_cert(&mut launch_options, &effective_ca_cert);
-
-    let external_launch =
-        cdp_url.is_some() || cdp_port.is_some() || auto_connect || provider_name.is_some();
-    validate_ca_cert_launch_mode(&launch_options, engine.as_deref(), external_launch)?;
-
-    state.plugin_init_scripts.clear();
-    let local_launch =
-        cdp_url.is_none() && cdp_port.is_none() && !auto_connect && provider_name.is_none();
-    if local_launch {
-        apply_launch_mutator_plugins(state, &mut launch_options, plugins_from_command_or_env(cmd))
-            .await?;
-        validate_ca_cert_launch_mode(&launch_options, engine.as_deref(), false)?;
-    }
-    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        allowed_domains: &allowed_domains,
-        cdp_url,
-        cdp_port,
-        auto_connect,
-        profile: launch_options.profile.as_deref(),
-        provider_name,
-        args: &launch_options.args,
-        restore_key: restore_key.as_deref(),
-        storage_state,
-    })?;
-
-    if let Some(domains) = requested_allowed_domains {
-        let mut filter = state.domain_filter.write().await;
-        *filter = if domains.is_empty() {
-            None
-        } else {
-            Some(DomainFilter::new(&domains.join(",")))
+    let outcome = apply_settings_patch(state, &patch).await?;
+    let reusable = !outcome.relaunched_browser
+        && match state.browser.as_mut() {
+            Some(mgr) => !mgr.has_process_exited() && mgr.is_connection_alive().await,
+            None => false,
         };
-    }
-
-    let (connection_kind, connection_target) =
-        launch_connection_identity(cdp_url, cdp_port, auto_connect, provider_name);
-    let connection_target = with_cdp_headers(connection_target, cmd);
-    let new_hash = launch_hash(
-        &launch_options,
-        &allowed_domains,
-        &state.plugin_init_scripts,
-        &enable_features,
-        &init_script_paths,
-        engine.as_deref(),
-        connection_kind,
-        connection_target.as_deref(),
-    );
-
-    // Hash comparison and fast process-exit check are evaluated before the
-    // async is_connection_alive to skip the expensive CDP liveness probe
-    // when a relaunch is already certain.
-    let needs_relaunch = if let Some(ref mut mgr) = state.browser {
-        let is_external =
-            launch_connection_is_external(cdp_url, cdp_port, auto_connect, provider_name);
-        let was_external = mgr.is_cdp_connection();
-        let hash_changed = state.launch_hash != Some(new_hash);
-        let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
-        is_external != was_external
-            || hash_changed
-            || storage_state_requires_clean_launch
-            || mgr.has_process_exited()
-            || !mgr.is_connection_alive().await
-    } else {
-        true
-    };
-
-    let had_browser_before_launch =
-        state.browser.is_some() || state.active_provider_session.is_some();
-
-    if needs_relaunch {
-        if local_launch {
-            if let Some(ref ca) = effective_ca_cert {
-                launch_options.prepared_nss_home = Some(prepare_nss_home(&ca.bundle)?);
-            }
-        }
-        if had_browser_before_launch {
-            let _ = auto_save_restore_state(state).await;
-            close_current_browser(state).await?;
-        }
-    } else {
-        load_storage_state(state, &storage_state_owned).await?;
-        state.effective_ca_cert = effective_ca_cert;
+    if reusable {
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
     }
-    state.ref_map.invalidate_all_documents();
-    state.session_setup = SessionSetup::default();
 
-    let has_cdp = cdp_url.is_some() || cdp_port.is_some();
-    super::browser::validate_launch_options(
-        launch_options.extensions.as_deref(),
-        has_cdp,
-        launch_options.profile.as_deref(),
-        storage_state,
-        launch_options.allow_file_access,
-        launch_options.executable_path.as_deref(),
-        launch_options.ca_cert.as_deref(),
-    )?;
-
-    // Store proxy credentials before any local or remote CDP branch enables
-    // Fetch interception with authentication handling.
-    let has_proxy_auth = launch_options.proxy_username.is_some();
-    if has_proxy_auth {
-        let mut creds = state.proxy_credentials.write().await;
-        *creds = Some((
-            launch_options.proxy_username.clone().unwrap_or_default(),
-            launch_options.proxy_password.clone().unwrap_or_default(),
-        ));
-    }
-
-    if let Some(url) = cdp_url {
-        state.reset_input_state();
-        let headers = cdp_headers_from_command(cmd);
-        state.browser =
-            Some(BrowserManager::connect_cdp_when_listening(url, headers.clone()).await?);
-        state.cdp_headers = headers.map(|headers| (url.to_string(), headers));
-        state.launch_hash = Some(new_hash);
-        state.subscribe_to_browser_events();
-        state.start_fetch_handler();
-        state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
-        state.update_stream_client().await;
-        install_network_controls_or_close(state, has_proxy_auth).await?;
-        apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-        try_auto_restore_state(state).await;
-        load_storage_state_or_rollback(state, &storage_state_owned).await?;
-        state.effective_ca_cert = effective_ca_cert;
-        return Ok(json!({ "launched": true, "relaunchedBrowser": had_browser_before_launch }));
-    }
-
-    if let Some(port) = cdp_port {
-        state.reset_input_state();
-        let headers = cdp_headers_from_command(cmd);
-        state.browser = Some(
-            BrowserManager::connect_cdp_when_listening(&port.to_string(), headers.clone()).await?,
-        );
-        state.cdp_headers = headers.map(|headers| (port.to_string(), headers));
-        state.launch_hash = Some(new_hash);
-        state.subscribe_to_browser_events();
-        state.start_fetch_handler();
-        state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
-        state.update_stream_client().await;
-        install_network_controls_or_close(state, has_proxy_auth).await?;
-        apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-        try_auto_restore_state(state).await;
-        load_storage_state_or_rollback(state, &storage_state_owned).await?;
-        state.effective_ca_cert = effective_ca_cert;
-        return Ok(json!({ "launched": true, "relaunchedBrowser": had_browser_before_launch }));
-    }
-
-    if auto_connect {
-        state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_auto().await?);
-        if !apply_tab_binding_on_attach_or_rollback(state).await? {
-            if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
-                let _ = rollback_failed_launch(state).await;
-                return Err(e);
+    match auto_launch_with(state, plugins_from_command_or_env(cmd), cmd).await {
+        Ok(extras) => {
+            let mut result = json!({
+                "launched": true,
+                "relaunchedBrowser": had_browser_before_launch,
+            });
+            if let (Some(result), Some(extras)) = (result.as_object_mut(), extras.as_object()) {
+                result.extend(extras.clone());
             }
+            Ok(result)
         }
-        state.launch_hash = Some(new_hash);
-        state.subscribe_to_browser_events();
-        state.start_fetch_handler();
-        state.start_dialog_handler();
-        state.update_stream_client().await;
-        install_network_controls_or_close(state, has_proxy_auth).await?;
-        apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-        try_auto_restore_state(state).await;
-        load_storage_state_or_rollback(state, &storage_state_owned).await?;
-        state.effective_ca_cert = effective_ca_cert;
-        return Ok(json!({ "launched": true, "relaunchedBrowser": had_browser_before_launch }));
-    }
-
-    if let Some(provider) = provider_name {
-        match provider.to_lowercase().as_str() {
-            "ios" => {
-                let result = launch_ios(cmd, state).await;
-                if result.is_ok() {
-                    state.effective_ca_cert = effective_ca_cert;
-                }
-                return result;
-            }
-            "safari" => {
-                let result = launch_safari(cmd, state).await;
-                if result.is_ok() {
-                    state.effective_ca_cert = effective_ca_cert;
-                }
-                return result;
-            }
-            _ => {
-                let command_plugins = plugins_from_command_or_env(cmd);
-                let conn = providers::connect_provider_with_plugins_and_options(
-                    provider,
-                    &command_plugins,
-                    &state.settings,
-                    Some(provider_plugin_launch_options_from_command(cmd)),
-                )
-                .await?;
-                if conn.direct_page && !allowed_domains.is_empty() {
-                    if let Some(ref ps) = conn.session {
-                        let _ =
-                            providers::close_provider_session_with_plugins(ps, &command_plugins)
-                                .await;
-                    }
-                    restore_domain_filter(state, &previous_domain_filter).await;
-                    return Err(direct_page_allowed_domains_error());
-                }
-                let provider_metadata = conn.metadata.clone();
-
-                let ws_headers = if provider.eq_ignore_ascii_case("agentcore") {
-                    providers::take_agentcore_ws_headers()
-                } else {
-                    None
-                };
-
-                match attach_provider_cdp(provider, &conn, ws_headers, state, &command_plugins)
-                    .await
-                {
-                    Ok(mgr) => {
-                        state.reset_input_state();
-                        state.browser = Some(mgr);
-                        state.launch_hash = Some(new_hash);
-                        state.subscribe_to_browser_events();
-                        state.start_fetch_handler();
-                        state.start_dialog_handler();
-                        state.update_stream_client().await;
-                        write_provider_file(&state.session_id, provider);
-                        install_network_controls_or_close(state, has_proxy_auth).await?;
-                        apply_launch_init_scripts(state, &enable_features, &init_script_paths)
-                            .await;
-                        try_auto_restore_state(state).await;
-                        load_storage_state_or_rollback(state, &storage_state_owned).await?;
-                        state.effective_ca_cert = effective_ca_cert;
-
-                        if let Some(info) = providers::get_agentcore_info() {
-                            return Ok(json!({
-                                "launched": true,
-                                "relaunchedBrowser": had_browser_before_launch,
-                                "provider": provider,
-                                "agentCoreSessionId": info.session_id,
-                                "agentCoreLiveViewUrl": info.live_view_url
-                            }));
-                        }
-
-                        if let Some(metadata) = provider_metadata {
-                            return Ok(json!({
-                                "launched": true,
-                                "relaunchedBrowser": had_browser_before_launch,
-                                "provider": provider,
-                                "providerMetadata": metadata
-                            }));
-                        }
-
-                        return Ok(
-                            json!({ "launched": true, "relaunchedBrowser": had_browser_before_launch, "provider": provider }),
-                        );
-                    }
-                    Err(e) => {
-                        let cleanup_error = close_active_provider_session(state).await.err();
-                        return Err(combine_provider_failure(e, cleanup_error));
-                    }
-                }
-            }
+        Err(e) => {
+            state.settings = settings_before;
+            *state.domain_filter.write().await = filter_before;
+            state.effective_ca_cert = ca_cert_before;
+            state.attached_target = attached_before;
+            Err(e)
         }
     }
-
-    state.engine = engine.as_deref().unwrap_or("chrome").to_string();
-    write_engine_file(&state.session_id, &state.engine);
-    write_extensions_file_from_paths(
-        &state.session_id,
-        &state.settings,
-        launch_options.extensions.as_deref(),
-    );
-    state.reset_input_state();
-    state.session_setup = SessionSetup::from_launch_options(&launch_options);
-    state.browser = Some(BrowserManager::launch(launch_options, engine.as_deref()).await?);
-    state.launch_hash = Some(new_hash);
-    state.subscribe_to_browser_events();
-    state.start_fetch_handler();
-    state.start_dialog_handler();
-    state.update_stream_client().await;
-
-    // Install containment before loading state or running user init scripts.
-    // Failure closes the browser so a requested allowlist never degrades to an
-    // unrestricted session.
-    install_network_controls_or_close(state, has_proxy_auth).await?;
-
-    apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-    try_auto_restore_state(state).await;
-
-    // Load storage state only after Fetch interception is active so replayed
-    // origin navigations go through the same domain and proxy handling as
-    // normal browser traffic. Explicit storage state wins over auto-restore.
-    load_storage_state_or_rollback(state, &storage_state_owned).await?;
-    state.effective_ca_cert = effective_ca_cert;
-
-    Ok(json!({ "launched": true, "relaunchedBrowser": had_browser_before_launch }))
 }
 
 async fn launch_ios(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7612,12 +7382,12 @@ async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
         "browserLaunched": state.browser.is_some(),
         "pageCount": state.browser.as_ref().map(|mgr| mgr.page_count()).unwrap_or(0),
         "engine": state.engine,
-        "launchHash": state.launch_hash,
+        "launchHash": state.launch_identity,
         "compatibilityStatus": "current",
         "effectiveLaunch": {
             "browserLaunched": state.browser.is_some(),
             "engine": state.engine,
-            "launchHash": state.launch_hash,
+            "launchHash": state.launch_identity,
         },
         "restoreKey": state.session_name,
         "restoreStatus": state.restore_status,
@@ -14264,7 +14034,7 @@ fn inject_lifecycle(
             "effectiveLaunch": {
                 "browserLaunched": state.browser.is_some(),
                 "engine": state.engine,
-                "launchHash": state.launch_hash,
+                "launchHash": state.launch_identity,
             }
         }),
     );
@@ -14816,7 +14586,7 @@ mod tests {
     /// paths set `state.browser` before calling this, so returning the error
     /// alone would let the next command skip the attach path and act on
     /// whatever tab is selected. Force-red: drop `rollback_failed_launch`
-    /// from the error arm and `launch_hash` survives the error.
+    /// from the error arm and `launch_identity` survives the error.
     #[tokio::test]
     async fn apply_tab_binding_rollback_clears_launch_state_on_recovery_failure() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
@@ -14830,7 +14600,7 @@ mod tests {
             "{not valid json",
         )
         .unwrap();
-        state.launch_hash = Some(42);
+        state.launch_identity = Some(42);
 
         let err = apply_tab_binding_on_attach_or_rollback(&mut state)
             .await
@@ -14842,7 +14612,7 @@ mod tests {
             err
         );
         assert!(
-            state.launch_hash.is_none(),
+            state.launch_identity.is_none(),
             "the failed attach must be rolled back, not left committed"
         );
     }
@@ -15702,40 +15472,6 @@ mod tests {
         assert!(state.restore_loaded_path.is_none());
         assert!(!state.restore_load_failed);
         assert_eq!(state.restore_save_status, "not_attempted");
-    }
-
-    #[test]
-    fn test_launch_profile_falls_back_to_env_only_for_plain_local_launch() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_PROFILE"]);
-        guard.set("AGENT_BROWSER_PROFILE", "/tmp/env-profile");
-        let settings = Running::from_env();
-
-        assert_eq!(
-            launch_profile_from_command_or_settings(&json!({ "action": "launch" }), &settings)
-                .as_deref(),
-            Some("/tmp/env-profile")
-        );
-        assert_eq!(
-            launch_profile_from_command_or_settings(
-                &json!({ "action": "launch", "profile": "/tmp/cli" }),
-                &settings
-            )
-            .as_deref(),
-            Some("/tmp/cli")
-        );
-        for cmd in [
-            json!({ "action": "launch", "cdpUrl": "ws://127.0.0.1:9222" }),
-            json!({ "action": "launch", "cdpPort": 9222 }),
-            json!({ "action": "launch", "autoConnect": true }),
-            json!({ "action": "launch", "provider": "browserbase" }),
-            json!({ "action": "launch", "storageState": "/tmp/state.json" }),
-        ] {
-            assert_eq!(
-                launch_profile_from_command_or_settings(&cmd, &settings),
-                None,
-                "{cmd}"
-            );
-        }
     }
 
     #[test]
@@ -16634,7 +16370,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                     &mut state,
                 )
                 .await
-                .map(|_| ())
             } else {
                 auto_launch(&mut state, Vec::new()).await
             };
@@ -16693,7 +16428,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 if closing {
                     state.active_provider_session = Some(pending_browser_use_session());
                     state.active_provider_connection = true;
-                    state.launch_hash = Some(42);
+                    state.launch_identity = Some(42);
                     state.screencasting = true;
                     state.network_auto_attach_installed = true;
                     assert!(
@@ -16711,7 +16446,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                         pending_browser_use_session().session.session_id
                     );
                     assert!(state.active_provider_connection);
-                    assert_eq!(state.launch_hash, None);
+                    assert_eq!(state.launch_identity, None);
                     assert!(!state.screencasting && !state.network_auto_attach_installed);
                 } else {
                     let result = handle_launch_with_deadline(
@@ -17669,99 +17404,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
-    fn test_webgpu_from_launch_cmd() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
-        guard.remove("AGENT_BROWSER_WEBGPU");
-        let default = Running::from_env().webgpu();
-        assert!(webgpu_from_launch_cmd(&json!({ "webgpu": true }), default));
-        assert!(!webgpu_from_launch_cmd(
-            &json!({ "webgpu": false }),
-            default
-        ));
-        // Falls back to the session setting when the command omits the field.
-        assert!(!webgpu_from_launch_cmd(&json!({}), default));
-        guard.set("AGENT_BROWSER_WEBGPU", "1");
-        let default = Running::from_env().webgpu();
-        assert!(webgpu_from_launch_cmd(&json!({}), default));
-        assert!(!webgpu_from_launch_cmd(
-            &json!({ "webgpu": false }),
-            default
-        ));
-    }
-
-    #[test]
-    fn test_no_xvfb_from_launch_cmd() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_NO_XVFB"]);
-        guard.remove("AGENT_BROWSER_NO_XVFB");
-        let default = Running::from_env().no_xvfb();
-        assert!(no_xvfb_from_launch_cmd(&json!({ "noXvfb": true }), default));
-        assert!(!no_xvfb_from_launch_cmd(
-            &json!({ "noXvfb": false }),
-            default
-        ));
-        // Falls back to the session setting when the command omits the field.
-        assert!(!no_xvfb_from_launch_cmd(&json!({}), default));
-        guard.set("AGENT_BROWSER_NO_XVFB", "1");
-        let default = Running::from_env().no_xvfb();
-        assert!(no_xvfb_from_launch_cmd(&json!({}), default));
-        assert!(!no_xvfb_from_launch_cmd(
-            &json!({ "noXvfb": false }),
-            default
-        ));
-    }
-
-    #[test]
-    fn test_launch_hash_includes_no_xvfb() {
-        let base = LaunchOptions::default();
-        let no_xvfb = LaunchOptions {
-            no_xvfb: true,
-            ..Default::default()
-        };
-        assert_ne!(
-            launch_hash(&base, &[], &[], &[], &[], Some("chrome"), "local", None),
-            launch_hash(&no_xvfb, &[], &[], &[], &[], Some("chrome"), "local", None)
-        );
-    }
-
-    #[test]
-    fn test_launch_hash_includes_webgpu() {
-        let base = LaunchOptions::default();
-        let webgpu = LaunchOptions {
-            webgpu: true,
-            ..Default::default()
-        };
-        assert_ne!(
-            launch_hash(&base, &[], &[], &[], &[], Some("chrome"), "local", None),
-            launch_hash(&webgpu, &[], &[], &[], &[], Some("chrome"), "local", None)
-        );
-    }
-
-    #[test]
-    fn test_launch_hash_includes_ca_cert() {
-        let base = LaunchOptions::default();
-        let bundle = crate::ca_bundle::test_bundle(b"proxy-ca");
-        let trusted_ca = LaunchOptions {
-            ca_cert: Some("/tmp/proxy-ca.pem".to_string()),
-            ca_bundle: Some(bundle.clone()),
-            ca_cert_digest: Some(*bundle.digest()),
-            ..Default::default()
-        };
-        assert_ne!(
-            launch_hash(&base, &[], &[], &[], &[], Some("chrome"), "local", None),
-            launch_hash(
-                &trusted_ca,
-                &[],
-                &[],
-                &[],
-                &[],
-                Some("chrome"),
-                "local",
-                None
-            )
-        );
-    }
-
-    #[test]
     fn test_effective_ca_cert_transitions_distinguish_omission_and_clear() {
         let mut state = DaemonState::new();
         state.effective_ca_cert = Some(EffectiveCaCert {
@@ -17801,32 +17443,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
-    fn test_launch_hash_changes_with_cdp_headers() {
-        let opts = LaunchOptions::default();
-        let hash_for = |cmd: Value| {
-            let target = with_cdp_headers(Some("wss://example.com/cdp".to_string()), &cmd);
-            launch_hash(
-                &opts,
-                &[],
-                &[],
-                &[],
-                &[],
-                Some("chrome"),
-                "cdp-url",
-                target.as_deref(),
-            )
-        };
-        let a = hash_for(json!({ "cdpHeaders": { "Authorization": "Bearer a" } }));
-        let b = hash_for(json!({ "cdpHeaders": { "Authorization": "Bearer b" } }));
-        assert_ne!(a, b);
-        assert_eq!(
-            a,
-            hash_for(json!({ "cdpHeaders": { "Authorization": "Bearer a" } }))
-        );
-        assert_ne!(a, hash_for(json!({})));
-    }
-
-    #[test]
     fn test_relaunch_keeps_cdp_headers_only_for_their_endpoint() {
         let mut state = DaemonState::new();
         state.cdp_headers = Some((
@@ -17841,35 +17457,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let mut other = json!({ "action": "launch", "cdpUrl": "wss://other.example/cdp" });
         attach_saved_cdp_headers(&mut other, &state);
         assert!(other.get("cdpHeaders").is_none());
-    }
-
-    #[test]
-    fn test_launch_hash_uses_ca_content_not_path() {
-        let bundle = crate::ca_bundle::test_bundle(b"same");
-        let first = EffectiveCaCert {
-            path: "/tmp/first.pem".to_string(),
-            bundle: bundle.clone(),
-        };
-        let second = EffectiveCaCert {
-            path: "/tmp/second.pem".to_string(),
-            bundle,
-        };
-        let changed = EffectiveCaCert {
-            path: "/tmp/first.pem".to_string(),
-            bundle: crate::ca_bundle::test_bundle(b"changed"),
-        };
-        let mut first_options = LaunchOptions::default();
-        let mut second_options = LaunchOptions::default();
-        let mut changed_options = LaunchOptions::default();
-        apply_effective_ca_cert(&mut first_options, &Some(first));
-        apply_effective_ca_cert(&mut second_options, &Some(second));
-        apply_effective_ca_cert(&mut changed_options, &Some(changed));
-
-        let hash = |options: &LaunchOptions| {
-            launch_hash(options, &[], &[], &[], &[], Some("chrome"), "local", None)
-        };
-        assert_eq!(hash(&first_options), hash(&second_options));
-        assert_ne!(hash(&first_options), hash(&changed_options));
     }
 
     #[test]
@@ -17909,55 +17496,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             ..Default::default()
         };
         assert!(validate_ca_cert_launch_mode(&profile, Some("chrome"), false).is_err());
-    }
-
-    #[test]
-    fn test_allowed_domains_enable_webrtc_restriction_and_launch_hashing() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
-        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
-        assert!(Running::from_env().launch_options().restrict_webrtc);
-
-        let base = LaunchOptions::default();
-        let restricted = LaunchOptions {
-            restrict_webrtc: true,
-            ..Default::default()
-        };
-        assert_ne!(
-            launch_hash(&base, &[], &[], &[], &[], Some("chrome"), "local", None),
-            launch_hash(
-                &restricted,
-                &[],
-                &[],
-                &[],
-                &[],
-                Some("chrome"),
-                "local",
-                None
-            )
-        );
-
-        assert_ne!(
-            launch_hash(
-                &restricted,
-                &["example.com".to_string()],
-                &[],
-                &[],
-                &[],
-                Some("chrome"),
-                "local",
-                None
-            ),
-            launch_hash(
-                &restricted,
-                &["other.example".to_string()],
-                &[],
-                &[],
-                &[],
-                Some("chrome"),
-                "local",
-                None
-            )
-        );
     }
 
     #[test]
@@ -18217,6 +17755,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
 
         let mut state = DaemonState::new();
+        // `execute_command` applies the restore config before the launch handler.
+        state.session_name = Some("saved-session".to_string());
         let error = handle_launch(
             &json!({
                 "action": "launch",
@@ -18591,111 +18131,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[test]
-    fn test_launch_hash_includes_plugin_init_scripts() {
-        let opts = LaunchOptions::default();
-        let no_scripts: Vec<String> = Vec::new();
-        let plugin_scripts = vec![
-            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });".to_string(),
-        ];
-
-        assert_ne!(
-            launch_hash(
-                &opts,
-                &[],
-                &no_scripts,
-                &[],
-                &[],
-                Some("chrome"),
-                "local",
-                None
-            ),
-            launch_hash(
-                &opts,
-                &[],
-                &plugin_scripts,
-                &[],
-                &[],
-                Some("chrome"),
-                "local",
-                None
-            )
-        );
-    }
-
-    #[test]
-    fn test_launch_hash_includes_engine_and_connection_identity() {
-        let opts = LaunchOptions::default();
-
-        assert_ne!(
-            launch_hash(&opts, &[], &[], &[], &[], Some("chrome"), "local", None),
-            launch_hash(&opts, &[], &[], &[], &[], Some("lightpanda"), "local", None)
-        );
-        assert_ne!(
-            launch_hash(
-                &opts,
-                &[],
-                &[],
-                &[],
-                &[],
-                Some("chrome"),
-                "cdp-url",
-                Some("ws://one")
-            ),
-            launch_hash(
-                &opts,
-                &[],
-                &[],
-                &[],
-                &[],
-                Some("chrome"),
-                "cdp-url",
-                Some("ws://two")
-            )
-        );
-        assert_ne!(
-            launch_hash(
-                &opts,
-                &[],
-                &[],
-                &[],
-                &[],
-                Some("chrome"),
-                "provider",
-                Some("browserbase")
-            ),
-            launch_hash(
-                &opts,
-                &[],
-                &[],
-                &[],
-                &[],
-                Some("chrome"),
-                "provider",
-                Some("kernel")
-            )
-        );
-    }
-
-    #[test]
-    fn test_launch_connection_is_external_includes_provider() {
-        assert!(!launch_connection_is_external(None, None, false, None));
-        assert!(launch_connection_is_external(
-            Some("ws://localhost:9222/devtools/browser/1"),
-            None,
-            false,
-            None
-        ));
-        assert!(launch_connection_is_external(None, Some(9222), false, None));
-        assert!(launch_connection_is_external(None, None, true, None));
-        assert!(launch_connection_is_external(
-            None,
-            None,
-            false,
-            Some("browserbase")
-        ));
-    }
-
-    #[test]
     fn test_write_extensions_file_from_paths_uses_final_extensions() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_EXTENSIONS"]);
         let dir = tempfile::tempdir().unwrap();
@@ -18724,33 +18159,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
         let content = fs::read_to_string(extensions_file_path("metadata-env-test")).unwrap();
         assert_eq!(content, "/env/ext");
-    }
-
-    #[test]
-    fn test_launch_cmd_hide_scrollbars_missing_uses_env_default() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
-        guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
-
-        assert!(!hide_scrollbars_from_launch_cmd(
-            &json!({
-                "action": "launch"
-            }),
-            Running::from_env().hide_scrollbars()
-        ));
-    }
-
-    #[test]
-    fn test_launch_cmd_hide_scrollbars_explicit_overrides_env_default() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
-        guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
-
-        assert!(hide_scrollbars_from_launch_cmd(
-            &json!({
-                "action": "launch",
-                "hideScrollbars": true
-            }),
-            Running::from_env().hide_scrollbars()
-        ));
     }
 
     #[test]
@@ -19848,5 +19256,293 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+    // === Session settings applied from a patch ===
+
+    fn patch_with(entries: Vec<(Key, Requested)>) -> Patch {
+        Patch::from_entries(entries)
+    }
+
+    fn set_to(key: Key, value: Value) -> (Key, Requested) {
+        (key, Requested::Set(value))
+    }
+
+    #[test]
+    fn test_launch_envelope_patch_names_what_the_command_sets() {
+        let cmd = json!({
+            "action": "launch",
+            "headless": false,
+            "profile": "/tmp/p",
+            "args": ["--lang=en-US"],
+            "cdpPort": 9222,
+            "cdpHeaders": { "Authorization": "Bearer t" },
+            "proxy": { "server": "http://proxy:8080", "username": "u", "password": "pw" },
+            "ignoreHTTPSErrors": true,
+            "allowedDomains": ["example.com"],
+        });
+        let patch = launch_envelope_patch(&cmd, None);
+
+        assert_eq!(patch.value(Key::Headed), Some(&json!(true)));
+        assert_eq!(patch.value(Key::Profile), Some(&json!("/tmp/p")));
+        assert_eq!(patch.value(Key::Args), Some(&json!(["--lang=en-US"])));
+        assert_eq!(patch.value(Key::Cdp), Some(&json!("9222")));
+        assert_eq!(
+            patch.value(Key::CdpHeaders),
+            Some(&json!(r#"{"Authorization":"Bearer t"}"#))
+        );
+        assert_eq!(patch.value(Key::Proxy), Some(&json!("http://proxy:8080")));
+        assert_eq!(patch.value(Key::ProxyUsername), Some(&json!("u")));
+        assert_eq!(patch.value(Key::ProxyPassword), Some(&json!("pw")));
+        assert_eq!(patch.value(Key::IgnoreHttpsErrors), Some(&json!(true)));
+        assert_eq!(
+            patch.value(Key::AllowedDomains),
+            Some(&json!(["example.com"]))
+        );
+        assert_eq!(patch.get(Key::Provider), None);
+    }
+
+    #[test]
+    fn test_a_plain_launch_names_no_settings() {
+        // Bare `open` keeps the profile and args the session runs with (#2287).
+        assert!(launch_envelope_patch(&json!({ "action": "launch" }), None).is_noop());
+        assert!(launch_envelope_patch(
+            &json!({ "action": "launch", "plugins": [], "id": "1" }),
+            Some("obscura")
+        )
+        .is_noop());
+    }
+
+    #[test]
+    fn test_launch_envelope_clears_the_obscura_bypass_only_for_obscura() {
+        let cmd = json!({ "action": "launch", "proxyBypass": null });
+        assert_eq!(
+            launch_envelope_patch(&cmd, Some("obscura")).get(Key::ProxyBypass),
+            Some(&Requested::Default)
+        );
+        assert!(launch_envelope_patch(&cmd, Some("chrome")).is_noop());
+        assert_eq!(
+            launch_envelope_patch(&json!({ "proxyBypass": "localhost" }), Some("obscura"))
+                .value(Key::ProxyBypass),
+            Some(&json!("localhost"))
+        );
+    }
+
+    #[test]
+    fn test_empty_allowed_domains_in_a_launch_clear_the_list() {
+        let patch = launch_envelope_patch(&json!({ "allowedDomains": [] }), None);
+        assert_eq!(patch.get(Key::AllowedDomains), Some(&Requested::Default));
+    }
+
+    #[tokio::test]
+    async fn test_live_settings_apply_in_place_without_touching_the_browser() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        state.default_timeout_ms = 25_000;
+        state.auto_dialog = true;
+        let patch = patch_with(vec![
+            set_to(Key::DefaultTimeout, json!(9000)),
+            set_to(Key::NoAutoDialog, json!(true)),
+            set_to(Key::ConfirmActions, json!("click")),
+            set_to(Key::IdleTimeout, json!("120000")),
+        ]);
+
+        let outcome = apply_settings_patch(&mut state, &patch).await.unwrap();
+
+        assert_eq!(state.default_timeout_ms, 9000);
+        assert!(!state.auto_dialog);
+        assert!(state.confirm_actions.is_some());
+        assert_eq!(state.idle_activity.timeout().map(|t| t.ms), Some(120_000));
+        assert_eq!(state.settings.default_timeout_ms(), 9000);
+        assert!(!outcome.relaunched_browser);
+        assert_eq!(outcome.changes.len(), 4);
+        assert!(outcome
+            .changes
+            .iter()
+            .all(|c| c["effect"] == "live" && c["applied"] == true));
+    }
+
+    #[tokio::test]
+    async fn test_action_policy_change_replaces_the_loaded_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        fs::write(&path, r#"{"default":"deny"}"#).unwrap();
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        state.policy = None;
+
+        let patch = patch_with(vec![set_to(
+            Key::ActionPolicy,
+            json!(path.to_str().unwrap()),
+        )]);
+        apply_settings_patch(&mut state, &patch).await.unwrap();
+
+        assert!(state.policy.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_equal_settings_are_free() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        let patch = patch_with(vec![
+            set_to(Key::Profile, json!("/tmp/p")),
+            set_to(Key::DefaultTimeout, json!(9000)),
+        ]);
+        apply_settings_patch(&mut state, &patch).await.unwrap();
+
+        let again = apply_settings_patch(&mut state, &patch).await.unwrap();
+
+        assert!(again.changes.is_empty());
+        assert!(!again.relaunched_browser && !again.forced);
+    }
+
+    #[tokio::test]
+    async fn test_a_launch_change_without_a_browser_is_recorded_not_relaunched() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        let patch = patch_with(vec![set_to(Key::Profile, json!("/tmp/p"))]);
+
+        let outcome = apply_settings_patch(&mut state, &patch).await.unwrap();
+
+        assert!(!outcome.relaunched_browser);
+        assert_eq!(outcome.changes[0]["option"], "profile");
+        assert_eq!(outcome.changes[0]["effect"], "relaunch");
+        assert_eq!(outcome.changes[0]["applied"], false);
+        assert_eq!(
+            state.settings.launch_options().profile.as_deref(),
+            Some("/tmp/p")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_domains_change_updates_the_domain_filter() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+
+        apply_settings_patch(
+            &mut state,
+            &patch_with(vec![set_to(Key::AllowedDomains, json!(["a.test"]))]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(current_allowed_domains(&state).await, vec!["a.test"]);
+
+        apply_settings_patch(
+            &mut state,
+            &patch_with(vec![(Key::AllowedDomains, Requested::Default)]),
+        )
+        .await
+        .unwrap();
+        assert!(state.domain_filter.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_a_new_connection_target_drops_the_attached_target() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        state.attached_target = Some(AttachedTarget::CdpPort(9222));
+
+        apply_settings_patch(
+            &mut state,
+            &patch_with(vec![set_to(Key::Provider, json!("browserless"))]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.attached_target, None);
+    }
+
+    #[tokio::test]
+    async fn test_command_response_reports_the_settings_it_changed() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        let cmd = json!({
+            "id": "1",
+            "action": "session_info",
+            "settings": { "profile": "/tmp/p", "default-timeout": 9000, "proxy-password": "pw" }
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        let changes = resp["data"]["lifecycle"]["settings"]["changes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no settings in {resp}"));
+        let options: Vec<&str> = changes
+            .iter()
+            .filter_map(|c| c["option"].as_str())
+            .collect();
+        assert_eq!(options, ["profile", "proxy-password", "default-timeout"]);
+        assert!(!resp.to_string().contains("\"pw\""), "{resp}");
+        assert_eq!(resp["data"]["lifecycle"]["relaunchedBrowser"], false);
+    }
+
+    #[tokio::test]
+    async fn test_a_command_with_no_settings_has_no_settings_report() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+
+        let resp =
+            execute_command(&json!({ "id": "1", "action": "session_info" }), &mut state).await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(
+            resp["data"]["lifecycle"].get("settings").is_none(),
+            "{resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bad_settings_fail_the_command() {
+        let mut state = DaemonState::new();
+        let cmd = json!({ "id": "1", "action": "session_info", "settings": { "headed": "yes" } });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"].as_str().unwrap().contains("headed"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn test_failed_launch_restores_the_settings() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        let cmd = json!({
+            "action": "launch",
+            "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/test",
+            "allowedDomains": ["example.com"]
+        });
+
+        assert!(handle_launch(&cmd, &mut state).await.is_err());
+
+        assert_eq!(state.settings, Running::defaults());
+        assert!(state.domain_filter.read().await.is_none());
+    }
+    #[test]
+    fn test_ca_trust_is_compared_by_content() {
+        let a = Some([1u8; 32]);
+        let b = Some([2u8; 32]);
+        // The same certificates from another path reuse the browser.
+        assert_eq!(
+            ca_trust_change(Some("/ca-1.pem"), a, "/ca-2.pem", a),
+            CaTrustChange::Unchanged
+        );
+        assert_eq!(
+            ca_trust_change(Some("/ca.pem"), a, "/ca.pem", a),
+            CaTrustChange::Unchanged
+        );
+        // The same path with different content is a change.
+        assert_eq!(
+            ca_trust_change(Some("/ca.pem"), a, "/ca.pem", b),
+            CaTrustChange::EditedInPlace
+        );
+        // A new path with different content, or no trust running, is a change.
+        assert_eq!(
+            ca_trust_change(Some("/ca-1.pem"), a, "/ca-2.pem", b),
+            CaTrustChange::Replaced
+        );
+        assert_eq!(
+            ca_trust_change(None, None, "/ca.pem", a),
+            CaTrustChange::Replaced
+        );
     }
 }

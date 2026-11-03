@@ -1167,7 +1167,9 @@ async fn test_obscura_launch_uses_request_proxy_bypass() {
         (json!({"proxyBypass": "localhost"}), "--proxy-bypass"),
         (json!({"proxyBypass": null}), "Failed to launch Obscura"),
         (json!({"proxy": {"bypass": "localhost"}}), "--proxy-bypass"),
-        (json!({}), "Failed to launch Obscura"),
+        // A launch that names no bypass defers to the running one; the CLI
+        // clears it with an explicit null.
+        (json!({}), "--proxy-bypass"),
     ] {
         let mut state = DaemonState::new();
         let mut request = json!({

@@ -188,6 +188,7 @@ async fn run_socket_server(
 ) -> Result<(), String> {
     use tokio::net::UnixListener;
 
+    idle_activity.set_timeout(idle_timeout);
     let idle_timeout_ms = idle_timeout.map(|t| t.ms);
 
     let listener =
@@ -214,6 +215,8 @@ async fn run_socket_server(
     let mut idle_lock: Option<IdleLock> = None;
 
     loop {
+        let idle_timeout = idle_activity.timeout();
+        let idle_timeout_ms = idle_timeout.map(|t| t.ms);
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
@@ -321,6 +324,7 @@ async fn run_socket_server(
 ) -> Result<(), String> {
     use tokio::net::TcpListener;
 
+    idle_activity.set_timeout(idle_timeout);
     let idle_timeout_ms = idle_timeout.map(|t| t.ms);
 
     let preferred_port = get_port_for_session(session);
@@ -362,6 +366,8 @@ async fn run_socket_server(
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        let idle_timeout = idle_activity.timeout();
+        let idle_timeout_ms = idle_timeout.map(|t| t.ms);
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
