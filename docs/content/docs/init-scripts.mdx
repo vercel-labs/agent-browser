@@ -29,7 +29,9 @@ agent-browser --enable react-devtools open http://localhost:3000
 
 `react-devtools` is the built-in feature currently available. It installs the React DevTools hook before application code runs and is required for `react tree`, `react inspect`, `react renders`, and `react suspense`.
 
-## Runtime scripts
+<span id="runtime-scripts" />
+
+## Removing init scripts
 
 Register scripts before the first navigation with `--init-script <path>`. Runtime registration is unsupported. Init scripts run before page JavaScript in future documents and do not change code that has already run.
 
