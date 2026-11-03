@@ -12216,48 +12216,74 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
         }
         let mut done = false;
         for tier in super::flow::tiers_for(&flow, &req.id) {
-            let result = match tier {
-                "http" => {
-                    let cookie = match state.browser.as_ref() {
-                        Some(mgr) => match mgr.active_session_id() {
-                            Ok(sid) => {
-                                cookies::get_cookies(&mgr.client, sid, Some(vec![req.url.clone()]))
-                                    .await
-                                    .ok()
-                                    .map(|c| super::flow::cookie_header(&c))
-                            }
-                            Err(_) => None,
-                        },
-                        None => None,
-                    };
-                    let routed = flow_routed_response(state, &req.url).await;
-                    super::flow::run_http(&client, req, cookie.as_deref(), routed).await
-                }
-                "page" => run_flow_in_page(&flow, req, state).await,
-                _ => {
-                    let wanted: Vec<&super::flow::PreparedRequest> = requests[index..]
-                        .iter()
-                        .filter(|r| {
-                            r.id == req.id
-                                || super::flow::tiers_for(&flow, &r.id).first() == Some(&"replay")
-                        })
-                        .collect();
-                    let result = run_flow_replay(
-                        &flow,
-                        &params,
+            let already_sent = tier != "replay"
+                && super::flow::is_flow_write(&flow, &req.id)
+                && completed.contains(&req.id);
+            let result = if already_sent {
+                // The replay already sent this write; read its answer back.
+                let started = std::time::Instant::now();
+                match replay_run.as_ref().map(|r| super::flow::replay_lookup(&r.entries, req)) {
+                    Some(Ok(entry)) => super::flow::replay_result(req, started, Some(entry)),
+                    other => super::flow::replay_write_unanswered(
                         req,
-                        &allow,
-                        state,
-                        &mut replay_run,
-                        &wanted,
-                        &completed,
-                    )
-                    .await;
-                    if replay_run.is_some() {
-                        // The replay repeated every recorded command, writes included.
-                        completed.extend(super::flow::all_write_ids(&flow));
+                        started,
+                        match other {
+                            Some(Err(reason)) => format!(
+                                "the write was already sent in this run and its answer cannot be read back: {}",
+                                reason
+                            ),
+                            _ => "the write was already sent in this run".to_string(),
+                        },
+                    ),
+                }
+            } else {
+                match tier {
+                    "http" => {
+                        let cookie = match state.browser.as_ref() {
+                            Some(mgr) => match mgr.active_session_id() {
+                                Ok(sid) => cookies::get_cookies(
+                                    &mgr.client,
+                                    sid,
+                                    Some(vec![req.url.clone()]),
+                                )
+                                .await
+                                .ok()
+                                .map(|c| super::flow::cookie_header(&c)),
+                                Err(_) => None,
+                            },
+                            None => None,
+                        };
+                        let routed = flow_routed_response(state, &req.url).await;
+                        super::flow::run_http(&client, req, cookie.as_deref(), routed).await
                     }
-                    result
+                    "page" => run_flow_in_page(&flow, req, state).await,
+                    _ => {
+                        let wanted: Vec<&super::flow::PreparedRequest> = requests[index..]
+                            .iter()
+                            .filter(|r| {
+                                r.id == req.id
+                                    || super::flow::is_flow_write(&flow, &r.id)
+                                    || super::flow::tiers_for(&flow, &r.id).first()
+                                        == Some(&"replay")
+                            })
+                            .collect();
+                        let result = run_flow_replay(
+                            &flow,
+                            &params,
+                            req,
+                            &allow,
+                            state,
+                            &mut replay_run,
+                            &wanted,
+                            &completed,
+                        )
+                        .await;
+                        if replay_run.is_some() {
+                            // The replay repeated every recorded command, writes included.
+                            completed.extend(super::flow::all_write_ids(&flow));
+                        }
+                        result
+                    }
                 }
             };
             let (ok, drift, stopped) = (result.ok, result.drift, result.kind.is_some());
@@ -12268,7 +12294,8 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
             let accepted_write = super::flow::is_flow_write(&flow, &req.id)
                 && result.status.is_some_and(|st| (200..400).contains(&st));
             if super::flow::is_flow_write(&flow, &req.id)
-                && (result.status.is_some() || result.kind == Some("outcome_unknown"))
+                && (result.status.is_some_and(|st| (200..400).contains(&st))
+                    || result.kind == Some("outcome_unknown"))
             {
                 completed.insert(req.id.clone());
             }
@@ -12672,8 +12699,10 @@ async fn run_flow_replay(
     if let Some(reason) = captured.failure.clone() {
         return super::flow::replay_failed(req, started, reason);
     }
-    let entry = super::flow::replay_match(&captured.entries, req);
-    super::flow::replay_result(req, started, entry)
+    match super::flow::replay_lookup(&captured.entries, req) {
+        Ok(entry) => super::flow::replay_result(req, started, Some(entry)),
+        Err(reason) => super::flow::replay_failed(req, started, reason),
+    }
 }
 
 /// Run the recorded commands once and capture the requests they send.
@@ -20161,6 +20190,45 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(resp["error"].as_str().unwrap().contains("again"), "{resp}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "{resp}");
         assert!(state.browser.is_none(), "the replay never started");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_write_with_stripped_credentials_still_reaches_the_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let (port, hits) = serve_counting(
+            "HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+        );
+        let base = format!("http://127.0.0.1:{}", port);
+        let url = format!("{}/api/cart", base);
+        let flow = json!({
+            "version": 2, "name": "rejected", "origin": "127.0.0.1",
+            "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1r1", "method": "POST", "url": url, "kind": "explicit", "step": 1 }],
+            "steps": [
+                // A script command keeps the replay from running a browser.
+                { "seq": 1, "ok": true, "command": { "action": "evaluate", "script": "1" }, "requests": [{
+                    "id": "s1r1", "method": "POST", "url": url, "headers": {}, "body": "{}",
+                    "expect": { "status": 200, "mime": "application/json", "signature": super::super::flow::signature(&json!({ "ok": true })),
+                        "bytes": 11, "itemFields": [], "extract": null, "strippedAuth": true } }] }
+            ]
+        });
+        super::super::flow::write_flow(&flow).unwrap();
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let run = json!({ "id": "r", "action": "flow_run", "name": "rejected", "params": {}, "allowWrite": "all" });
+        let resp = execute_command(&run, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        let error = resp["error"].as_str().unwrap();
+        assert!(
+            error.contains("not allowed in a replay"),
+            "the replay was reached: {error}"
+        );
+        assert!(!error.contains("already sent"), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

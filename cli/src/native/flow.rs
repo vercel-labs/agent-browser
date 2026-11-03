@@ -3166,9 +3166,15 @@ pub fn check_replay_commands(flow: &Value, commands: &[Value]) -> Result<(), Str
 }
 
 /// The entry captured during a replay that stands for a recorded request:
-/// same method, host and path, and for requests with a body the same body or
-/// GraphQL operation (one endpoint serves every query). An exact URL wins.
-pub fn replay_match<'a>(entries: &'a [HarEntry], req: &PreparedRequest) -> Option<&'a HarEntry> {
+/// same method, host and path, the same recorded query, and for requests with
+/// a body the same body or GraphQL operation (one endpoint serves every
+/// query). Query parameters the replay added and the recording never had,
+/// such as cache-busters, are ignored. An exact URL wins; otherwise exactly
+/// one entry must match, so an ambiguous or missing match is an error.
+pub fn replay_lookup<'a>(
+    entries: &'a [HarEntry],
+    req: &PreparedRequest,
+) -> Result<&'a HarEntry, String> {
     let key = |u: &str| {
         url::Url::parse(u)
             .ok()
@@ -3183,7 +3189,15 @@ pub fn replay_match<'a>(entries: &'a [HarEntry], req: &PreparedRequest) -> Optio
     let same_body = |e: &HarEntry| match &req.body {
         None => true,
         Some(b) => {
+            let same_json = || {
+                let (a, c) = (
+                    serde_json::from_str::<Value>(b).ok()?,
+                    serde_json::from_str::<Value>(e.post_data.as_deref()?).ok()?,
+                );
+                Some(a == c)
+            };
             e.post_data.as_deref() == Some(b.as_str())
+                || same_json() == Some(true)
                 || (want_op.is_some() && operation(e.post_data.as_deref()) == want_op)
         }
     };
@@ -3192,11 +3206,56 @@ pub fn replay_match<'a>(entries: &'a [HarEntry], req: &PreparedRequest) -> Optio
         .rev()
         .filter(|e| e.method == req.method && key(&e.url) == want && same_body(e))
         .collect();
-    candidates
-        .iter()
-        .find(|e| e.url == req.url)
-        .or_else(|| candidates.first())
-        .copied()
+    if let Some(exact) = candidates.iter().find(|e| e.url == req.url) {
+        return Ok(exact);
+    }
+    let wanted_query: Vec<(String, String)> = url::Url::parse(&req.url)
+        .map(|u| {
+            u.query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let has_query = |e: &HarEntry| {
+        let pairs: Vec<(String, String)> = url::Url::parse(&e.url)
+            .map(|u| {
+                u.query_pairs()
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        wanted_query.iter().all(|(k, v)| {
+            pairs
+                .iter()
+                .any(|(pk, pv)| pk == k && (v.contains("{{") || pv == v))
+        })
+    };
+    let matching: Vec<&HarEntry> = candidates.into_iter().filter(|e| has_query(e)).collect();
+    match matching.as_slice() {
+        [] => Err(format!(
+            "no replayed request matches {} {} with its recorded query",
+            req.method, req.url
+        )),
+        [one] => Ok(one),
+        _ => Err(format!(
+            "{} {} matches several replayed requests, so none is used",
+            req.method, req.url
+        )),
+    }
+}
+
+pub fn replay_match<'a>(entries: &'a [HarEntry], req: &PreparedRequest) -> Option<&'a HarEntry> {
+    replay_lookup(entries, req).ok()
+}
+
+/// A write the replay already sent has no answer to read back: it is not
+/// sent again.
+pub fn replay_write_unanswered(
+    req: &PreparedRequest,
+    started: Instant,
+    reason: String,
+) -> TierResult {
+    tier_result(req, "replay", started, Err(unknown_outcome(reason)))
 }
 
 pub fn replay_result(
@@ -5685,5 +5744,51 @@ mod tests {
             .unwrap()
             .iter()
             .any(|x| x["request"] == "s2r1"));
+    }
+
+    fn replayed(url: &str) -> HarEntry {
+        let mut e = entry("r", url, "Fetch", "application/json", r#"{"items":[]}"#);
+        e.status = Some(200);
+        e
+    }
+
+    #[test]
+    fn replay_match_keeps_pages_apart_and_ignores_cache_busters() {
+        let entries = vec![
+            replayed("https://api.site.example/items?page=1&_=111"),
+            replayed("https://api.site.example/items?page=2&_=222"),
+        ];
+        let want = |url: &str| PreparedRequest {
+            url: url.to_string(),
+            ..prepared("s1r1")
+        };
+        let one = replay_lookup(&entries, &want("https://api.site.example/items?page=1"))
+            .ok()
+            .unwrap();
+        assert!(one.url.contains("page=1"));
+        let two = replay_lookup(&entries, &want("https://api.site.example/items?page=2"))
+            .ok()
+            .unwrap();
+        assert!(two.url.contains("page=2"));
+        // A recorded value that no replayed request has finds nothing.
+        let err = replay_lookup(&entries, &want("https://api.site.example/items?page=3"))
+            .err()
+            .unwrap();
+        assert!(err.contains("no replayed request"), "{err}");
+        // A request without the query matches both pages, so it fails closed.
+        let err = replay_lookup(&entries, &want("https://api.site.example/items"))
+            .err()
+            .unwrap();
+        assert!(err.contains("several"), "{err}");
+        // The same page twice, differing only by a cache-buster, is ambiguous too.
+        let twice = vec![
+            replayed("https://api.site.example/items?page=1&_=1"),
+            replayed("https://api.site.example/items?page=1&_=2"),
+        ];
+        assert!(replay_lookup(&twice, &want("https://api.site.example/items?page=1")).is_err());
+        // An exact URL still wins.
+        assert!(replay_lookup(&twice, &want("https://api.site.example/items?page=1&_=2")).is_ok());
+        assert!(replay_match(&entries, &want("https://api.site.example/items?page=1")).is_some());
+        assert!(replay_match(&entries, &want("https://api.site.example/items")).is_none());
     }
 }
