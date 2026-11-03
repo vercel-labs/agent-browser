@@ -342,8 +342,7 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
     Ok(headers)
 }
 
-/// Parses command arguments into normalized command data.
-/// For fill and type, `--` after the selector starts literal text.
+/// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
