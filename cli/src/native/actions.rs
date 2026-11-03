@@ -2714,7 +2714,28 @@ fn policy_actions_for_command(
     if action == "launch" {
         let plugins = plugins_from_command_or_env(cmd);
         let resolved = resolve_launch_target(cmd, attached);
-        append_launch_policy_actions(&mut actions, resolved.as_ref().unwrap_or(cmd), &plugins);
+        let mut launch = resolved.unwrap_or_else(|| cmd.clone());
+        // A launch that names no connection target connects as the session's
+        // settings say, so its policy actions follow them.
+        if AttachedTarget::named_by(&launch).is_none() {
+            if let Some(obj) = launch.as_object_mut() {
+                match settings.connection() {
+                    Connection::Provider(provider)
+                        if !matches!(provider.to_lowercase().as_str(), "" | "ios" | "safari") =>
+                    {
+                        obj.insert("provider".to_string(), json!(provider.to_lowercase()));
+                    }
+                    Connection::Cdp(cdp) => {
+                        obj.insert("cdpUrl".to_string(), json!(cdp));
+                    }
+                    Connection::AutoConnect => {
+                        obj.insert("autoConnect".to_string(), json!(true));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        append_launch_policy_actions(&mut actions, &launch, &plugins);
     } else if !skip_launch_action(action) && needs_implicit_launch {
         let plugins = plugins_from_command_or_env(cmd);
         if let Some(launch) = resolve_launch_target(&json!({ "action": "launch" }), attached) {
@@ -20029,5 +20050,86 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
         assert_eq!(state.settings, Running::defaults());
         assert!(state.domain_filter.read().await.is_none());
+    }
+    fn provider_plugins() -> Value {
+        json!([
+            {
+                "name": "browserbox",
+                "command": "agent-browser-plugin-browserbox",
+                "capabilities": ["browser.provider"]
+            },
+            {
+                "name": "stealth",
+                "command": "agent-browser-plugin-stealth",
+                "capabilities": ["launch.mutate"]
+            }
+        ])
+    }
+
+    #[test]
+    fn test_launch_policy_follows_the_provider_in_settings() {
+        let (_env, _) = isolated_state();
+        let mut settings = Running::defaults();
+        settings.set(Key::Provider, json!("browserbox"));
+        let launch = json!({ "action": "launch", "plugins": provider_plugins() });
+
+        let actions = policy_actions_for_command(&launch, "launch", false, None, &settings);
+
+        assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
+        assert!(!actions.contains(&"plugin:stealth:launch.mutate".to_string()));
+
+        // A local launch still gates the launch mutators.
+        let local =
+            policy_actions_for_command(&launch, "launch", false, None, &Running::defaults());
+        assert!(local.contains(&"plugin:stealth:launch.mutate".to_string()));
+        assert!(!local.contains(&"plugin:browserbox:browser.provider".to_string()));
+
+        // A named target wins over the settings, and ios has no plugin provider.
+        let named = json!({ "action": "launch", "cdpPort": 9222, "plugins": provider_plugins() });
+        let actions = policy_actions_for_command(&named, "launch", false, None, &settings);
+        assert!(!actions.contains(&"plugin:browserbox:browser.provider".to_string()));
+        let mut ios = Running::defaults();
+        ios.set(Key::Provider, json!("ios"));
+        let actions = policy_actions_for_command(&launch, "launch", false, None, &ios);
+        assert!(!actions.iter().any(|a| a.starts_with("plugin:browserbox")));
+    }
+
+    #[tokio::test]
+    async fn test_bare_open_with_a_settings_provider_is_gated_by_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        for (rule, expect_confirmation) in [("deny", false), ("confirm", true)] {
+            let policy = dir.path().join(format!("{rule}.json"));
+            fs::write(
+                &policy,
+                format!(r#"{{"{rule}": ["plugin:browserbox:browser.provider"]}}"#),
+            )
+            .unwrap();
+            let (_env, mut state) = isolated_state();
+            state.settings = Running::defaults();
+            let cmd = json!({
+                "id": "1",
+                "action": "launch",
+                "plugins": provider_plugins(),
+                "settings": {
+                    "provider": "browserbox",
+                    "action-policy": policy.to_str().unwrap()
+                }
+            });
+
+            let resp = execute_command(&cmd, &mut state).await;
+
+            if expect_confirmation {
+                assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
+                assert_eq!(resp["data"]["action"], "plugin:browserbox:browser.provider");
+            } else {
+                assert_eq!(resp["success"], false, "{resp}");
+                assert!(
+                    resp["error"].as_str().unwrap().contains("denied by policy"),
+                    "{resp}"
+                );
+            }
+            assert!(state.browser.is_none(), "the plugin must not run: {resp}");
+            assert_eq!(state.settings.get(Key::Provider), None, "{resp}");
+        }
     }
 }
