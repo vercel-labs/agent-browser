@@ -190,6 +190,10 @@
     ],
     "/init-scripts": [
       {
+        "from": "Runtime scripts",
+        "to": "Removing init scripts"
+      },
+      {
         "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"cookies\",\"set\",\"--curl\",\"cookies.curl\",\"--domain\",\"localhost\"]' \\\n  '[\"navigate\",\"http://localhost:3000/target\"]'",
         "to": "agent-browser batch \\\n  \"open\" \\\n  \"network route * --abort --resource-type script\" \\\n  \"cookies set --curl cookies.curl --domain localhost\" \\\n  \"navigate http://localhost:3000/target\""
       },
