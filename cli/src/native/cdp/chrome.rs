@@ -1060,6 +1060,7 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
     )
 }
 
+/// Finds Chrome from the install cache, macOS Applications directories, or system paths.
 pub fn find_chrome() -> Option<PathBuf> {
     // 1. Check Chrome downloaded by `agent-browser install`
     if let Some(p) = crate::install::find_installed_chrome() {
@@ -1081,17 +1082,11 @@ pub fn find_chrome() -> Option<PathBuf> {
     // 2. Check system-installed Chrome
     #[cfg(target_os = "macos")]
     {
-        let candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        ];
-        for c in &candidates {
-            let p = PathBuf::from(c);
-            if p.exists() {
-                return Some(p);
-            }
+        let home_applications = std::env::home_dir().map(|home| home.join("Applications"));
+        if let Some(path) =
+            find_macos_chrome(Path::new("/Applications"), home_applications.as_deref())
+        {
+            return Some(path);
         }
     }
 
@@ -1150,6 +1145,28 @@ pub fn find_chrome() -> Option<PathBuf> {
         return Some(p);
     }
 
+    None
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn find_macos_chrome(
+    system_applications: &Path,
+    home_applications: Option<&Path>,
+) -> Option<PathBuf> {
+    let candidates = [
+        "Google Chrome.app/Contents/MacOS/Google Chrome",
+        "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        "Chromium.app/Contents/MacOS/Chromium",
+        "Brave Browser.app/Contents/MacOS/Brave Browser",
+    ];
+    for applications in std::iter::once(system_applications).chain(home_applications) {
+        for candidate in &candidates {
+            let path = applications.join(candidate);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
     None
 }
 
