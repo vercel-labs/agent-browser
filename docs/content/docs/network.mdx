@@ -216,6 +216,21 @@ Each request must stay on the flow's site, whatever `--allowed-domains` says. `f
 
 The next run starts at the tier that worked. Every tier checks the response against the shape that was recorded. If the shape changed, the run fails, the flow is marked unverified, and the agent continues in the UI. A response that only lacks its lists and counts is treated as no results and leaves the verified state as it was.
 
+Some responses end the run instead of falling to the next tier, because every tier would get the same answer. They do not mark the flow unverified, and the run adds no throttle or retry of its own.
+
+<table>
+  <thead>
+    <tr><th>Response</th><th>Error code</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>401 or 403</td><td><code>auth_expired</code></td><td>The session is signed out or lacks access. Sign in again in the browser, then rerun</td></tr>
+    <tr><td>429</td><td><code>rate_limited</code></td><td>The site is rate limiting the session. <code>data.retryAfter</code> carries the <code>Retry-After</code> value when the site sent one</td></tr>
+    <tr><td>A bot challenge page</td><td><code>blocked</code></td><td>The site served a challenge instead of data. Continue in the UI or let the user clear it</td></tr>
+  </tbody>
+</table>
+
+The code is in the JSON response as `code`, with `data.status`, `data.step` and `data.httpStatus`.
+
 ### Writes
 
 `flow save` lists every write the recorded steps caused in the flow's `writes`, each with an id, a method, a URL and a kind. The report prints them.

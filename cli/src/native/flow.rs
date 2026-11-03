@@ -2254,6 +2254,10 @@ pub struct TierResult {
     /// which is how many APIs answer a query with no results.
     pub empty: bool,
     pub tier: &'static str,
+    /// The response says the run cannot go on, whatever tier sends it:
+    /// `auth_expired`, `rate_limited` or `blocked`.
+    pub kind: Option<&'static str>,
+    pub retry_after: Option<String>,
 }
 
 impl TierResult {
@@ -2270,6 +2274,8 @@ impl TierResult {
             shape_changed: f.shape_changed,
             empty: false,
             tier,
+            kind: f.kind,
+            retry_after: None,
         }
     }
 }
@@ -2280,6 +2286,7 @@ pub struct Failure {
     pub reason: String,
     pub drift: bool,
     pub shape_changed: bool,
+    pub kind: Option<&'static str>,
 }
 
 impl Failure {
@@ -2289,6 +2296,19 @@ impl Failure {
             reason,
             drift,
             shape_changed: false,
+            kind: None,
+        }
+    }
+
+    /// A response that ends the run: another tier would get the same answer,
+    /// and it does not mean the site changed.
+    fn stop(kind: &'static str, status: u16, reason: String) -> Failure {
+        Failure {
+            status: Some(status),
+            reason,
+            drift: false,
+            shape_changed: false,
+            kind: Some(kind),
         }
     }
 }
@@ -2317,21 +2337,38 @@ pub fn check_response(
     status: u16,
     text: &str,
 ) -> Result<(Value, bool), Failure> {
-    if matches!(status, 401 | 403 | 407 | 429) {
-        return Err(Failure::new(true, Some(status), format!("HTTP {}", status)));
+    if (matches!(status, 401 | 403 | 429) || (200..300).contains(&status))
+        && looks_like_challenge(text)
+    {
+        return Err(Failure::stop(
+            "blocked",
+            status,
+            "bot challenge page instead of data".to_string(),
+        ));
+    }
+    match status {
+        401 | 403 => {
+            return Err(Failure::stop(
+                "auth_expired",
+                status,
+                format!("HTTP {}: the session is signed out or lacks access", status),
+            ))
+        }
+        429 => {
+            return Err(Failure::stop(
+                "rate_limited",
+                status,
+                "HTTP 429: the site is rate limiting this session".to_string(),
+            ))
+        }
+        407 => return Err(Failure::new(true, Some(status), format!("HTTP {}", status))),
+        _ => {}
     }
     if !(200..300).contains(&status) {
         return Err(Failure::new(
             false,
             Some(status),
             format!("HTTP {}", status),
-        ));
-    }
-    if looks_like_challenge(text) {
-        return Err(Failure::new(
-            true,
-            Some(status),
-            "bot challenge page instead of data".to_string(),
         ));
     }
     let parsed: Value = serde_json::from_str(text)
@@ -2350,6 +2387,7 @@ pub fn check_response(
             reason: format!("response shape changed: {}", reason),
             drift: true,
             shape_changed: true,
+            kind: None,
         });
     }
     Ok((parsed, false))
@@ -2389,6 +2427,8 @@ pub fn tier_result(
             shape_changed: false,
             empty,
             tier,
+            kind: None,
+            retry_after: None,
         },
         Err(f) => TierResult::failed(req, tier, ms, f),
     }
@@ -2463,16 +2503,29 @@ pub async fn run_http(
     if let Some(body) = &req.body {
         builder = builder.body(body.clone());
     }
+    let mut retry_after = None;
     let outcome = match builder.send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
+            retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
             resp.text().await.map(|t| (status, t)).map_err(|e| {
                 Failure::new(true, Some(status), format!("could not read body: {}", e))
             })
         }
         Err(e) => Err(Failure::new(false, None, format!("request failed: {}", e))),
     };
-    tier_result(req, "http", started, outcome)
+    with_retry_after(tier_result(req, "http", started, outcome), retry_after)
+}
+
+fn with_retry_after(mut result: TierResult, retry_after: Option<String>) -> TierResult {
+    if result.kind == Some("rate_limited") {
+        result.retry_after = retry_after.filter(|v| !v.trim().is_empty());
+    }
+    result
 }
 
 /// Tier 2: the page sends the request itself, so the browser adds its own
@@ -2505,7 +2558,7 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
         "(async () => {{ const u = {url}, i = {init}; \
          let r; try {{ r = await fetch(u, {{ ...i, credentials: 'include' }}); }} \
          catch (e) {{ r = await fetch(u, i); }} \
-         return {{ status: r.status, text: await r.text() }}; }})()",
+         return {{ status: r.status, retryAfter: r.headers.get('retry-after'), text: await r.text() }}; }})()",
         url = json!(req.url),
         init = init
     )
@@ -2521,6 +2574,11 @@ pub fn page_result(
     started: Instant,
     value: Result<Value, String>,
 ) -> TierResult {
+    let retry_after = value
+        .as_ref()
+        .ok()
+        .and_then(|v| v["retryAfter"].as_str())
+        .map(String::from);
     let outcome = match value {
         Ok(v) => match (v["status"].as_u64(), v["text"].as_str()) {
             (Some(status), Some(text)) => Ok((status as u16, text.to_string())),
@@ -2536,7 +2594,7 @@ pub fn page_result(
             format!("in-page fetch failed: {}", e),
         )),
     };
-    tier_result(req, "page", started, outcome)
+    with_retry_after(tier_result(req, "page", started, outcome), retry_after)
 }
 
 /// Tier 3: the recorded commands with the run's params swapped in. A param
@@ -2719,7 +2777,13 @@ pub fn replay_result(
             )),
         },
     };
-    tier_result(req, "replay", started, outcome)
+    let retry_after = entry.and_then(|e| {
+        e.response_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
+            .map(|(_, v)| v.clone())
+    });
+    with_retry_after(tier_result(req, "replay", started, outcome), retry_after)
 }
 
 pub fn replay_failed(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
@@ -3152,7 +3216,8 @@ mod tests {
     fn check_response_separates_blocks_inputs_and_shape_changes() {
         let req = prepared("s1r1");
         let blocked = check_response(&req, 403, "").unwrap_err();
-        assert!(blocked.drift && !blocked.shape_changed);
+        assert!(!blocked.drift && !blocked.shape_changed);
+        assert_eq!(blocked.kind, Some("auth_expired"));
         let rejected = check_response(&req, 400, "{}").unwrap_err();
         assert!(!rejected.drift);
         let moved = check_response(&req, 200, r#"{"items":[]}"#).unwrap_err();
@@ -3161,13 +3226,17 @@ mod tests {
     }
 
     #[test]
-    fn a_blocked_tier_falls_back_and_the_flow_stays_verified() {
+    fn a_tier_that_got_a_page_instead_of_data_falls_back_and_the_flow_stays_verified() {
         let mut flow = json!({
             "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": null,
             "steps": [{ "requests": [{ "id": "s1r1" }] }],
         });
         let attempts = vec![
-            attempt("s1r1", "http", Ok((403, String::new()))),
+            attempt(
+                "s1r1",
+                "http",
+                Ok((200, "<html>sign in</html>".to_string())),
+            ),
             attempt(
                 "s1r1",
                 "page",
@@ -4186,5 +4255,49 @@ mod tests {
             typed_param_name(Some(&traits("text", "", "123")), &[]),
             "typed"
         );
+    }
+
+    #[test]
+    fn statuses_that_end_a_run_carry_a_kind_and_no_drift() {
+        let req = prepared("s1r1");
+        for (status, kind) in [
+            (401, "auth_expired"),
+            (403, "auth_expired"),
+            (429, "rate_limited"),
+        ] {
+            let f = check_response(&req, status, "{}").unwrap_err();
+            assert_eq!(f.kind, Some(kind), "{status}");
+            assert!(!f.drift);
+        }
+        let blocked = check_response(&req, 200, "<html>captcha</html>").unwrap_err();
+        assert_eq!(blocked.kind, Some("blocked"));
+        let blocked_403 = check_response(&req, 403, "<div id=cf-chl>").unwrap_err();
+        assert_eq!(blocked_403.kind, Some("blocked"));
+        assert_eq!(check_response(&req, 500, "{}").unwrap_err().kind, None);
+        assert_eq!(check_response(&req, 407, "{}").unwrap_err().kind, None);
+    }
+
+    #[test]
+    fn retry_after_is_kept_only_for_rate_limits() {
+        let req = prepared("s1r1");
+        let limited = tier_result(
+            &req,
+            "http",
+            Instant::now(),
+            Err(Failure::stop("rate_limited", 429, "x".into())),
+        );
+        assert_eq!(
+            with_retry_after(limited, Some("30".into()))
+                .retry_after
+                .as_deref(),
+            Some("30")
+        );
+        let auth = tier_result(
+            &req,
+            "http",
+            Instant::now(),
+            Err(Failure::stop("auth_expired", 401, "x".into())),
+        );
+        assert_eq!(with_retry_after(auth, Some("30".into())).retry_after, None);
     }
 }

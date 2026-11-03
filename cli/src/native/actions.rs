@@ -673,6 +673,8 @@ pub struct DaemonState {
     pub flow: super::flow::FlowRecorder,
     /// Registrable domain whose saved flows were last announced.
     pub flow_hinted: Option<String>,
+    /// Why the last `flow run` stopped, for the error response.
+    pub flow_stop: Option<Value>,
     pub har_content_mode: HarContentMode,
     /// Bytes of response bodies embedded so far this recording; enforces
     /// [`HAR_MAX_TOTAL_BODY_BYTES`].
@@ -852,6 +854,7 @@ impl DaemonState {
             har_entries: Vec::new(),
             flow: Default::default(),
             flow_hinted: None,
+            flow_stop: None,
             har_content_mode: HarContentMode::default(),
             har_body_total_bytes: 0,
             confirm_actions: ConfirmActions::from_env(),
@@ -3502,6 +3505,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
     attach_tab_gone_data(&mut resp, state);
+    if let Some(stop) = state.flow_stop.take() {
+        if resp.get("success") != Some(&json!(true)) {
+            resp["code"] = stop["status"].clone();
+            resp["data"] = stop;
+        }
+    }
     if let Some(report) = wedge {
         state.undelivered_wedge = Some((id.clone(), report));
     } else if let Some((_, report)) = state.undelivered_wedge.take() {
@@ -12211,7 +12220,7 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
                 "page" => run_flow_in_page(&flow, req, state).await,
                 _ => run_flow_replay(&flow, &params, req, &allow, state).await,
             };
-            let (ok, drift) = (result.ok, result.drift);
+            let (ok, drift, stopped) = (result.ok, result.drift, result.kind.is_some());
             if let Some(body) = result.body.as_ref().filter(|_| ok) {
                 bodies.insert(req.id.clone(), body.clone());
             }
@@ -12219,6 +12228,10 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
             let accepted_write = super::flow::is_flow_write(&flow, &req.id)
                 && result.status.is_some_and(|st| (200..300).contains(&st));
             results.push(result);
+            // The site answered with something every tier would get again.
+            if stopped {
+                break;
+            }
             // A rejected input fails the same way on every tier, except a
             // write the site did not accept: its request tokens may be stale,
             // and the page or the UI can still send it once.
@@ -12231,6 +12244,34 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
         if !done {
             break;
         }
+    }
+
+    if let Some(stop) = results.iter().rev().find(|r| r.kind.is_some()) {
+        let kind = stop.kind.unwrap_or("blocked");
+        let mut message = format!(
+            "{}: flow '{}' step {} ({}): {}",
+            kind,
+            name,
+            stop.step,
+            stop.tier,
+            stop.reason.as_deref().unwrap_or("")
+        );
+        if let Some(wait) = stop.retry_after.as_deref() {
+            message.push_str(&format!("; retry after {}", wait));
+        }
+        message.push_str(match kind {
+            "auth_expired" => ". Sign in again in the browser, then rerun",
+            "rate_limited" => ". Wait before rerunning",
+            _ => ". Continue in the UI or let the user clear the challenge",
+        });
+        state.flow_stop = Some(json!({
+            "status": kind,
+            "flow": name,
+            "step": stop.step,
+            "httpStatus": stop.status,
+            "retryAfter": stop.retry_after,
+        }));
+        return Err(message);
     }
 
     let shape = super::flow::Shape::from_cmd(cmd);
@@ -19783,6 +19824,57 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 .contains("not a write of this flow"),
             "{resp}"
         );
+    }
+
+    fn serve_fixed(response: &'static str) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn auth_rate_limit_and_challenge_responses_stop_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let cases: [(&'static str, &str, &str); 4] = [
+            ("HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}", "auth_expired", ""),
+            ("HTTP/1.1 403 Forbidden\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}", "auth_expired", ""),
+            ("HTTP/1.1 429 Too Many Requests\r\nretry-after: 17\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}", "rate_limited", "17"),
+            ("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 41\r\nconnection: close\r\n\r\n<html>cf-chl-bypass captcha challenge</html", "blocked", ""),
+        ];
+        for (response, kind, retry) in cases {
+            write_flow_fixture(dir.path(), serve_fixed(response));
+            // A write flow, allowed, so only the response decides.
+            let run = json!({ "id": "r", "action": "flow_run", "name": "cart", "params": {}, "allowWrite": "all" });
+            let mut state = DaemonState::new();
+            state.policy = None;
+            state.confirm_actions = None;
+            let resp = execute_command(&run, &mut state).await;
+            assert_eq!(resp["success"], false, "{resp}");
+            assert_eq!(resp["code"], kind, "{resp}");
+            assert_eq!(resp["data"]["status"], kind);
+            let error = resp["error"].as_str().unwrap();
+            assert!(error.starts_with(kind), "{error}");
+            assert!(
+                error.contains("(http)"),
+                "stopped on the first tier: {error}"
+            );
+            if !retry.is_empty() {
+                assert_eq!(resp["data"]["retryAfter"], retry);
+                assert!(error.contains("retry after 17"), "{error}");
+            }
+            // No lower tier ran, so no browser was opened.
+            assert!(state.browser.is_none());
+        }
     }
 
     #[tokio::test]
