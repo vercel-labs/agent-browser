@@ -49,6 +49,8 @@ export HTTP_PROXY="http://username:password@proxy.example.com:8080"
 agent-browser open https://example.com
 ```
 
+Credentials embedded in the URL are percent-decoded once before Chrome answers the proxy's authentication challenge. Encode reserved characters in the username or password, so `p@ss` is written `p%40ss` and a literal percent is written `%25`. A `+` stays a literal `+` and a `%` sequence that does not decode to UTF-8 is passed through as written.
+
 ## SOCKS Proxy
 
 ```bash

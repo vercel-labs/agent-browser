@@ -4167,6 +4167,7 @@ Options:
   --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY)
                              When launching Chrome, agent-browser accepts a proxy URL with a trailing slash.
                              Supports authenticated proxies: --proxy "http://user:pass@127.0.0.1:7890"
+                             Credentials are percent-decoded, so encode reserved characters (p@ss as p%40ss).
   --proxy-bypass <hosts>     Bypass proxy for these hosts (or AGENT_BROWSER_PROXY_BYPASS, NO_PROXY)
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
