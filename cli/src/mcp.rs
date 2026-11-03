@@ -4325,6 +4325,7 @@ fn append_timeout_message(stderr: String, timeout_ms: u64) -> String {
     }
 }
 
+/// Convert CLI output into an MCP tool result.
 fn tool_result_from_run(run: CliRun) -> Value {
     let parsed = serde_json::from_str::<Value>(run.stdout.trim()).ok();
     let cli_success = parsed
@@ -4344,14 +4345,18 @@ fn tool_result_from_run(run: CliRun) -> Value {
         }
     }
 
+    let mut structured_content = json!({
+        "exitCode": run.exit_code,
+        "stderr": run.stderr,
+        "response": parsed,
+    });
+    if parsed.is_none() {
+        structured_content["stdout"] = json!(run.stdout);
+    }
+
     json!({
         "content": content,
-        "structuredContent": {
-            "exitCode": run.exit_code,
-            "stdout": run.stdout,
-            "stderr": run.stderr,
-            "response": parsed,
-        },
+        "structuredContent": structured_content,
         "isError": !success,
     })
 }
