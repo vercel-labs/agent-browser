@@ -728,7 +728,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run multiple commands sequentially. A batch containing only get cdp-url commands never launches a browser.",
+      "description": "Run multiple commands sequentially. Set global flags on the batch invocation or MCP server. Command arguments can contain flag-like text. A batch containing only get cdp-url commands never launches a browser.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
