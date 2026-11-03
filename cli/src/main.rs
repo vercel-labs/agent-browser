@@ -513,6 +513,13 @@ struct ParsedProxy {
     password: Option<String>,
 }
 
+/// Decodes proxy credential escapes, preserving the raw value if decoding fails.
+fn decode_proxy_credential(credential: &str) -> String {
+    urlencoding::decode(credential)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| credential.to_string())
+}
+
 fn parse_proxy(proxy_str: &str) -> ParsedProxy {
     let Some(protocol_end) = proxy_str.find("://") else {
         return ParsedProxy {
@@ -544,12 +551,12 @@ fn parse_proxy(proxy_str: &str) -> ParsedProxy {
                 if u.is_empty() {
                     None
                 } else {
-                    Some(u.to_string())
+                    Some(decode_proxy_credential(u))
                 },
                 if p.is_empty() {
                     None
                 } else {
-                    Some(p.to_string())
+                    Some(decode_proxy_credential(p))
                 },
             )
         }
@@ -557,7 +564,7 @@ fn parse_proxy(proxy_str: &str) -> ParsedProxy {
             if creds.is_empty() {
                 None
             } else {
-                Some(creds.to_string())
+                Some(decode_proxy_credential(creds))
             },
             None,
         ),
