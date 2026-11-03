@@ -15655,7 +15655,7 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
 
 #[tokio::test]
 #[ignore]
-async fn e2e_flow_comment_8_replay_runs_once_per_run() {
+async fn e2e_flow_replay_runs_once_per_run() {
     let fx = flow_fixture().await;
     let dir = tempfile::tempdir().unwrap();
     let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);

@@ -19839,7 +19839,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
-    async fn comment_1_a_blocked_host_is_not_fetched_after_the_allowlist_tightens() {
+    async fn a_host_the_session_now_blocks_is_not_fetched_by_a_saved_flow() {
         let dir = tempfile::tempdir().unwrap();
         let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
         guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
@@ -19871,7 +19871,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
-    async fn comment_2_the_replay_does_not_send_a_write_nobody_allowed() {
+    async fn the_replay_does_not_send_a_write_that_was_not_allowed() {
         let dir = tempfile::tempdir().unwrap();
         let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
         guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());

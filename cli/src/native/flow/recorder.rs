@@ -552,7 +552,7 @@ impl FieldTraits {
     }
 
     /// A credential field by its type or autocomplete, or by what it is called.
-    fn looks_secret(&self) -> bool {
+    pub(super) fn looks_secret(&self) -> bool {
         self.is_secret() || has_secret_marker(&self.hint)
     }
 
