@@ -73,8 +73,8 @@ fn find_skills_dirs() -> Vec<PathBuf> {
         }
     }
 
-    let Some(root) =
-        find_package_root().or_else(|| dirs::home_dir().map(|home| home.join(".agent-browser")))
+    let Some(root) = find_package_root()
+        .or_else(|| std::env::home_dir().map(|home| home.join(".agent-browser")))
     else {
         return vec![];
     };
