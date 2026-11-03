@@ -7,6 +7,8 @@
 
 use serde_json::{json, Value};
 
+use crate::commands::{parse_command, shell_words_split};
+
 use super::actions::{execute_command, DaemonState};
 
 const ENCRYPTION_KEY_ENV: &str = "AGENT_BROWSER_ENCRYPTION_KEY";
@@ -388,6 +390,34 @@ fn minimal_command(action: &str, id: &str) -> Value {
 // ---------------------------------------------------------------------------
 // 1. Action dispatch coverage
 // ---------------------------------------------------------------------------
+
+#[test]
+fn test_cli_commands_parse_to_documented_actions() {
+    let samples = [
+        ("open https://example.com", "navigate"),
+        ("read", "read"),
+        ("snapshot -i", "snapshot"),
+        ("click body", "click"),
+        ("network requests", "requests"),
+        ("cookies get", "cookies_get"),
+        ("storage local get key", "storage_get"),
+        ("state list", "state_list"),
+        ("auth list", "auth_list"),
+        ("tab list", "tab_list"),
+        ("dialog status", "dialog"),
+        ("trace start", "trace_start"),
+        ("diff snapshot", "diff_snapshot"),
+        ("device list", "device_list"),
+        ("confirm confirmation-1", "confirm"),
+    ];
+    let flags = crate::commands::tests::default_flags();
+    for (invocation, action) in samples {
+        let command = parse_command(&shell_words_split(invocation), &flags)
+            .unwrap_or_else(|e| panic!("'{invocation}' did not parse: {}", e.format()));
+        assert_eq!(command["action"], action, "{invocation}");
+        assert!(DOCUMENTED_ACTIONS.contains(&action), "{action}");
+    }
+}
 
 #[tokio::test]
 async fn test_all_documented_actions_are_handled() {
