@@ -2783,17 +2783,12 @@ fn provider_plugin_launch_options_from_command(cmd: &Value) -> Value {
 }
 
 /// Returns whether an action can run without implicitly launching a browser.
-fn skip_launch_action(action: &str) -> bool {
-    if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
-        return true;
-    }
-
+/// Actions that never touch a browser at all, so no launch is needed and the
+/// CLI must not send a launch envelope for them.
+pub fn action_is_browserless(action: &str) -> bool {
     matches!(
         action,
-        "" | "launch"
-            | "close"
-            | "read"
-            | "har_stop"
+        "close"
             | "credentials_set"
             | "credentials_get"
             | "credentials_delete"
@@ -2810,14 +2805,25 @@ fn skip_launch_action(action: &str) -> bool {
             | "state_clean"
             | "state_rename"
             | "device_list"
-            | "stream_enable"
-            | "stream_disable"
-            | "stream_status"
             | "session_info"
             | "cdp_url"
             | "webmcp_result"
             | "webmcp_cancel"
     )
+}
+
+fn skip_launch_action(action: &str) -> bool {
+    action == INTERNAL_DAEMON_SHUTDOWN_ACTION
+        || action_is_browserless(action)
+        || matches!(
+            action,
+            "" | "launch"
+                | "read"
+                | "har_stop"
+                | "stream_enable"
+                | "stream_disable"
+                | "stream_status"
+        )
 }
 
 /// True when `read` renders the live tab instead of fetching over HTTP.

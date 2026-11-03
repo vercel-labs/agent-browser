@@ -322,31 +322,39 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
 }
 
 fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -> bool {
-    (flags.headed
-        || flags.cli_headed
-        || flags.executable_path.is_some()
-        || flags.profile.is_some()
-        || flags.state.is_some()
-        || flags.proxy.is_some()
-        || flags.args.is_some()
-        || flags.user_agent.is_some()
-        || ((flags.ca_cert.is_some() || flags.clear_ca_cert) && !command_is_browserless(command))
-        || flags.allow_file_access
-        || should_send_hide_scrollbars_launch_option(
-            flags.cli_hide_scrollbars,
-            flags.hide_scrollbars,
-        )
-        || flags.webgpu
-        || flags.cli_webgpu
-        || flags.no_webmcp
-        || flags.cli_no_webmcp
-        || flags.color_scheme.is_some()
-        || flags.download_path.is_some()
-        || flags.engine.is_some()
-        || flags.allowed_domains.is_some()
-        || !flags.init_scripts.is_empty()
-        || !flags.enable.is_empty()
-        || !flags.extensions.is_empty())
+    // A command that never touches a browser must not start one just to carry
+    // browser configuration, so an outdated build cannot fail `close` either.
+    let browserless = command
+        .get("action")
+        .and_then(|value| value.as_str())
+        .is_some_and(native::actions::action_is_browserless);
+    !browserless
+        && (flags.headed
+            || flags.cli_headed
+            || flags.executable_path.is_some()
+            || flags.profile.is_some()
+            || flags.state.is_some()
+            || flags.proxy.is_some()
+            || flags.args.is_some()
+            || flags.user_agent.is_some()
+            || ((flags.ca_cert.is_some() || flags.clear_ca_cert)
+                && !command_is_browserless(command))
+            || flags.allow_file_access
+            || should_send_hide_scrollbars_launch_option(
+                flags.cli_hide_scrollbars,
+                flags.hide_scrollbars,
+            )
+            || flags.webgpu
+            || flags.cli_webgpu
+            || flags.no_webmcp
+            || flags.cli_no_webmcp
+            || flags.color_scheme.is_some()
+            || flags.download_path.is_some()
+            || flags.engine.is_some()
+            || flags.allowed_domains.is_some()
+            || !flags.init_scripts.is_empty()
+            || !flags.enable.is_empty()
+            || !flags.extensions.is_empty())
         && flags.cdp.is_none()
         && flags.provider.is_none()
         && !flags.auto_connect
@@ -2889,6 +2897,37 @@ mod tests {
         let mut launch = json!({ "action": "launch" });
         attach_webmcp_launch_option(&mut launch, &flags);
         assert_eq!(launch["webmcp"], false);
+    }
+
+    #[test]
+    fn test_browserless_commands_do_not_trigger_a_launch() {
+        // The launch envelope exists to carry browser configuration. Sending it
+        // for `close` would start a browser only to close it, and a refused
+        // browser would fail the close instead of tearing the session down.
+        let mut flags = neutral_launch_config_flags();
+        flags.executable_path = Some("/usr/local/bin/chromium".to_string());
+        flags.headed = true;
+
+        for action in [
+            "close",
+            "state_list",
+            "auth_list",
+            "session_info",
+            "cdp_url",
+        ] {
+            assert!(
+                !should_send_local_launch_config(&flags, &json!({ "action": action })),
+                "{action} must not launch a browser"
+            );
+        }
+        assert!(should_send_local_launch_config(
+            &flags,
+            &json!({ "action": "snapshot" })
+        ));
+        assert!(should_send_local_launch_config(
+            &flags,
+            &json!({ "action": "launch" })
+        ));
     }
 
     #[test]
