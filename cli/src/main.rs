@@ -2693,6 +2693,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_proxy_decodes_encoded_credentials() {
+        for (proxy, username, password) in [
+            (
+                "http://user%40name+tag:p%3Ass%40word%252F+tail@proxy.com:8080",
+                Some("user@name+tag"),
+                Some("p:ss@word%2F+tail"),
+            ),
+            ("http://user%3Aname@proxy.com:8080", Some("user:name"), None),
+            (
+                "http://user:pass%FF@proxy.com:8080",
+                Some("user"),
+                Some("pass%FF"),
+            ),
+        ] {
+            let result = parse_proxy(proxy);
+            assert_eq!(result.username.as_deref(), username, "proxy: {proxy}");
+            assert_eq!(result.password.as_deref(), password, "proxy: {proxy}");
+        }
+    }
+
+    #[test]
     fn test_serialize_json_value_escapes_control_characters() {
         let payload = serialize_json_value(&json!({
             "success": false,
