@@ -2042,62 +2042,114 @@ fn wait_timeout_schema() -> Value {
     })
 }
 
-/// Per-call arguments every tool advertises in its input schema.
-fn shared_properties() -> serde_json::Map<String, Value> {
-    let Value::Object(map) = json!({
-        "session": {
-            "type": "string",
-            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores."
-        },
-        "restore": {
-            "oneOf": [{ "type": "boolean" }, { "type": "string" }],
-            "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key."
-        },
-        "allowedDomains": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Restrict browser and read traffic to these domain patterns."
-        },
-        "extraArgs": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Extra CLI arguments for this command, such as --engine. Flags that change network, file, policy, or host access are rejected."
-        },
-        "timeoutMs": {
-            "type": "integer",
-            "minimum": 1,
-            "default": DEFAULT_TIMEOUT_MS,
-            "description": "Maximum time to wait for this tool call."
-        }
-    }) else {
-        unreachable!()
-    };
-    map
-}
-
-/// Arguments every tool accepts but does not advertise. They configure the daemon,
-/// restore checks, or CA trust, which a client normally sets once; the server's
-/// initialize instructions describe them.
-const UNADVERTISED_SHARED_ARGUMENTS: &[&str] = &[
+/// Shared arguments every tool accepts. Each tool's schema lists only the ones in
+/// `advertised_shared_arguments`; the initialize instructions describe the rest.
+const SHARED_ARGUMENTS: &[&str] = &[
+    "session",
     "namespace",
+    "restore",
     "restoreSave",
     "restoreCheckUrl",
     "restoreCheckText",
     "restoreCheckFn",
+    "allowedDomains",
     "caCert",
     "useSystemCa",
     "clearCaCert",
     "idleTimeout",
+    "extraArgs",
+    "timeoutMs",
 ];
 
-const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool also accepts these optional arguments, which are not listed in each tool's schema: namespace (string, isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (strings that restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), and idleTimeout (string such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown). allowedDomains also disables RTCPeerConnection in Chromium sessions and is rejected when the server environment or config already sets allowed domains. extraArgs rejects global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config; set those in the MCP server environment or config.";
+/// Tools that usually start a session's browser, where launch-time arguments matter.
+const LAUNCH_TOOLS: &[&str] = &[TOOL_OPEN, TOOL_TAB_NEW];
+
+/// Tools that wait on navigation, page conditions, or scripts, where a per-call timeout matters.
+const WAITING_TOOLS: &[&str] = &[
+    TOOL_OPEN,
+    TOOL_READ,
+    TOOL_BACK,
+    TOOL_FORWARD,
+    TOOL_RELOAD,
+    TOOL_EVAL,
+    TOOL_WAIT_MS,
+    TOOL_WAIT_FOR_SELECTOR,
+    TOOL_WAIT_FOR_TEXT,
+    TOOL_WAIT_FOR_LOAD,
+];
+
+/// Shared arguments listed in this tool's input schema.
+fn advertised_shared_arguments(name: &str) -> Vec<&'static str> {
+    let mut keys = vec!["session"];
+    let launches = LAUNCH_TOOLS.contains(&name);
+    if launches {
+        keys.push("restore");
+    }
+    if launches || name == TOOL_READ {
+        keys.push("allowedDomains");
+        keys.push("extraArgs");
+    }
+    if WAITING_TOOLS.contains(&name) {
+        keys.push("timeoutMs");
+    }
+    keys
+}
+
+fn shared_property(key: &str) -> Value {
+    match key {
+        "session" => json!({
+            "type": "string",
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores."
+        }),
+        "restore" => json!({
+            "oneOf": [{ "type": "boolean" }, { "type": "string" }],
+            "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key."
+        }),
+        "allowedDomains" => json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Restrict browser and read traffic to these domain patterns."
+        }),
+        "extraArgs" => json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Extra CLI arguments for this command, such as --engine. Flags that change network, file, policy, or host access are rejected."
+        }),
+        "timeoutMs" => json!({
+            "type": "integer",
+            "minimum": 1,
+            "default": DEFAULT_TIMEOUT_MS,
+            "description": "Maximum time to wait for this tool call."
+        }),
+        _ => unreachable!("shared argument {key} is not advertised"),
+    }
+}
+
+const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool accepts these optional arguments even when its schema does not list them: session (isolated browser session name), restore (true or a key; restores and auto-saves browser state when the call launches the browser), allowedDomains (domain patterns that restrict browser and read traffic when the call launches the browser; also disables RTCPeerConnection in Chromium sessions, and is rejected when the server environment or config already sets allowed domains), extraArgs (extra CLI arguments such as --engine; global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config, are rejected, so set those in the MCP server environment or config), timeoutMs (positive integer, maximum milliseconds to wait for the tool call), namespace (isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (conditions restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), and idleTimeout (such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown).";
+
+/// Levenshtein distance, for suggesting a close argument name.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
 
 fn tool(name: &str, title: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     let mut props = match properties {
         Value::Object(map) => map,
         _ => serde_json::Map::new(),
     };
-    props.extend(shared_properties());
+    for key in advertised_shared_arguments(name) {
+        props.insert(key.to_string(), shared_property(key));
+    }
 
     let mut schema = serde_json::Map::new();
     schema.insert("type".to_string(), json!("object"));
@@ -2222,32 +2274,52 @@ fn reject_unknown_arguments(
         .unwrap_or(&empty);
     let mut unknown: Vec<&str> = args
         .keys()
-        .filter(|key| {
-            !declared.contains_key(*key) && !UNADVERTISED_SHARED_ARGUMENTS.contains(&key.as_str())
-        })
+        .filter(|key| !declared.contains_key(*key) && !SHARED_ARGUMENTS.contains(&key.as_str()))
         .map(|key| key.as_str())
         .collect();
     if unknown.is_empty() {
         return Ok(());
     }
     unknown.sort();
-    let shared_keys = shared_properties();
     let mut own: Vec<&str> = declared
         .keys()
-        .filter(|key| !shared_keys.contains_key(*key))
+        .filter(|key| !SHARED_ARGUMENTS.contains(&key.as_str()))
         .map(|key| key.as_str())
         .collect();
     own.sort();
+    let candidates: Vec<&str> = own
+        .iter()
+        .copied()
+        .chain(SHARED_ARGUMENTS.iter().copied())
+        .collect();
+    let suggestions: Vec<String> = unknown
+        .iter()
+        .filter_map(|key| {
+            candidates
+                .iter()
+                .map(|candidate| (edit_distance(key, candidate), *candidate))
+                .filter(|(distance, _)| *distance <= 2)
+                .min()
+                .map(|(_, candidate)| format!("{} for {}", candidate, key))
+        })
+        .collect();
+    let hint = if suggestions.is_empty() {
+        String::new()
+    } else {
+        format!(" Did you mean {}?", suggestions.join(", "))
+    };
     let own = if own.is_empty() {
         "none".to_string()
     } else {
         own.join(", ")
     };
     Err(ProtocolError::invalid_params(format!(
-        "Unknown argument(s) for {}: {}. Tool arguments: {}.",
+        "Unknown argument(s) for {}: {}.{} Tool arguments: {}. Shared arguments every tool accepts: {}.",
         name,
         unknown.join(", "),
-        own
+        hint,
+        own,
+        SHARED_ARGUMENTS.join(", ")
     )))
 }
 
@@ -5087,7 +5159,9 @@ mod tests {
         assert_eq!(err.code, -32602);
         assert!(err.message.contains("tabId"));
         let listed = err.message.split("Tool arguments:").nth(1).unwrap();
+        let listed = listed.split("Shared arguments").next().unwrap();
         assert!(listed.contains("tab"));
+        assert!(err.message.contains("Did you mean tab for tabId?"));
         assert!(!listed.contains("session"));
     }
 
@@ -5545,36 +5619,62 @@ mod tests {
             open["inputSchema"]["properties"]["allowedDomains"]["type"],
             "array"
         );
-        for key in UNADVERTISED_SHARED_ARGUMENTS {
-            assert!(
-                open["inputSchema"]["properties"].get(*key).is_none(),
-                "{key}"
-            );
+        let click = find_tool(TOOL_CLICK).unwrap();
+        let click_props = click["inputSchema"]["properties"].as_object().unwrap();
+        assert!(click_props.contains_key("session"));
+        for key in [
+            "restore",
+            "allowedDomains",
+            "extraArgs",
+            "timeoutMs",
+            "namespace",
+        ] {
+            assert!(!click_props.contains_key(key), "{key}");
+        }
+        for tool in &tools {
+            let name = tool["name"].as_str().unwrap();
+            let props = tool["inputSchema"]["properties"].as_object().unwrap();
+            for key in SHARED_ARGUMENTS {
+                assert_eq!(
+                    props.contains_key(*key),
+                    advertised_shared_arguments(name).contains(key),
+                    "{name} {key}"
+                );
+            }
         }
     }
 
     #[test]
-    fn unadvertised_shared_arguments_are_accepted_and_documented() {
-        let open = find_tool(TOOL_OPEN).unwrap();
-        let arguments = json!({
-            "url": "https://example.com",
-            "namespace": "ns",
-            "restoreSave": "never",
-            "restoreCheckUrl": "example.com",
-            "restoreCheckText": "Welcome",
-            "restoreCheckFn": "true",
-            "caCert": "/tmp/ca.pem",
-            "useSystemCa": true,
-            "idleTimeout": "5m"
-        });
-        reject_unknown_arguments(TOOL_OPEN, &open, &arguments).unwrap();
-        let err =
-            reject_unknown_arguments(TOOL_OPEN, &open, &json!({ "namespaec": "ns" })).unwrap_err();
-        assert!(err.message.contains("namespaec"));
-        for key in UNADVERTISED_SHARED_ARGUMENTS {
-            assert!(SHARED_ARGUMENTS_INSTRUCTIONS.contains(key), "{key}");
-            assert!(shared_properties().get(*key).is_none(), "{key}");
+    fn every_tool_accepts_every_shared_argument_and_instructions_name_them() {
+        let all: serde_json::Map<String, Value> = SHARED_ARGUMENTS
+            .iter()
+            .map(|key| (key.to_string(), json!(null)))
+            .collect();
+        for tool in tools() {
+            let name = tool["name"].as_str().unwrap();
+            reject_unknown_arguments(name, &tool, &Value::Object(all.clone())).unwrap();
         }
+        for key in SHARED_ARGUMENTS {
+            assert!(SHARED_ARGUMENTS_INSTRUCTIONS.contains(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn unknown_argument_error_suggests_hidden_shared_names() {
+        let click = find_tool(TOOL_CLICK).unwrap();
+        let err = reject_unknown_arguments(TOOL_CLICK, &click, &json!({ "namespaec": "ns" }))
+            .unwrap_err();
+        assert!(
+            err.message
+                .contains("Did you mean namespace for namespaec?"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("Shared arguments every tool accepts:"));
+        assert!(err.message.contains("idleTimeout"));
+        let err =
+            reject_unknown_arguments(TOOL_CLICK, &click, &json!({ "zzzzzzzz": 1 })).unwrap_err();
+        assert!(!err.message.contains("Did you mean"), "{}", err.message);
     }
 
     #[test]
