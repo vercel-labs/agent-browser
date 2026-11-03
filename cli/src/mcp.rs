@@ -2708,7 +2708,14 @@ fn cli_tool_args(
     if let Some(boundary) = text_boundary {
         args.extend(command_args[..boundary].iter().cloned());
         args.extend(extra_args);
-        args.extend(command_args[boundary..].iter().cloned());
+        args.push(command_args[boundary].clone());
+        let cleaned = crate::flags::clean_args(&args);
+        if crate::flags::before_end_of_options(&cleaned).len() + 1 != cleaned.len() {
+            return Err(ProtocolError::invalid_params(
+                "Tool extraArgs must preserve the text boundary",
+            ));
+        }
+        args.extend(command_args[boundary + 1..].iter().cloned());
     } else {
         args.extend(command_args);
         args.extend(extra_args);
@@ -5296,12 +5303,18 @@ mod tests {
         guard.remove("AGENT_BROWSER_CONFIG");
 
         for command in ["fill", "type"] {
-            for text in ["--config", "--session", "--help", "--clear"] {
-                let extra_args = if command == "type" && text == "--clear" {
-                    vec!["--session", "work", "--clear"]
-                } else {
-                    vec!["--session", "work"]
-                };
+            for text in ["--config", "--session", "--help", "--clear", "--json"] {
+                let mut extra_args = vec![
+                    "--session",
+                    "work",
+                    "--engine",
+                    "chrome",
+                    "--user-agent",
+                    "--",
+                ];
+                if command == "type" && text == "--clear" {
+                    extra_args.push("--clear");
+                }
                 let arguments = json!({
                     "selector": "#input",
                     "text": text,
@@ -5320,6 +5333,7 @@ mod tests {
                     crate::commands::parse_command(&crate::flags::clean_args(&args), &flags)
                         .unwrap();
                 assert_eq!(flags.session, "work");
+                assert_eq!(flags.user_agent.as_deref(), Some("--"));
                 assert_eq!(parsed["selector"], "#input");
                 if command == "fill" {
                     assert_eq!(parsed["value"], text);
@@ -5332,8 +5346,11 @@ mod tests {
             for extra in [
                 vec!["--config", "/tmp/config"],
                 vec!["--", "--state", "/tmp/state"],
+                vec!["--"],
+                vec!["--session"],
+                vec!["--engine"],
             ] {
-                let arguments = json!({"selector": "#input", "text": "--help", "extraArgs": extra});
+                let arguments = json!({"selector": "#input", "text": "--json", "extraArgs": extra});
                 let args = text_command_args(&arguments, command).unwrap();
                 assert!(cli_tool_args(&arguments, args, None).is_err());
             }
