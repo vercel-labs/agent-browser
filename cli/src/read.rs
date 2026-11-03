@@ -1155,9 +1155,11 @@ fn decode_html_entities(input: &str) -> String {
         }
 
         let mut entity = String::new();
+        let mut terminated = false;
         while let Some(&next) = chars.peek() {
             if next == ';' {
                 chars.next();
+                terminated = true;
                 break;
             }
             if entity.len() >= 16 || next.is_whitespace() || next == '&' {
@@ -1170,8 +1172,13 @@ fn decode_html_entities(input: &str) -> String {
         match decode_entity(&entity) {
             Some(decoded) => out.push(decoded),
             None => {
+                // Leave an entity we cannot decode as it was written,
+                // including the `;` that ended it.
                 out.push('&');
                 out.push_str(&entity);
+                if terminated {
+                    out.push(';');
+                }
             }
         }
     }
@@ -1275,6 +1282,18 @@ mod tests {
         assert!(text.contains("Hello world."));
         assert!(text.contains("- One"));
         assert!(!text.contains(".x{}"));
+    }
+
+    #[test]
+    fn decode_html_entities_keeps_semicolon_of_unknown_entities() {
+        assert_eq!(decode_html_entities("Tom &amp; Jerry"), "Tom & Jerry");
+        assert_eq!(
+            decode_html_entities("Wait&hellip; done"),
+            "Wait&hellip; done"
+        );
+        assert_eq!(decode_html_entities("a&b;c"), "a&b;c");
+        assert_eq!(decode_html_entities("&#xZZ;"), "&#xZZ;");
+        assert_eq!(decode_html_entities("AT&T rocks"), "AT&T rocks");
     }
 
     #[test]
