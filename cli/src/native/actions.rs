@@ -2974,7 +2974,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             Some(mgr) => mgr.get_url().await.ok(),
             None => None,
         };
-        state.flow.begin_command(action, &stable, from_url);
+        let traits = flow_field_traits(action, cmd, state).await;
+        state
+            .flow
+            .begin_command(action, &stable, from_url, traits.as_ref());
     }
 
     // Keep element resolution in sync with the `frame` selection (see
@@ -12306,6 +12309,30 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
     Ok(response)
 }
 
+/// The page's own description of the field a `fill` or `type` writes to.
+async fn flow_field_traits(
+    action: &str,
+    cmd: &Value,
+    state: &DaemonState,
+) -> Option<super::flow::FieldTraits> {
+    if !matches!(action, "fill" | "type") {
+        return None;
+    }
+    let selector = cmd.get("selector").and_then(|v| v.as_str())?;
+    let mgr = state.browser.as_ref()?;
+    let session_id = mgr.active_session_id().ok()?.to_string();
+    let value = super::element::get_field_traits(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        &state.iframe_sessions,
+    )
+    .await
+    .ok()?;
+    Some(super::flow::FieldTraits::from_value(&value))
+}
+
 /// Snapshot refs only live until the next snapshot, so a recorded command
 /// that targets one is stored as the role and name the ref pointed at.
 fn flow_stable_command(action: &str, cmd: &Value, refs: &super::element::RefMap) -> Value {
@@ -19815,6 +19842,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             .begin_command(
                 "click",
                 &json!({ "action": "click", "selector": "#a" }),
+                None,
                 None,
             )
             .unwrap();

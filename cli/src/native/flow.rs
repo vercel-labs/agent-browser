@@ -57,6 +57,8 @@ pub struct FlowRecorder {
     pub secrets: Vec<String>,
     /// The tab's URL when capture began, for flows that start on an open page.
     pub page_url: Option<String>,
+    /// Values typed into fields that are not secrets, as (param name, value, seq).
+    pub typed: Vec<(String, String, u64)>,
     /// Sequence number of the last step covered by a save.
     pub last_save_seq: u64,
     /// Flows saved during this session, as (origin, name).
@@ -107,6 +109,7 @@ impl FlowRecorder {
         action: &str,
         cmd: &Value,
         from_url: Option<String>,
+        traits: Option<&FieldTraits>,
     ) -> Option<u64> {
         if !self.active() || self.suspended || !is_recordable(action) {
             return None;
@@ -116,8 +119,10 @@ impl FlowRecorder {
         if let Some(obj) = recorded.as_object_mut() {
             obj.remove("id");
         }
-        if let Some(secret) = redact_secret(&mut recorded) {
+        if let Some(secret) = redact_secret(&mut recorded, traits) {
             self.secrets.push(secret);
+        } else if let Some(field) = typed_field(&recorded) {
+            self.keep_typed_as_param(&mut recorded, field, traits);
         }
         self.commands.push((self.next_seq, recorded));
         self.meta.insert(
@@ -131,6 +136,28 @@ impl FlowRecorder {
         self.current_seq = Some(self.next_seq);
         self.begun = Some(self.next_seq);
         Some(self.next_seq)
+    }
+
+    /// A value typed into an ordinary field is saved as a param, so the flow
+    /// file carries a placeholder in the step and the value only as the
+    /// param's recorded example.
+    fn keep_typed_as_param(&mut self, cmd: &mut Value, field: &str, traits: Option<&FieldTraits>) {
+        let Some(value) = cmd[field]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .map(String::from)
+        else {
+            return;
+        };
+        let name = match self.typed.iter().find(|(_, v, _)| *v == value) {
+            Some((name, _, _)) => name.clone(),
+            None => {
+                let taken: Vec<String> = self.typed.iter().map(|(n, _, _)| n.clone()).collect();
+                typed_param_name(traits, &taken)
+            }
+        };
+        self.typed.push((name.clone(), value, self.next_seq));
+        cmd[field] = json!(format!("{{{{{}}}}}", name));
     }
 
     pub fn finish_command(&mut self, seq: u64, ok: bool, url: Option<String>) {
@@ -206,32 +233,91 @@ impl FlowRecorder {
     }
 }
 
+/// What the page says about the field a command types into.
+#[derive(Clone, Default, Debug)]
+pub struct FieldTraits {
+    /// The `type` property: `password`, `text`, `email`, ...
+    pub input_type: String,
+    /// The `autocomplete` attribute.
+    pub autocomplete: String,
+    /// Name, id, aria-label, placeholder and label text, space separated.
+    pub hint: String,
+}
+
+impl FieldTraits {
+    pub fn from_value(v: &Value) -> FieldTraits {
+        let text = |k: &str| v[k].as_str().unwrap_or("").to_string();
+        FieldTraits {
+            input_type: text("type"),
+            autocomplete: text("autocomplete"),
+            hint: text("hint"),
+        }
+    }
+
+    /// Fields whose value is a credential, whatever the page calls them.
+    fn is_secret(&self) -> bool {
+        let ac = self.autocomplete.trim().to_ascii_lowercase();
+        self.input_type.eq_ignore_ascii_case("password")
+            || ac.split_whitespace().any(|t| {
+                matches!(t, "current-password" | "new-password" | "one-time-code")
+                    || t.starts_with("cc-")
+            })
+    }
+}
+
+const SECRET_MARKERS: &[&str] = &[
+    "pass",
+    "contraseña",
+    "secret",
+    "token",
+    "otp",
+    "pin",
+    "cvv",
+    "card",
+];
+
+/// The field a command stores typed input in: `fill` and `find ... fill` use
+/// `value`, `type` uses `text`.
+fn typed_field(cmd: &Value) -> Option<&'static str> {
+    let action = cmd["action"].as_str().unwrap_or("");
+    let sub = cmd["subaction"].as_str().unwrap_or("");
+    let kind = if matches!(action, "fill" | "type") {
+        action
+    } else {
+        sub
+    };
+    let field = match kind {
+        "fill" => "value",
+        "type" => "text",
+        _ => return None,
+    };
+    cmd[field].as_str().map(|_| field)
+}
+
 /// A value typed into a field that looks like a password or code is never
 /// stored; the flow keeps a marker and cannot be replayed through the UI.
 /// Returns the removed value. `fill` stores input in `value`, `type` in `text`.
-fn redact_secret(cmd: &mut Value) -> Option<String> {
+fn redact_secret(cmd: &mut Value, traits: Option<&FieldTraits>) -> Option<String> {
+    let typed = typed_field(cmd);
     let obj = cmd.as_object_mut()?;
-    let field = ["value", "text"]
-        .into_iter()
-        .find(|k| obj.get(*k).and_then(|v| v.as_str()).is_some())?;
-    let target = ["selector", "name", "label", "placeholder"]
+    let field = match typed {
+        Some(f) => f,
+        None => ["value", "text"]
+            .into_iter()
+            .find(|k| obj.get(*k).and_then(|v| v.as_str()).is_some())?,
+    };
+    let mut target = ["selector", "name", "label", "placeholder"]
         .iter()
         .filter_map(|k| obj.get(*k).and_then(|v| v.as_str()))
         .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    let secret = [
-        "pass",
-        "contraseña",
-        "secret",
-        "token",
-        "otp",
-        "pin",
-        "cvv",
-        "card",
-    ]
-    .iter()
-    .any(|m| target.contains(m));
+        .join(" ");
+    if let Some(t) = traits {
+        target.push(' ');
+        target.push_str(&t.hint);
+    }
+    let target = target.to_lowercase();
+    let secret =
+        traits.is_some_and(|t| t.is_secret()) || SECRET_MARKERS.iter().any(|m| target.contains(m));
     if !secret {
         return None;
     }
@@ -239,6 +325,34 @@ fn redact_secret(cmd: &mut Value) -> Option<String> {
     obj.insert(field.to_string(), json!(REDACTED));
     obj.insert("redacted".to_string(), json!(true));
     (!original.is_empty()).then_some(original)
+}
+
+/// A param name from what the page calls the field: lowercase letters,
+/// digits and underscores, starting with a letter.
+fn typed_param_name(traits: Option<&FieldTraits>, taken: &[String]) -> String {
+    let base: String = traits
+        .and_then(|t| t.hint.split_whitespace().next())
+        .map(|w| {
+            w.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        })
+        .map(|w| w.trim_matches('_').chars().take(24).collect::<String>())
+        .filter(|w| w.chars().next().is_some_and(|c| c.is_ascii_lowercase()))
+        .unwrap_or_else(|| "typed".to_string());
+    let mut name = base.clone();
+    let mut n = 1;
+    while taken.contains(&name) {
+        n += 1;
+        name = format!("{}{}", base, n);
+    }
+    name
 }
 
 pub const REDACTED: &str = "<redacted>";
@@ -853,7 +967,53 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         .ok_or("nothing to save: the flow has no `open <url>` command and no page was open")?;
     let host = host_of(&start).ok_or("the flow's start URL has no host")?;
     let base = base_domain(&host);
-    let given = with_page_query_params(&start, &base, input.params, input.entries);
+    // Values typed into ordinary fields are params: the step keeps a
+    // placeholder, and a `--param` with the same value names it.
+    let mut typed: Vec<(String, String)> = Vec::new();
+    let mut renames: Vec<(String, String)> = Vec::new();
+    for (name, value, seq) in &input.recorder.typed {
+        if !input.commands.iter().any(|(s, _)| s == seq) {
+            continue;
+        }
+        let mut name = name.clone();
+        if let Some((explicit, _)) = input.params.iter().find(|(_, v)| v == value) {
+            if *explicit != name && !renames.iter().any(|(from, _)| *from == name) {
+                renames.push((name, explicit.clone()));
+            }
+            continue;
+        }
+        if input.params.iter().any(|(n, _)| *n == name) {
+            let renamed = format!("{}_typed", name);
+            renames.push((name, renamed.clone()));
+            name = renamed;
+        }
+        if !typed.iter().any(|(n, _)| *n == name) {
+            typed.push((name, value.clone()));
+        }
+    }
+    let commands: Vec<(u64, Value)> = input
+        .commands
+        .iter()
+        .map(|(seq, cmd)| {
+            let mut cmd = cmd.clone();
+            let _ = map_strings(&mut cmd, &|text| {
+                let mut text = text.to_string();
+                for (from, to) in &renames {
+                    text = text.replace(&format!("{{{{{}}}}}", from), &format!("{{{{{}}}}}", to));
+                }
+                Ok(text)
+            });
+            (*seq, cmd)
+        })
+        .collect();
+    let mut explicit_and_typed = input.params.to_vec();
+    explicit_and_typed.extend(
+        typed
+            .iter()
+            .filter(|(_, v)| v.chars().count() >= 3)
+            .cloned(),
+    );
+    let given = with_page_query_params(&start, &base, &explicit_and_typed, input.entries);
 
     let mut steps = Vec::new();
     let mut gaps = Vec::new();
@@ -863,7 +1023,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
     let mut secret_requests: Vec<String> = Vec::new();
     let mut har_ids: HashMap<String, String> = HashMap::new();
 
-    for (index, (seq, cmd)) in input.commands.iter().enumerate() {
+    for (index, (seq, cmd)) in commands.iter().enumerate() {
         let tagged: Vec<&HarEntry> = input
             .entries
             .iter()
@@ -987,14 +1147,22 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
     let mut params: Vec<Value> = given
         .iter()
         .map(|(k, v)| {
-            if input.params.iter().any(|(n, _)| n == k) {
-                json!({ "name": k, "example": v })
+            if input.params.iter().any(|(n, _)| n == k) || typed.iter().any(|(n, _)| n == k) {
+                json!({ "name": k, "example": v, "source": "typed" })
             } else {
-                json!({ "name": k, "example": v, "from": { "pageQuery": k } })
+                json!({ "name": k, "example": v, "source": "query", "from": { "pageQuery": k } })
             }
         })
         .collect();
-    params.extend(links.params.iter().cloned());
+    for (name, value) in &typed {
+        if !given.iter().any(|(n, _)| n == name) {
+            params.push(json!({ "name": name, "example": value, "source": "typed" }));
+        }
+    }
+    params.extend(links.params.iter().cloned().map(|mut p| {
+        p["source"] = json!("response");
+        p
+    }));
     let output = match input.output {
         Some(id) if request_ids.iter().any(|r| r == id) => id.to_string(),
         Some(id) => return Err(format!("unknown request id '{}' for --output", id)),
@@ -1010,6 +1178,12 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         "createdAt": input.created_at,
         "createdBy": { "tool": "agent-browser", "version": env!("CARGO_PKG_VERSION") },
         "description": input.description,
+        "redactedSteps": commands
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, c))| c["redacted"] == true)
+            .map(|(i, _)| i + 1)
+            .collect::<Vec<_>>(),
         "params": params,
         "output": output,
         "itemFields": steps
@@ -2383,6 +2557,22 @@ pub fn replay_commands(
             (!example.is_empty() && example != value).then(|| (example.to_string(), value))
         })
         .collect();
+    // Typed values are stored as `{{name}}` and take the run's value, or the
+    // recorded example when the run gives none.
+    let placeholders: Vec<(String, String)> = flow["params"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let name = p["name"].as_str()?;
+            let value = cmd_params
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+                .or_else(|| p["example"].as_str().map(String::from))?;
+            Some((format!("{{{{{}}}}}", name), value))
+        })
+        .collect();
     let recorded = serde_json::to_string(
         &flow["steps"]
             .as_array()
@@ -2392,8 +2582,18 @@ pub fn replay_commands(
             .collect::<Vec<_>>(),
     )
     .unwrap_or_default();
+    let in_commands = |text: &str| {
+        recorded.contains(text) || recorded.contains(urlencoding::encode(text).as_ref())
+    };
     if let Some((from, _)) = swaps.iter().find(|(from, _)| {
-        !recorded.contains(from.as_str()) && !recorded.contains(urlencoding::encode(from).as_ref())
+        let named = placeholders.iter().any(|(ph, _)| {
+            flow["params"].as_array().into_iter().flatten().any(|p| {
+                p["example"].as_str() == Some(from.as_str())
+                    && format!("{{{{{}}}}}", p["name"].as_str().unwrap_or("")) == *ph
+                    && recorded.contains(ph.as_str())
+            })
+        });
+        !named && !in_commands(from)
     }) {
         let name = flow["params"]
             .as_array()
@@ -2446,6 +2646,9 @@ pub fn replay_commands(
                             if ef != *from {
                                 text = text.replace(ef.as_ref(), et.as_ref());
                             }
+                        }
+                        for (ph, value) in &placeholders {
+                            text = text.replace(ph.as_str(), value);
                         }
                         Ok(text)
                     });
@@ -2737,6 +2940,7 @@ mod tests {
             "navigate",
             &json!({ "id": "1", "action": "navigate", "url": "https://www.example.com.ar/" }),
             None,
+            None,
         );
         r.tag_request("doc");
         r.tag_request("api");
@@ -2744,6 +2948,7 @@ mod tests {
         r.begin_command(
             "click",
             &json!({ "id": "2", "action": "click", "selector": "@e4" }),
+            None,
             None,
         );
         r
@@ -2904,12 +3109,17 @@ mod tests {
     #[test]
     fn recorder_ignores_flow_and_har_commands() {
         let mut r = FlowRecorder::default();
-        r.begin_command("click", &json!({}), None);
+        r.begin_command("click", &json!({}), None, None);
         assert!(r.commands.is_empty());
         r.begin_capture(None);
-        r.begin_command("flow_save", &json!({}), None);
-        r.begin_command("har_start", &json!({}), None);
-        r.begin_command("click", &json!({ "id": "9", "action": "click" }), None);
+        r.begin_command("flow_save", &json!({}), None, None);
+        r.begin_command("har_start", &json!({}), None, None);
+        r.begin_command(
+            "click",
+            &json!({ "id": "9", "action": "click" }),
+            None,
+            None,
+        );
         assert_eq!(r.commands.len(), 1);
         assert!(r.commands[0].1.get("id").is_none());
     }
@@ -3045,6 +3255,7 @@ mod tests {
         r.begin_command(
             "navigate",
             &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
             None,
         );
         for id in ["theaters", "token", "seats"] {
@@ -3213,7 +3424,7 @@ mod tests {
     fn a_start_url_query_value_the_api_sent_becomes_a_param() {
         let mut r = FlowRecorder::default();
         r.begin_capture(None);
-        r.begin_command("navigate", &json!({ "action": "navigate", "url": "https://www.shop.example/l/?keyword=kettle&page=1" }), None);
+        r.begin_command("navigate", &json!({ "action": "navigate", "url": "https://www.shop.example/l/?keyword=kettle&page=1" }), None, None);
         r.tag_request("api");
         let mut api = entry(
             "api",
@@ -3335,10 +3546,12 @@ mod tests {
             "fill",
             &json!({ "action": "fill", "selector": "#password", "value": "hunter2" }),
             None,
+            None,
         );
         r.begin_command(
             "auth_login",
             &json!({ "action": "auth_login", "name": "x" }),
+            None,
             None,
         );
         assert_eq!(r.commands.len(), 1);
@@ -3422,10 +3635,12 @@ mod tests {
             "navigate",
             &json!({ "action": "navigate", "url": "https://www.example.com.ar/login" }),
             None,
+            None,
         );
         r.begin_command(
             "type",
             &json!({ "action": "type", "selector": "#password", "text": "hunter2" }),
+            None,
             None,
         );
         assert_eq!(r.commands[1].1["text"], REDACTED);
@@ -3477,6 +3692,7 @@ mod tests {
                     action,
                     &json!({ "action": action, "url": "https://a.test/" }),
                     None,
+                    None,
                 )
                 .unwrap();
             r.finish_command(seq, *ok, Some("https://a.test/".to_string()));
@@ -3509,7 +3725,7 @@ mod tests {
         assert_eq!(r.unsaved_steps(), 0);
         assert!(r.resolve_range(None, None).is_err());
         let seq = r
-            .begin_command("click", &json!({ "action": "click" }), None)
+            .begin_command("click", &json!({ "action": "click" }), None, None)
             .unwrap();
         r.finish_command(seq, true, None);
         assert_eq!(r.resolve_range(None, None).unwrap(), (5, 5));
@@ -3525,14 +3741,14 @@ mod tests {
         r.last_save_seq = 1;
         assert_eq!(r.end_capture(), 1);
         assert!(!r.active());
-        assert!(r.begin_command("click", &json!({}), None).is_none());
+        assert!(r.begin_command("click", &json!({}), None, None).is_none());
     }
 
     #[test]
     fn launch_commands_are_not_steps() {
         let mut r = recorded(&[]);
         assert!(r
-            .begin_command("launch", &json!({ "capture": ["flow"] }), None)
+            .begin_command("launch", &json!({ "capture": ["flow"] }), None, None)
             .is_none());
     }
 
@@ -3548,7 +3764,7 @@ mod tests {
     fn a_suspended_recorder_records_nothing() {
         let mut r = recorded(&[("navigate", true)]);
         r.set_suspended(true);
-        assert!(r.begin_command("click", &json!({}), None).is_none());
+        assert!(r.begin_command("click", &json!({}), None, None).is_none());
         r.tag_request("late");
         assert!(r.request_tags.is_empty());
     }
@@ -3666,8 +3882,14 @@ mod tests {
             "navigate",
             &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
             None,
+            None,
         );
-        r.begin_command("click", &json!({ "action": first, "selector": "#b" }), None);
+        r.begin_command(
+            "click",
+            &json!({ "action": first, "selector": "#b" }),
+            None,
+            None,
+        );
         for t in tag {
             r.tag_request(t);
         }
@@ -3723,6 +3945,7 @@ mod tests {
             "navigate",
             &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
             None,
+            None,
         );
         for t in ["data", "out"] {
             r.tag_request(t);
@@ -3773,5 +3996,195 @@ mod tests {
         assert!(AllowWrite::parse(Some(&json!(true))).is_err());
         let flow = json!({ "writes": [{ "id": "s1r2" }] });
         assert!(check_write_ids(&flow, &some).unwrap_err().contains("s3w1"));
+    }
+
+    fn traits(input_type: &str, autocomplete: &str, hint: &str) -> FieldTraits {
+        FieldTraits {
+            input_type: input_type.to_string(),
+            autocomplete: autocomplete.to_string(),
+            hint: hint.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_field_is_secret_by_type_or_autocomplete_even_without_a_label() {
+        for t in [
+            traits("password", "", ""),
+            traits("text", "one-time-code", ""),
+            traits("text", "current-password", ""),
+            traits("text", "new-password", ""),
+            traits("text", "cc-number", ""),
+            traits("tel", "section-pay cc-csc", ""),
+        ] {
+            let mut r = recorded(&[]);
+            r.begin_command(
+                "fill",
+                &json!({ "action": "fill", "selector": "@e5", "value": "482913" }),
+                None,
+                Some(&t),
+            );
+            assert_eq!(r.commands[0].1["value"], REDACTED, "{t:?}");
+            assert_eq!(r.commands[0].1["redacted"], true);
+            assert_eq!(r.secrets, vec!["482913".to_string()]);
+            assert!(r.typed.is_empty());
+        }
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "@e5", "value": "x" }),
+            None,
+            Some(&traits("text", "email", "email")),
+        );
+        assert_ne!(r.commands[0].1["value"], REDACTED);
+    }
+
+    #[test]
+    fn a_typed_email_becomes_a_param_and_no_value_stays_literal() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/login" }),
+            None,
+            None,
+        );
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "@e2", "value": "ana@example.com" }),
+            None,
+            Some(&traits("email", "username", "email Email address")),
+        );
+        r.tag_request("lookup");
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "@e3", "value": "482913" }),
+            None,
+            Some(&traits("text", "one-time-code", "")),
+        );
+        assert_eq!(r.commands[1].1["value"], "{{email}}");
+        let mut lookup = entry(
+            "lookup",
+            "https://api.example.com.ar/lookup",
+            "Fetch",
+            "application/json",
+            r#"{"found":true}"#,
+        );
+        lookup.method = "POST".to_string();
+        lookup.post_data = Some(r#"{"email":"ana@example.com"}"#.to_string());
+        let (flow, _) = build_flow(SaveInput {
+            name: "t",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[lookup],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let param = flow["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "email")
+            .unwrap();
+        assert_eq!(param["source"], "typed");
+        assert_eq!(param["example"], "ana@example.com");
+        assert_eq!(flow["steps"][1]["command"]["value"], "{{email}}");
+        assert_eq!(
+            flow["steps"][1]["requests"][0]["body"],
+            r#"{"email":"{{email}}"}"#
+        );
+        assert_eq!(flow["steps"][2]["command"]["value"], REDACTED);
+        assert_eq!(flow["redactedSteps"], json!([3]));
+        let text = serde_json::to_string(&flow).unwrap();
+        assert!(!text.contains("482913"));
+        // The step holds no literal; only the param keeps the recorded example.
+        assert_eq!(text.matches("ana@example.com").count(), 1);
+    }
+
+    #[test]
+    fn a_param_flag_names_the_typed_value() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+            None,
+        );
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "#q", "value": "kettle" }),
+            None,
+            Some(&traits("text", "", "q")),
+        );
+        r.tag_request("search");
+        let entries = vec![entry(
+            "search",
+            "https://api.example.com.ar/s?q=kettle",
+            "Fetch",
+            "application/json",
+            r#"{"items":[{"id":1}]}"#,
+        )];
+        let params = vec![("product".to_string(), "kettle".to_string())];
+        let (flow, _) = build_flow(SaveInput {
+            name: "t",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &entries,
+            params: &params,
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        assert_eq!(flow["steps"][1]["command"]["value"], "{{product}}");
+        let names: Vec<&str> = flow["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["product"]);
+        assert_eq!(
+            flow["steps"][1]["requests"][0]["url"],
+            "https://api.example.com.ar/s?q={{product}}"
+        );
+    }
+
+    #[test]
+    fn replay_fills_typed_placeholders_with_the_run_value_or_the_example() {
+        let flow = json!({
+            "startUrl": "https://a.test/",
+            "params": [{ "name": "email", "example": "ana@example.com", "source": "typed" }],
+            "steps": [
+                { "ok": true, "command": { "action": "navigate", "url": "https://a.test/" } },
+                { "ok": true, "command": { "action": "fill", "selector": "#e", "value": "{{email}}" } }
+            ]
+        });
+        let given = replay_commands(
+            &flow,
+            &[("email".to_string(), "bo@example.com".to_string())],
+        )
+        .unwrap();
+        assert_eq!(given[1]["value"], "bo@example.com");
+        let recorded_value = replay_commands(&flow, &[]).unwrap();
+        assert_eq!(recorded_value[1]["value"], "ana@example.com");
+    }
+
+    #[test]
+    fn typed_param_names_follow_the_field_and_stay_unique() {
+        let t = traits("text", "", "Search query");
+        assert_eq!(typed_param_name(Some(&t), &[]), "search");
+        assert_eq!(
+            typed_param_name(Some(&t), &["search".to_string()]),
+            "search2"
+        );
+        assert_eq!(typed_param_name(None, &[]), "typed");
+        assert_eq!(
+            typed_param_name(Some(&traits("text", "", "123")), &[]),
+            "typed"
+        );
     }
 }

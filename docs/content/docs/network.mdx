@@ -173,11 +173,26 @@ Flow files are version 2. A flow saved by an earlier version fails to run with a
 
 ### Params
 
-Pass params explicitly with `flow save --param name=value`, using a value you typed during the task. `flow save` also finds params on its own:
+Every value typed with `fill` or `type` is either a param or redacted, and a step never stores it as a literal. A value typed into an ordinary field becomes a param named after the field, with `source: typed`; the step keeps a `{{name}}` placeholder and the value survives only as the param's recorded example. Pass `flow save --param name=value` to choose the name. `flow save` also finds params on its own:
 
-- a query value of the page URL that the requests also sent, such as `?q=`
-- a value the task picked from a list in an earlier response, such as an id from a list of stores
+- a query value of the page URL that the requests also sent, such as `?q=` (`source: query`)
+- a value the task picked from a list in an earlier response, such as an id from a list of stores (`source: response`)
 - a value copied from a single field of an earlier response, such as a session key, which is filled from that response on every run
+
+### Redaction
+
+A value typed into a secret field is stored as `<redacted>` and listed in `redactedSteps`. Any request that carried the value is dropped from the flow, and the flow cannot be replayed through the UI. agent-browser reads the field itself, not only the command, so an unlabeled field is covered. A field is secret when:
+
+<table>
+  <thead>
+    <tr><th>Signal</th><th>Matches</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>type</code></td><td><code>password</code></td></tr>
+    <tr><td><code>autocomplete</code></td><td><code>current-password</code>, <code>new-password</code>, <code>one-time-code</code>, or any <code>cc-*</code> token</td></tr>
+    <tr><td>Name, id, label, placeholder, aria-label or selector</td><td>Contains <code>pass</code>, <code>secret</code>, <code>token</code>, <code>otp</code>, <code>pin</code>, <code>cvv</code> or <code>card</code></td></tr>
+  </tbody>
+</table>
 
 ```bash
 agent-browser flow list   # Params, recorded values, item fields and verified state
