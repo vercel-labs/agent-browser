@@ -277,6 +277,7 @@ impl CdpClient {
         let reader_cancel_tx = cancel_tx.clone();
 
         let reader_handle = tokio::spawn(async move {
+            let mut event_sequence = 0;
             while let Some(msg) = ws_rx.next().await {
                 // Accept both Text and Binary frames — remote CDP proxies
                 // (e.g. Browserless) may send responses as Binary frames.
@@ -361,7 +362,9 @@ impl CdpClient {
                     }
                 } else if let Some(ref method) = parsed.method {
                     // Event
+                    event_sequence += 1;
                     let event = CdpEvent {
+                        sequence: event_sequence,
                         method: method.clone(),
                         params: parsed.params.clone().unwrap_or(Value::Null),
                         session_id: parsed.session_id.clone(),
