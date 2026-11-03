@@ -37,6 +37,8 @@ export HTTPS_PROXY="http://proxy.example.com:8080"
 agent-browser open https://example.com
 ```
 
+When launching Chrome, agent-browser accepts a proxy URL with a trailing slash. The MCP server uses the same environment and config settings; set the proxy there because MCP tools do not accept a proxy argument.
+
 ## Authenticated Proxy
 
 For proxies requiring authentication:

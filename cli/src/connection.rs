@@ -109,12 +109,12 @@ pub fn get_socket_dir() -> PathBuf {
         } else if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
             if !runtime_dir.is_empty() {
                 PathBuf::from(runtime_dir).join("agent-browser")
-            } else if let Some(home) = dirs::home_dir() {
+            } else if let Some(home) = std::env::home_dir() {
                 home.join(".agent-browser")
             } else {
                 env::temp_dir().join("agent-browser")
             }
-        } else if let Some(home) = dirs::home_dir() {
+        } else if let Some(home) = std::env::home_dir() {
             home.join(".agent-browser")
         } else {
             env::temp_dir().join("agent-browser")
@@ -122,12 +122,12 @@ pub fn get_socket_dir() -> PathBuf {
     } else if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
         if !runtime_dir.is_empty() {
             PathBuf::from(runtime_dir).join("agent-browser")
-        } else if let Some(home) = dirs::home_dir() {
+        } else if let Some(home) = std::env::home_dir() {
             home.join(".agent-browser")
         } else {
             env::temp_dir().join("agent-browser")
         }
-    } else if let Some(home) = dirs::home_dir() {
+    } else if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser")
     } else {
         env::temp_dir().join("agent-browser")
@@ -508,6 +508,7 @@ pub struct DaemonOptions<'a> {
     pub idle_timeout: Option<&'a str>,
     pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
+    pub cdp_headers: Option<&'a str>,
     pub no_auto_dialog: bool,
     pub plugins: Option<&'a str>,
 }
@@ -621,6 +622,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(cdp) = opts.cdp {
         cmd.env("AGENT_BROWSER_CDP", cdp);
+    }
+    if let Some(headers) = opts.cdp_headers {
+        cmd.env("AGENT_BROWSER_CDP_HEADERS", headers);
     }
     if opts.no_auto_dialog {
         cmd.env("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
@@ -1642,6 +1646,7 @@ mod tests {
             idle_timeout,
             default_timeout: None,
             cdp: None,
+            cdp_headers: None,
             no_auto_dialog,
             plugins: None,
         }

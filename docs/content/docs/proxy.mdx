@@ -50,6 +50,8 @@ agent-browser --use-system-ca read https://example.com
 
 `AGENT_BROWSER_PROXY` takes precedence over standard proxy variables. The CLI also accepts credentials embedded in the proxy URL and separates them before passing launch options to the daemon.
 
+When launching Chrome, agent-browser accepts a proxy URL with a trailing slash. The MCP server uses the same environment and config settings as the CLI; set the proxy there because MCP tools do not accept a proxy argument.
+
 ## HTTPS interception certificates
 
 ### CLI requests

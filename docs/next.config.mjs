@@ -1,4 +1,5 @@
 import { createGeistdocs } from "@vercel/geistdocs/next";
+import { withMicrofrontends } from "@vercel/microfrontends/next/config";
 
 const withMDX = createGeistdocs();
 
@@ -29,4 +30,4 @@ const nextConfig = {
   },
 };
 
-export default withMDX(nextConfig);
+export default withMicrofrontends(await withMDX(nextConfig));

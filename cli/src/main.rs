@@ -33,7 +33,9 @@ use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::OpenProcess;
 
-use commands::{attach_ca_cert_to_launch_command, gen_id, parse_command, ParseError};
+use commands::{
+    attach_ca_cert_to_launch_command, gen_id, parse_cdp_headers, parse_command, ParseError,
+};
 use connection::{
     cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir,
     is_agent_browser_process, is_pid_alive, send_command, walk_daemons, DaemonOptions, Response,
@@ -174,6 +176,33 @@ fn command_is_browserless(cmd: &serde_json::Value) -> bool {
                     return false;
                 };
             !first_words.is_empty() && first_words.iter().all(|w| w.as_deref() == Some("read"))
+        }
+        _ => false,
+    }
+}
+
+/// Identifies CDP metadata requests, including batches containing only those requests.
+fn command_is_cdp_url_metadata(cmd: &serde_json::Value) -> bool {
+    match cmd.get("action").and_then(|value| value.as_str()) {
+        Some("cdp_url") => true,
+        Some("batch") => {
+            if let Some(commands) = cmd.get("commands").and_then(|value| value.as_array()) {
+                !commands.is_empty()
+                    && commands.iter().all(|command| {
+                        command.as_str().is_some_and(|command| {
+                            commands::shell_words_split(command)
+                                .starts_with(&["get".into(), "cdp-url".into()])
+                        })
+                    })
+            } else if let Some(argv) = cmd.get("argv").and_then(|value| value.as_array()) {
+                !argv.is_empty()
+                    && argv.iter().all(|args| {
+                        args.as_array()
+                            .is_some_and(|args| args.starts_with(&[json!("get"), json!("cdp-url")]))
+                    })
+            } else {
+                false
+            }
         }
         _ => false,
     }
@@ -320,6 +349,7 @@ fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -
         && flags.cdp.is_none()
         && flags.provider.is_none()
         && !flags.auto_connect
+        && !command_is_cdp_url_metadata(command)
         && !command_is_external_launch(command)
 }
 
@@ -1429,6 +1459,11 @@ fn main() {
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         }
         let session = env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
+        if !validation::is_valid_session_name(&session) {
+            let msg = validation::session_name_error(&session);
+            eprintln!("{} {}", color::error_indicator(), msg);
+            exit(1);
+        }
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(native::daemon::run_daemon(&session));
         return;
@@ -1582,11 +1617,31 @@ fn main() {
     // Handle MCP stdio server mode. This must never share stdout with normal
     // CLI output because stdout is reserved for JSON-RPC protocol messages.
     if clean.first().map(|s| s.as_str()) == Some("mcp") {
+        if let Some(Some(path)) = flags::extract_config_path(&args) {
+            env::set_var("AGENT_BROWSER_CONFIG", path);
+        }
+        if clean.get(1).map(|s| s.as_str()) == Some("call") {
+            exit(mcp::run_mcp_call(&clean[2..]));
+        }
         if let Err(err) = mcp::run_mcp(&clean[1..]) {
             eprintln!("{} {}", color::error_indicator(), err);
             exit(1);
         }
         return;
+    }
+
+    if !validation::is_valid_session_name(&flags.session) {
+        let msg = format!(
+            "{} Source: {}.",
+            validation::session_name_error(&flags.session),
+            flags.session_source
+        );
+        if flags.json {
+            print_json_error_with_type(msg, "invalid_session_name");
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
     }
 
     // Handle session separately (doesn't need daemon)
@@ -1823,6 +1878,7 @@ fn main() {
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
+        cdp_headers: flags.cdp_headers.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
         plugins: Some(plugin_registry_json.as_str()),
     };
@@ -1971,6 +2027,20 @@ fn main() {
             launch_cmd["downloadPath"] = json!(dp);
         }
 
+        if let Some(ref raw) = flags.cdp_headers {
+            match parse_cdp_headers(raw) {
+                Ok(headers) => launch_cmd["cdpHeaders"] = headers,
+                Err(msg) => {
+                    if flags.json {
+                        print_json_error(&msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), msg);
+                    }
+                    exit(1);
+                }
+            }
+        }
+
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
             Ok(resp) => Some((
@@ -1992,7 +2062,11 @@ fn main() {
     }
 
     // Launch with cloud provider if -p flag is set.
-    if let Some(ref provider) = flags.provider {
+    if let Some(provider) = flags
+        .provider
+        .as_ref()
+        .filter(|_| !command_is_cdp_url_metadata(&cmd))
+    {
         let launch_cmd = build_provider_launch_command(provider, &flags);
 
         let err = match send_command(launch_cmd, &flags.session) {
@@ -2814,6 +2888,48 @@ mod tests {
     }
 
     #[test]
+    fn test_cdp_url_metadata_ignores_launch_configuration() {
+        let mut flags = neutral_launch_config_flags();
+        flags.engine = Some("chrome".to_string());
+        flags.executable_path = Some("/usr/local/bin/chromium".to_string());
+        flags.args = Some("--disable-gpu".to_string());
+
+        assert!(!should_send_local_launch_config(
+            &flags,
+            &json!({ "action": "cdp_url" })
+        ));
+        assert!(should_send_local_launch_config(
+            &flags,
+            &json!({ "action": "snapshot" })
+        ));
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_batches_ignore_launch_configuration() {
+        let mut flags = neutral_launch_config_flags();
+        flags.headed = true;
+        for command in [
+            json!({ "action": "batch", "commands": ["get cdp-url", "get 'cdp-url' ignored"] }),
+            json!({ "action": "batch", "argv": [["get", "cdp-url"]] }),
+        ] {
+            assert!(command_is_cdp_url_metadata(&command), "{command}");
+            assert!(!should_send_local_launch_config(&flags, &command));
+        }
+        for command in [
+            json!({ "action": "batch", "commands": ["get cdp-url", "open about:blank"] }),
+            json!({ "action": "batch", "argv": [["get", "cdp-url"], ["snapshot"]] }),
+            json!({ "action": "batch", "commands": ["batch 'get cdp-url'"] }),
+            json!({ "action": "batch", "argv": [["batch", "get cdp-url"]] }),
+            json!({ "action": "batch", "commands": [] }),
+            json!({ "action": "batch", "argv": [[]] }),
+            json!({ "action": "batch" }),
+        ] {
+            assert!(!command_is_cdp_url_metadata(&command), "{command}");
+            assert!(should_send_local_launch_config(&flags, &command));
+        }
+    }
+
+    #[test]
     fn test_attach_plugins_to_command_adds_registry_payload() {
         let plugins = vec![crate::plugins::PluginConfig {
             name: "stealth".to_string(),
@@ -3026,15 +3142,15 @@ mod tests {
     }
 
     #[test]
-    fn test_readme_proxy_ca_config_uses_compatible_options() {
-        let readme = include_str!("../../README.md");
-        let marker = "**Example proxy CA configuration:**";
-        let example = readme
+    fn test_docs_proxy_ca_config_uses_compatible_options() {
+        let docs = include_str!("../../docs/content/docs/configuration.mdx");
+        let marker = "### Behind a Proxy";
+        let example = docs
             .split_once(marker)
             .and_then(|(_, rest)| rest.split_once("```json"))
             .and_then(|(_, rest)| rest.split_once("```"))
             .map(|(json, _)| json.trim())
-            .expect("README proxy CA configuration example");
+            .expect("docs proxy CA configuration example");
         let config: flags::Config = serde_json::from_str(example).unwrap();
         let mut flags = neutral_launch_config_flags();
         flags.profile = config.profile;
@@ -3049,7 +3165,7 @@ mod tests {
         let error = incompatible_launch_mode_error(&flags);
         assert!(
             error.is_none() || error == Some("--ca-cert browser trust is currently supported only on Linux (read, install, upgrade, and doctor accept it on every platform)"),
-            "README proxy CA configuration is incompatible: {error:?}"
+            "docs proxy CA configuration is incompatible: {error:?}"
         );
     }
 

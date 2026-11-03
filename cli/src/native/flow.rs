@@ -1305,7 +1305,7 @@ pub fn flows_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("AGENT_BROWSER_FLOWS_DIR") {
         return PathBuf::from(dir);
     }
-    dirs::home_dir()
+    std::env::home_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(".agent-browser")
         .join("flows")
