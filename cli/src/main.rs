@@ -135,6 +135,23 @@ fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings:
     patch
 }
 
+/// The settings for one command of a batch. `--relaunch` asks for one relaunch
+/// per invocation, so only the first command that can launch a browser carries
+/// it. Returns the patch and whether the relaunch has now been sent.
+fn batch_item_settings(
+    flags: &Flags,
+    cmd: &serde_json::Value,
+    relaunch_sent: bool,
+) -> (session_settings::Patch, bool) {
+    let mut patch = command_settings(flags, cmd);
+    if relaunch_sent {
+        patch.clear_relaunch();
+        return (patch, true);
+    }
+    let sent = patch.forces_relaunch();
+    (patch, sent)
+}
+
 /// Checks a `--cdp` value and its headers. The value is either a port number
 /// or a ws, wss, http or https URL.
 fn validate_cdp_flags(flags: &Flags) -> Result<(), String> {
@@ -1917,6 +1934,7 @@ fn run_batch(
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut had_error = false;
+    let mut relaunch_sent = false;
 
     for (i, cmd_args) in commands.iter().enumerate() {
         if cmd_args.is_empty() {
@@ -1970,7 +1988,9 @@ fn run_batch(
             .map(|s| s.to_string());
         attach_plugins_to_command(&mut parsed, &flags.plugins);
         attach_restore_config_to_command(&mut parsed, flags);
-        if let Some(wire) = command_settings(flags, &parsed).to_wire() {
+        let (settings, relaunch_sent_now) = batch_item_settings(flags, &parsed, relaunch_sent);
+        relaunch_sent = relaunch_sent_now;
+        if let Some(wire) = settings.to_wire() {
             parsed["settings"] = wire;
         }
 
@@ -2266,6 +2286,22 @@ mod tests {
         ] {
             assert!(!command_is_cdp_url_metadata(&command), "{command}");
         }
+    }
+
+    #[test]
+    fn test_relaunch_is_sent_with_the_first_batch_command_only() {
+        let args: Vec<String> = ["--relaunch", "--profile", "/tmp/p", "get", "url"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let flags = crate::flags::parse_flags(&args);
+        let cmd = serde_json::json!({ "action": "url" });
+
+        let (first, sent) = batch_item_settings(&flags, &cmd, false);
+        assert!(first.forces_relaunch() && sent);
+        let (second, sent) = batch_item_settings(&flags, &cmd, sent);
+        assert!(!second.forces_relaunch() && sent);
+        assert!(second.value(session_settings::Key::Profile).is_some());
     }
 
     #[test]
