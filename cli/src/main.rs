@@ -1897,6 +1897,12 @@ fn main() {
     };
     let _daemon_was_already_running = daemon_result.already_running;
     let daemon_restarted = daemon_result.restarted;
+    if flags.default_timeout.is_none() {
+        commands::inherit_wait_timeout(
+            &mut cmd,
+            connection::running_daemon_default_timeout(&flags.session),
+        );
+    }
 
     // Auto-connect to existing browser. This is sent even when the daemon is
     // already running so launch compatibility stays idempotent.
@@ -2372,7 +2378,15 @@ fn run_batch(
         }
 
         let mut parsed = match parse_command(cmd_args, flags) {
-            Ok(c) => c,
+            Ok(mut c) => {
+                if flags.default_timeout.is_none() {
+                    commands::inherit_wait_timeout(
+                        &mut c,
+                        connection::running_daemon_default_timeout(&flags.session),
+                    );
+                }
+                c
+            }
             Err(e) => {
                 had_error = true;
                 if flags.json {
