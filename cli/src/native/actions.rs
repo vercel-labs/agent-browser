@@ -3134,7 +3134,17 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             if state.browser.is_some() || state.active_provider_session.is_some() {
                 let _ = auto_save_restore_state(state).await;
             }
-            if let Err(e) = auto_launch(state, plugins_from_command_or_env(cmd)).await {
+            let strict_state = launch_patch
+                .as_ref()
+                .is_some_and(|patch| patch.value(Key::StorageState).is_some());
+            if let Err(e) = auto_launch_with(
+                state,
+                plugins_from_command_or_env(cmd),
+                &Value::Null,
+                strict_state,
+            )
+            .await
+            {
                 let context = auto_launch_error_context(matches!(
                     state.settings.connection(),
                     Connection::Cdp(_)
@@ -4381,16 +4391,20 @@ async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
 ) -> Result<Value, String> {
-    auto_launch_with(state, plugins, &Value::Null).await
+    auto_launch_with(state, plugins, &Value::Null, false).await
 }
 
 /// Launches or attaches the session's browser from its settings. `cmd` is the
 /// launch command that asked for it, when there is one; it carries only what
 /// the settings do not (device selection for the WebDriver providers).
+///
+/// `strict_state` is set when the command named a `--state` file: a file that
+/// cannot be loaded then fails the launch instead of launching without state.
 async fn auto_launch_with(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
     cmd: &Value,
+    strict_state: bool,
 ) -> Result<Value, String> {
     if state.attached_target.is_some() && cmd.is_null() {
         // Resume the attached browser; the launch handler resolves the target.
@@ -4401,14 +4415,14 @@ async fn auto_launch_with(
     if matches!(connection, Connection::Cdp(_) | Connection::AutoConnect)
         || !matches!(&connection, Connection::Provider(provider) if provider_is_browser_use(provider))
     {
-        return auto_launch_inner(state, plugins, cmd).await;
+        return auto_launch_inner(state, plugins, cmd, strict_state).await;
     }
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
     let result = match tokio::time::timeout(
         BROWSER_USE_SETUP_DEADLINE,
-        auto_launch_inner(state, plugins, cmd),
+        auto_launch_inner(state, plugins, cmd, strict_state),
     )
     .await
     {
@@ -4427,6 +4441,7 @@ async fn auto_launch_inner(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
     cmd: &Value,
+    strict_state: bool,
 ) -> Result<Value, String> {
     if has_active_browser_session(state) {
         close_before_implicit_relaunch(state).await?;
@@ -4508,7 +4523,7 @@ async fn auto_launch_inner(
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
-        try_load_storage_state(state, &storage_state_path).await;
+        load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
         return Ok(json!({}));
     }
 
@@ -4540,7 +4555,7 @@ async fn auto_launch_inner(
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
-        try_load_storage_state(state, &storage_state_path).await;
+        load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
         return Ok(json!({}));
     }
 
@@ -4615,7 +4630,7 @@ async fn auto_launch_inner(
                     install_network_controls_or_close(state, has_proxy_auth).await?;
                     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
                     try_auto_restore_state(state).await;
-                    try_load_storage_state(state, &storage_state_path).await;
+                    load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
                     state.effective_ca_cert = effective_ca_cert;
                     let mut extras = json!({ "provider": provider });
                     if let Some(info) = providers::get_agentcore_info() {
@@ -4684,7 +4699,7 @@ async fn auto_launch_inner(
 
     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
     try_auto_restore_state(state).await;
-    try_load_storage_state(state, &storage_state_path).await;
+    load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
     Ok(json!({}))
 }
 
@@ -5083,9 +5098,20 @@ async fn load_storage_state_or_rollback(
     Ok(())
 }
 
-/// Load storage state from AGENT_BROWSER_STATE if set.
-async fn try_load_storage_state(state: &mut DaemonState, path: &Option<String>) {
-    let _ = load_storage_state(state, path).await;
+/// Loads the storage state a launch was set up with. A command that named the
+/// state file fails the launch when it cannot be loaded; a launch that only
+/// inherits it continues without the state.
+async fn load_storage_state_for_launch(
+    state: &mut DaemonState,
+    path: &Option<String>,
+    strict: bool,
+) -> Result<(), String> {
+    if strict {
+        load_storage_state_or_rollback(state, path).await
+    } else {
+        let _ = load_storage_state(state, path).await;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5680,7 +5706,8 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
     }
 
-    match auto_launch_with(state, plugins_from_command_or_env(cmd), cmd).await {
+    let strict_state = patch.value(Key::StorageState).is_some();
+    match auto_launch_with(state, plugins_from_command_or_env(cmd), cmd, strict_state).await {
         Ok(extras) => {
             let mut result = json!({
                 "launched": true,
@@ -20187,5 +20214,27 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             .unwrap();
         assert_eq!(cdp_headers_for(&state, endpoint), None);
         assert_eq!(state.cdp_headers, None);
+    }
+    #[tokio::test]
+    async fn test_an_unreadable_state_file_fails_the_command_and_keeps_the_settings() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Profile, json!("/tmp/previous"));
+        let cmd = json!({
+            "id": "1",
+            "action": "navigate",
+            "url": "about:blank",
+            "settings": { "storage-state": "/nonexistent/state.json" }
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(state.settings.get(Key::StorageState), None, "{resp}");
+        assert_eq!(
+            state.settings.get(Key::Profile),
+            Some(&json!("/tmp/previous"))
+        );
+        assert!(state.browser.is_none(), "the failed launch is closed");
     }
 }
