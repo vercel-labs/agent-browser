@@ -2986,6 +2986,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         state
             .flow
             .begin_command(action, &stable, from_url, traits.as_ref());
+    } else if state.flow.active() {
+        state.flow.untag_current();
     }
 
     // Keep element resolution in sync with the `frame` selection (see
@@ -12387,7 +12389,7 @@ async fn flow_field_traits(
     cmd: &Value,
     state: &DaemonState,
 ) -> Option<super::flow::FieldTraits> {
-    let is_text_entry = matches!(action, "inserttext")
+    let is_text_entry = matches!(action, "inserttext" | "press" | "keydown" | "keyup")
         || (action == "keyboard"
             && matches!(
                 cmd.get("subaction").and_then(|v| v.as_str()),
@@ -14154,6 +14156,8 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         ..
     } = cred;
 
+    // The login fills this password itself; a capture must not keep it.
+    state.flow.add_secret(&password);
     let auth_timeout_ms = state.timeout_ms(cmd);
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let expected_origin = if no_navigate {
@@ -19935,6 +19939,23 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 assert_eq!(resp["code"], "outcome_unknown");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn requests_of_an_unrecorded_command_are_not_tagged_to_the_previous_step() {
+        let mut state = DaemonState::new();
+        state.flow.begin_capture(None);
+        state.flow.begin_command(
+            "click",
+            &json!({ "action": "click", "selector": "#a" }),
+            None,
+            None,
+        );
+        let resp =
+            execute_command(&json!({ "id": "s", "action": "session_info" }), &mut state).await;
+        assert!(resp.get("recorded").is_none(), "{resp}");
+        state.flow.tag_request("sent-by-the-unrecorded-command");
+        assert!(state.flow.request_tags.is_empty());
     }
 
     #[tokio::test]

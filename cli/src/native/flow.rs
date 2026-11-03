@@ -50,6 +50,10 @@ pub struct FlowRecorder {
     /// running when the request started.
     pub request_tags: HashMap<String, u64>,
     pub current_seq: Option<u64>,
+    /// Keys pressed so far in the secret field that has focus.
+    key_buffer: String,
+    /// The last entry of `secrets` is the current `key_buffer`.
+    key_active: bool,
     /// A typed step saved as a param before its field could be read.
     pub needs_traits: Option<u64>,
     /// Sequence number the command being executed was recorded under.
@@ -121,8 +125,14 @@ impl FlowRecorder {
         if let Some(obj) = recorded.as_object_mut() {
             obj.remove("id");
         }
+        let is_key = matches!(action, "press" | "keydown" | "keyup");
+        if !is_key {
+            self.reset_keys();
+        }
         if let Some(secret) = redact_secret(&mut recorded, traits) {
             self.secrets.push(secret);
+        } else if is_key {
+            self.record_key(action, &mut recorded, traits);
         } else if let Some(field) = typed_field(&recorded) {
             self.keep_typed_as_param(&mut recorded, field, traits);
         }
@@ -260,6 +270,75 @@ impl FlowRecorder {
             ));
         }
         Ok((from, to))
+    }
+
+    /// A command that is not recorded starts: requests it sends belong to no
+    /// step, so a later save does not keep them.
+    pub fn untag_current(&mut self) {
+        self.current_seq = None;
+        self.reset_keys();
+    }
+
+    pub fn add_secret(&mut self, value: &str) {
+        if !value.is_empty() && !self.secrets.iter().any(|s| s == value) {
+            self.secrets.push(value.to_string());
+        }
+    }
+
+    fn reset_keys(&mut self) {
+        self.key_buffer.clear();
+        self.key_active = false;
+    }
+
+    fn set_key_buffer(&mut self, buffer: String) {
+        if self.key_active {
+            self.secrets.pop();
+        }
+        self.key_buffer = buffer;
+        self.key_active = !self.key_buffer.is_empty();
+        if self.key_active {
+            self.secrets.push(self.key_buffer.clone());
+        }
+    }
+
+    /// A key sent to a secret field is part of a secret: it is redacted from
+    /// the step and joined to the keys before it, so a request carrying the
+    /// whole value is dropped at save.
+    fn record_key(&mut self, action: &str, cmd: &mut Value, traits: Option<&FieldTraits>) {
+        let secret = traits.is_some_and(|t| {
+            let hint = t.hint.to_lowercase();
+            t.is_secret() || SECRET_MARKERS.iter().any(|m| hint.contains(m))
+        });
+        if !secret {
+            self.reset_keys();
+            return;
+        }
+        let Some(key) = cmd["key"].as_str().map(String::from) else {
+            return;
+        };
+        let last = key.rsplit('+').next().unwrap_or("").to_string();
+        if last.chars().count() == 1 || key.chars().count() == 1 {
+            let ch = if key.chars().count() == 1 {
+                key.clone()
+            } else {
+                last
+            };
+            if action != "keyup" {
+                let mut buffer = self.key_buffer.clone();
+                buffer.push_str(&ch);
+                self.set_key_buffer(buffer);
+            }
+            cmd["key"] = json!(REDACTED);
+            cmd["redacted"] = json!(true);
+        } else if last == "Backspace" {
+            if action != "keyup" {
+                let mut buffer = self.key_buffer.clone();
+                buffer.pop();
+                self.set_key_buffer(buffer);
+            }
+        } else if action != "keyup" {
+            self.reset_keys();
+        }
     }
 
     pub fn mark_saved(&mut self, last: u64) {
@@ -2674,13 +2753,21 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
     }
     // Cross-origin APIs differ on credentials: some need cookies, some reject
     // a credentialed request outright. Try with, then without.
+    // A write is never sent a second time: a thrown fetch may still have
+    // reached the server, so it is reported as an unknown outcome instead.
+    let send = if req.expect["write"] == true {
+        "const r = await fetch(u, { ...i, credentials: 'include' });"
+    } else {
+        "let r; try { r = await fetch(u, { ...i, credentials: 'include' }); } \
+         catch (e) { r = await fetch(u, i); }"
+    };
     format!(
         "(async () => {{ const u = {url}, i = {init}; \
-         let r; try {{ r = await fetch(u, {{ ...i, credentials: 'include' }}); }} \
-         catch (e) {{ r = await fetch(u, i); }} \
+         {send} \
          return {{ status: r.type === 'opaqueredirect' ? 302 : r.status, retryAfter: r.headers.get('retry-after'), text: await r.text() }}; }})()",
         url = json!(req.url),
-        init = init
+        init = init,
+        send = send
     )
 }
 
@@ -2889,36 +2976,53 @@ const REPLAY_ACTIONS: &[&str] = &[
 
 const SCRIPT_KEYS: &[&str] = &["script", "expression", "function", "fn", "js", "code"];
 
-fn url_like(text: &str) -> bool {
-    let lower = text.trim_start().to_ascii_lowercase();
-    [
-        "http:",
-        "https:",
-        "ws:",
-        "wss:",
-        "ftp:",
-        "file:",
-        "javascript:",
-        "data:",
-        "blob:",
-    ]
-    .iter()
-    .any(|scheme| lower.starts_with(scheme))
-}
+const URL_KEYS: &[&str] = &[
+    "url", "href", "src", "action", "uri", "location", "origin", "target",
+];
 
-fn collect_urls(v: &Value, out: &mut Vec<String>, scripts: &mut bool) {
+/// Check one value the way a browser reads it: the URL parser drops tabs,
+/// newlines and leading control characters, so a string that parses as an
+/// http(s) URL is host-checked whatever it looks like before parsing.
+fn check_value(
+    flow: &Value,
+    v: &Value,
+    key: Option<&str>,
+    scripts: &mut bool,
+) -> Result<(), String> {
     match v {
-        Value::String(text) if url_like(text) => out.push(text.clone()),
-        Value::Array(items) => items.iter().for_each(|i| collect_urls(i, out, scripts)),
+        Value::String(text) => {
+            let forced = key.is_some_and(|k| URL_KEYS.contains(&k));
+            if let Ok(parsed) = url::Url::parse(text) {
+                match parsed.scheme() {
+                    "http" | "https" => check_allowed_host(flow, text)?,
+                    "about" if parsed.as_str() == "about:blank" => {}
+                    scheme
+                        if forced
+                            || matches!(
+                                scheme,
+                                "ws" | "wss" | "ftp" | "file" | "javascript" | "data" | "blob"
+                            ) =>
+                    {
+                        return Err(format!("'{}' is not an http(s) URL", text.trim()));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        Value::Array(items) => items
+            .iter()
+            .try_for_each(|i| check_value(flow, i, key, scripts)),
         Value::Object(map) => {
             for (k, item) in map {
                 if SCRIPT_KEYS.contains(&k.as_str()) && item.is_string() {
                     *scripts = true;
                 }
-                collect_urls(item, out, scripts);
+                check_value(flow, item, Some(k), scripts)?;
             }
+            Ok(())
         }
-        _ => {}
+        _ => Ok(()),
     }
 }
 
@@ -2933,17 +3037,13 @@ pub fn check_replay_commands(flow: &Value, commands: &[Value]) -> Result<(), Str
                 action
             ));
         }
-        let mut urls = Vec::new();
         let mut scripts = false;
-        collect_urls(cmd, &mut urls, &mut scripts);
+        check_value(flow, cmd, None, &mut scripts)?;
         if scripts {
             return Err(format!(
                 "the recorded command '{}' carries a script, which a replay does not run",
                 action
             ));
-        }
-        for url in urls {
-            check_allowed_host(flow, &url)?;
         }
     }
     Ok(())
@@ -4838,5 +4938,178 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("pass a value"));
+    }
+
+    #[test]
+    fn urls_hidden_by_whatwg_stripping_are_still_host_checked() {
+        let flow = json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com"] });
+        for bad in [
+            "ht\ttps://evil.com/x",
+            "\u{1}https://evil.com/x",
+            " https://evil.com/x",
+            "https://evil.com\n/x",
+            "java\tscript:alert(1)",
+        ] {
+            let cmd = json!({ "action": "tab_new", "url": bad });
+            assert!(check_replay_commands(&flow, &[cmd]).is_err(), "{bad:?}");
+            let nested = json!({ "action": "click", "selector": "x", "arg": bad });
+            assert!(check_replay_commands(&flow, &[nested]).is_err(), "{bad:?}");
+        }
+        // A URL key is checked even when the value is not an http URL.
+        let odd = json!({ "action": "tab_new", "url": "chrome://settings" });
+        assert!(check_replay_commands(&flow, &[odd]).is_err());
+        let fine = json!({ "action": "tab_new", "url": "/relative/path" });
+        assert!(check_replay_commands(&flow, &[fine]).is_ok());
+        let blank = json!({ "action": "navigate", "url": "about:blank" });
+        assert!(check_replay_commands(&flow, &[blank]).is_ok());
+    }
+
+    #[test]
+    fn a_write_is_never_retried_by_the_in_page_fetch() {
+        let write = PreparedRequest {
+            method: "POST".to_string(),
+            expect: json!({ "write": true }),
+            ..prepared("s1r1")
+        };
+        let script = page_fetch_script(&write);
+        assert!(!script.contains("catch"), "{script}");
+        assert_eq!(script.matches("fetch(").count(), 1, "{script}");
+        let read = page_fetch_script(&prepared("s1r1"));
+        assert!(read.contains("catch"));
+    }
+
+    #[test]
+    fn a_command_that_is_not_recorded_stops_tagging_requests_to_the_last_step() {
+        let mut r = recorded(&[("navigate", true)]);
+        r.tag_request("belongs-to-step-1");
+        r.untag_current();
+        r.tag_request("from-an-unrecorded-command");
+        assert_eq!(r.request_tags.len(), 1);
+        assert!(r.request_tags.contains_key("belongs-to-step-1"));
+    }
+
+    #[test]
+    fn keys_pressed_in_a_secret_field_are_gathered_as_one_secret() {
+        let secret = traits("password", "", "");
+        let mut r = recorded(&[]);
+        for key in ["p", "a", "x", "Backspace", "s", "s"] {
+            r.begin_command(
+                "press",
+                &json!({ "action": "press", "key": key }),
+                None,
+                Some(&secret),
+            );
+        }
+        assert_eq!(r.secrets, vec!["pass".to_string()]);
+        for (i, key) in ["p", "a", "x", "s", "s"].iter().enumerate() {
+            let idx = [0, 1, 2, 4, 5][i];
+            assert_eq!(r.commands[idx].1["key"], REDACTED, "{key}");
+            assert_eq!(r.commands[idx].1["redacted"], true);
+        }
+        assert_eq!(r.commands[3].1["key"], "Backspace");
+        // Enter ends the password and is kept as a step.
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "Enter" }),
+            None,
+            Some(&secret),
+        );
+        assert_eq!(r.commands[6].1["key"], "Enter");
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "z" }),
+            None,
+            Some(&secret),
+        );
+        assert_eq!(r.secrets, vec!["pass".to_string(), "z".to_string()]);
+        // Keys in an ordinary field stay as they are.
+        let mut plain = recorded(&[]);
+        plain.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "q" }),
+            None,
+            Some(&traits("text", "", "search")),
+        );
+        assert_eq!(plain.commands[0].1["key"], "q");
+        assert!(plain.secrets.is_empty());
+        // Shift combos and keydown count as characters.
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "keydown",
+            &json!({ "action": "keydown", "key": "Shift+A" }),
+            None,
+            Some(&secret),
+        );
+        r.begin_command(
+            "keyup",
+            &json!({ "action": "keyup", "key": "Shift+A" }),
+            None,
+            Some(&secret),
+        );
+        assert_eq!(r.secrets, vec!["A".to_string()]);
+        assert_eq!(r.commands[1].1["key"], REDACTED);
+    }
+
+    #[test]
+    fn a_request_carrying_a_key_by_key_password_is_not_saved() {
+        let secret = traits("password", "", "");
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/login" }),
+            None,
+            None,
+        );
+        for key in "hunter2!".chars() {
+            r.begin_command(
+                "press",
+                &json!({ "action": "press", "key": key.to_string() }),
+                None,
+                Some(&secret),
+            );
+        }
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "Enter" }),
+            None,
+            Some(&secret),
+        );
+        r.tag_request("login");
+        r.tag_request("me");
+        let mut login = entry(
+            "login",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            r#"{"ok":true}"#,
+        );
+        login.method = "POST".to_string();
+        login.post_data = Some(r#"{"password":"hunter2!"}"#.to_string());
+        let me = entry(
+            "me",
+            "https://api.example.com.ar/me",
+            "Fetch",
+            "application/json",
+            r#"{"name":"a"}"#,
+        );
+        let (flow, _) = build_flow(SaveInput {
+            name: "k",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[login, me],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let text = serde_json::to_string(&flow).unwrap();
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(
+            !text.contains("api.example.com.ar/login"),
+            "the login request is dropped"
+        );
+        assert_eq!(flow["steps"][1]["command"]["key"], REDACTED);
     }
 }
