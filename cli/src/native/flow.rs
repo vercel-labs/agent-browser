@@ -2105,27 +2105,21 @@ fn collect_writes(
     writes
 }
 
-/// Ids of the writes a flow's own requests send; a run needs each one
-/// allowed or confirmed before it starts.
+/// Ids of the writes a run sends over HTTP or from the page: the ones among
+/// the requests the output needs. Each must be allowed or confirmed first.
 pub fn request_write_ids(flow: &Value) -> Vec<String> {
-    let requests: Vec<&str> = flow["steps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|s| s["requests"].as_array().into_iter().flatten())
-        .filter_map(|r| r["id"].as_str())
-        .collect();
+    let needed = dependencies(flow, flow["output"].as_str().unwrap_or(""));
     flow["writes"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|w| w["id"].as_str())
-        .filter(|id| requests.contains(id))
+        .filter(|id| needed.iter().any(|n| n == id))
         .map(String::from)
         .collect()
 }
 
-/// Writes the command replay would send that no kept request covers.
+/// Writes the command replay would send beyond the ones a run sends itself.
 pub fn replay_only_writes(flow: &Value) -> Vec<Value> {
     let own = request_write_ids(flow);
     flow["writes"]
@@ -4299,5 +4293,32 @@ mod tests {
             Err(Failure::stop("auth_expired", 401, "x".into())),
         );
         assert_eq!(with_retry_after(auth, Some("30".into())).retry_after, None);
+    }
+
+    #[test]
+    fn a_run_gates_only_the_writes_its_output_needs() {
+        let flow = json!({
+            "output": "s2r1",
+            "writes": [
+                { "id": "s1r1", "method": "POST", "kind": "explicit" },
+                { "id": "s2r1", "method": "POST", "kind": "explicit" },
+                { "id": "s3w1", "method": "GET", "kind": "suspected" }
+            ],
+            "steps": [
+                { "requests": [{ "id": "s1r1", "url": "https://a.test/session", "body": null }] },
+                { "requests": [{ "id": "s2r1", "url": "https://a.test/cart", "body": "{\"csrf\":\"{{@s1r1.csrf}}\"}" }] }
+            ]
+        });
+        assert_eq!(request_write_ids(&flow), vec!["s1r1", "s2r1"]);
+        let only_output = json!({ "output": "s2r1", "writes": flow["writes"], "steps": [
+            { "requests": [{ "id": "s1r1", "url": "https://a.test/session", "body": null }] },
+            { "requests": [{ "id": "s2r1", "url": "https://a.test/cart", "body": "{}" }] }
+        ] });
+        assert_eq!(request_write_ids(&only_output), vec!["s2r1"]);
+        let replay: Vec<String> = replay_only_writes(&only_output)
+            .iter()
+            .filter_map(|w| w["id"].as_str().map(String::from))
+            .collect();
+        assert_eq!(replay, vec!["s1r1", "s3w1"]);
     }
 }

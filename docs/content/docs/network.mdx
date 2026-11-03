@@ -249,7 +249,7 @@ The code is in the JSON response as `code`, with `data.status`, `data.step` and 
 agent-browser flow run <name> --allow-write <all|id,id,...>
 ```
 
-`--allow-write` takes `all` or comma-separated write ids. A write it does not cover is never sent silently: the run stops with a confirmation request, and `confirm` approves one write at a time. Each write is a policy action named `flow_write:<id>`, so `--action-policy` can deny or require confirmation for it and `--confirm-actions flow_write:<id>` asks even when `--allow-write` covers it. These checks apply to the HTTP and in-page tiers. The command replay also sends writes no kept request covers; those need `--allow-write` or a confirmation too, and the policy file can deny them. A write the site accepted is never sent again by a lower tier.
+`--allow-write` takes `all` or comma-separated write ids. A run only sends the writes among the requests its output needs, and a write `--allow-write` does not cover is never sent silently: the run stops with a confirmation request, and `confirm` approves one write at a time. Each write is a policy action named `flow_write:<id>`, so `--action-policy` can deny or require confirmation for it and `--confirm-actions flow_write:<id>` asks even when `--allow-write` covers it. These checks apply to the HTTP and in-page tiers. The command replay also sends writes no kept request covers; those need `--allow-write` or a confirmation too, and the policy file can deny them. A write the site accepted is never sent again by a lower tier.
 
 ### Discovery
 

@@ -14955,6 +14955,15 @@ fn html_response(body: &str) -> String {
     )
 }
 
+/// Boxed so the command future lives on the heap; a long test would
+/// otherwise overflow the stack.
+fn exec<'a>(
+    cmd: &'a Value,
+    state: &'a mut DaemonState,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + 'a>> {
+    Box::pin(execute_command(cmd, state))
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_state_load_keeps_storage_away_from_page_scripts_and_redirects() {
@@ -15043,4 +15052,505 @@ async fn e2e_state_load_keeps_storage_away_from_page_scripts_and_redirects() {
     other_server.abort();
     redirect_server.abort();
     hook_server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Saved flows
+// ---------------------------------------------------------------------------
+
+const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
+<input id="email" type="text" placeholder="Email">
+<input id="code" autocomplete="one-time-code">
+<button id="login" onclick="login()">Login</button>
+<button id="session" onclick="session()">Session</button>
+<button id="items" onclick="items()">Items</button>
+<button id="gql" onclick="gql()">Gql</button>
+<button id="add" onclick="add()">Add</button>
+<button id="cartadd" onclick="fetch('/cart/add?id=7')">CartAdd</button>
+<script>
+let csrf = '';
+async function login() { await fetch('/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: document.getElementById('email').value }) }); }
+async function session() { const r = await fetch('/api/session'); csrf = (await r.json()).csrf; }
+async function items() { await fetch('/api/items'); }
+async function gql() { await fetch('/graphql', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: 'query Items { items { id name } }' }) }); }
+async function add() { await fetch('/api/cart', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 7, csrf }) }); }
+</script></body></html>"#;
+
+struct FlowFixture {
+    site: String,
+    other: String,
+    log: Arc<Mutex<Vec<String>>>,
+    servers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl FlowFixture {
+    fn hits(&self, needle: &str) -> usize {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains(needle))
+            .count()
+    }
+}
+
+impl Drop for FlowFixture {
+    fn drop(&mut self) {
+        for s in &self.servers {
+            s.abort();
+        }
+    }
+}
+
+async fn flow_fixture() -> FlowFixture {
+    let site_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let other_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let site_port = site_listener.local_addr().unwrap().port();
+    let other_port = other_listener.local_addr().unwrap().port();
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> (String, String, String, String) {
+        let mut data = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            data.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&data).to_string();
+            if let Some(head_end) = text.find("\r\n\r\n") {
+                let length = text[..head_end]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                if data.len() >= head_end + 4 + length {
+                    break;
+                }
+            }
+        }
+        let text = String::from_utf8_lossy(&data).to_string();
+        let head_end = text.find("\r\n\r\n").unwrap_or(text.len());
+        let mut lines = text[..head_end].lines();
+        let first = lines.next().unwrap_or("").to_string();
+        let mut parts = first.split_whitespace();
+        let method = parts.next().unwrap_or("").to_string();
+        let path = parts.next().unwrap_or("").to_string();
+        let cookie = lines
+            .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))
+            .unwrap_or("")
+            .to_string();
+        let body = text.get(head_end + 4..).unwrap_or("").to_string();
+        (method, path, cookie, body)
+    }
+
+    async fn reply(
+        stream: &mut tokio::net::TcpStream,
+        status: &str,
+        ctype: &str,
+        extra: &str,
+        body: &str,
+    ) {
+        let response = format!(
+            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n{}Connection: close\r\n\r\n{}",
+            status, ctype, body.len(), extra, body
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+    }
+
+    let site_log = log.clone();
+    let site = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = site_listener.accept().await.unwrap();
+            let (method, path, cookie, body) = read_request(&mut stream).await;
+            site_log
+                .lock()
+                .unwrap()
+                .push(format!("site {} {} {}", method, path, body));
+            let signed_in = cookie.contains("sid=abc");
+            match (method.as_str(), path.as_str()) {
+                ("GET", "/") => {
+                    reply(&mut stream, "200 OK", "text/html", "", FLOW_FIXTURE_PAGE).await
+                }
+                ("POST", "/login") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "Set-Cookie: sid=abc; Path=/\r\n",
+                        r#"{"ok":true}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/session") if signed_in => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"csrf":"tok-8d41","user":"ana"}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/items") if signed_in => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"items":[{"id":1,"name":"kettle"},{"id":2,"name":"toaster"}]}"#,
+                    )
+                    .await
+                }
+                ("POST", "/graphql") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"data":{"items":[{"id":1,"name":"kettle"}]}}"#,
+                    )
+                    .await
+                }
+                ("POST", "/api/cart") if body.contains("tok-8d41") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"cart":[7]}"#,
+                    )
+                    .await
+                }
+                ("POST", "/api/cart") => {
+                    reply(&mut stream, "403 Forbidden", "application/json", "", "{}").await
+                }
+                ("GET", p) if p.starts_with("/cart/add") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"added":true}"#,
+                    )
+                    .await
+                }
+                ("GET", "/go") => {
+                    reply(
+                        &mut stream,
+                        "302 Found",
+                        "text/plain",
+                        &format!("Location: http://localhost:{}/data\r\n", other_port),
+                        "",
+                    )
+                    .await
+                }
+                (_, _) if !signed_in && path.starts_with("/api/") => {
+                    reply(
+                        &mut stream,
+                        "401 Unauthorized",
+                        "application/json",
+                        "",
+                        "{}",
+                    )
+                    .await
+                }
+                _ => reply(&mut stream, "404 Not Found", "application/json", "", "{}").await,
+            }
+        }
+    });
+    let other_log = log.clone();
+    let other = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = other_listener.accept().await.unwrap();
+            let (method, path, _, _) = read_request(&mut stream).await;
+            other_log
+                .lock()
+                .unwrap()
+                .push(format!("other {} {}", method, path));
+            reply(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                "",
+                r#"{"other":true}"#,
+            )
+            .await;
+        }
+    });
+    FlowFixture {
+        site: format!("http://127.0.0.1:{}", site_port),
+        other: format!("http://localhost:{}", other_port),
+        log,
+        servers: vec![site, other],
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_capture_save_run_and_guards() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&[
+        "AGENT_BROWSER_FLOWS_DIR",
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+    ]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    guard.remove("AGENT_BROWSER_ACTION_POLICY");
+    guard.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("f{}", n));
+        cmd
+    }
+
+    let launch = run(
+        &mut n,
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+    );
+    assert_success(&exec(&launch, &mut state).await);
+    assert!(state.flow.active());
+    // Turning capture on for a session that has none is an error.
+    let mut plain = DaemonState::new();
+    assert_success(
+        &exec(
+            &json!({ "id": "p1", "action": "launch", "headless": true }),
+            &mut plain,
+        )
+        .await,
+    );
+    let late = exec(
+        &json!({ "id": "p2", "action": "launch", "headless": true, "capture": ["flow"] }),
+        &mut plain,
+    )
+    .await;
+    assert!(
+        late["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("close it and reopen"),
+        "{late}"
+    );
+    let _ = exec(&json!({ "id": "p3", "action": "close" }), &mut plain).await;
+
+    let first = exec(
+        &run(
+            &mut n,
+            json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&first);
+    assert_eq!(first["recorded"]["seq"], 1);
+    for (action, selector, value) in [
+        ("fill", "#email", Some("ana@example.com")),
+        ("fill", "#code", Some("482913")),
+        ("click", "#login", None),
+        ("click", "#session", None),
+        ("click", "#add", None),
+        ("click", "#cartadd", None),
+    ] {
+        let mut cmd = json!({ "action": action, "selector": selector });
+        if let Some(v) = value {
+            cmd["value"] = json!(v);
+        }
+        let resp = exec(&run(&mut n, cmd), &mut state).await;
+        assert_success(&resp);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    let failed = exec(
+        &run(
+            &mut n,
+            json!({ "action": "click", "selector": "#missing", "timeout": 500 }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(failed["success"], false);
+    assert!(
+        failed["recorded"]["seq"].is_u64(),
+        "failed commands are recorded: {failed}"
+    );
+
+    let steps = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
+    assert_success(&steps);
+    assert_eq!(steps["data"]["steps"].as_array().unwrap().len(), 8);
+    assert_eq!(steps["data"]["steps"][7]["ok"], false);
+
+    // Save the first flow without the failed step, keep recording.
+    let saved = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_save", "name": "cart", "to": 7, "description": "Add to cart" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    assert_eq!(saved["data"]["from"], 1);
+    assert_eq!(saved["data"]["to"], 7);
+    assert!(state.flow.active(), "save keeps the capture running");
+    // The flow answers with the cart write, picked by request id.
+    let add_id = saved["data"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().ends_with("/api/cart"))
+        .and_then(|r| r["id"].as_str())
+        .unwrap()
+        .to_string();
+    let resaved = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_save", "name": "cart", "from": "1", "to": 7, "output": add_id }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resaved);
+    assert_eq!(resaved["data"]["output"], add_id.as_str());
+    let writes = saved["data"]["writes"].as_array().unwrap();
+    assert!(writes.iter().any(|w| w["method"] == "POST"
+        && w["url"].as_str().unwrap().ends_with("/api/cart")
+        && w["kind"] == "explicit"));
+    assert!(writes
+        .iter()
+        .any(|w| w["method"] == "POST" && w["url"].as_str().unwrap().ends_with("/login")));
+    assert!(writes.iter().any(|w| w["method"] == "GET"
+        && w["url"].as_str().unwrap().contains("/cart/add?id=7")
+        && w["kind"] == "suspected"));
+
+    // A second flow in the same session, from the step after the first save.
+    for selector in ["#items", "#gql"] {
+        let resp = exec(
+            &run(&mut n, json!({ "action": "click", "selector": selector })),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    let saved2 = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_save", "name": "browse", "from": "last-save" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved2);
+    assert_eq!(saved2["data"]["from"], 8);
+    assert_eq!(
+        saved2["data"]["writes"],
+        json!([]),
+        "a GraphQL query and a data GET are reads: {}",
+        saved2["data"]
+    );
+
+    // Files: no typed secret, the email is a param, the CSRF value is a reference.
+    let cart_path = dir.path().join("127.0.0.1").join("cart.json");
+    let cart_text = std::fs::read_to_string(&cart_path).unwrap();
+    assert!(!cart_text.contains("482913"));
+    assert!(cart_text.contains(r#""source": "typed""#));
+    assert!(cart_text.contains("{{email}}"));
+    assert!(cart_text.contains("<redacted>"));
+    assert!(dir.path().join("127.0.0.1").join("browse.json").exists());
+
+    // Runs: a read flow needs no confirmation; a write flow asks first.
+    let browse = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "browse", "params": {} }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(browse["data"]["ok"], true, "{browse}");
+    let ask = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "cart", "params": {} }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(ask["data"]["confirmation_required"], true, "{ask}");
+    assert!(ask["data"]["action"]
+        .as_str()
+        .unwrap()
+        .starts_with("flow_write:"));
+
+    let posts_before = fx.hits("POST /api/cart");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "cart", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert_eq!(
+        fx.hits("POST /api/cart"),
+        posts_before + 1,
+        "the write is sent once: {sent}\n{:#?}",
+        fx.log.lock().unwrap()
+    );
+
+    // An edited flow cannot reach another host, directly or by redirect.
+    let browse_path = dir.path().join("127.0.0.1").join("browse.json");
+    let original = std::fs::read_to_string(&browse_path).unwrap();
+    let other_hits = fx.hits("other ");
+    for target in [format!("{}/data", fx.other), format!("{}/go", fx.site)] {
+        let mut flow: Value = serde_json::from_str(&original).unwrap();
+        let at = flow["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|s| !s["requests"].as_array().unwrap().is_empty())
+            .unwrap();
+        flow["steps"][at]["requests"][0]["url"] = json!(target);
+        flow["steps"][at]["requests"][0]["tier"] = json!("http");
+        std::fs::write(&browse_path, serde_json::to_string(&flow).unwrap()).unwrap();
+        let resp = exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_run", "name": "browse", "params": {} }),
+            ),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{target}: {resp}");
+        if target.starts_with(&fx.other) {
+            assert!(
+                resp["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("outside the hosts"),
+                "{resp}"
+            );
+        }
+    }
+    assert_eq!(
+        fx.hits("other "),
+        other_hits,
+        "no request reached the other host"
+    );
+
+    // Runs are not recorded, and close reports nothing unsaved after the last save.
+    let steps = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
+    assert_eq!(steps["data"]["steps"].as_array().unwrap().len(), 10);
+    let closed = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+    assert_success(&closed);
+    assert!(closed["data"].get("unsaved").is_none(), "{closed}");
 }
