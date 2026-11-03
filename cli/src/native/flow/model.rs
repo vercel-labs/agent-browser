@@ -37,10 +37,6 @@ fn typed_source() -> ParamSource {
     ParamSource::Typed
 }
 
-fn is_false(v: &bool) -> bool {
-    !*v
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Flow {
@@ -159,9 +155,6 @@ pub struct Request {
     /// The tier that worked last time; absent means start with HTTP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
-    /// A run needs this request allowed before it sends it.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub write: bool,
     #[serde(default)]
     pub expect: Expect,
 }

@@ -19673,7 +19673,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
             "writes": [{ "id": "s1r1", "method": "POST", "url": url, "kind": "explicit", "step": 1 }],
             "steps": [{ "seq": 1, "ok": true, "command": { "action": "click" }, "requests": [{
-                "id": "s1r1", "write": true, "method": "POST", "url": url, "headers": {}, "body": "{}",
+                "id": "s1r1", "method": "POST", "url": url, "headers": {}, "body": "{}",
                 "expect": { "status": 200, "mime": "application/json",
                     "signature": super::super::flow::signature(&json!({ "ok": true })),
                     "bytes": 11, "itemFields": [], "extract": null }
@@ -19920,7 +19920,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "writes": [{ "id": "s1r1", "method": "POST", "url": format!("{}/api/cart", base), "kind": "explicit", "step": 1 }],
             "steps": [
                 { "seq": 1, "ok": true, "command": { "action": "click", "selector": "#add" }, "requests": [{
-                    "id": "s1r1", "write": true, "method": "POST", "url": format!("{}/api/cart", base), "headers": {}, "body": "{}", "expect": expect }] },
+                    "id": "s1r1", "method": "POST", "url": format!("{}/api/cart", base), "headers": {}, "body": "{}", "expect": expect }] },
                 { "seq": 2, "ok": true, "command": { "action": "click", "selector": "#list" }, "requests": [{
                     "id": "s2r1", "method": "GET", "url": format!("{}/api/items?c={{{{@s1r1.ok}}}}", base), "headers": {}, "body": null,
                     "tier": "replay", "expect": expect }] }
@@ -19956,7 +19956,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "steps": [
                 // A script command keeps the replay from running a browser.
                 { "seq": 1, "ok": true, "command": { "action": "evaluate", "script": "1" }, "requests": [{
-                    "id": "s1r1", "write": true, "method": "POST", "url": url, "headers": {}, "body": "{}",
+                    "id": "s1r1", "method": "POST", "url": url, "headers": {}, "body": "{}",
                     "expect": { "status": 200, "mime": "application/json", "signature": super::super::flow::signature(&json!({ "ok": true })),
                         "bytes": 11, "itemFields": [], "extract": null, "strippedAuth": true } }] }
             ]

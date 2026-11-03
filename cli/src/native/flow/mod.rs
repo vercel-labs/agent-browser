@@ -806,9 +806,6 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     let mut flow: Flow = serde_json::from_value(flow_json)
         .map_err(|e| format!("the flow could not be built: {}", e))?;
     let writes = collect_writes(&input, &policy, &given, &har_ids);
-    for r in flow.steps.iter_mut().flat_map(|s| s.requests.iter_mut()) {
-        r.write = writes.iter().any(|w| w.id == r.id);
-    }
     flow.writes = writes;
 
     let requests_report: Vec<Value> = flow
@@ -1641,7 +1638,7 @@ pub fn prepare_all(
                     None => None,
                 },
                 expect: r.expect.clone(),
-                write: r.write,
+                write: flow.write(&r.id).is_some(),
             });
         }
     }
@@ -3138,7 +3135,7 @@ mod tests {
 
     #[test]
     fn a_run_gates_only_the_writes_its_output_needs() {
-        let request = |id: &str, url: &str, body: &str| json!({ "id": id, "method": "POST", "url": url, "body": body, "write": true });
+        let request = |id: &str, url: &str, body: &str| json!({ "id": id, "method": "POST", "url": url, "body": body });
         let writes = json!([
             { "id": "s1r1", "method": "POST", "url": "https://a.test/session", "kind": "explicit" },
             { "id": "s2r1", "method": "POST", "url": "https://a.test/cart", "kind": "explicit" },
@@ -4153,7 +4150,7 @@ mod tests {
             "output": "s1r1",
             "steps": [{ "command": {}, "requests": [{
                 "id": "s1r1", "method": if write { "POST" } else { "GET" },
-                "url": "https://a.test/x", "tier": tier, "write": write
+                "url": "https://a.test/x", "tier": tier
             }] }]
         }))
     }
@@ -4343,7 +4340,7 @@ mod tests {
             "output": "s2r1",
             "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
             "steps": [
-                { "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "write": true, "expect": ok_expect() }] },
+                { "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] },
                 { "command": {}, "requests": [{ "id": "s2r1", "method": "GET", "url": "https://a.test/items?c={{@s1r1.ok}}", "expect": ok_expect() }] }
             ]
         }));
@@ -4376,7 +4373,7 @@ mod tests {
             "writes": [{ "id": "s2r1", "method": "POST", "kind": "explicit" }],
             "steps": [
                 { "command": {}, "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/session", "tier": "replay", "expect": ok_expect() }] },
-                { "command": {}, "requests": [{ "id": "s2r1", "method": "POST", "url": "https://a.test/cart?c={{@s1r1.ok}}", "write": true, "expect": ok_expect() }] }
+                { "command": {}, "requests": [{ "id": "s2r1", "method": "POST", "url": "https://a.test/cart?c={{@s1r1.ok}}", "expect": ok_expect() }] }
             ]
         }));
         // The replay answers the session read and, having repeated every
@@ -4403,7 +4400,7 @@ mod tests {
         let (flow, requests) = run_flow(json!({
             "output": "s1r1",
             "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
-            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "write": true, "expect": ok_expect() }] }]
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] }]
         }));
         let mut senders = MemorySenders::default()
             .answer(Tier::Http, "s1r1", Scripted::unknown())
@@ -4651,5 +4648,26 @@ mod tests {
                 assert_withheld(&mut r, "482913");
             }
         }
+    }
+
+    #[test]
+    fn a_request_is_a_write_exactly_when_the_writes_list_says_so() {
+        let flow = flow_of(json!({
+            "output": "s1r2",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [{ "command": {}, "requests": [
+                { "id": "s1r1", "method": "POST", "url": "https://a.test/cart" },
+                { "id": "s1r2", "method": "GET", "url": "https://a.test/items" }
+            ] }]
+        }));
+        let prepared = prepare_all(&flow, &[]).unwrap();
+        assert_eq!(
+            prepared.iter().map(|r| r.write).collect::<Vec<_>>(),
+            vec![true, false]
+        );
+        // The file has no second flag to disagree with the list.
+        let mut with_flag = serde_json::to_value(&flow).unwrap();
+        with_flag["steps"][0]["requests"][0]["write"] = json!(false);
+        assert!(serde_json::from_value::<Flow>(with_flag).is_err());
     }
 }
