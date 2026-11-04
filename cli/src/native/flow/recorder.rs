@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use super::{build_flow, write_flow, SaveInput};
+use super::{build_flow, classify_header, write_flow, HeaderClass, SaveInput};
 use crate::native::actions::{HarEntry, FIND_ACTIONS};
 use crate::native::element::RefMap;
 
@@ -286,6 +286,7 @@ impl FlowRecorder {
         if !is_key {
             self.reset_keys();
         }
+        self.secrets.extend(redact_headers(&mut recorded));
         if let Some(secret) = redact_secret(&mut recorded, traits) {
             self.secrets.push(secret);
         } else if is_key {
@@ -627,6 +628,31 @@ fn typed_field(cmd: &Value) -> Option<&'static str> {
         _ => return None,
     };
     cmd[field].as_str().map(|_| field)
+}
+
+/// Headers a command sends, such as `navigate --headers`, are classified like
+/// a request's: a credential or cookie value is never stored. The step is
+/// marked redacted, and the values count as secrets.
+fn redact_headers(cmd: &mut Value) -> Vec<String> {
+    let mut found = Vec::new();
+    let Some(headers) = cmd.get_mut("headers").and_then(|h| h.as_object_mut()) else {
+        return found;
+    };
+    for (name, value) in headers.iter_mut() {
+        let lower = name.to_ascii_lowercase();
+        let secret = classify_header(&lower) == HeaderClass::Credential
+            || matches!(lower.as_str(), "cookie" | "set-cookie");
+        if secret {
+            if let Some(text) = value.as_str().filter(|t| !t.is_empty()) {
+                found.push(text.to_string());
+            }
+            *value = json!(REDACTED);
+        }
+    }
+    if !found.is_empty() || headers.values().any(|v| v == REDACTED) {
+        cmd["redacted"] = json!(true);
+    }
+    found
 }
 
 /// A value typed into a field that looks like a password or code is never

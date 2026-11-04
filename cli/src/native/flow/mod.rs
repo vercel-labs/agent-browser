@@ -2672,6 +2672,154 @@ mod tests {
     }
 
     #[test]
+    fn credential_headers_on_a_recorded_navigation_are_redacted_and_marked() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://a.test/", "headers": {
+                "Authorization": "Bearer abc123", "Cookie": "sid=s3cret", "X-CSRF-Token": "tok9",
+                "Accept-Language": "es" } }),
+            None,
+            None,
+        );
+        let cmd = &r.commands[0].1;
+        let text = cmd.to_string();
+        for secret in ["abc123", "s3cret", "tok9"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        assert_eq!(cmd["headers"]["Authorization"], REDACTED);
+        assert_eq!(cmd["headers"]["Accept-Language"], "es");
+        assert_eq!(cmd["redacted"], true);
+        // The values count as secrets, so a request that sends one is not saved.
+        assert!(r.secrets.contains(&"Bearer abc123".to_string()));
+        let flow = flow_of(
+            json!({ "startUrl": "https://a.test/", "steps": [{ "command": cmd.clone() }] }),
+        );
+        assert!(replay_commands(&flow, &[]).unwrap_err().contains("secret"));
+    }
+
+    fn navigating_flow(start: &str, steps: Value, params: Value) -> Flow {
+        flow_of(json!({ "startUrl": start, "params": params, "steps": steps }))
+    }
+
+    #[test]
+    fn a_replayed_url_gets_the_value_encoded_for_its_query() {
+        let flow = navigating_flow(
+            "https://a.test/",
+            json!([{ "command": { "action": "navigate", "url": "https://a.test/?q=kettle&x=1" } }]),
+            json!([{ "name": "q", "example": "kettle" }]),
+        );
+        let cmds = replay_commands(&flow, &[("q".to_string(), "a&b#c d".to_string())]).unwrap();
+        assert_eq!(cmds[0]["url"], "https://a.test/?q=a%26b%23c%20d&x=1");
+    }
+
+    #[test]
+    fn each_swap_reads_the_recorded_text_and_never_an_earlier_result() {
+        let flow = navigating_flow(
+            "https://a.test/",
+            json!([{ "command": { "action": "navigate", "url": "https://a.test/?from=Paris&to=London" } }]),
+            json!([{ "name": "from", "example": "Paris" }, { "name": "to", "example": "London" }]),
+        );
+        let given = [
+            ("from".to_string(), "London".to_string()),
+            ("to".to_string(), "Rome".to_string()),
+        ];
+        let cmds = replay_commands(&flow, &given).unwrap();
+        assert_eq!(cmds[0]["url"], "https://a.test/?from=London&to=Rome");
+    }
+
+    #[test]
+    fn a_param_only_in_the_start_url_of_a_flow_on_an_open_page_is_replayed() {
+        let flow = navigating_flow(
+            "https://a.test/search?q=kettle",
+            json!([{ "command": { "action": "click", "selector": "#go" } }]),
+            json!([{ "name": "q", "example": "kettle" }]),
+        );
+        let cmds = replay_commands(&flow, &[("q".to_string(), "toaster".to_string())]).unwrap();
+        assert_eq!(cmds[0]["action"], "navigate");
+        assert_eq!(cmds[0]["url"], "https://a.test/search?q=toaster");
+        assert_eq!(cmds[1]["action"], "click");
+    }
+
+    struct SilentBrowser;
+
+    #[async_trait::async_trait]
+    impl Browser for SilentBrowser {
+        async fn cookie_header(&mut self, _: &str) -> Option<String> {
+            None
+        }
+        async fn routed_response(&mut self, _: &str) -> Option<RoutedResponse> {
+            None
+        }
+        async fn tab_url(&mut self) -> Option<String> {
+            None
+        }
+        async fn eval(&mut self, _: &str) -> Result<Value, String> {
+            Err("no page".to_string())
+        }
+        async fn ensure_browser(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn begin_capture(&mut self) -> Result<usize, String> {
+            Ok(0)
+        }
+        async fn run(&mut self, _: &Value) -> Value {
+            json!({ "success": true })
+        }
+        async fn captured_since(&mut self, _: usize) -> Vec<HarEntry> {
+            Vec::new()
+        }
+        async fn end_capture(&mut self) {}
+        fn write_approved(&self, _: &Write) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_write_the_replay_may_have_sent_without_a_captured_answer_is_unknown() {
+        let flow = flow_of(json!({
+            "output": "s1r1",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [{ "command": { "action": "click", "selector": "#add" }, "requests": [
+                { "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "body": "{}",
+                  "expect": { "signature": signature(&json!({ "ok": true })) } }] }]
+        }));
+        let req = prepare_all(&flow, &[]).unwrap().remove(0);
+        let ledger = WriteLedger::default();
+        let ctx = SendCtx {
+            ledger: &ledger,
+            wanted: &[],
+        };
+        let mut run = None;
+        let mut browser = SilentBrowser;
+        let result = block_on(replay::send(&flow, &[], &mut browser, &mut run, &req, &ctx));
+        assert!(!result.ok);
+        assert_eq!(
+            result.stop,
+            Some(Stop::OutcomeUnknown),
+            "{:?}",
+            result.reason
+        );
+        // A read with no captured answer is still drift.
+        let read = PreparedRequest {
+            write: false,
+            method: "GET".to_string(),
+            ..req
+        };
+        let mut run = None;
+        let result = block_on(replay::send(
+            &flow,
+            &[],
+            &mut browser,
+            &mut run,
+            &read,
+            &ctx,
+        ));
+        assert_eq!(result.stop, None);
+        assert!(result.drift);
+    }
+
+    #[test]
     fn capture_accepts_only_flow() {
         assert!(parse_capture(&["flow".to_string()]).is_ok());
         let err = parse_capture(&["har".to_string()]).unwrap_err();

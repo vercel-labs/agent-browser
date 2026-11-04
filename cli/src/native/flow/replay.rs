@@ -7,26 +7,33 @@ use super::*;
 /// would answer with the recorded value instead.
 pub fn replay_commands(flow: &Flow, cmd_params: &[(String, String)]) -> Result<Vec<Value>, String> {
     let given = |name: &str| cmd_params.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+    // The params this run changes, as (name, recorded value): wherever the
+    // recorded value stands in a command it becomes the param's placeholder.
     let swaps: Vec<(String, String)> = flow
         .params
         .iter()
         .filter_map(|p| {
             let example = p.example.as_deref()?;
-            let value = given(&p.name)?.clone();
-            (!example.is_empty() && example != value).then(|| (example.to_string(), value))
+            let value = given(&p.name)?;
+            (!example.is_empty() && example != value.as_str())
+                .then(|| (p.name.clone(), example.to_string()))
         })
         .collect();
-    // Typed values are stored as `{{name}}` and take the run's value, or the
-    // recorded example when the run gives none.
-    let placeholders: Vec<(String, String)> = flow
+    // Every placeholder takes the run's value, or the recorded example when
+    // the run gives none.
+    let values: HashMap<String, String> = flow
         .params
         .iter()
         .filter_map(|p| {
             let value = given(&p.name).cloned().or_else(|| p.example.clone())?;
-            Some((format!("{{{{{}}}}}", p.name), value))
+            Some((p.name.clone(), value))
         })
         .collect();
-    let recorded = serde_json::to_string(
+    let opens_page = flow.steps.iter().any(|s| s.command["action"] == "navigate");
+    // A flow recorded on an already open page starts from that page, so its
+    // start URL is part of what the replay sends.
+    let start = (!opens_page).then(|| json!({ "action": "navigate", "url": flow.start_url }));
+    let mut recorded = serde_json::to_string(
         &flow
             .steps
             .iter()
@@ -34,6 +41,10 @@ pub fn replay_commands(flow: &Flow, cmd_params: &[(String, String)]) -> Result<V
             .collect::<Vec<_>>(),
     )
     .unwrap_or_default();
+    if start.is_some() {
+        recorded.push(' ');
+        recorded.push_str(&flow.start_url);
+    }
     for p in &flow.params {
         if given(&p.name).is_none()
             && p.example.is_none()
@@ -48,22 +59,13 @@ pub fn replay_commands(flow: &Flow, cmd_params: &[(String, String)]) -> Result<V
     let in_commands = |text: &str| {
         recorded.contains(text) || recorded.contains(urlencoding::encode(text).as_ref())
     };
-    if let Some((from, _)) = swaps.iter().find(|(from, _)| {
-        let named = flow.params.iter().any(|p| {
-            p.example.as_deref() == Some(from.as_str())
-                && recorded.contains(&format!("{{{{{}}}}}", p.name))
-        });
-        !named && !in_commands(from)
+    if let Some((name, example)) = swaps.iter().find(|(name, example)| {
+        let named = recorded.contains(&format!("{{{{{}}}}}", name));
+        !named && !in_commands(example)
     }) {
-        let name = flow
-            .params
-            .iter()
-            .find(|p| p.example.as_deref() == Some(from.as_str()))
-            .map(|p| p.name.as_str())
-            .unwrap_or("?");
         return Err(format!(
             "param '{}' is not in the recorded commands, so a replay would return the recorded value {}",
-            name, from
+            name, example
         ));
     }
     if flow.steps.iter().any(|s| s.command["redacted"] == true) {
@@ -72,30 +74,54 @@ pub fn replay_commands(flow: &Flow, cmd_params: &[(String, String)]) -> Result<V
                 .to_string(),
         );
     }
-    let opens_page = flow.steps.iter().any(|s| s.command["action"] == "navigate");
-    // A flow recorded on an already open page starts from that page.
-    let start = (!opens_page).then(|| json!({ "action": "navigate", "url": flow.start_url }));
     Ok(start
         .into_iter()
-        .chain(flow.steps.iter().filter(|s| s.ok).map(|s| {
-            let mut cmd = s.command.clone();
-            let _ = map_strings(&mut cmd, &|text| {
-                let mut text = text.to_string();
-                for (from, to) in &swaps {
-                    text = text.replace(from.as_str(), to);
-                    let (ef, et) = (urlencoding::encode(from), urlencoding::encode(to));
-                    if ef != *from {
-                        text = text.replace(ef.as_ref(), et.as_ref());
-                    }
-                }
-                for (ph, value) in &placeholders {
-                    text = text.replace(ph.as_str(), value);
-                }
-                Ok(text)
-            });
-            cmd
-        }))
+        .chain(
+            flow.steps
+                .iter()
+                .filter(|s| s.ok)
+                .map(|s| s.command.clone()),
+        )
+        .map(|cmd| render_command(&cmd, None, &swaps, &values))
         .collect())
+}
+
+/// One command with the run's values in place: every string is read once,
+/// the recorded values become placeholders, and each placeholder is filled
+/// with the value encoded for where it lands, a URL or plain text.
+fn render_command(
+    v: &Value,
+    key: Option<&str>,
+    swaps: &[(String, String)],
+    values: &HashMap<String, String>,
+) -> Value {
+    match v {
+        Value::String(text) => {
+            let slot = if key.is_some_and(|k| URL_KEYS.contains(&k)) {
+                Slot::Url
+            } else {
+                Slot::Raw
+            };
+            let templated = template::templatize(text, swaps, slot);
+            Value::String(template::bind_known(
+                &template::parse(&templated),
+                slot,
+                values,
+            ))
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|i| render_command(i, key, swaps, values))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, i)| (k.clone(), render_command(i, Some(k), swaps, values)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// Commands a replay may send. Anything that runs page script, or that the
@@ -309,6 +335,9 @@ pub fn replay_result(
                 Some(status as u16),
                 "the replayed request has no readable body".to_string(),
             )),
+            _ if req.write => Err(Failure::unknown_outcome(
+                "the replayed write got no response".to_string(),
+            )),
             _ => Err(Failure::new(
                 true,
                 None,
@@ -391,6 +420,12 @@ pub async fn send(
     }
     match replay_lookup(&captured.entries, req) {
         Ok(entry) => replay_result(req, started, Some(entry)),
+        // The replay ran the commands that send a write; no captured answer
+        // does not say the write was not sent.
+        Err(reason) if req.write => fail(Failure::unknown_outcome(format!(
+            "the replay may have sent the write, but no answer for it was captured: {}",
+            reason
+        ))),
         Err(reason) => fail(Failure::drift(reason)),
     }
 }

@@ -15800,6 +15800,30 @@ async fn e2e_flow_replay_runs_once_per_run() {
         before + 1,
         "an approved write is sent once per run: {sent}"
     );
+    // The items click follows the session click at once; it must send the
+    // user the session response set, never an empty one.
+    let log_start = fx.log.lock().unwrap().len();
+    for _ in 0..4 {
+        let again = exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+            ),
+            &mut state,
+        )
+        .await;
+        assert_eq!(again["data"]["ok"], true, "{again}");
+    }
+    let log = fx.log.lock().unwrap().clone();
+    let items: Vec<&String> = log[log_start..]
+        .iter()
+        .filter(|l| l.contains("GET /api/items"))
+        .collect();
+    assert!(!items.is_empty(), "{log:#?}");
+    assert!(
+        items.iter().all(|l| l.contains("GET /api/items?u=ana ")),
+        "an items request went out without the session value: {items:#?}"
+    );
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
 
