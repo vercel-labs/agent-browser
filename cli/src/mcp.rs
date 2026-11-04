@@ -1087,7 +1087,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DOWNLOAD,
             "Download file",
-            "Click an element and save the download.",
+            "Click an element and save the download. Only works with a browser agent-browser launched; rejected over --cdp, --auto-connect, or a provider.",
             json!({ "selector": selector_schema(), "path": { "type": "string" } }),
             &["selector", "path"],
         ),
@@ -1122,7 +1122,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_WAIT_FOR_DOWNLOAD,
             "Wait for download",
-            "Wait for a browser download.",
+            "Wait for a browser download. A path is rejected over --cdp, --auto-connect, or a provider.",
             json!({ "path": { "type": "string", "description": "Optional output path." }, "waitTimeoutMs": wait_timeout_schema() }),
             &[],
         ),
