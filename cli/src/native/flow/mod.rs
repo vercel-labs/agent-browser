@@ -1684,15 +1684,16 @@ pub fn prepare_all(
                 Some(b) => Some(map_body(b, &|t| fill(t, &params, false))?),
                 None => None,
             };
+            let url = fill(&r.url, &params, true)?;
             let write = flow.write(&r.id).is_some();
-            if !write && is_write(&r.method, body.as_deref()) {
+            if !write && becomes_write(&r.method, &url, body.as_deref()) {
                 return Err(not_listed_as_write(&r.id));
             }
             out.push(PreparedRequest {
                 id: r.id.clone(),
                 step: index + 1,
                 method: r.method.clone(),
-                url: fill(&r.url, &params, true)?,
+                url,
                 headers,
                 body,
                 expect: r.expect.clone(),
@@ -1711,11 +1712,16 @@ impl PreparedRequest {
         if let Some(b) = &self.body {
             out.body = Some(map_body(b, &|t| fill_references(t, bodies, false))?);
         }
-        if !out.write && is_write(&out.method, out.body.as_deref()) {
+        if !out.write && becomes_write(&out.method, &out.url, out.body.as_deref()) {
             return Err(not_listed_as_write(&out.id));
         }
         Ok(out)
     }
+}
+
+/// A request that is a write, or a GET whose path names a state change.
+fn becomes_write(method: &str, url: &str, body: Option<&str>) -> bool {
+    is_write(method, body) || (method == "GET" && has_mutating_segment(url))
 }
 
 fn not_listed_as_write(id: &str) -> String {
@@ -4213,6 +4219,27 @@ mod tests {
         .err()
         .unwrap();
         assert!(err.contains("s1r1") && err.contains("write"), "{err}");
+    }
+
+    #[test]
+    fn a_param_cannot_put_a_mutating_segment_in_a_read_url() {
+        let flow = flow_of(json!({
+            "params": [{ "name": "id", "example": "42" }],
+            "output": "s1r1", "writes": [],
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/items/{{id}}" }] }]
+        }));
+        assert!(prepare_all(&flow, &[]).is_ok());
+        let err = prepare_all(&flow, &[("id".to_string(), "delete".to_string())])
+            .err()
+            .unwrap();
+        assert!(err.contains("s1r1") && err.contains("write"), "{err}");
+        let req = PreparedRequest {
+            url: "https://a.test/items/{{@a.id}}".to_string(),
+            write: false,
+            ..prepared("s2r1")
+        };
+        let bodies = HashMap::from([("a".to_string(), json!({ "id": "remove" }))]);
+        assert!(req.resolve(&bodies).err().unwrap().contains("write"));
     }
 
     #[test]
