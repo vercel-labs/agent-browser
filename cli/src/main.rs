@@ -136,20 +136,29 @@ fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings:
 }
 
 /// The settings for one command of a batch. `--relaunch` asks for one relaunch
-/// per invocation, so only the first command that can launch a browser carries
-/// it. Returns the patch and whether the relaunch has now been sent.
+/// per invocation: every command that can launch a browser carries it until the
+/// daemon reports it applied (`relaunch_applied`).
 fn batch_item_settings(
     flags: &Flags,
     cmd: &serde_json::Value,
-    relaunch_sent: bool,
-) -> (session_settings::Patch, bool) {
+    relaunch_applied: bool,
+) -> session_settings::Patch {
     let mut patch = command_settings(flags, cmd);
-    if relaunch_sent || !native::actions::command_launches_browser(cmd) {
+    if relaunch_applied || !native::actions::command_launches_browser(cmd) {
         patch.clear_relaunch();
-        return (patch, relaunch_sent);
     }
-    let sent = patch.forces_relaunch();
-    (patch, sent)
+    patch
+}
+
+/// Whether the daemon applied a forced relaunch for this response. A command
+/// denied by policy or parked for confirmation never reaches the launch, so it
+/// reports none and the next command carries the relaunch.
+fn response_applied_relaunch(resp: &connection::Response) -> bool {
+    resp.data
+        .as_ref()
+        .and_then(|data| data.pointer("/lifecycle/settings/forcedRelaunch"))
+        .and_then(|forced| forced.as_bool())
+        .unwrap_or(false)
 }
 
 /// Checks a `--cdp` value and its headers. The value is either a port number
@@ -1941,7 +1950,7 @@ fn run_batch(
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut had_error = false;
-    let mut relaunch_sent = false;
+    let mut relaunch_applied = false;
 
     for (i, cmd_args) in commands.iter().enumerate() {
         if cmd_args.is_empty() {
@@ -1995,8 +2004,7 @@ fn run_batch(
             .map(|s| s.to_string());
         attach_plugins_to_command(&mut parsed, &flags.plugins);
         attach_restore_config_to_command(&mut parsed, flags);
-        let (settings, relaunch_sent_now) = batch_item_settings(flags, &parsed, relaunch_sent);
-        relaunch_sent = relaunch_sent_now;
+        let settings = batch_item_settings(flags, &parsed, relaunch_applied);
         if let Some(wire) = settings.to_wire() {
             parsed["settings"] = wire;
         }
@@ -2005,6 +2013,7 @@ fn run_batch(
 
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
+                relaunch_applied |= response_applied_relaunch(&resp);
                 if flags.json {
                     let mut result = batch_result_identity(i, cmd_args, omit_command);
                     result["success"] = json!(resp.success);
@@ -2304,10 +2313,9 @@ mod tests {
         let flags = crate::flags::parse_flags(&args);
         let cmd = serde_json::json!({ "action": "url" });
 
-        let (first, sent) = batch_item_settings(&flags, &cmd, false);
-        assert!(first.forces_relaunch() && sent);
-        let (second, sent) = batch_item_settings(&flags, &cmd, sent);
-        assert!(!second.forces_relaunch() && sent);
+        assert!(batch_item_settings(&flags, &cmd, false).forces_relaunch());
+        let second = batch_item_settings(&flags, &cmd, true);
+        assert!(!second.forces_relaunch());
         assert!(second.value(session_settings::Key::Profile).is_some());
     }
 
@@ -2324,12 +2332,34 @@ mod tests {
             serde_json::json!({ "action": "auth_login", "noNavigate": true }),
             serde_json::json!({ "action": "state_list" }),
         ] {
-            let (patch, sent) = batch_item_settings(&flags, &cmd, false);
-            assert!(!patch.forces_relaunch() && !sent, "{cmd}");
+            assert!(
+                !batch_item_settings(&flags, &cmd, false).forces_relaunch(),
+                "{cmd}"
+            );
         }
-        let (patch, sent) =
-            batch_item_settings(&flags, &serde_json::json!({ "action": "url" }), false);
-        assert!(patch.forces_relaunch() && sent);
+        let url = serde_json::json!({ "action": "url" });
+        assert!(batch_item_settings(&flags, &url, false).forces_relaunch());
+    }
+
+    #[test]
+    fn test_only_a_reported_relaunch_counts_as_applied() {
+        let response = |data: serde_json::Value| connection::Response {
+            success: true,
+            data: Some(data),
+            ..Default::default()
+        };
+        assert!(response_applied_relaunch(&response(serde_json::json!({
+            "lifecycle": { "settings": { "changes": [], "forcedRelaunch": true } }
+        }))));
+        // Parked for confirmation or denied: the launch never ran.
+        assert!(!response_applied_relaunch(&response(serde_json::json!({
+            "confirmation_required": true, "confirmation_id": "c1"
+        }))));
+        assert!(!response_applied_relaunch(&connection::Response {
+            success: false,
+            error: Some("Action denied by policy".to_string()),
+            ..Default::default()
+        }));
     }
 
     #[test]
