@@ -140,6 +140,9 @@ pub struct Expect {
     pub item_fields: Vec<String>,
     #[serde(default)]
     pub extract: Option<Value>,
+    /// Path of the list the response is about, when the body is not itself a list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<String>,
     /// The recording sent credential headers that a run cannot copy.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stripped_auth: bool,

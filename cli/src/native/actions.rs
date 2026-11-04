@@ -12201,7 +12201,9 @@ async fn handle_flow_run(
     );
     super::flow::write_flow(&flow)?;
     if response["ok"] != json!(true) {
-        return Err(super::flow::RunOutcome::failed(&results, &flow).message(name));
+        let outcome = super::flow::RunOutcome::failed(&results, &flow);
+        state.flow_stop = outcome.data(name);
+        return Err(outcome.message(name));
     }
     Ok(response)
 }
@@ -20053,6 +20055,46 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let error = resp["error"].as_str().unwrap();
         assert!(error.contains("use the page UI"), "{error}");
         assert!(!error.contains("Sign in again"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_moved_list_fails_the_run_as_drifted() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let body = r#"{"data":{"products":[{"title":"x"}]}}"#;
+        let port = serve_fixed(Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .into_boxed_str(),
+        ));
+        let url = format!("http://127.0.0.1:{}/api/catalog", port);
+        save_flow_json(json!({
+            "version": 1, "name": "catalog", "origin": "127.0.0.1",
+            "startUrl": format!("http://127.0.0.1:{}/", port), "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null, "writes": [],
+            "steps": [{ "seq": 1, "requests": [{
+                "id": "s1r1", "method": "GET", "url": url, "headers": {}, "body": null,
+                "expect": { "status": 200, "mime": "application/json",
+                    "signature": super::super::flow::signature(&json!({ "items": [{ "name": "x" }] })),
+                    "bytes": 11, "itemFields": [], "extract": null }
+            }] }]
+        }));
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let run = json!({ "id": "r", "action": "flow_run", "name": "catalog", "params": {} });
+        let resp = execute_command(&run, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(resp["code"], "drifted", "{resp}");
+        let error = resp["error"].as_str().unwrap();
+        assert!(
+            error.contains("'items'") && error.contains("data.products"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
