@@ -5643,6 +5643,10 @@ async fn apply_settings_patch(
     if was(Key::NoAutoDialog) {
         state.auto_dialog = !next.no_auto_dialog();
     }
+    if was(Key::ActionPolicy) || was(Key::ConfirmActions) || was(Key::AllowedDomains) {
+        // An approval asked for under the old rules no longer stands.
+        state.pending_confirmation = None;
+    }
     if was(Key::ActionPolicy) {
         state.policy = next
             .security()
@@ -13673,10 +13677,32 @@ async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &mut state.confirmed_policy_actions,
         approved_actions.into_iter().collect(),
     );
-    let result = Box::pin(execute_command(&pending.cmd, state)).await;
+    let replay = confirmation_replay_command(&pending.cmd);
+    let result = Box::pin(execute_command(&replay, state)).await;
     state.confirmed_policy_actions = previous_confirmed;
 
     Ok(json!({ "confirmed": true, "action": pending.action, "result": result }))
+}
+
+/// The parked command as `confirm` replays it: without its security settings,
+/// which already applied when it was parked, so the replay runs under the
+/// session's current containment and policy.
+fn confirmation_replay_command(cmd: &Value) -> Value {
+    let mut replay = cmd.clone();
+    if let Some(object) = replay.as_object_mut() {
+        object.remove("allowedDomains");
+        if let Ok(patch) = Patch::from_wire(object.get("settings")) {
+            match patch.without_security_settings().to_wire() {
+                Some(wire) => {
+                    object.insert("settings".to_string(), wire);
+                }
+                None => {
+                    object.remove("settings");
+                }
+            }
+        }
+    }
+    replay
 }
 
 async fn handle_deny(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -16681,6 +16707,77 @@ mod tests {
         assert!(content.contains("# Account"));
         assert!(content.contains("Signed in."));
         assert_eq!(server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_a_policy_change_drops_the_pending_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirm_read = dir.path().join("a.json");
+        let deny_read = dir.path().join("b.json");
+        fs::write(&confirm_read, r#"{"confirm":["read"]}"#).unwrap();
+        fs::write(&deny_read, r#"{"deny":["read"]}"#).unwrap();
+        let mut state = DaemonState::new();
+
+        let parked = execute_command(
+            &json!({
+                "id": "parked",
+                "action": "read",
+                "url": "http://127.0.0.1:9/",
+                "settings": { "action-policy": confirm_read.to_str().unwrap() }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(parked["data"]["confirmation_required"], true);
+        assert!(state.pending_confirmation.is_some());
+
+        // The operator switches to the stricter policy, riding on any command.
+        let switched = execute_command(
+            &json!({
+                "id": "switch",
+                "action": "state_list",
+                "settings": { "action-policy": deny_read.to_str().unwrap() }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(switched["success"], true);
+        assert!(state.pending_confirmation.is_none());
+
+        let confirmed =
+            execute_command(&json!({ "id": "confirm", "action": "confirm" }), &mut state).await;
+        assert_eq!(confirmed["success"], false);
+        assert!(state.policy.is_some());
+        assert_eq!(
+            state.settings.security().action_policy_path.as_deref(),
+            deny_read.to_str()
+        );
+    }
+
+    #[test]
+    fn test_a_confirmation_replay_drops_security_settings_only() {
+        let replay = confirmation_replay_command(&json!({
+            "action": "launch",
+            "allowedDomains": ["a.example"],
+            "settings": {
+                "action-policy": "/tmp/a.json",
+                "confirm-actions": "read",
+                "allowed-domains": ["a.example"],
+                "profile": "/tmp/p",
+                "relaunch": true
+            }
+        }));
+        assert!(replay.get("allowedDomains").is_none());
+        assert_eq!(
+            replay["settings"],
+            json!({ "profile": "/tmp/p", "relaunch": true })
+        );
+
+        let only_security = confirmation_replay_command(&json!({
+            "action": "read",
+            "settings": { "action-policy": "/tmp/a.json" }
+        }));
+        assert!(only_security.get("settings").is_none());
     }
 
     #[tokio::test]

@@ -91,6 +91,17 @@ impl Patch {
         live
     }
 
+    /// The patch without its security settings (allowed domains, action
+    /// policy, confirm actions): what a confirmation replay may apply, so it
+    /// cannot put back a policy that changed after the command was parked.
+    pub fn without_security_settings(&self) -> Patch {
+        let mut patch = self.clone();
+        patch
+            .entries
+            .retain(|key, _| spec(*key).persist != Persist::Secured);
+        patch
+    }
+
     /// Drops the forced relaunch, for a command that follows one that carried it.
     pub fn clear_relaunch(&mut self) {
         self.relaunch = false;
