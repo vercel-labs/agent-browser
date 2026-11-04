@@ -3749,6 +3749,10 @@ Pass the arguments as a JSON object, or - to read them from stdin. Every tool
 is available unless --tools limits the call. Exit code: 0 on success, 1 when
 the tool reports an error, 2 for an unknown tool or invalid arguments.
 
+For tool calls that run the CLI, structuredContent.response contains parsed
+CLI JSON. stdout is included only when the output cannot be parsed as JSON;
+exitCode and stderr are always included.
+
 Pass --config <trusted-path> to agent-browser mcp or agent-browser mcp call to
 select one trusted config file. MCP tool child processes load only that file,
 replacing default user/project discovery. Put required safety policy in it.
