@@ -2174,7 +2174,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
     }
 }
 
-/// Parse `flow <steps|save|run|list>`: save a task captured with `--capture flow`, replay it over HTTP.
+/// Parse `flow <steps|save|run|list>`: save a task captured with `--capture flow`, run it over HTTP.
 fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["steps", "save", "run", "list"];
     const USAGE: &str = "flow <steps [--json]|save <name> [--from <seq>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]|run <name> [--param k=v]... [--origin <host>] [--allow-write <all|id,...>]|list [--origin <host>]>";

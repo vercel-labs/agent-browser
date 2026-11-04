@@ -403,41 +403,17 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
             Some(out)
         }
         Some("flow_run") => {
-            let tiers: Vec<String> = data
+            let steps: Vec<String> = data
                 .get("steps")?
                 .as_array()?
                 .iter()
-                .map(|s| {
-                    let fell_back: Vec<String> = s["fellBack"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|f| {
-                            format!(
-                                "{}: {}",
-                                f["tier"].as_str().unwrap_or("-"),
-                                f["error"].as_str().unwrap_or("")
-                            )
-                        })
-                        .collect();
-                    let mut line = format!(
-                        "{} via {} in {}ms",
-                        s["id"].as_str().unwrap_or(""),
-                        s["tier"].as_str().unwrap_or("-"),
-                        s["ms"]
-                    );
-                    if !fell_back.is_empty() {
-                        line.push_str(&format!(" after {}", fell_back.join("; ")));
-                    }
-                    line
-                })
+                .map(|s| format!("{} in {}ms", s["id"].as_str().unwrap_or(""), s["ms"]))
                 .collect();
             let body = data.get("data").cloned().unwrap_or(serde_json::Value::Null);
             let status = match data.get("drift") {
                 Some(d) => format!(
-                    "unverified: {} on the {} tier",
-                    d["reason"].as_str().unwrap_or("response changed"),
-                    d["tier"].as_str().unwrap_or("-")
+                    "unverified: {}",
+                    d["reason"].as_str().unwrap_or("response changed")
                 ),
                 None if data.get("empty") == Some(&serde_json::Value::Bool(true)) => {
                     "no results, so the flow's verified state is unchanged".to_string()
@@ -448,7 +424,7 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
                 "Flow '{}' ran in {}ms ({}), {}\n{}",
                 data.get("name")?.as_str()?,
                 data.get("ms")?,
-                tiers.join(", "),
+                steps.join(", "),
                 status,
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             ))
@@ -4386,7 +4362,7 @@ Saved flows (experimental, open the session with --capture flow):
   flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed
   flow save <name>           Save the steps since the last open as a flow; accepts --from <seq>,
                              --to <seq>, --param k=v, --output <id>, and --description <text>
-  flow run <name>            Replay over HTTP; accepts --param k=v, --where f=v, --fields a,b, --limit n,
+  flow run <name>            Send over HTTP; accepts --param k=v, --where f=v, --fields a,b, --limit n,
                              --origin <host>, and --allow-write <all|id,...>
   flow list [--origin <host>] Saved flows with params and verified state
 

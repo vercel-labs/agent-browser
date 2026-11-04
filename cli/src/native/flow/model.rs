@@ -8,31 +8,6 @@ use serde_json::Value;
 /// The file format. Nothing older has shipped.
 pub const FLOW_VERSION: u32 = 1;
 
-/// A way of sending a request, in the order a run tries them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Tier {
-    Http,
-    Page,
-    Replay,
-}
-
-impl Tier {
-    pub const ALL: [Tier; 3] = [Tier::Http, Tier::Page, Tier::Replay];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Tier::Http => "http",
-            Tier::Page => "page",
-            Tier::Replay => "replay",
-        }
-    }
-}
-
-fn yes() -> bool {
-    true
-}
-
 fn typed_source() -> ParamSource {
     ParamSource::Typed
 }
@@ -133,11 +108,6 @@ pub struct Write {
 pub struct Step {
     #[serde(default)]
     pub seq: u64,
-    #[serde(default = "yes")]
-    pub ok: bool,
-    /// The recorded command, as the CLI sent it.
-    #[serde(default)]
-    pub command: Value,
     #[serde(default)]
     pub requests: Vec<Request>,
 }
@@ -152,9 +122,6 @@ pub struct Request {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub body: Option<String>,
-    /// The tier that worked last time; absent means start with HTTP.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tier: Option<Tier>,
     #[serde(default)]
     pub expect: Expect,
 }
@@ -175,9 +142,6 @@ pub struct Expect {
     pub item_fields: Vec<String>,
     #[serde(default)]
     pub extract: Option<Value>,
-    /// The recording sent credential headers that a run cannot copy.
-    #[serde(default)]
-    pub stripped_auth: bool,
 }
 
 impl Flow {

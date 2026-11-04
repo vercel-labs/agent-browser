@@ -22,7 +22,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -138,7 +138,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -248,7 +248,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -352,7 +352,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -467,7 +467,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -599,7 +599,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -709,7 +709,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -817,7 +817,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -939,7 +939,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -1058,7 +1058,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -1169,7 +1169,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -1290,7 +1290,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -1394,7 +1394,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -1498,7 +1498,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -1602,7 +1602,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -1717,7 +1717,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -1821,7 +1821,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -1931,7 +1931,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -2046,7 +2046,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -2153,7 +2153,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -2257,7 +2257,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -2361,7 +2361,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -2501,7 +2501,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -2622,7 +2622,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -2731,7 +2731,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -2835,7 +2835,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -2944,7 +2944,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -3061,7 +3061,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -3165,7 +3165,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -3272,7 +3272,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -3376,7 +3376,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -3483,7 +3483,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -3602,7 +3602,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -3715,7 +3715,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -3847,7 +3847,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -3972,7 +3972,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -4087,7 +4087,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -4206,7 +4206,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -4313,7 +4313,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -4424,7 +4424,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -4544,7 +4544,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -4686,7 +4686,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -4798,7 +4798,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -4932,7 +4932,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -5066,7 +5066,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -5170,7 +5170,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -5279,7 +5279,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -5384,7 +5384,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -5488,7 +5488,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -5598,7 +5598,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -5711,7 +5711,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -5820,7 +5820,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -5922,7 +5922,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -6031,7 +6031,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -6140,7 +6140,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -6249,7 +6249,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -6360,7 +6360,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -6464,7 +6464,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -6568,7 +6568,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -6677,7 +6677,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -6788,7 +6788,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -6897,7 +6897,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -7001,7 +7001,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -7109,7 +7109,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -7218,7 +7218,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -7327,7 +7327,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -7436,7 +7436,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -7546,7 +7546,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -7656,7 +7656,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -7767,7 +7767,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -7887,7 +7887,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -7991,7 +7991,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -8135,7 +8135,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -8239,7 +8239,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -8352,7 +8352,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -8464,7 +8464,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -8571,7 +8571,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -8681,7 +8681,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -8810,7 +8810,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -8924,7 +8924,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -9031,7 +9031,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -9151,7 +9151,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -9269,7 +9269,7 @@
             "type": "array"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -9394,7 +9394,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -9498,7 +9498,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -9619,7 +9619,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -9729,7 +9729,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -9840,7 +9840,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -9947,7 +9947,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -10054,7 +10054,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -10158,7 +10158,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -10268,7 +10268,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -10382,7 +10382,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -10489,7 +10489,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -10596,7 +10596,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -10706,7 +10706,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -10813,7 +10813,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -10949,7 +10949,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -11083,7 +11083,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -11218,7 +11218,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -11322,7 +11322,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -11427,7 +11427,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -11542,7 +11542,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -11692,7 +11692,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -11810,7 +11810,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -11919,7 +11919,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -12039,7 +12039,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -12143,7 +12143,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -12260,7 +12260,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -12364,7 +12364,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -12468,7 +12468,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -12582,7 +12582,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -12692,7 +12692,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -12806,7 +12806,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -12919,7 +12919,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -13038,7 +13038,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -13148,7 +13148,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -13268,7 +13268,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -13391,7 +13391,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -13495,7 +13495,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -13602,7 +13602,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -13740,7 +13740,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -13854,7 +13854,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -13961,7 +13961,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -14065,7 +14065,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -14175,7 +14175,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -14289,7 +14289,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -14399,7 +14399,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -14509,7 +14509,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -14623,7 +14623,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -14740,7 +14740,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -14862,7 +14862,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -14966,7 +14966,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -15073,7 +15073,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -15180,7 +15180,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -15296,7 +15296,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -15405,7 +15405,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -15510,7 +15510,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -15623,7 +15623,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -15735,7 +15735,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -15846,7 +15846,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -15950,7 +15950,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -16054,7 +16054,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -16161,7 +16161,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -16287,7 +16287,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -16398,7 +16398,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -16502,7 +16502,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -16622,7 +16622,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -16732,7 +16732,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -16845,7 +16845,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -16958,7 +16958,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -17078,7 +17078,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -17204,7 +17204,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -17319,7 +17319,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -17433,7 +17433,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -17544,7 +17544,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -17654,7 +17654,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -17777,7 +17777,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -17887,7 +17887,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
@@ -18001,7 +18001,7 @@
             "type": "string"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it.",
             "items": {
               "enum": [
                 "flow"
