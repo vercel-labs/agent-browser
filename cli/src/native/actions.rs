@@ -2713,31 +2713,25 @@ fn policy_actions_for_command(
     }
     if action == "launch" {
         let plugins = plugins_from_command_or_env(cmd);
-        let resolved = resolve_launch_target(cmd, attached);
-        let mut launch = resolved.unwrap_or_else(|| cmd.clone());
-        // A launch that names no connection target connects as the session's
-        // settings say, so its policy actions follow them.
-        if AttachedTarget::named_by(&launch).is_none() {
-            if let Some(obj) = launch.as_object_mut() {
-                match settings.connection() {
-                    Connection::Provider(provider)
-                        if !matches!(provider.to_lowercase().as_str(), "" | "ios" | "safari") =>
-                    {
-                        obj.insert("provider".to_string(), json!(provider.to_lowercase()));
-                    }
-                    Connection::Cdp(cdp) => {
-                        obj.insert("cdpUrl".to_string(), json!(cdp));
-                    }
-                    Connection::AutoConnect => {
-                        obj.insert("autoConnect".to_string(), json!(true));
-                    }
-                    _ => {}
+        // A target the envelope names wins, then the external target the
+        // settings name, then the browser the session is attached to.
+        let mut launch = cmd.clone();
+        if AttachedTarget::named_by(cmd).is_none() {
+            if let Some((field, value)) = settings_launch_target(settings) {
+                if let Some(obj) = launch.as_object_mut() {
+                    obj.insert(field.to_string(), value);
                 }
+            } else if let Some(resolved) = resolve_launch_target(cmd, attached) {
+                launch = resolved;
             }
         }
         append_launch_policy_actions(&mut actions, &launch, &plugins);
     } else if !skip_launch_action(action) && needs_implicit_launch {
         let plugins = plugins_from_command_or_env(cmd);
+        if let Some((field, value)) = settings_launch_target(settings) {
+            append_launch_policy_actions(&mut actions, &json!({ field: value }), &plugins);
+            return actions;
+        }
         if let Some(launch) = resolve_launch_target(&json!({ "action": "launch" }), attached) {
             append_launch_policy_actions(&mut actions, &launch, &plugins);
             return actions;
@@ -2753,6 +2747,21 @@ fn policy_actions_for_command(
         }
     }
     actions
+}
+
+/// The external browser the session's settings connect to, as the launch field
+/// that names it. Local sessions and the WebDriver providers name none.
+fn settings_launch_target(settings: &Running) -> Option<(&'static str, Value)> {
+    match settings.connection() {
+        Connection::Provider(provider)
+            if !matches!(provider.to_lowercase().as_str(), "" | "ios" | "safari") =>
+        {
+            Some(("provider", json!(provider.to_lowercase())))
+        }
+        Connection::Cdp(cdp) => Some(("cdpUrl", json!(cdp))),
+        Connection::AutoConnect => Some(("autoConnect", json!(true))),
+        _ => None,
+    }
 }
 
 fn append_launch_policy_actions(
@@ -20279,5 +20288,76 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             crate::connection::running_daemon_default_timeout("timeout-sync"),
             Some(5000)
         );
+    }
+    #[test]
+    fn test_policy_follows_a_provider_switched_through_settings() {
+        let (_env, _) = isolated_state();
+        let attached = AttachedTarget::CdpPort(9222);
+        let mut settings = Running::defaults();
+        settings.set(Key::Provider, json!("browserbox"));
+        let navigate = json!({ "action": "navigate", "url": "https://example.com", "plugins": provider_plugins() });
+        let launch = json!({ "action": "launch", "plugins": provider_plugins() });
+
+        for (cmd, action, implicit) in [(&navigate, "navigate", true), (&launch, "launch", false)] {
+            let actions =
+                policy_actions_for_command(cmd, action, implicit, Some(&attached), &settings);
+            assert!(
+                actions.contains(&"plugin:browserbox:browser.provider".to_string()),
+                "{action}: {actions:?}"
+            );
+        }
+        // Without a settings target the attachment still decides.
+        let attached = AttachedTarget::Provider("browserbox".to_string());
+        let actions = policy_actions_for_command(
+            &navigate,
+            "navigate",
+            true,
+            Some(&attached),
+            &Running::defaults(),
+        );
+        assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_switching_an_attached_session_to_a_provider_is_gated_by_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        for (rule, expect_confirmation) in [("deny", false), ("confirm", true)] {
+            let policy = dir.path().join(format!("{rule}.json"));
+            fs::write(
+                &policy,
+                format!(r#"{{"{rule}": ["plugin:browserbox:browser.provider"]}}"#),
+            )
+            .unwrap();
+            let (_env, mut state) = isolated_state();
+            state.settings = Running::defaults();
+            state.settings.set(Key::Cdp, json!("9222"));
+            state.attached_target = Some(AttachedTarget::CdpPort(9222));
+            let cmd = json!({
+                "id": "1",
+                "action": "navigate",
+                "url": "about:blank",
+                "plugins": provider_plugins(),
+                "settings": {
+                    "provider": "browserbox",
+                    "action-policy": policy.to_str().unwrap()
+                }
+            });
+
+            let resp = execute_command(&cmd, &mut state).await;
+
+            if expect_confirmation {
+                assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
+                assert_eq!(resp["data"]["action"], "plugin:browserbox:browser.provider");
+            } else {
+                assert!(
+                    resp["error"].as_str().unwrap().contains("denied by policy"),
+                    "{resp}"
+                );
+            }
+            assert!(state.browser.is_none(), "the provider must not run: {resp}");
+            assert_eq!(state.settings.get(Key::Provider), None, "{resp}");
+            assert_eq!(state.settings.get(Key::Cdp), Some(&json!("9222")));
+            assert_eq!(state.attached_target, Some(AttachedTarget::CdpPort(9222)));
+        }
     }
 }
