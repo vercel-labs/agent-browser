@@ -552,7 +552,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             .filter(|(_, v)| v.chars().count() >= 3)
             .cloned(),
     );
-    let given = with_page_query_params(&start, &policy, &explicit_and_typed, input.entries);
+    let mut given = with_page_query_params(&start, &policy, &explicit_and_typed, input.entries);
 
     let mut steps: Vec<Step> = Vec::new();
     let mut gaps = Vec::new();
@@ -564,6 +564,9 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     // The id each request had in the capture (`s<seq>r<n>`), which `flow
     // steps` numbering gives, next to its id in the saved range.
     let mut capture_ids: Vec<(String, String)> = Vec::new();
+    // Recorded Referer values, to restore if a page-query param turns out to
+    // be carried by the Referer alone.
+    let mut referers: Vec<(String, String, String)> = Vec::new();
 
     for (index, (seq, cmd)) in commands.iter().enumerate() {
         let tagged: Vec<&HarEntry> = input
@@ -613,6 +616,13 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                         dropped_headers.push(lower);
                     }
                     continue;
+                }
+                if lower == "referer" {
+                    referers.push((
+                        format!("s{}r{}", index + 1, requests.len() + 1),
+                        k.clone(),
+                        v.clone(),
+                    ));
                 }
                 headers.insert(k.clone(), template::templatize(v, &given, Slot::Raw));
             }
@@ -685,6 +695,36 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             "no first-party JSON requests were recorded for {}; this flow has nothing to send over HTTP",
             base
         ));
+    }
+    // A page-query value that only a Referer carries is the page's address,
+    // not an input of the requests: keep the recorded Referer.
+    let unused: Vec<String> = given
+        .iter()
+        .filter(|(k, _)| {
+            !input.params.iter().any(|(n, _)| n == k) && !typed.iter().any(|(n, _)| n == k)
+        })
+        .map(|(k, _)| k.clone())
+        .filter(|k| {
+            let placeholder = format!("{{{{{}}}}}", k);
+            let used = steps.iter().flat_map(|s| s.requests.iter()).any(|r| {
+                r.url.contains(&placeholder)
+                    || r.body.as_deref().is_some_and(|b| b.contains(&placeholder))
+                    || r.headers.iter().any(|(h, v)| {
+                        !h.eq_ignore_ascii_case("referer") && v.contains(&placeholder)
+                    })
+            });
+            !used
+        })
+        .collect();
+    if !unused.is_empty() {
+        for req in steps.iter_mut().flat_map(|s| s.requests.iter_mut()) {
+            for (id, key, original) in &referers {
+                if *id == req.id {
+                    req.headers.insert(key.clone(), original.clone());
+                }
+            }
+        }
+        given.retain(|(k, _)| !unused.contains(k));
     }
     let page_segments: Vec<String> = url::Url::parse(&start)
         .ok()
@@ -2354,6 +2394,44 @@ mod tests {
                 .unwrap()
                 .contains(&json!(name.to_ascii_lowercase())));
         }
+    }
+
+    #[test]
+    fn a_page_query_value_only_the_referer_carries_is_not_a_param() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/env?create=true" }),
+            None,
+            None,
+        );
+        r.tag_now("api");
+        // The page document is outside the saved requests.
+        let doc = entry(
+            "doc",
+            "https://app.example/env?create=true",
+            "Document",
+            "text/html",
+            r#"<script id="d" type="application/json">{"a":1}</script>"#,
+        );
+        let mut api = entry(
+            "api",
+            "https://app.example/api/env",
+            "Fetch",
+            "application/json",
+            r#"{"envs":[]}"#,
+        );
+        api.request_headers.push((
+            "Referer".to_string(),
+            "https://app.example/env?create=true".to_string(),
+        ));
+        let (flow, report) = flow_of_entries(&r, &[doc, api], None).unwrap();
+        assert_eq!(report["params"], json!([]));
+        assert_eq!(
+            flow["steps"][0]["requests"][0]["headers"]["Referer"],
+            "https://app.example/env?create=true"
+        );
     }
 
     #[test]
