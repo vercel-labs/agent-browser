@@ -4502,7 +4502,6 @@ async fn auto_launch_inner(
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
     let restore_key = state.session_name.clone();
-    let storage_state = storage_state_path.as_deref();
 
     // Store proxy credentials for Fetch.authRequired handling
     // Only a browser agent-browser launches itself gets them: an external
