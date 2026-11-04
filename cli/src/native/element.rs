@@ -710,24 +710,10 @@ pub async fn resolve_element_object_id(
 
         // Try cached backend_node_id first (fast path)
         if let Some(backend_node_id) = entry.backend_node_id {
-            let result: Result<DomResolveNodeResult, String> = client
-                .send_command_typed(
-                    "DOM.resolveNode",
-                    &DomResolveNodeParams {
-                        backend_node_id: Some(backend_node_id),
-                        node_id: None,
-                        object_group: Some("agent-browser".to_string()),
-                    },
-                    Some(effective_session_id),
-                )
-                .await;
-
-            if let Ok(r) = result {
-                if let Some(object_id) = r.object.object_id {
-                    if !is_detached(client, effective_session_id, &object_id).await {
-                        return Ok((object_id, effective_session_id.to_string()));
-                    }
-                }
+            if let Some(object_id) =
+                resolve_attached_backend_node(client, effective_session_id, backend_node_id).await
+            {
+                return Ok((object_id, effective_session_id.to_string()));
             }
             if !entry.allow_role_fallback {
                 return Err(format!("Element ref {ref_id} is stale"));
@@ -809,6 +795,95 @@ pub async fn resolve_element_object_id(
         .object_id
         .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
     Ok((object_id, session_id.to_string()))
+}
+
+/// Resolve a snapshot ref for `wait <ref> --state <state>`.
+///
+/// - When `allow_fallback` is `false` (`detached` / `hidden`), only the original
+///   `backend_node_id` captured in the snapshot is checked. Once that concrete
+///   DOM node leaves the document, `Ok(None)` is returned immediately without
+///   consulting the accessibility tree (preventing ghost re-binding to another
+///   element with the same role/name or spurious `nth` ambiguity errors).
+/// - When `allow_fallback` is `true` (`attached` / `visible`), a stale
+///   `backend_node_id` falls back to unique role/name recovery; if the element
+///   is currently absent from the AX tree, `Ok(None)` is returned so polling can
+///   continue, whereas unrecoverable ambiguity or an exact-node ref (`allow_role_fallback == false`)
+///   returns `Err(...)` to fail fast.
+pub(super) async fn resolve_ref_for_wait(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    ref_id: &str,
+    iframe_sessions: &HashMap<String, String>,
+    allow_fallback: bool,
+) -> Result<Option<(String, String)>, String> {
+    let entry = ref_map
+        .get(ref_id)
+        .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+
+    let effective_session_id =
+        resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
+
+    if let Some(backend_node_id) = entry.backend_node_id {
+        if let Some(object_id) =
+            resolve_attached_backend_node(client, effective_session_id, backend_node_id).await
+        {
+            return Ok(Some((object_id, effective_session_id.to_string())));
+        }
+        if !allow_fallback {
+            return Ok(None);
+        }
+        if !entry.allow_role_fallback {
+            return Err(format!("Element ref {ref_id} is stale"));
+        }
+    } else if !allow_fallback {
+        return Ok(None);
+    }
+
+    match find_node_id_by_role_name(
+        client,
+        session_id,
+        &entry.role,
+        &entry.name,
+        entry.nth,
+        entry.frame_id.as_deref(),
+        iframe_sessions,
+    )
+    .await
+    {
+        Ok(fresh_id) => Ok(
+            resolve_attached_backend_node(client, effective_session_id, fresh_id)
+                .await
+                .map(|object_id| (object_id, effective_session_id.to_string())),
+        ),
+        Err(e) if e.starts_with("Could not locate element ") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+async fn resolve_attached_backend_node(
+    client: &CdpClient,
+    session_id: &str,
+    backend_node_id: i64,
+) -> Option<String> {
+    let result: DomResolveNodeResult = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(backend_node_id),
+                node_id: None,
+                object_group: Some("agent-browser".to_string()),
+            },
+            Some(session_id),
+        )
+        .await
+        .ok()?;
+    let object_id = result.object.object_id?;
+    if is_detached(client, session_id, &object_id).await {
+        None
+    } else {
+        Some(object_id)
+    }
 }
 
 /// Reports whether a resolved node has been removed from its document, releasing it if so.
@@ -958,13 +1033,13 @@ pub(super) fn extract_ax_string(value: &Option<AXValue>) -> String {
 }
 
 /// Build a JS expression that finds a DOM element by CSS selector or XPath.
-fn build_find_element_js(selector: &str) -> String {
+pub(super) fn build_find_element_js(selector: &str) -> String {
     build_find_element_js_in("document", selector)
 }
 
 /// Same as build_find_element_js but rooted at an arbitrary Document
 /// expression (e.g. an iframe's contentDocument).
-fn build_find_element_js_in(root: &str, selector: &str) -> String {
+pub(super) fn build_find_element_js_in(root: &str, selector: &str) -> String {
     if let Some(xpath) = selector.strip_prefix("xpath=") {
         format!(
             "{root}.evaluate({xpath}, {root}, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue",

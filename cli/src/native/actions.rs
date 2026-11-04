@@ -7076,6 +7076,19 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             .get("state")
             .and_then(|v| v.as_str())
             .unwrap_or("visible");
+        if super::element::parse_ref(selector).is_some() {
+            wait_for_ref(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                &state.iframe_sessions,
+                state_str,
+                timeout_ms,
+            )
+            .await?;
+            return Ok(json!({ "waited": "selector", "selector": selector }));
+        }
         // Honor an active `frame <sel>` selection, like element resolution does.
         match state.active_frame_id.as_deref() {
             Some(frame_id) => match state.iframe_sessions.get(frame_id) {
@@ -7311,6 +7324,182 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 // Wait helpers
 // ---------------------------------------------------------------------------
 
+const INVALID_SELECTOR_PREFIX: &str = "__agent_browser_invalid_selector__:";
+
+fn build_selector_wait_check_js(root: &str, selector: &str, state: &str) -> String {
+    let find_expr = super::element::build_find_element_js_in(root, selector);
+    let body = match state {
+        "attached" => "return !!el;",
+        "detached" => "return !el;",
+        "hidden" => {
+            r#"if (!el) return true;
+                const r = el.getBoundingClientRect();
+                const s = (el.ownerDocument && el.ownerDocument.defaultView ? el.ownerDocument.defaultView : window).getComputedStyle(el);
+                return r.width <= 0 || r.height <= 0 || s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;"#
+        }
+        _ => {
+            r#"if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const s = (el.ownerDocument && el.ownerDocument.defaultView ? el.ownerDocument.defaultView : window).getComputedStyle(el);
+                return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && parseFloat(s.opacity) > 0;"#
+        }
+    };
+    format!(
+        r#"(() => {{
+            let el;
+            try {{
+                el = {find_expr};
+            }} catch (e) {{
+                return {prefix} + (e && e.message ? e.message : String(e));
+            }}
+            {body}
+        }})()"#,
+        prefix = serde_json::to_string(INVALID_SELECTOR_PREFIX).unwrap_or_default(),
+    )
+}
+
+async fn wait_for_ref(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    ref_map: &super::element::RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &std::collections::HashMap<String, String>,
+    state: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let ref_id = super::element::parse_ref(selector_or_ref)
+        .ok_or_else(|| format!("Invalid element ref: {}", selector_or_ref))?;
+    if ref_map.get(&ref_id).is_none() {
+        return Err(format!("Unknown ref: {}", ref_id));
+    }
+
+    let allow_fallback = !matches!(state, "detached" | "hidden");
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+    loop {
+        let resolved = super::element::resolve_ref_for_wait(
+            client,
+            session_id,
+            ref_map,
+            &ref_id,
+            iframe_sessions,
+            allow_fallback,
+        )
+        .await?;
+
+        let satisfied = match (state, resolved) {
+            ("attached", Some((object_id, effective_session_id))) => {
+                let _ = client
+                    .send_command(
+                        "Runtime.releaseObject",
+                        Some(json!({ "objectId": object_id })),
+                        Some(&effective_session_id),
+                    )
+                    .await;
+                true
+            }
+            ("attached", None) => false,
+            ("detached", Some((object_id, effective_session_id))) => {
+                let _ = client
+                    .send_command(
+                        "Runtime.releaseObject",
+                        Some(json!({ "objectId": object_id })),
+                        Some(&effective_session_id),
+                    )
+                    .await;
+                false
+            }
+            ("detached", None) => true,
+            ("hidden", Some((object_id, effective_session_id))) => {
+                let result: Result<super::cdp::types::EvaluateResult, String> = client
+                    .send_command_typed(
+                        "Runtime.callFunctionOn",
+                        &super::cdp::types::CallFunctionOnParams {
+                            function_declaration: r#"function() {
+                                if (!this.isConnected) return true;
+                                const rect = this.getBoundingClientRect();
+                                const view = this.ownerDocument && this.ownerDocument.defaultView ? this.ownerDocument.defaultView : window;
+                                const style = view.getComputedStyle(this);
+                                return rect.width <= 0 || rect.height <= 0 ||
+                                       style.visibility === 'hidden' ||
+                                       style.display === 'none' ||
+                                       parseFloat(style.opacity) === 0;
+                            }"#
+                            .to_string(),
+                            object_id: Some(object_id.clone()),
+                            arguments: None,
+                            return_by_value: Some(true),
+                            await_promise: Some(false),
+                        },
+                        Some(&effective_session_id),
+                    )
+                    .await;
+                let _ = client
+                    .send_command(
+                        "Runtime.releaseObject",
+                        Some(json!({ "objectId": object_id })),
+                        Some(&effective_session_id),
+                    )
+                    .await;
+                result
+                    .ok()
+                    .and_then(|r| r.result.value)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true)
+            }
+            ("hidden", None) => true,
+            (_, Some((object_id, effective_session_id))) => {
+                let result: Result<super::cdp::types::EvaluateResult, String> = client
+                    .send_command_typed(
+                        "Runtime.callFunctionOn",
+                        &super::cdp::types::CallFunctionOnParams {
+                            function_declaration: r#"function() {
+                                if (!this.isConnected) return false;
+                                const rect = this.getBoundingClientRect();
+                                const view = this.ownerDocument && this.ownerDocument.defaultView ? this.ownerDocument.defaultView : window;
+                                const style = view.getComputedStyle(this);
+                                return rect.width > 0 && rect.height > 0 &&
+                                       style.visibility !== 'hidden' &&
+                                       style.display !== 'none' &&
+                                       parseFloat(style.opacity) > 0;
+                            }"#
+                            .to_string(),
+                            object_id: Some(object_id.clone()),
+                            arguments: None,
+                            return_by_value: Some(true),
+                            await_promise: Some(false),
+                        },
+                        Some(&effective_session_id),
+                    )
+                    .await;
+                let _ = client
+                    .send_command(
+                        "Runtime.releaseObject",
+                        Some(json!({ "objectId": object_id })),
+                        Some(&effective_session_id),
+                    )
+                    .await;
+                result
+                    .ok()
+                    .and_then(|r| r.result.value)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            }
+            (_, None) => false,
+        };
+
+        if satisfied {
+            return Ok(());
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("Wait timed out after {}ms", timeout_ms));
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+}
+
 async fn wait_for_selector(
     client: &super::cdp::client::CdpClient,
     session_id: &str,
@@ -7318,37 +7507,9 @@ async fn wait_for_selector(
     state: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let check_fn = match state {
-        "attached" => format!(
-            "!!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
-        "detached" => format!(
-            "!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
-        "hidden" => format!(
-            r#"(() => {{
-                const el = document.querySelector({sel});
-                if (!el) return true;
-                const s = window.getComputedStyle(el);
-                return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
-            }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
-        ),
-        _ => format!(
-            r#"(() => {{
-                const el = document.querySelector({sel});
-                if (!el) return false;
-                const r = el.getBoundingClientRect();
-                const s = window.getComputedStyle(el);
-                return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-            }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
-        ),
-    };
+    let check_fn = build_selector_wait_check_js("document", selector, state);
 
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+    poll_until_true_with_selector(client, session_id, &check_fn, Some(selector), timeout_ms).await
 }
 
 async fn wait_for_url(mgr: &BrowserManager, pattern: &str, timeout_ms: u64) -> Result<(), String> {
@@ -7404,28 +7565,7 @@ async fn wait_for_selector_in_frame(
 ) -> Result<(), String> {
     let owner_object_id =
         super::element::frame_owner_object_id(client, session_id, frame_id).await?;
-    let sel = serde_json::to_string(selector).unwrap_or_default();
-    let check = match state {
-        "attached" => format!("!!doc.querySelector({sel})"),
-        "detached" => format!("!doc.querySelector({sel})"),
-        "hidden" => format!(
-            r#"(() => {{
-                const el = doc.querySelector({sel});
-                if (!el) return true;
-                const s = doc.defaultView.getComputedStyle(el);
-                return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
-            }})()"#,
-        ),
-        _ => format!(
-            r#"(() => {{
-                const el = doc.querySelector({sel});
-                if (!el) return false;
-                const r = el.getBoundingClientRect();
-                const s = doc.defaultView.getComputedStyle(el);
-                return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-            }})()"#,
-        ),
-    };
+    let check = build_selector_wait_check_js("doc", selector, state);
     let function = format!(
         "function() {{ const doc = this.contentDocument; if (!doc) return false; return {check}; }}",
     );
@@ -7441,16 +7581,53 @@ async fn wait_for_selector_in_frame(
                 })),
                 Some(session_id),
             )
-            .await?;
-        let satisfied = result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                let _ = client
+                    .send_command(
+                        "Runtime.releaseObject",
+                        Some(json!({ "objectId": owner_object_id })),
+                        Some(session_id),
+                    )
+                    .await;
+                return Err(err);
+            }
+        };
+        let value = result.get("result").and_then(|r| r.get("value"));
+        if let Some(err) = value
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.strip_prefix(INVALID_SELECTOR_PREFIX))
+        {
+            let _ = client
+                .send_command(
+                    "Runtime.releaseObject",
+                    Some(json!({ "objectId": owner_object_id })),
+                    Some(session_id),
+                )
+                .await;
+            return Err(format!("Invalid selector '{}': {}", selector, err));
+        }
+        let satisfied = value.and_then(|v| v.as_bool()).unwrap_or(false);
         if satisfied {
+            let _ = client
+                .send_command(
+                    "Runtime.releaseObject",
+                    Some(json!({ "objectId": owner_object_id })),
+                    Some(session_id),
+                )
+                .await;
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
+            let _ = client
+                .send_command(
+                    "Runtime.releaseObject",
+                    Some(json!({ "objectId": owner_object_id })),
+                    Some(session_id),
+                )
+                .await;
             return Err(format!("Wait timed out after {}ms", timeout_ms));
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -7461,6 +7638,16 @@ async fn poll_until_true(
     client: &super::cdp::client::CdpClient,
     session_id: &str,
     expression: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    poll_until_true_with_selector(client, session_id, expression, None, timeout_ms).await
+}
+
+async fn poll_until_true_with_selector(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    expression: &str,
+    selector: Option<&str>,
     timeout_ms: u64,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
@@ -7477,6 +7664,19 @@ async fn poll_until_true(
                 Some(session_id),
             )
             .await?;
+
+        if let Some(err) = result
+            .result
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.strip_prefix(INVALID_SELECTOR_PREFIX))
+        {
+            return match selector {
+                Some(sel) => Err(format!("Invalid selector '{}': {}", sel, err)),
+                None => Err(format!("Invalid selector: {}", err)),
+            };
+        }
 
         if result
             .result
@@ -20095,5 +20295,294 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+
+    #[test]
+    fn test_build_selector_wait_check_js_supports_css_and_xpath_and_catches_syntax_errors() {
+        let css_js = super::build_selector_wait_check_js("document", "#submit", "visible");
+        assert!(css_js.contains("document.querySelector(\"#submit\")"));
+        assert!(css_js.contains(super::INVALID_SELECTOR_PREFIX));
+
+        let xpath_js =
+            super::build_selector_wait_check_js("doc", "xpath=//button[@id='ok']", "attached");
+        assert!(xpath_js.contains("doc.evaluate(\"//button[@id='ok']\""));
+        assert!(!xpath_js.contains("doc.querySelector"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_ref_rejects_unknown_ref_immediately() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{addr}");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let ref_map = super::super::element::RefMap::new();
+        let iframe_sessions = std::collections::HashMap::new();
+
+        let started = tokio::time::Instant::now();
+        let err = super::wait_for_ref(
+            &client,
+            "session-1",
+            &ref_map,
+            "@e99",
+            &iframe_sessions,
+            "visible",
+            25_000,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "Unknown ref: e99");
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        client.close().await;
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_ref_polls_visibility_and_releases_resolved_object() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{addr}");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut visibility_checks = 0usize;
+            let mut released = Vec::new();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                let id = req["id"].as_u64().unwrap();
+                let method = req["method"].as_str().unwrap();
+                let result = match method {
+                    "DOM.resolveNode" => {
+                        json!({ "object": { "type": "object", "objectId": "obj-e1" } })
+                    }
+                    "Runtime.callFunctionOn" => {
+                        let decl = req["params"]["functionDeclaration"].as_str().unwrap_or("");
+                        if decl.contains("this.isConnected")
+                            && !decl.contains("getBoundingClientRect")
+                        {
+                            json!({ "result": { "type": "boolean", "value": true } })
+                        } else {
+                            visibility_checks += 1;
+                            json!({ "result": { "type": "boolean", "value": visibility_checks >= 2 } })
+                        }
+                    }
+                    "Runtime.releaseObject" => {
+                        released.push(req["params"]["objectId"].as_str().unwrap().to_string());
+                        json!({})
+                    }
+                    other => panic!("unexpected CDP method: {other}"),
+                };
+                ws.send(Message::Text(
+                    json!({ "id": id, "result": result }).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+            (visibility_checks, released)
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut ref_map = super::super::element::RefMap::new();
+        ref_map.add("e1".to_string(), Some(42), "button", "Submit", None);
+        let iframe_sessions = std::collections::HashMap::new();
+
+        super::wait_for_ref(
+            &client,
+            "session-1",
+            &ref_map,
+            "@e1",
+            &iframe_sessions,
+            "visible",
+            5_000,
+        )
+        .await
+        .unwrap();
+
+        client.close().await;
+        let (visibility_checks, released) = server.await.unwrap();
+        assert_eq!(visibility_checks, 2);
+        assert_eq!(released, vec!["obj-e1".to_string(), "obj-e1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_selector_fails_fast_on_invalid_selector() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{addr}");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut eval_calls = 0usize;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                let id = req["id"].as_u64().unwrap();
+                eval_calls += 1;
+                let msg = format!(
+                    "{}'@invalid[' is not a valid selector.",
+                    super::INVALID_SELECTOR_PREFIX
+                );
+                let result = json!({
+                    "result": { "type": "string", "value": msg }
+                });
+                ws.send(Message::Text(
+                    json!({ "id": id, "result": result }).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+            eval_calls
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let err = super::wait_for_selector(&client, "session-1", "@invalid[", "visible", 25_000)
+            .await
+            .unwrap_err();
+
+        client.close().await;
+        let eval_calls = server.await.unwrap();
+        assert_eq!(
+            eval_calls, 1,
+            "should fail on the first evaluation without polling"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert!(
+            err.contains("Invalid selector '@invalid[':"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_ref_detached_with_nth_succeeds_without_ax_fallback() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{addr}");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut resolve_calls = 0usize;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                let id = req["id"].as_u64().unwrap();
+                let method = req["method"].as_str().unwrap();
+                match method {
+                    "DOM.resolveNode" => {
+                        resolve_calls += 1;
+                        if resolve_calls == 1 {
+                            let resp = json!({
+                                "id": id,
+                                "result": { "object": { "type": "object", "objectId": "obj-e2" } }
+                            });
+                            ws.send(Message::Text(resp.to_string())).await.unwrap();
+                        } else {
+                            let resp = json!({
+                                "id": id,
+                                "error": { "code": -32000, "message": "No node with given id found" }
+                            });
+                            ws.send(Message::Text(resp.to_string())).await.unwrap();
+                        }
+                    }
+                    "Runtime.callFunctionOn" => {
+                        let resp = json!({
+                            "id": id,
+                            "result": { "result": { "type": "boolean", "value": true } }
+                        });
+                        ws.send(Message::Text(resp.to_string())).await.unwrap();
+                    }
+                    "Runtime.releaseObject" => {
+                        ws.send(Message::Text(json!({ "id": id, "result": {} }).to_string()))
+                            .await
+                            .unwrap();
+                    }
+                    other => panic!("unexpected CDP method (must not query AX tree): {other}"),
+                }
+            }
+            resolve_calls
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut ref_map = super::super::element::RefMap::new();
+        // `nth: Some(1)` would fail in `find_node_id_by_role_name` if fallback ran.
+        ref_map.add("e2".to_string(), Some(42), "button", "Delete", Some(1));
+        let iframe_sessions = std::collections::HashMap::new();
+
+        super::wait_for_ref(
+            &client,
+            "session-1",
+            &ref_map,
+            "@e2",
+            &iframe_sessions,
+            "detached",
+            5_000,
+        )
+        .await
+        .unwrap();
+
+        client.close().await;
+        let resolve_calls = server.await.unwrap();
+        assert_eq!(resolve_calls, 2);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_ref_attached_fails_fast_on_stale_exact_node_ref() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{addr}");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut resolve_calls = 0usize;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                let id = req["id"].as_u64().unwrap();
+                resolve_calls += 1;
+                let resp = json!({
+                    "id": id,
+                    "error": { "code": -32000, "message": "No node with given id found" }
+                });
+                ws.send(Message::Text(resp.to_string())).await.unwrap();
+            }
+            resolve_calls
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut ref_map = super::super::element::RefMap::new();
+        ref_map.add_exact_backend_node("e1".to_string(), 99);
+        let iframe_sessions = std::collections::HashMap::new();
+
+        let started = tokio::time::Instant::now();
+        let err = super::wait_for_ref(
+            &client,
+            "session-1",
+            &ref_map,
+            "@e1",
+            &iframe_sessions,
+            "attached",
+            25_000,
+        )
+        .await
+        .unwrap_err();
+
+        client.close().await;
+        let resolve_calls = server.await.unwrap();
+        assert_eq!(resolve_calls, 1);
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert_eq!(err, "Element ref e1 is stale");
     }
 }
