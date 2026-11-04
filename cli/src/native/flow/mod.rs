@@ -907,6 +907,22 @@ fn link_requests(
         references: Vec::new(),
     };
     let given_values: Vec<&str> = given.iter().map(|(_, v)| v.as_str()).collect();
+    // A path segment that several requests share is the site's structure
+    // (`api`, `v10`), whatever a response happens to hold.
+    let mut segment_uses: HashMap<String, usize> = HashMap::new();
+    for req in steps.iter().flat_map(|s| s.requests.iter()) {
+        if let Ok(url) = url::Url::parse(&req.url) {
+            let mut own: Vec<String> = url
+                .path_segments()
+                .map(|p| p.map(String::from).collect())
+                .unwrap_or_default();
+            own.sort();
+            own.dedup();
+            for seg in own {
+                *segment_uses.entry(seg).or_default() += 1;
+            }
+        }
+    }
     // Position of every request, writes included, so a write can take a value
     // from any response that came before it.
     let rank: HashMap<String, usize> = steps
@@ -928,6 +944,9 @@ fn link_requests(
                 // The page's own path (owner, repo, section) is the site's
                 // structure, not a choice the run makes.
                 if given_values.contains(&value.as_str()) || page_segments.contains(&value) {
+                    continue;
+                }
+                if segment_uses.get(&value).is_some_and(|n| *n > 1) {
                     continue;
                 }
                 // Blocks of the same document are one response, not a chain.
@@ -2151,6 +2170,58 @@ mod tests {
             "https://api.example.com.ar/seats?theater=402&key=k%202"
         );
         assert!(reqs[1].resolve(&HashMap::new()).is_err());
+    }
+
+    fn flow_of_entries(
+        r: &FlowRecorder,
+        entries: &[HarEntry],
+        output: Option<&str>,
+    ) -> Result<(Value, Value), String> {
+        build_flow_value(SaveInput {
+            name: "t",
+            recorder: r,
+            commands: &r.commands,
+            description: None,
+            entries,
+            params: &[],
+            output,
+            created_at: String::new(),
+            login_wall: false,
+        })
+    }
+
+    #[test]
+    fn a_response_value_equal_to_a_path_segment_other_requests_share_is_not_a_param() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/" }),
+            None,
+            None,
+        );
+        r.tag_now("projects");
+        r.tag_now("env");
+        let entries = vec![
+            entry(
+                "projects",
+                "https://app.example/api/v9/projects",
+                "Fetch",
+                "application/json",
+                r#"{"projects":[{"id":"prj_x","meta":{"gitRootDirectory":"api"}}]}"#,
+            ),
+            entry(
+                "env",
+                "https://app.example/api/v10/projects/prj_x/env",
+                "Fetch",
+                "application/json",
+                r#"{"envs":[]}"#,
+            ),
+        ];
+        let (flow, report) = flow_of_entries(&r, &entries, None).unwrap();
+        let url = flow["steps"][0]["requests"][1]["url"].as_str().unwrap();
+        assert_eq!(url, "https://app.example/api/v10/projects/{{id}}/env");
+        assert_eq!(report["params"], json!(["id"]));
     }
 
     #[test]
