@@ -2084,6 +2084,7 @@ impl BrowserManager {
             return Err("Cannot close the last tab".to_string());
         }
 
+        let closed_active = target_index == self.active_page_index;
         let page = self.pages.remove(target_index);
         self.update_active_page_after_removal(target_index);
         let closed_tab_id = page.tab_id;
@@ -2110,8 +2111,11 @@ impl BrowserManager {
 
         // With pin-tab, closing the bound tab leaves the session unbound (page
         // commands return `tab_gone` until an explicit re-bind), so don't touch
-        // the neighboring tab that inherited the active slot.
-        if !self.bound_target_is_gone() {
+        // the neighboring tab that inherited the active slot. Closing a
+        // background tab leaves the already-active tab in place, so only a
+        // successor that becomes active after closing the active tab needs
+        // liveness probing and domain initialization.
+        if closed_active && !self.bound_target_is_gone() {
             // The close has already committed. The tab that becomes active may
             // itself be discarded, which would hang enable_domains; revive it
             // first. A successor that cannot revive must not turn the completed
@@ -2541,6 +2545,14 @@ impl BrowserManager {
             .iter()
             .find(|p| p.tab_id == tab_id)
             .map(|p| p.target_id.as_str())
+    }
+
+    /// CDP session id for a tab's stable `tab_id`.
+    pub fn session_id_for_tab(&self, tab_id: u32) -> Option<&str> {
+        self.pages
+            .iter()
+            .find(|p| p.tab_id == tab_id)
+            .map(|p| p.session_id.as_str())
     }
 
     /// Returns true if a tab with the given stable `tab_id` is still open.
@@ -5307,6 +5319,40 @@ mod tests {
             "an unrevivable successor must not be marked revived"
         );
         assert_eq!(mgr.pages.len(), 1);
+    }
+
+    /// Closing a background tab leaves the active tab unchanged, so `tab_close`
+    /// must not re-probe or re-activate the already-active tab.
+    #[tokio::test]
+    async fn test_tab_close_background_tab_does_not_reprobe_active_tab() {
+        let (url, activations) = start_mock_cdp_connect(
+            vec![("BG_BEFORE", true), ("ACTIVE", true), ("BG_AFTER", false)],
+            true,
+        )
+        .await;
+        let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
+        mgr.active_page_index = 1;
+        mgr.bind_active_target();
+        let activations_before = activations.load(std::sync::atomic::Ordering::SeqCst);
+
+        // Close background tab after active tab (index 2).
+        let result = mgr.tab_close(Some(2), None).await.expect("close bg tab 2");
+        assert_eq!(result["closed"], json!(true));
+        assert!(result.get("activeTabRevived").is_none());
+        assert_eq!(mgr.active_page_index, 1);
+        assert_eq!(mgr.pages[mgr.active_page_index].target_id, "ACTIVE");
+
+        // Close background tab before active tab (index 0); active_page_index shifts to 0.
+        let result = mgr.tab_close(Some(0), None).await.expect("close bg tab 0");
+        assert_eq!(result["closed"], json!(true));
+        assert!(result.get("activeTabRevived").is_none());
+        assert_eq!(mgr.active_page_index, 0);
+        assert_eq!(mgr.pages[mgr.active_page_index].target_id, "ACTIVE");
+        assert_eq!(
+            activations.load(std::sync::atomic::Ordering::SeqCst),
+            activations_before,
+            "closing background tabs must not reactivate the already-active tab"
+        );
     }
 
     // -----------------------------------------------------------------------

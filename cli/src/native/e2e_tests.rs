@@ -3105,6 +3105,60 @@ async fn e2e_rejected_tab_label_preserves_refs_and_frame() {
     }
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_closing_background_tab_preserves_active_tab_refs_and_frame() {
+    let mut state = DaemonState::new();
+    for command in [
+        json!({ "action": "launch", "headless": true }),
+        json!({
+            "action": "navigate",
+            "url": "data:text/html,<iframe id='child' srcdoc=\"<button onclick='this.textContent=&quot;Clicked&quot;'>Preserved</button>\"></iframe>"
+        }),
+        json!({ "action": "tab_new", "url": "data:text/html,<title>Background</title>", "label": "bg" }),
+        json!({ "action": "tab_switch", "tabId": "t1" }),
+        json!({ "action": "frame", "selector": "#child" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+
+    let snapshot = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+    assert_success(&snapshot);
+    let button_ref = get_data(&snapshot)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["name"] == "Preserved")
+        .unwrap()
+        .0
+        .clone();
+    let frame_id = state.active_frame_id.clone().unwrap();
+
+    // Closing the background tab must preserve active tab's @eN refs and frame scope.
+    let close_bg =
+        execute_command(&json!({ "action": "tab_close", "tabId": "bg" }), &mut state).await;
+    assert_success(&close_bg);
+    assert!(state.ref_map.get(&button_ref).is_some());
+    assert_eq!(state.active_frame_id.as_deref(), Some(frame_id.as_str()));
+
+    let click_resp = execute_command(
+        &json!({ "action": "click", "selector": format!("@{button_ref}") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&click_resp);
+
+    let text_resp = execute_command(
+        &json!({ "action": "innertext", "selector": format!("@{button_ref}") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&text_resp);
+    assert_eq!(get_data(&text_resp)["text"], "Clicked");
+
+    assert_success(&execute_command(&json!({ "action": "close" }), &mut state).await);
+}
+
 /// Duplicate labels must be rejected so agents can treat a label as a unique
 /// handle. The first tab keeps the label; the second tab's creation errors.
 #[tokio::test]
