@@ -3021,11 +3021,24 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
     let mut lifecycle_relaunched_browser = false;
+    // A launch that changes where the session connects no longer resumes the
+    // browser it was attached to, so that attachment does not decide its policy.
+    let switches_connection = launch_plan.as_ref().is_some_and(|plan| {
+        plan.changes.iter().any(|change| {
+            matches!(
+                change.key,
+                Key::Cdp | Key::AutoConnect | Key::Provider | Key::CdpHeaders
+            )
+        })
+    });
     let policy_actions = policy_actions_for_command(
         cmd,
         action,
         needs_launch,
-        state.attached_target.as_ref(),
+        state
+            .attached_target
+            .as_ref()
+            .filter(|_| !switches_connection),
         launch_plan
             .as_ref()
             .map_or(&state.settings, |plan| &plan.next),
@@ -4492,14 +4505,22 @@ async fn auto_launch_inner(
     let storage_state = storage_state_path.as_deref();
 
     // Store proxy credentials for Fetch.authRequired handling
-    let has_proxy_auth = options.proxy_username.is_some();
+    // Only a browser agent-browser launches itself gets them: an external
+    // browser is never answered proxy challenges on the session's behalf.
+    let local = matches!(connection, Connection::Local);
+    let has_proxy_auth = local && options.proxy_username.is_some();
     if has_proxy_auth {
         let mut creds = state.proxy_credentials.write().await;
         *creds = Some((
             options.proxy_username.clone().unwrap_or_default(),
             options.proxy_password.clone().unwrap_or_default(),
         ));
+    } else if !local {
+        *state.proxy_credentials.write().await = None;
     }
+    // Nor is a state file replayed into one.
+    let storage_state_path = if local { storage_state_path } else { None };
+    let storage_state = storage_state_path.as_deref();
 
     state.engine = engine.as_deref().unwrap_or("chrome").to_string();
     write_engine_file(&state.session_id, &state.engine);
@@ -20384,5 +20405,98 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             Some(&json!("/tmp/previous"))
         );
         assert!(state.browser.is_none(), "the failed launch is closed");
+    }
+    #[tokio::test]
+    async fn test_resetting_to_a_local_launch_gates_the_launch_mutators() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = dir.path().join("deny.json");
+        fs::write(&policy, r#"{"deny": ["plugin:stealth:launch.mutate"]}"#).unwrap();
+        // `-p ""` and a raw null both reset the session to a local launch.
+        for reset in [json!({ "provider": "" }), json!({ "cdp": null })] {
+            let (_env, mut state) = isolated_state();
+            state.settings = Running::defaults();
+            state.settings.set(Key::Cdp, json!("9222"));
+            state.attached_target = Some(AttachedTarget::CdpPort(9222));
+            let mut settings = reset.clone();
+            settings["action-policy"] = json!(policy.to_str().unwrap());
+            let cmd = json!({
+                "id": "1",
+                "action": "navigate",
+                "url": "about:blank",
+                "plugins": provider_plugins(),
+                "settings": settings
+            });
+
+            let resp = execute_command(&cmd, &mut state).await;
+
+            assert!(
+                resp["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("denied by policy")),
+                "{reset}: {resp}"
+            );
+            assert!(state.browser.is_none());
+            assert_eq!(
+                state.settings.get(Key::Cdp),
+                Some(&json!("9222")),
+                "not committed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_an_empty_provider_names_no_browser() {
+        let mut settings = Running::defaults();
+        settings.set(Key::Provider, json!(""));
+        assert_eq!(settings.connection(), Connection::Local);
+        assert!(settings_launch_target(&settings).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_an_external_launch_installs_no_proxy_credentials() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        // Inherited local launch settings that a stale session could carry.
+        state.settings.set(Key::ProxyUsername, json!("user"));
+        state.settings.set(Key::ProxyPassword, json!("pw"));
+        state
+            .settings
+            .set(Key::StorageState, json!("/tmp/state.json"));
+        state.settings.set(Key::Cdp, json!("1"));
+        *state.proxy_credentials.write().await = Some(("old".to_string(), "old".to_string()));
+
+        // Nothing listens on port 1, so the attach fails; the credentials are
+        // decided before it is tried.
+        assert!(auto_launch(&mut state, Vec::new()).await.is_err());
+
+        assert!(state.proxy_credentials.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_switching_to_an_external_browser_drops_inherited_local_settings() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state
+            .settings
+            .set(Key::StorageState, json!("/tmp/state.json"));
+        state.settings.set(Key::ProxyUsername, json!("user"));
+        state.settings.set(Key::ProxyPassword, json!("pw"));
+
+        let patch = patch_with(vec![set_to(Key::Cdp, json!("ws://127.0.0.1:9999/x"))]);
+        let outcome = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+
+        let options = state.settings.launch_options();
+        assert_eq!(options.storage_state, None);
+        assert_eq!(options.proxy_username, None);
+        assert_eq!(options.proxy_password, None);
+        let dropped: Vec<&str> = outcome
+            .changes
+            .iter()
+            .filter(|c| c["effect"] == "ignored")
+            .filter_map(|c| c["option"].as_str())
+            .collect();
+        assert!(dropped.contains(&"storage-state") && dropped.contains(&"proxy-password"));
     }
 }

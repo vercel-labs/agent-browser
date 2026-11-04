@@ -206,11 +206,12 @@ impl Running {
     }
 
     pub fn connection(&self) -> Connection {
-        if let Some(cdp) = self.str(Key::Cdp) {
+        // An empty target names no browser: `-p ""` resets to a local launch.
+        if let Some(cdp) = self.str(Key::Cdp).filter(|cdp| !cdp.is_empty()) {
             Connection::Cdp(cdp)
         } else if self.get(Key::AutoConnect).is_some() {
             Connection::AutoConnect
-        } else if let Some(provider) = self.str(Key::Provider) {
+        } else if let Some(provider) = self.str(Key::Provider).filter(|p| !p.is_empty()) {
             Connection::Provider(provider)
         } else {
             Connection::Local

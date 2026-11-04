@@ -106,6 +106,21 @@ fn is_local_only(key: Key) -> bool {
     )
 }
 
+/// Local-launch settings an external session must not keep: state replayed
+/// into the browser and proxy credentials answered on its behalf are the ones
+/// that would reach it. The rest of the local-only settings are only ignored.
+const DROPPED_FOR_EXTERNAL: [Key; 9] = [
+    Key::StorageState,
+    Key::Profile,
+    Key::Extensions,
+    Key::Proxy,
+    Key::ProxyBypass,
+    Key::ProxyUsername,
+    Key::ProxyPassword,
+    Key::ExecutablePath,
+    Key::Args,
+];
+
 /// The value a setting has when nothing sets it, where that is not "absent".
 fn default_value(key: Key) -> Option<Value> {
     match key {
@@ -216,6 +231,23 @@ impl Running {
                         key,
                         requested: Requested::Default,
                         running: Some(current.clone()),
+                    });
+                    next.unassign(key);
+                }
+            }
+        }
+
+        // A session attached to an external browser carries nothing that only
+        // describes a local launch, so it cannot reach that browser: no state
+        // file to replay into it, no proxy credentials to answer challenges
+        // with. Inherited values are dropped, and reported as such.
+        if next.connection() != Connection::Local {
+            for key in DROPPED_FOR_EXTERNAL {
+                if let Some(current) = next.get(key).cloned() {
+                    ignored.push(Change {
+                        key,
+                        requested: Requested::Default,
+                        running: Some(current),
                     });
                     next.unassign(key);
                 }

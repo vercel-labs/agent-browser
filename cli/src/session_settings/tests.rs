@@ -1283,3 +1283,52 @@ fn no_xvfb_can_be_turned_off() {
     assert_eq!(changed_keys(&running.plan(&patch)), vec![Key::NoXvfb]);
     assert!(Patch::from_flags(&blank_flags()).get(Key::NoXvfb).is_none());
 }
+
+#[test]
+fn inherited_local_settings_are_dropped_when_the_session_goes_external() {
+    let local = [
+        (Key::StorageState, json!("/s.json")),
+        (Key::Profile, json!("/p")),
+        (Key::Extensions, json!(["/e"])),
+        (Key::Proxy, json!("http://proxy:1")),
+        (Key::ProxyUsername, json!("user")),
+        (Key::ProxyPassword, json!("pw")),
+        (Key::ExecutablePath, json!("/chrome")),
+        (Key::Args, json!(["--x"])),
+    ];
+    for target in [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::Provider, json!("browserbase")),
+        (Key::AutoConnect, json!(true)),
+    ] {
+        let running = running_with(&local);
+        let plan = running.plan(&patch_of(&[is(target.0, target.1.clone())]));
+        for (key, _) in &local {
+            assert_eq!(plan.next.get(*key), None, "{key:?} survives {:?}", target.0);
+        }
+        let dropped: Vec<Key> = plan.ignored.iter().map(|c| c.key).collect();
+        assert!(dropped.contains(&Key::StorageState) && dropped.contains(&Key::ProxyPassword));
+        // Switching target relaunches once; dropping the values adds nothing.
+        assert_eq!(changed_keys(&plan), vec![target.0]);
+    }
+}
+
+#[test]
+fn local_settings_are_kept_while_the_session_stays_local() {
+    let running = running_with(&[
+        (Key::StorageState, json!("/s.json")),
+        (Key::ProxyUsername, json!("user")),
+    ]);
+    let plan = running.plan(&patch_of(&[is(Key::DefaultTimeout, json!(5000))]));
+    assert_eq!(plan.next.get(Key::StorageState), Some(&json!("/s.json")));
+    assert_eq!(plan.next.get(Key::ProxyUsername), Some(&json!("user")));
+    assert!(plan.ignored.is_empty());
+}
+
+#[test]
+fn an_empty_provider_resets_the_session_to_local() {
+    let running = running_with(&[(Key::Cdp, json!("9222"))]);
+    let plan = running.plan(&patch_of(&[is(Key::Provider, json!(""))]));
+    assert_eq!(plan.next.connection(), Connection::Local);
+    assert!(plan.relaunch);
+}
