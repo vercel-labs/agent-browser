@@ -263,7 +263,7 @@ If HAR export fails, recording and captured requests remain available. Fix the d
 ```bash
 agent-browser --capture flow open <url>               # Open a session that records its commands and requests
 agent-browser flow steps [--json]                     # Recorded steps: seq, command, URL, request count, ok or failed
-agent-browser flow save <name> [--param k=v]... [--output <id>] [--description <text>]  # Keep first-party JSON requests, turn values into params
+agent-browser flow save <name> [--param k=v]... [--output <id>] [--description <text>]  # Keep first-party JSON requests, turn values into params; --output takes a saved id (s1r1, numbered within the range) or a capture id s<step>r<n>; an id that means two requests is refused
 agent-browser flow save <name> --from <seq> --to <seq>  # Save a range of steps
 agent-browser flow run <name> [--param k=v]...        # Send the saved requests over HTTP
 agent-browser flow run <name> --where field=value --fields a,b.c --limit 5  # Return only matching items and fields

@@ -773,7 +773,27 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     }
     params.extend(links.params);
     let output = match input.output {
-        Some(id) if request_ids.iter().any(|r| r == id) => id.to_string(),
+        Some(id) if request_ids.iter().any(|r| r == id) => {
+            let url_of = |saved: &str| {
+                steps
+                    .iter()
+                    .flat_map(|s| s.requests.iter())
+                    .find(|r| r.id == saved)
+                    .map(|r| r.url.clone())
+                    .unwrap_or_default()
+            };
+            match capture_ids.iter().find(|(c, saved)| c == id && saved != id) {
+                Some((_, other)) => {
+                    return Err(format!(
+                        "{id} is ambiguous: saved {id} ({}) or capture {id}, saved as {other} ({}); \
+                         use --output with one of them after renumbering the range, or save from step 1",
+                        url_of(id),
+                        url_of(other)
+                    ));
+                }
+                None => id.to_string(),
+            }
+        }
         Some(id) => match capture_ids.iter().find(|(c, _)| c == id) {
             Some((_, saved)) => saved.clone(),
             None => {
@@ -2532,6 +2552,55 @@ mod tests {
             dependencies(&flow_of(flow.clone()), "s1r2"),
             vec!["s1r1", "s1r2"]
         );
+    }
+
+    #[test]
+    fn an_output_id_that_means_two_requests_is_refused_with_both() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        for (page, id) in [("a", "one"), ("b", "two"), ("c", "three")] {
+            r.begin_command(
+                "navigate",
+                &json!({ "action": "navigate", "url": format!("https://app.example/{page}") }),
+                None,
+                None,
+            );
+            r.tag_now(id);
+        }
+        let entries: Vec<HarEntry> = ["one", "two", "three"]
+            .iter()
+            .map(|n| {
+                entry(
+                    n,
+                    &format!("https://app.example/api/{n}"),
+                    "Fetch",
+                    "application/json",
+                    r#"{"a":1}"#,
+                )
+            })
+            .collect();
+        let range = &r.commands[1..];
+        let save = |output: &str| {
+            build_flow_value(SaveInput {
+                name: "t",
+                recorder: &r,
+                commands: range,
+                description: None,
+                entries: &entries,
+                params: &[],
+                output: Some(output),
+                created_at: String::new(),
+                login_wall: false,
+            })
+        };
+        let err = save("s2r1").unwrap_err();
+        assert!(
+            err.contains("s2r1 is ambiguous: saved s2r1 (https://app.example/api/three)")
+                && err.contains("saved as s1r1 (https://app.example/api/two)"),
+            "{err}"
+        );
+        assert_eq!(save("s1r1").unwrap().0["output"], "s1r1");
+        assert_eq!(save("s3r1").unwrap().0["output"], "s2r1");
     }
 
     #[test]

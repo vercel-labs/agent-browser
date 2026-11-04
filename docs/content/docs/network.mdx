@@ -153,7 +153,7 @@ agent-browser flow save <name> [--from <seq>] [--to <seq>] [--param k=v]... [--o
     <tr><td><code>--from</code></td><td>First step number. Defaults to the last navigation after the previous save</td></tr>
     <tr><td><code>--to</code></td><td>Last step. Defaults to the latest</td></tr>
     <tr><td><code>--param</code></td><td>A value you typed during the task, so later runs can change it</td></tr>
-    <tr><td><code>--output</code></td><td>Request id whose response the flow returns</td></tr>
+    <tr><td><code>--output</code></td><td>Request id whose response the flow returns: an id from the saved flow (<code>s1r1</code>, numbered within the saved range) or the capture id <code>s&lt;step&gt;r&lt;n&gt;</code> using the step numbers of <code>flow steps</code>. An id that names a different request in each form is refused</td></tr>
     <tr><td><code>--description</code></td><td>One line saying what the flow does, shown in flow lists</td></tr>
   </tbody>
 </table>
