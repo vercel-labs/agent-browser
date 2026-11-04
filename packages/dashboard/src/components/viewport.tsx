@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAtomValue, useSetAtom } from "jotai/react";
+import { useAtom, useAtomValue, useSetAtom } from "jotai/react";
+import { atomWithStorage } from "jotai/utils";
 import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
@@ -17,6 +18,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuCheckboxItem,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -42,6 +44,8 @@ import {
   sendInputAtom,
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
+
+const autoFitAtom = atomWithStorage("dashboard-viewport-auto-fit", false);
 
 const SCREENCAST_ENGINES = new Set(["chrome"]);
 
@@ -156,6 +160,7 @@ export function Viewport() {
   const sessionName = useAtomValue(activeSessionNameAtom);
   const streamPort = useAtomValue(activePortAtom);
   const sendInput = useSetAtom(sendInputAtom);
+  const [autoFit, setAutoFit] = useAtom(autoFitAtom);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -270,14 +275,22 @@ export function Viewport() {
     }
   }, [canvasArea, runCmd]);
 
+  // Wait for panel resizing to settle before changing the connected browser.
+  useEffect(() => {
+    if (!autoFit || !browserConnected || !streamPort || !sessionName) return;
+    const timer = setTimeout(handleFit, 150);
+    return () => clearTimeout(timer);
+  }, [autoFit, browserConnected, streamPort, sessionName, handleFit]);
+
   const handlePreset = useCallback(
     (ratio: [number, number]) => {
       if (canvasArea.width <= 0) return;
+      setAutoFit(false);
       const avail = { w: canvasArea.width, h: canvasArea.height };
       const { w, h } = computePresetSize(ratio, avail.w, avail.h);
       runCmd("set", "viewport", String(w), String(h));
     },
-    [canvasArea, runCmd],
+    [canvasArea, runCmd, setAutoFit],
   );
 
   const submitCustomDimensions = useCallback(() => {
@@ -287,9 +300,10 @@ export function Viewport() {
     const w = parseInt(match[1], 10);
     const h = parseInt(match[2], 10);
     if (w > 0 && h > 0) {
+      setAutoFit(false);
       runCmd("set", "viewport", String(w), String(h));
     }
-  }, [customValue, runCmd]);
+  }, [customValue, runCmd, setAutoFit]);
 
   const handleRecordStart = useCallback(async () => {
     const path = recordPath.trim();
@@ -303,9 +317,10 @@ export function Viewport() {
   }, [sessionName]);
 
   const handleSetDevice = useCallback(async (device: string) => {
+    setAutoFit(false);
     setActiveDevice(device);
     await execCommand(sessionArgs(sessionName, "set", "device", device));
-  }, [sessionName]);
+  }, [sessionName, setAutoFit]);
 
   const handleResetDevice = useCallback(async () => {
     setActiveDevice(null);
@@ -667,7 +682,17 @@ export function Viewport() {
                 </DropdownMenuItem>
               ))}
               <DropdownMenuSeparator />
-              {!isFit && (
+              <DropdownMenuCheckboxItem
+                checked={autoFit}
+                onCheckedChange={(checked) => {
+                  setAutoFit(checked === true);
+                  if (checked === true) setActiveDevice(null);
+                }}
+                className="text-xs"
+              >
+                Auto-fit
+              </DropdownMenuCheckboxItem>
+              {!isFit && !autoFit && (
                 <DropdownMenuItem onClick={handleFit} className="text-xs">
                   <Maximize className="mr-1.5 size-3" />
                   Fit
