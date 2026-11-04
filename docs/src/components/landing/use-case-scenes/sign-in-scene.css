@@ -45,7 +45,7 @@
   & .ab-sign-in-label[data-on] { opacity: 1; filter: none; transition-delay: .08s; }
 
   /* The pending spinner reads on the black button. The completed check is
-     a white disc with a gray tick, kept neutral like the form. */
+     a white disc with a black tick. */
   & .ab-sign-in-submit .ss-check__ring { stroke: color-mix(in srgb, var(--ss-surface) 45%, transparent); }
   & .ab-sign-in-submit .ss-check__arc { stroke: var(--ss-surface); }
   & .ab-sign-in-status { position: relative; display: grid; width: 14px; height: 14px; flex: none; }
@@ -53,7 +53,7 @@
   & .ab-sign-in-spinner:not([data-on]) { opacity: 0; }
   & .ab-sign-in-done { position: relative; color: var(--ss-surface); opacity: 0; scale: .6; }
   & .ab-sign-in-done[data-on] { opacity: 1; scale: 1; }
-  & .ab-sign-in-done::before { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--ds-gray-800, #606060); }
+  & .ab-sign-in-done::before { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--ds-gray-1000, #171717); }
   & .ab-sign-in-done svg { position: relative; display: block; }
 
   & .ss-stage[data-layout='compact'] .ab-sign-in-form { left: 35px; }

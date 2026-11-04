@@ -17,7 +17,8 @@ import './recording-scene.css';
 type Box = { x: number; y: number; w: number; h: number };
 type Carry = 'none' | 'lift' | 'held' | 'gone';
 /** `left`/`top`: where the copy rests, from the hotspot. */
-type Copy = { carry: Carry; from: Box | null; left: number; top: number; w: number; h: number; scale: number };
+/** `rotate`: its tilt at rest, in degrees (clockwise), so the stack fans like a hand of cards. */
+type Copy = { carry: Carry; from: Box | null; left: number; top: number; w: number; h: number; scale: number; rotate: number };
 /** `fromEnd`: the drag started at the box's lower right, so its dashes anchor there. */
 type State = { preview: boolean; box: Box | null; fromEnd: boolean; radius: number; marquee: boolean; shot: boolean; flash: number; para: Copy; chart: Copy };
 
@@ -32,21 +33,23 @@ const PAD = 8;
 const TILE_RADIUS = 8;
 const TILE = { w: 168, h: 96 };
 const COPY_W = TILE.w * CHART_SCALE;
-/** Where each copy rests. The first sits at the back; the one stacked on it is
- * a little smaller and inset, so its own shadow says it is on top. No tilt. */
-type Rest = { right: number; top: number; w: number };
-const BACK: Rest = { right: SHOT.right, top: SHOT.top, w: COPY_W };
-const FRONT: Rest = { right: SHOT.right - 10, top: SHOT.top + 14, w: COPY_W - 20 };
+/** Where each copy rests: fanned like a deck of cards. Nearly the same size,
+ * both turned clockwise about their top-left corner; the front one sits a
+ * little right of the back one and turns further, so the pair reads as fanned
+ * out rather than as a smaller card stacked on a bigger one. */
+type Rest = { right: number; top: number; w: number; rotate: number };
+const BACK: Rest = { right: SHOT.right, top: SHOT.top, w: COPY_W, rotate: 3 };
+const FRONT: Rest = { right: SHOT.right + 8, top: SHOT.top + 2, w: COPY_W - 4, rotate: 8 };
 /** How long the outline holds at full blue after the flash, while the copy flies. */
 const BLUE_HOLD = 380;
 /** The copy leaves at the flash's peak, not after it. */
 const FLASH_PEAK = 70;
 const heights = [40, 62, 50, 76, 58, 88];
 
-const none: Copy = { carry: 'none', from: null, left: 0, top: 0, w: 0, h: 0, scale: 1 };
+const none: Copy = { carry: 'none', from: null, left: 0, top: 0, w: 0, h: 0, scale: 1, rotate: 0 };
 const resting = (rest: Rest, region: { w: number; h: number }): Copy => {
   const scale = rest.w / region.w;
-  return { carry: 'held', from: null, left: rest.right - rest.w, top: rest.top, w: rest.w, h: region.h * scale, scale };
+  return { carry: 'held', from: null, left: rest.right - rest.w, top: rest.top, w: rest.w, h: region.h * scale, scale, rotate: rest.rotate };
 };
 const initial: State = { preview: false, box: null, fromEnd: false, radius: PAD, marquee: false, shot: false, flash: 0, para: none, chart: none };
 /** Halfway through drawing the first capture, in either responsive layout. */
@@ -110,13 +113,18 @@ async function script(a: Act<State>) {
   // The cursor holds still until the copy has landed, so the flight is one arc.
   await a.wait(600);
 
-  // Second capture: the paragraph beside it. Its copy lands on top, smaller.
+  // Second capture: the paragraph beside it. Its copy lands on top, fanned out.
   a.mark('select-para');
   const start2 = { x: para.x - PAD, y: para.y - PAD };
   const end2 = await select(start2, { x: para.x + para.width + PAD, y: para.y + para.height + PAD }, PAD);
   a.mark('capture-para');
   await fly('para', await capture(boxFrom(start2, end2), end2, 2, FRONT));
-  await a.wait(1200);
+  await a.wait(300);
+  a.mark('result');
+  // Done: the hand drifts back across the page, slow and unhurried, carrying
+  // the fanned copies, rather than stopping dead on the last capture
+  await a.move({ x: tile.x + tile.width * 0.5, y: end2.y + 6 }, { duration: 1400 });
+  await a.wait(250);
 
   // Clear the captures, then draw only the first half of the next selection.
   a.mark('reset');
@@ -149,7 +157,10 @@ function ParaShot({ w, h }: { w: number; h: number }) {
 
 function Carried({ copy, Body }: { copy: Copy; Body: ComponentType<{ w: number; h: number }> }) {
   const lift = copy.carry === 'lift' && copy.from;
-  const transform = lift ? `translate(${copy.from!.x}px, ${copy.from!.y}px) scale(${1 / copy.scale})` : undefined;
+  // Same function list in both states, so the flight turns the copy into its tilt
+  const transform = lift
+    ? `translate(${copy.from!.x}px, ${copy.from!.y}px) scale(${1 / copy.scale}) rotate(0deg)`
+    : `translate(0px, 0px) scale(1) rotate(${copy.rotate}deg)`;
   return <span className="ab-shot-copy" data-carry={copy.carry} style={{ left: copy.left, top: copy.top, width: copy.w, height: copy.h, transform }}>
     <span className="ab-shot-copy-inner" style={{ transform: `scale(${copy.scale})` }}><Body w={copy.w / copy.scale} h={copy.h / copy.scale} /></span>
   </span>;

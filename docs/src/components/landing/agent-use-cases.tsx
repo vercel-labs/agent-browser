@@ -24,7 +24,7 @@ export function AgentUseCases({ heading, items }: AgentUseCasesProps) {
         {items.map((item) => (
           <li key={item.title} className="flex flex-col">
             <SceneSequenceItem index={scenes.indexOf(item)}>
-              <div className="overflow-hidden border border-gray-alpha-400 bg-background-100">
+              <div className="overflow-hidden rounded-[2px] border border-gray-alpha-400 bg-background-100">
                 <UseCaseVisual kind={item.visual} />
               </div>
             </SceneSequenceItem>

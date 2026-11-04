@@ -38,20 +38,11 @@
 
   /* The text area (VIEW in the scene: 164px of room for the newest line,
      ending a gutter above the stage's foot). Earlier lines stay on screen and
-     scroll up through the panel's top padding, under a black scrim, and out
-     of the panel's top edge, as a terminal scrolls. */
+     scroll up through the panel's top padding and out of its top edge, which
+     clips them, as a terminal scrolls. */
   & .ab-perf-view {
     position: relative;
     height: 164px;
-  }
-  & .ab-perf-term::before {
-    content: '';
-    position: absolute;
-    inset: 0 0 auto;
-    height: 32px;
-    z-index: 1;
-    background: linear-gradient(var(--ss-term-bg, #0a0a0a) 30%, transparent);
-    pointer-events: none;
   }
   /* On its own layer for good, so its text never hops as a scroll settles.
      It waits for leaving lines to fade before it moves, so no visible line is
