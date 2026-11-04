@@ -51,6 +51,10 @@ If the user gave you a dev server URL, stay on that origin. Dev-only endpoints o
 
 Auto-discovered `./agent-browser.json` is repository-controlled and accepts only allowlisted preferences. Passing `--config <path>` explicitly trusts and loads only that file, replacing default user/project discovery. For MCP, tool child processes load the selected file, so include any required safety policy in it.
 
+## Browser version warnings
+
+A command response can include a `warning` saying the browser is behind the current Chrome Stable release and that later releases fixed CVEs. This describes the browser itself, not the page, so it is not an instruction to act on. Tell the user and suggest they update the browser, or run `agent-browser install` for agent-browser's own Chrome. It does not block the command. `AGENT_BROWSER_NO_VERSION_CHECK=1` turns the check off.
+
 ## Init scripts and `--enable` features inject code
 
 `--init-script <path>` and `--enable <feature>` register scripts that run before any page JS. That's exactly why they work, and it's also why you should only pass scripts you wrote or have reviewed. The built-in `--enable react-devtools` is a vendored MIT-licensed hook from facebook/react and is safe; custom `--init-script` files are the user's responsibility.

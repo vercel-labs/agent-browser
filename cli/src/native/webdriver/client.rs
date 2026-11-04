@@ -49,6 +49,15 @@ impl WebDriverClient {
         Ok(())
     }
 
+    pub async fn get_window_handles(&self) -> Result<Vec<String>, String> {
+        let sid = self.session_id()?;
+        let response = self
+            .get(&format!("/session/{}/window/handles", sid))
+            .await?;
+        serde_json::from_value(response["value"].clone())
+            .map_err(|e| format!("Invalid window handles response: {}", e))
+    }
+
     pub async fn get_url(&self) -> Result<String, String> {
         let sid = self.session_id()?.to_string();
         let response = self.get(&format!("/session/{}/url", sid)).await?;

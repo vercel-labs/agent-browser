@@ -11,6 +11,12 @@ Navigation, action, and output controls are opt-in. By default, agent-browser im
 
 The auto-discovered `./agent-browser.json` accepts only `headed`, `json`, `debug`, `userAgent`, `hideScrollbars`, `annotate`, `colorScheme`, `maxOutput`, `screenshotQuality`, `screenshotFormat`, and `idleTimeout`. Other runtime keys, including `extensions`, `initScripts`, state, trust, policy, session, connection, and path settings, are ignored with a warning. The `$schema` metadata key is ignored silently. Put advanced settings in `~/.agent-browser/config.json` or load a trusted file with `--config` or `AGENT_BROWSER_CONFIG`. An explicit config replaces default discovery and loads only that file. See [Configuration](/configuration) for details.
 
+## Browser version check
+
+When a command drives a Chrome, Chromium, or HeadlessChrome browser, agent-browser reads the browser version and compares it with the Stable Channel Update for Desktop posts on the [Chrome Releases blog](https://chromereleases.googleblog.com/). If the browser is behind the current stable release and later Stable releases fixed CVEs, the command response includes a `warning` with the CVE count and up to three IDs. Update the browser to clear it, or run `agent-browser install` for agent-browser's own Chrome.
+
+The warning appears once per browser version in each session. It never blocks a command. If the blog cannot be reached within a few seconds, or no CVEs are listed for later releases, nothing is shown. The request uses agent-browser's built-in root certificates, so a proxy that requires a custom CA blocks it and no warning appears. Cloud provider sessions are not checked, and neither are browsers whose reported product is not Chrome, Chromium, or HeadlessChrome. Set `AGENT_BROWSER_NO_VERSION_CHECK=1` to turn the check and its request off.
+
 ## Threat Model
 
 These features are designed to mitigate the following threats when an LLM-based agent drives a browser:
