@@ -144,9 +144,9 @@ fn batch_item_settings(
     relaunch_sent: bool,
 ) -> (session_settings::Patch, bool) {
     let mut patch = command_settings(flags, cmd);
-    if relaunch_sent {
+    if relaunch_sent || !native::actions::command_launches_browser(cmd) {
         patch.clear_relaunch();
-        return (patch, true);
+        return (patch, relaunch_sent);
     }
     let sent = patch.forces_relaunch();
     (patch, sent)
@@ -2309,6 +2309,27 @@ mod tests {
         let (second, sent) = batch_item_settings(&flags, &cmd, sent);
         assert!(!second.forces_relaunch() && sent);
         assert!(second.value(session_settings::Key::Profile).is_some());
+    }
+
+    #[test]
+    fn test_relaunch_skips_batch_commands_that_cannot_launch() {
+        let args: Vec<String> = ["--relaunch", "batch", "read https://example.com", "get url"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let flags = crate::flags::parse_flags(&args);
+
+        for cmd in [
+            serde_json::json!({ "action": "read", "url": "https://example.com" }),
+            serde_json::json!({ "action": "auth_login", "noNavigate": true }),
+            serde_json::json!({ "action": "state_list" }),
+        ] {
+            let (patch, sent) = batch_item_settings(&flags, &cmd, false);
+            assert!(!patch.forces_relaunch() && !sent, "{cmd}");
+        }
+        let (patch, sent) =
+            batch_item_settings(&flags, &serde_json::json!({ "action": "url" }), false);
+        assert!(patch.forces_relaunch() && sent);
     }
 
     #[test]

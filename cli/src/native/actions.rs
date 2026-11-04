@@ -2666,6 +2666,24 @@ async fn close_after_network_control_failure(
 }
 
 /// Returns whether an action can run without implicitly launching a browser.
+/// `auth login --no-navigate` must never launch a browser or manufacture an
+/// about:blank page to satisfy the command.
+fn is_auth_login_no_navigate(cmd: &Value) -> bool {
+    cmd.get("action").and_then(Value::as_str) == Some("auth_login")
+        && cmd
+            .get("noNavigate")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// Whether `cmd` may launch or relaunch the session's browser. Commands that
+/// cannot apply only the live settings, so launch settings and a forced
+/// relaunch wait for the next command that can.
+pub(crate) fn command_launches_browser(cmd: &Value) -> bool {
+    let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
+    (!skip_launch_action(action) || action == "launch") && !is_auth_login_no_navigate(cmd)
+}
+
 fn skip_launch_action(action: &str) -> bool {
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
         return true;
@@ -2839,11 +2857,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
-    let auth_login_no_navigate = action == "auth_login"
-        && cmd
-            .get("noNavigate")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+    let auth_login_no_navigate = is_auth_login_no_navigate(cmd);
     if let Some(mode @ ("instant" | "smooth" | "human")) =
         cmd.get("defaultInputMode").and_then(Value::as_str)
     {
@@ -2982,7 +2996,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // apply now, before the policy checks, so a changed policy governs this
     // command too. Launch settings wait until the launch itself: a command that
     // is denied or needs confirmation leaves the browser and its settings alone.
-    let launches = (!skip_launch_action(action) || action == "launch") && !auth_login_no_navigate;
+    let launches = command_launches_browser(cmd);
     let mut launch_patch: Option<Patch> = None;
     let mut settings_outcome = if action == "close" {
         SettingsOutcome::default()
