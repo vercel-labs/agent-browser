@@ -13684,15 +13684,16 @@ async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     Ok(json!({ "confirmed": true, "action": pending.action, "result": result }))
 }
 
-/// The parked command as `confirm` replays it: without its security settings,
-/// which already applied when it was parked, so the replay runs under the
-/// session's current containment and policy.
+/// The parked command as `confirm` replays it: without its action policy and
+/// confirm actions, which already applied when it was parked, so the replay
+/// runs under the session's current policy. Its allowed domains stay, since
+/// they apply only at the launch the replay runs; a change to the session's
+/// allowed domains drops the pending confirmation instead.
 fn confirmation_replay_command(cmd: &Value) -> Value {
     let mut replay = cmd.clone();
     if let Some(object) = replay.as_object_mut() {
-        object.remove("allowedDomains");
         if let Ok(patch) = Patch::from_wire(object.get("settings")) {
-            match patch.without_security_settings().to_wire() {
+            match patch.without_live_security_settings().to_wire() {
                 Some(wire) => {
                     object.insert("settings".to_string(), wire);
                 }
@@ -16755,7 +16756,7 @@ mod tests {
     }
 
     #[test]
-    fn test_a_confirmation_replay_drops_security_settings_only() {
+    fn test_a_confirmation_replay_drops_only_the_policy_settings() {
         let replay = confirmation_replay_command(&json!({
             "action": "launch",
             "allowedDomains": ["a.example"],
@@ -16767,10 +16768,10 @@ mod tests {
                 "relaunch": true
             }
         }));
-        assert!(replay.get("allowedDomains").is_none());
+        assert_eq!(replay["allowedDomains"], json!(["a.example"]));
         assert_eq!(
             replay["settings"],
-            json!({ "profile": "/tmp/p", "relaunch": true })
+            json!({ "allowed-domains": ["a.example"], "profile": "/tmp/p", "relaunch": true })
         );
 
         let only_security = confirmation_replay_command(&json!({
@@ -16778,6 +16779,43 @@ mod tests {
             "settings": { "action-policy": "/tmp/a.json" }
         }));
         assert!(only_security.get("settings").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_a_confirmed_launch_keeps_the_allowed_domains_it_was_parked_with() {
+        let (_env, mut state) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let policy = dir.path().join("policy.json");
+        fs::write(&policy, r#"{"confirm":["navigate"]}"#).unwrap();
+
+        let parked = execute_command(
+            &json!({
+                "id": "parked",
+                "action": "navigate",
+                "url": "https://a.example",
+                "settings": {
+                    "action-policy": policy.to_str().unwrap(),
+                    "allowed-domains": ["a.example"],
+                    "executable-path": "/missing/chrome-for-test"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(parked["data"]["confirmation_required"], true);
+        assert!(
+            state.domain_filter.read().await.is_none(),
+            "deferred to the launch"
+        );
+
+        // The launch fails (no browser binary) after the settings apply.
+        let _ = execute_command(&json!({ "id": "c", "action": "confirm" }), &mut state).await;
+
+        assert_eq!(
+            state.settings.security().allowed_domains,
+            Some(vec!["a.example".to_string()])
+        );
+        assert!(state.domain_filter.read().await.is_some());
     }
 
     #[tokio::test]

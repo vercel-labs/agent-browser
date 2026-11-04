@@ -91,14 +91,16 @@ impl Patch {
         live
     }
 
-    /// The patch without its security settings (allowed domains, action
+    /// The patch without the security settings that apply at once (action
     /// policy, confirm actions): what a confirmation replay may apply, so it
     /// cannot put back a policy that changed after the command was parked.
-    pub fn without_security_settings(&self) -> Patch {
+    /// Allowed domains stay: they apply only at the launch the replay runs.
+    pub fn without_live_security_settings(&self) -> Patch {
         let mut patch = self.clone();
-        patch
-            .entries
-            .retain(|key, _| spec(*key).persist != Persist::Secured);
+        patch.entries.retain(|key, _| {
+            let spec = spec(*key);
+            !(spec.persist == Persist::Secured && spec.effect == Effect::Live)
+        });
         patch
     }
 
