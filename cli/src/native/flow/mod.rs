@@ -64,6 +64,10 @@ fn classify_header(name: &str) -> HeaderClass {
         "cookie" | "host" | "content-length" | "connection" | "accept-encoding" => {
             HeaderClass::Dropped
         }
+        // Per-request tracing and client identity: not part of what a flow replays.
+        "x-client-ip" | "x-forwarded-for" | "x-real-ip" | "forwarded" | "traceparent"
+        | "tracestate" | "x-request-id" | "request-id" | "x-amzn-trace-id" | "sentry-trace"
+        | "baggage" | "cf-connecting-ip" | "true-client-ip" => HeaderClass::Dropped,
         _ => HeaderClass::Kept,
     }
 }
@@ -2297,6 +2301,59 @@ mod tests {
         assert_eq!(save(Some("s1r1")).unwrap().0["output"], "s1r1");
         let err = save(Some("s9r9")).unwrap_err();
         assert!(err.contains("s1r1") && err.contains("s2r1"), "{err}");
+    }
+
+    #[test]
+    fn identifying_and_tracing_headers_are_not_saved_in_any_case() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/" }),
+            None,
+            None,
+        );
+        r.tag_now("api");
+        let mut api = entry(
+            "api",
+            "https://app.example/api/x",
+            "Fetch",
+            "application/json",
+            r#"{"a":1}"#,
+        );
+        let dropped = [
+            "X-Client-IP",
+            "x-forwarded-for",
+            "X-Real-IP",
+            "Forwarded",
+            "traceparent",
+            "TraceState",
+            "X-Request-Id",
+            "Request-Id",
+            "X-Amzn-Trace-Id",
+            "Sentry-Trace",
+            "Baggage",
+            "CF-Connecting-IP",
+            "True-Client-IP",
+        ];
+        for name in dropped {
+            api.request_headers
+                .push((name.to_string(), "2001:db8::1".to_string()));
+        }
+        api.request_headers
+            .push(("X-App-Version".to_string(), "7".to_string()));
+        let (flow, report) = flow_of_entries(&r, &[api], None).unwrap();
+        let headers = flow["steps"][0]["requests"][0]["headers"]
+            .as_object()
+            .unwrap();
+        let kept: Vec<&String> = headers.keys().collect();
+        assert_eq!(kept, ["Accept", "X-App-Version"]);
+        for name in dropped {
+            assert!(report["droppedHeaders"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(name.to_ascii_lowercase())));
+        }
     }
 
     #[test]
