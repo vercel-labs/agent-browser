@@ -8419,13 +8419,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     // With "allowAndName" behavior, Chrome saves the file using the GUID as filename.
     // Rename it to the user-requested filename.
     if let Some(guid) = downloaded_guid {
-        let guid_path = download_dir.join(&guid);
-        if guid_path.file_name() != Some(std::ffi::OsStr::new(&guid)) {
-            return Err(format!(
-                "Refusing to move downloaded file: invalid download GUID {:?}",
-                guid
-            ));
-        }
+        let guid_path = guid_download_path(&download_dir, &guid)?;
         if wait_for_downloaded_file(&guid_path).await {
             if !may_move_download(&guid_path, true, Some(download_dir_str)) {
                 return Err(format!(
@@ -11657,6 +11651,19 @@ async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<
     move_download(&saved, path_str).inspect_err(|_| state.downloads.release(&record.guid))
 }
 
+/// Returns the file Chrome saved for `guid` in `download_dir`.
+/// The GUID comes from a CDP event, so anything other than a single filename is rejected.
+fn guid_download_path(download_dir: &std::path::Path, guid: &str) -> Result<PathBuf, String> {
+    let path = download_dir.join(guid);
+    if path.file_name() != Some(std::ffi::OsStr::new(guid)) {
+        return Err(format!(
+            "Refusing to move downloaded file: invalid download GUID {:?}",
+            guid
+        ));
+    }
+    Ok(path)
+}
+
 /// The saved path comes from a CDP event, so only a browser this daemon
 /// launched is trusted to name a local file. A remote endpoint could otherwise
 /// point the move at any file the daemon can read.
@@ -14501,6 +14508,21 @@ mod tests {
             let link = dir.path().join("downloads").join("link");
             std::os::unix::fs::symlink(&outside, &link).unwrap();
             assert!(!super::may_move_download(&link, true, downloads));
+        }
+    }
+
+    #[test]
+    fn download_guid_must_name_a_file_in_the_download_dir() {
+        let dir = std::path::Path::new("/tmp/downloads");
+        assert_eq!(
+            super::guid_download_path(dir, "8f3c-21ab").unwrap(),
+            dir.join("8f3c-21ab")
+        );
+        for guid in ["", ".", "..", "../secret", "a/b", "/etc/passwd", "8f3c/"] {
+            assert!(
+                super::guid_download_path(dir, guid).is_err(),
+                "accepted {guid:?}"
+            );
         }
     }
 
