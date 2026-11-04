@@ -1948,7 +1948,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Move the mouse. Interpolation starts at the last pointer or element interaction.",
+      "description": "Move the mouse using finite coordinates, including fractional CSS pixels. Interpolation starts at the last pointer or element interaction.",
       "inputSchema": {
         "properties": {
           "durationMs": {
@@ -2030,7 +2030,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Scroll with the mouse wheel at the current pointer, initially (0,0). Call agent_browser_mouse_move first to target another location.",
+      "description": "Scroll with finite wheel deltas, including fractional CSS pixels, at the current pointer, initially (0,0). Call agent_browser_mouse_move first to target another location.",
       "inputSchema": {
         "properties": {
           "dx": {
