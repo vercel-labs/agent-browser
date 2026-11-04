@@ -774,8 +774,9 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
             "version": env!("CARGO_PKG_VERSION")
         },
         "instructions": format!(
-            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. When a navigation result lists saved flows that match the task, call agent_browser_flow_run instead of driving the page. Use agent_browser_tools_profiles to see available startup profiles.",
-            config.profile_names().join(", ")
+            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. When a navigation result lists saved flows that match the task, call agent_browser_flow_run instead of driving the page. Use agent_browser_tools_profiles to see available startup profiles. {}",
+            config.profile_names().join(", "),
+            SHARED_ARGUMENTS_INSTRUCTIONS
         )
     })
 }
@@ -2092,130 +2093,129 @@ fn wait_timeout_schema() -> Value {
     })
 }
 
-fn tool(name: &str, title: &str, description: &str, properties: Value, required: &[&str]) -> Value {
-    let mut props = match properties {
-        Value::Object(map) => map,
-        _ => serde_json::Map::new(),
-    };
-    props.insert(
-        "session".to_string(),
-        json!({
+/// Shared arguments every tool accepts. Each tool's schema lists only the ones in
+/// `advertised_shared_arguments`; the initialize instructions describe the rest.
+const SHARED_ARGUMENTS: &[&str] = &[
+    "session",
+    "namespace",
+    "restore",
+    "restoreSave",
+    "restoreCheckUrl",
+    "restoreCheckText",
+    "restoreCheckFn",
+    "allowedDomains",
+    "capture",
+    "caCert",
+    "useSystemCa",
+    "clearCaCert",
+    "idleTimeout",
+    "extraArgs",
+    "timeoutMs",
+];
+
+/// Tools that usually start a session's browser, where launch-time arguments matter.
+const LAUNCH_TOOLS: &[&str] = &[TOOL_OPEN, TOOL_TAB_NEW];
+
+/// Tools that wait on navigation, page conditions, or scripts, where a per-call timeout matters.
+const WAITING_TOOLS: &[&str] = &[
+    TOOL_OPEN,
+    TOOL_READ,
+    TOOL_BACK,
+    TOOL_FORWARD,
+    TOOL_RELOAD,
+    TOOL_EVAL,
+    TOOL_WAIT_MS,
+    TOOL_WAIT_FOR_SELECTOR,
+    TOOL_WAIT_FOR_TEXT,
+    TOOL_WAIT_FOR_LOAD,
+    TOOL_WAIT_FOR_URL,
+    TOOL_WAIT_FOR_FUNCTION,
+    TOOL_WAIT_FOR_DOWNLOAD,
+    TOOL_TAB_NEW,
+];
+
+/// Shared arguments listed in this tool's input schema.
+fn advertised_shared_arguments(name: &str) -> Vec<&'static str> {
+    let mut keys = vec!["session"];
+    let launches = LAUNCH_TOOLS.contains(&name);
+    if launches {
+        keys.push("restore");
+        keys.push("capture");
+    }
+    if launches || name == TOOL_READ {
+        keys.push("allowedDomains");
+        keys.push("extraArgs");
+    }
+    if WAITING_TOOLS.contains(&name) {
+        keys.push("timeoutMs");
+    }
+    keys
+}
+
+fn shared_property(key: &str) -> Value {
+    match key {
+        "session" => json!({
             "type": "string",
-            "description": "Optional isolated browser session name. Accepts Unicode letters and numbers, hyphens, and underscores only; spaces are rejected."
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores."
         }),
-    );
-    props.insert(
-        "namespace".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional namespace that isolates daemon sockets and restore-state directories."
+        "restore" => json!({
+            "oneOf": [{ "type": "boolean" }, { "type": "string" }],
+            "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key."
         }),
-    );
-    props.insert(
-        "restore".to_string(),
-        json!({
-            "oneOf": [
-                { "type": "boolean" },
-                { "type": "string" }
-            ],
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key."
-        }),
-    );
-    props.insert(
-        "restoreSave".to_string(),
-        json!({
-            "type": "string",
-            "enum": ["auto", "always", "never"],
-            "description": "Auto-save policy for restored state."
-        }),
-    );
-    props.insert(
-        "restoreCheckUrl".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional URL pattern that restored state must match."
-        }),
-    );
-    props.insert(
-        "restoreCheckText".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional page text that restored state must expose."
-        }),
-    );
-    props.insert(
-        "restoreCheckFn".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional JavaScript expression that must evaluate truthy after restore."
-        }),
-    );
-    props.insert(
-        "allowedDomains".to_string(),
-        json!({
+        "allowedDomains" => json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active."
+            "description": "Restrict browser and read traffic to these domain patterns."
         }),
-    );
-    props.insert(
-        "capture".to_string(),
-        json!({
+        "capture" => json!({
             "type": "array",
             "items": { "type": "string", "enum": ["flow"] },
             "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it."
         }),
-    );
-    props.insert(
-        "caCert".to_string(),
-        json!({
-            "type": "string",
-            "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux."
-        }),
-    );
-    props.insert(
-        "useSystemCa".to_string(),
-        json!({
-            "type": "boolean",
-            "description": "Use the operating system trust store instead of the built-in roots for the CLI's own HTTPS requests. Does not affect the browser."
-        }),
-    );
-    props.insert(
-        "clearCaCert".to_string(),
-        json!({
-            "type": "boolean",
-            "description": "Explicitly clear CA trust retained by the running browser session."
-        }),
-    );
-    props.insert(
-        "idleTimeout".to_string(),
-        json!({
-            "type": "string",
-            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown."
-        }),
-    );
-    props.insert(
-        "extraArgs".to_string(),
-        json!({
+        "extraArgs" => json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura. Global flags that change network, file, policy, or host access (such as --allowed-domains, --executable-path, --args, --config) are rejected; set them in the MCP server environment or config. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
+            "description": "Extra CLI arguments for this command, such as --engine. Flags that change network, file, policy, or host access are rejected."
         }),
-    );
-    props.insert(
-        "timeoutMs".to_string(),
-        json!({
+        "timeoutMs" => json!({
             "type": "integer",
             "minimum": 1,
             "default": DEFAULT_TIMEOUT_MS,
             "description": "Maximum time to wait for this tool call."
         }),
-    );
+        _ => unreachable!("shared argument {key} is not advertised"),
+    }
+}
+
+const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool accepts these optional arguments even when its schema does not list them: session (isolated browser session name), restore (true or a key; restores and auto-saves browser state when the call launches the browser), allowedDomains (domain patterns that restrict browser and read traffic when the call launches the browser; also disables RTCPeerConnection in Chromium sessions, and is rejected when the server environment or config already sets allowed domains), capture (set to flow to record the session so flow steps and flow save can turn it into a reusable flow, when the call launches the browser), extraArgs (extra CLI arguments such as --engine; global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config, are rejected, so set those in the MCP server environment or config), timeoutMs (positive integer, maximum milliseconds to wait for the tool call), namespace (isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (conditions restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), and idleTimeout (such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown).";
+
+/// Levenshtein distance, for suggesting a close argument name.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+fn tool(name: &str, title: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+    let mut props = match properties {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    for key in advertised_shared_arguments(name) {
+        props.insert(key.to_string(), shared_property(key));
+    }
 
     let mut schema = serde_json::Map::new();
     schema.insert("type".to_string(), json!("object"));
     schema.insert("properties".to_string(), Value::Object(props));
-    schema.insert("additionalProperties".to_string(), json!(false));
     if !required.is_empty() {
         schema.insert("required".to_string(), json!(required));
     }
@@ -2337,34 +2337,52 @@ fn reject_unknown_arguments(
         .unwrap_or(&empty);
     let mut unknown: Vec<&str> = args
         .keys()
-        .filter(|key| !declared.contains_key(*key))
+        .filter(|key| !declared.contains_key(*key) && !SHARED_ARGUMENTS.contains(&key.as_str()))
         .map(|key| key.as_str())
         .collect();
     if unknown.is_empty() {
         return Ok(());
     }
     unknown.sort();
-    let shared = tool("", "", "", json!({}), &[]);
-    let shared_keys = shared
-        .pointer("/inputSchema/properties")
-        .and_then(|v| v.as_object())
-        .unwrap_or(&empty);
     let mut own: Vec<&str> = declared
         .keys()
-        .filter(|key| !shared_keys.contains_key(*key))
+        .filter(|key| !SHARED_ARGUMENTS.contains(&key.as_str()))
         .map(|key| key.as_str())
         .collect();
     own.sort();
+    let candidates: Vec<&str> = own
+        .iter()
+        .copied()
+        .chain(SHARED_ARGUMENTS.iter().copied())
+        .collect();
+    let suggestions: Vec<String> = unknown
+        .iter()
+        .filter_map(|key| {
+            candidates
+                .iter()
+                .map(|candidate| (edit_distance(key, candidate), *candidate))
+                .filter(|(distance, _)| *distance <= 2)
+                .min()
+                .map(|(_, candidate)| format!("{} for {}", candidate, key))
+        })
+        .collect();
+    let hint = if suggestions.is_empty() {
+        String::new()
+    } else {
+        format!(" Did you mean {}?", suggestions.join(", "))
+    };
     let own = if own.is_empty() {
         "none".to_string()
     } else {
         own.join(", ")
     };
     Err(ProtocolError::invalid_params(format!(
-        "Unknown argument(s) for {}: {}. Tool arguments: {}.",
+        "Unknown argument(s) for {}: {}.{} Tool arguments: {}. Shared arguments every tool accepts: {}.",
         name,
         unknown.join(", "),
-        own
+        hint,
+        own,
+        SHARED_ARGUMENTS.join(", ")
     )))
 }
 
@@ -5291,7 +5309,9 @@ mod tests {
         assert_eq!(err.code, -32602);
         assert!(err.message.contains("tabId"));
         let listed = err.message.split("Tool arguments:").nth(1).unwrap();
+        let listed = listed.split("Shared arguments").next().unwrap();
         assert!(listed.contains("tab"));
+        assert!(err.message.contains("Did you mean tab for tabId?"));
         assert!(!listed.contains("session"));
     }
 
@@ -5781,21 +5801,87 @@ mod tests {
             "array"
         );
         assert_eq!(
-            open["inputSchema"]["properties"]["restoreSave"]["enum"][0],
-            "auto"
-        );
-        assert_eq!(
-            open["inputSchema"]["properties"]["namespace"]["type"],
-            "string"
-        );
-        assert_eq!(
             open["inputSchema"]["properties"]["allowedDomains"]["type"],
             "array"
         );
-        assert_eq!(
-            open["inputSchema"]["properties"]["idleTimeout"]["type"],
-            "string"
+        let click = find_tool(TOOL_CLICK).unwrap();
+        let click_props = click["inputSchema"]["properties"].as_object().unwrap();
+        assert!(click_props.contains_key("session"));
+        for key in [
+            "restore",
+            "allowedDomains",
+            "extraArgs",
+            "timeoutMs",
+            "namespace",
+        ] {
+            assert!(!click_props.contains_key(key), "{key}");
+        }
+        for tool in &tools {
+            let name = tool["name"].as_str().unwrap();
+            let props = tool["inputSchema"]["properties"].as_object().unwrap();
+            for key in SHARED_ARGUMENTS {
+                assert_eq!(
+                    props.contains_key(*key),
+                    advertised_shared_arguments(name).contains(key),
+                    "{name} {key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tool_schemas_allow_unlisted_shared_arguments() {
+        for tool in tools() {
+            let name = tool["name"].as_str().unwrap();
+            assert!(
+                tool["inputSchema"].get("additionalProperties").is_none(),
+                "{name}"
+            );
+        }
+        for name in [
+            TOOL_WAIT_FOR_URL,
+            TOOL_WAIT_FOR_FUNCTION,
+            TOOL_WAIT_FOR_DOWNLOAD,
+            TOOL_TAB_NEW,
+        ] {
+            assert!(
+                advertised_shared_arguments(name).contains(&"timeoutMs"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_tool_accepts_every_shared_argument_and_instructions_name_them() {
+        let all: serde_json::Map<String, Value> = SHARED_ARGUMENTS
+            .iter()
+            .map(|key| (key.to_string(), json!(null)))
+            .collect();
+        for tool in tools() {
+            let name = tool["name"].as_str().unwrap();
+            reject_unknown_arguments(name, &tool, &Value::Object(all.clone())).unwrap();
+        }
+        for key in SHARED_ARGUMENTS {
+            assert!(SHARED_ARGUMENTS_INSTRUCTIONS.contains(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn unknown_argument_error_suggests_hidden_shared_names() {
+        let click = find_tool(TOOL_CLICK).unwrap();
+        let err = reject_unknown_arguments(TOOL_CLICK, &click, &json!({ "namespaec": "ns" }))
+            .unwrap_err();
+        assert!(
+            err.message
+                .contains("Did you mean namespace for namespaec?"),
+            "{}",
+            err.message
         );
+        assert!(err.message.contains("Shared arguments every tool accepts:"));
+        assert!(err.message.contains("idleTimeout"));
+        let err =
+            reject_unknown_arguments(TOOL_CLICK, &click, &json!({ "zzzzzzzz": 1 })).unwrap_err();
+        assert!(!err.message.contains("Did you mean"), "{}", err.message);
     }
 
     #[test]
