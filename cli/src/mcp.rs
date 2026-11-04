@@ -2163,7 +2163,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "array",
             "items": { "type": "string", "enum": ["flow"] },
-            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. Applies when the session opens; close and reopen to change it."
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it."
         }),
     );
     props.insert(

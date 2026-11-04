@@ -1,22 +1,22 @@
-//! Sending a saved request directly, with the session's cookies.
+//! The direct-HTTP tier: the saved request sent with the session's cookies.
 
 use super::*;
 
-/// A session route (`network route`) that matches the request answers it,
-/// so mocks apply to a run too.
+/// A session route (`network route`) that matches the request answers it on
+/// the HTTP tier too, so mocks apply to the whole session.
 pub struct RoutedResponse {
     pub abort: bool,
     pub status: u16,
     pub body: String,
 }
 
-/// Send the request directly, with cookies from the live session.
+/// Tier 1: send the request directly, with cookies from the live session.
 pub async fn run_http(
     client: &reqwest::Client,
     req: &PreparedRequest,
     cookie_header: Option<&str>,
     routed: Option<RoutedResponse>,
-) -> RequestResult {
+) -> TierResult {
     let started = Instant::now();
     if let Some(r) = routed {
         let outcome = if r.abort {
@@ -28,13 +28,14 @@ pub async fn run_http(
         } else {
             Ok((r.status, r.body))
         };
-        return request_result(req, started, outcome);
+        return tier_result(req, Tier::Http, started, outcome);
     }
     let method = match reqwest::Method::from_bytes(req.method.as_bytes()) {
         Ok(m) => m,
         Err(_) => {
-            return request_result(
+            return tier_result(
                 req,
+                Tier::Http,
                 started,
                 Err(Failure::new(
                     true,
@@ -86,8 +87,9 @@ pub async fn run_http(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                return request_result(
+                return tier_result(
                     req,
+                    Tier::Http,
                     started,
                     Err(Failure {
                         status: Some(status),
@@ -109,7 +111,7 @@ pub async fn run_http(
         ))),
         Err(e) => Err(Failure::new(false, None, format!("request failed: {}", e))),
     };
-    with_retry_after(request_result(req, started, outcome), retry_after)
+    with_retry_after(tier_result(req, Tier::Http, started, outcome), retry_after)
 }
 
 /// The direct-HTTP client. Redirects are followed only to hosts the
@@ -147,4 +149,15 @@ pub fn cookie_header(cookies: &[crate::native::cookies::Cookie]) -> String {
         .map(|c| format!("{}={}", c.name, c.value))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// The HTTP tier over a browser session's cookies and routes.
+pub async fn send(
+    client: &reqwest::Client,
+    browser: &mut dyn Browser,
+    req: &PreparedRequest,
+) -> TierResult {
+    let cookie = browser.cookie_header(&req.url).await;
+    let routed = browser.routed_response(&req.url).await;
+    run_http(client, req, cookie.as_deref(), routed).await
 }
