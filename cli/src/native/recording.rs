@@ -695,8 +695,20 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
     Ok(result)
 }
 
+fn ffmpeg_command() -> tokio::process::Command {
+    let cmd = tokio::process::Command::new("ffmpeg");
+    #[cfg(windows)]
+    let cmd = {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut cmd = cmd;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd
+    };
+    cmd
+}
+
 fn build_ffmpeg_command(output_path: &str, fps: u32, cursor: bool) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("ffmpeg");
+    let mut cmd = ffmpeg_command();
     let high_fps = fps > HIGH_FPS_THRESHOLD;
 
     // -hide_banner keeps the version and build banner out of stderr, so a
@@ -1366,7 +1378,7 @@ fn ffmpeg_launch_error(error: impl std::fmt::Display) -> String {
 /// This keeps missing-binary failures ahead of browser attachment while the
 /// real encoder process is deferred until that attachment succeeds.
 pub async fn check_ffmpeg_available() -> Result<(), String> {
-    let status = tokio::process::Command::new("ffmpeg")
+    let status = ffmpeg_command()
         .arg("-version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
