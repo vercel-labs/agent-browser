@@ -250,25 +250,66 @@ fn templatize(text: &str, params: &[(String, String)], encoded: bool) -> String 
     out
 }
 
-fn fill(template: &str, params: &HashMap<String, String>, encoded: bool) -> Result<String, String> {
-    let mut out = template.to_string();
-    for (name, value) in params {
-        let v = if encoded {
-            urlencoding::encode(value).into_owned()
-        } else {
-            value.clone()
-        };
-        out = out.replace(&format!("{{{{{}}}}}", name), &v);
+/// Templatize a request body. The text of a GraphQL operation stays
+/// literal, so a param can fill `variables` and other fields but never the
+/// operation itself.
+fn templatize_body(body: &str, params: &[(String, String)]) -> String {
+    let Ok(mut parsed) = serde_json::from_str::<Value>(body) else {
+        return templatize(body, params, false);
+    };
+    let is_op = |v: &Value| v.get("query").is_some_and(|q| q.is_string());
+    let graphql = match &parsed {
+        Value::Array(items) => !items.is_empty() && items.iter().all(is_op),
+        other => is_op(other),
+    };
+    if !graphql {
+        return templatize(body, params, false);
     }
-    if let Some(start) = out
-        .match_indices("{{")
-        .map(|(i, _)| i)
-        .find(|i| !out[*i..].starts_with("{{@"))
-    {
-        if let Some(len) = out[start..].find("}}") {
-            return Err(format!("missing --param {}", &out[start + 2..start + len]));
+    let mut ops: Vec<&mut Value> = match &mut parsed {
+        Value::Array(items) => items.iter_mut().collect(),
+        other => vec![other],
+    };
+    for op in ops.iter_mut() {
+        if let Some(map) = op.as_object_mut() {
+            for (key, value) in map.iter_mut() {
+                if key != "query" {
+                    let _ = map_strings(value, &|t| Ok(templatize(t, params, false)));
+                }
+            }
         }
     }
+    serde_json::to_string(&parsed).unwrap_or_else(|_| body.to_string())
+}
+
+/// Fill `{{name}}` placeholders in one pass over the template. A value is
+/// appended as data and never scanned again; `{{@...}}` references are left
+/// for the run.
+fn fill(template: &str, params: &HashMap<String, String>, encoded: bool) -> Result<String, String> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        if rest.starts_with("{{@") {
+            out.push_str("{{@");
+            rest = &rest[3..];
+            continue;
+        }
+        let Some(len) = rest.find("}}") else {
+            break;
+        };
+        let name = &rest[2..len];
+        let value = params
+            .get(name)
+            .ok_or_else(|| format!("missing --param {}", name))?;
+        if encoded {
+            out.push_str(&urlencoding::encode(value));
+        } else {
+            out.push_str(value);
+        }
+        rest = &rest[len + 2..];
+    }
+    out.push_str(rest);
     Ok(out)
 }
 
@@ -674,7 +715,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                 method: e.method.clone(),
                 url: templatize(&e.url, &given, true),
                 headers,
-                body: e.post_data.as_deref().map(|b| templatize(b, &given, false)),
+                body: e.post_data.as_deref().map(|b| templatize_body(b, &given)),
                 expect: Expect {
                     status: e.status.map(|s| s as u16),
                     mime: e.mime_type.clone(),
@@ -1062,12 +1103,14 @@ pub fn fill_references(
     bodies: &HashMap<String, Value>,
     encoded: bool,
 ) -> Result<String, String> {
-    let mut out = text.to_string();
-    while let Some(start) = out.find("{{@") {
-        let Some(len) = out[start..].find("}}") else {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("{{@") {
+        let Some(len) = rest[start..].find("}}") else {
             break;
         };
-        let inner = out[start + 3..start + len].to_string();
+        out.push_str(&rest[..start]);
+        let inner = &rest[start + 3..start + len];
         let (from, path) = inner
             .split_once('.')
             .ok_or(format!("bad reference {}", inner))?;
@@ -1077,13 +1120,14 @@ pub fn fill_references(
         let value = lookup(body, path)
             .map(as_text)
             .ok_or(format!("{} no longer has '{}'", from, path))?;
-        let value = if encoded {
-            urlencoding::encode(&value).into_owned()
+        if encoded {
+            out.push_str(&urlencoding::encode(&value));
         } else {
-            value
-        };
-        out.replace_range(start..start + len + 2, &value);
+            out.push_str(&value);
+        }
+        rest = &rest[start + len + 2..];
     }
+    out.push_str(rest);
     Ok(out)
 }
 
@@ -1636,18 +1680,23 @@ pub fn prepare_all(
                 .iter()
                 .filter_map(|(k, v)| Some((k.clone(), fill(v, &params, false).ok()?)))
                 .collect();
+            let body = match &r.body {
+                Some(b) => Some(map_body(b, &|t| fill(t, &params, false))?),
+                None => None,
+            };
+            let write = flow.write(&r.id).is_some();
+            if !write && is_write(&r.method, body.as_deref()) {
+                return Err(not_listed_as_write(&r.id));
+            }
             out.push(PreparedRequest {
                 id: r.id.clone(),
                 step: index + 1,
                 method: r.method.clone(),
                 url: fill(&r.url, &params, true)?,
                 headers,
-                body: match &r.body {
-                    Some(b) => Some(map_body(b, &|t| fill(t, &params, false))?),
-                    None => None,
-                },
+                body,
                 expect: r.expect.clone(),
-                write: flow.write(&r.id).is_some(),
+                write,
             });
         }
     }
@@ -1662,8 +1711,18 @@ impl PreparedRequest {
         if let Some(b) = &self.body {
             out.body = Some(map_body(b, &|t| fill_references(t, bodies, false))?);
         }
+        if !out.write && is_write(&out.method, out.body.as_deref()) {
+            return Err(not_listed_as_write(&out.id));
+        }
         Ok(out)
     }
+}
+
+fn not_listed_as_write(id: &str) -> String {
+    format!(
+        "request {} is a write once its values are filled in, but the flow does not list it as one; it was not sent",
+        id
+    )
 }
 
 const MUTATING_SEGMENTS: &[&str] = &["logout", "signout", "unsubscribe", "delete", "remove"];
@@ -1793,7 +1852,8 @@ pub fn is_write(method: &str, body: Option<&str>) -> bool {
 }
 
 /// A GraphQL POST that only runs queries reads data; mutations still count
-/// as writes.
+/// as writes, and so does an operation with a placeholder in its text, since
+/// a value could turn it into one.
 fn is_graphql_query(body: Option<&str>) -> bool {
     let Some(parsed) = body.and_then(|b| serde_json::from_str::<Value>(b).ok()) else {
         return false;
@@ -1806,7 +1866,9 @@ fn is_graphql_query(body: Option<&str>) -> bool {
         && ops.iter().all(|op| {
             op["query"].as_str().is_some_and(|q| {
                 let q = q.trim_start();
-                (q.starts_with("query") || q.starts_with('{')) && !q.contains("mutation")
+                (q.starts_with("query") || q.starts_with('{'))
+                    && !q.contains("mutation")
+                    && !q.contains("{{")
             })
         })
 }
@@ -3101,6 +3163,7 @@ mod tests {
         let flow = flow_of(json!({
             "startUrl": "https://a.test/",
             "params": [{ "name": "email", "source": "typed" }],
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
             "steps": [{ "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/login",
                 "body": "{\"email\":\"{{email}}\"}" }] }]
         }));
@@ -3511,6 +3574,7 @@ mod tests {
         let flow = flow_of(json!({
             "startUrl": "https://a.test/",
             "params": [{ "name": "q", "source": "typed" }],
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
             "steps": [{
                 "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/s?q={{q}}",
                     "headers": { "x-q": "{{q}}" }, "body": "{\"q\":\"{{q}}\"}",
@@ -4079,6 +4143,128 @@ mod tests {
                 assert_withheld(&mut r, "482913");
             }
         }
+    }
+
+    fn with_timeout<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("did not finish: the expansion loops")
+    }
+
+    #[test]
+    fn a_response_value_with_its_own_reference_expands_once_and_ends() {
+        let out = with_timeout(|| {
+            let bodies = HashMap::from([("a".to_string(), json!({ "v": "{{@a.v}}", "w": "ok" }))]);
+            let one = fill_references("x={{@a.v}}&y={{@a.w}}", &bodies, false).unwrap();
+            let two = fill_references("{{@a.w}}{{@a.v}}", &bodies, false).unwrap();
+            (one, two)
+        });
+        assert_eq!(out.0, "x={{@a.v}}&y=ok");
+        assert_eq!(out.1, "ok{{@a.v}}");
+    }
+
+    #[test]
+    fn a_param_value_with_placeholder_text_is_inserted_literally() {
+        let params = HashMap::from([
+            ("a".to_string(), "{{b}}".to_string()),
+            ("b".to_string(), "X".to_string()),
+            ("c".to_string(), "{{missing}}".to_string()),
+        ]);
+        assert_eq!(fill("{{a}}-{{b}}", &params, false).unwrap(), "{{b}}-X");
+        assert_eq!(fill("{{c}}", &params, false).unwrap(), "{{missing}}");
+        assert!(fill("{{nope}}", &params, false)
+            .unwrap_err()
+            .contains("missing --param nope"));
+        assert_eq!(
+            fill("{{@s1r1.id}}", &params, false).unwrap(),
+            "{{@s1r1.id}}"
+        );
+    }
+
+    #[test]
+    fn a_graphql_operation_with_a_placeholder_is_a_write() {
+        for body in [
+            r#"{"query":"{{op}} X { a }"}"#,
+            r#"[{"query":"query A { a }"},{"query":"query B { {{@s1r1.f}} }"}]"#,
+        ] {
+            assert!(is_write("POST", Some(body)), "{body}");
+        }
+        assert!(!is_write(
+            "POST",
+            Some(r#"{"query":"query X { a }","variables":{"q":"{{q}}"}}"#)
+        ));
+    }
+
+    #[test]
+    fn a_param_cannot_turn_a_saved_query_into_a_mutation() {
+        let flow = flow_of(json!({
+            "params": [{ "name": "op", "example": "query" }],
+            "output": "s1r1", "writes": [],
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/graphql",
+                "body": "{\"query\":\"{{op}} X { a }\"}" }] }]
+        }));
+        let err = prepare_all(
+            &flow,
+            &[("op".to_string(), "mutation Y { buy }".to_string())],
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("s1r1") && err.contains("write"), "{err}");
+    }
+
+    #[test]
+    fn a_reference_cannot_turn_a_read_into_a_write() {
+        let req = PreparedRequest {
+            body: Some(r#"{"query":"{{@a.op}} X { a }"}"#.to_string()),
+            method: "POST".to_string(),
+            write: false,
+            ..prepared("s2r1")
+        };
+        let bodies = HashMap::from([("a".to_string(), json!({ "op": "mutation Y { buy }" }))]);
+        assert!(req.resolve(&bodies).err().unwrap().contains("write"));
+        let ok = HashMap::from([("a".to_string(), json!({ "op": "query" }))]);
+        assert!(req.resolve(&ok).is_ok());
+    }
+
+    #[test]
+    fn save_keeps_a_graphql_operation_literal_and_templatizes_variables() {
+        let mut r = recorder();
+        r.tag_now("gql");
+        let mut e = entry(
+            "gql",
+            "https://api.example.com.ar/graphql",
+            "Fetch",
+            "application/json",
+            r#"{"data":{"search":[{"id":1}]}}"#,
+        );
+        e.method = "POST".to_string();
+        e.post_data = Some(
+            r#"{"query":"query S($t:String){ search(term:\"kettle\", t:$t){ id } }","variables":{"t":"kettle"}}"#
+                .to_string(),
+        );
+        let params = vec![("product".to_string(), "kettle".to_string())];
+        let (flow, _) = build_flow_value(SaveInput {
+            name: "g",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[e],
+            params: &params,
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let body: Value =
+            serde_json::from_str(flow["steps"][1]["requests"][0]["body"].as_str().unwrap())
+                .unwrap();
+        assert!(body["query"].as_str().unwrap().contains("kettle"));
+        assert!(!body["query"].as_str().unwrap().contains("{{"));
+        assert_eq!(body["variables"]["t"], "{{product}}");
+        assert_eq!(flow["writes"], json!([]));
     }
 
     #[test]
