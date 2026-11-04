@@ -227,7 +227,7 @@ Some responses end the run. They do not mark the flow unverified, and the run ad
   </tbody>
 </table>
 
-A bot challenge is recognized only in HTML responses, never in JSON. A write is sent once: if the request fails without an answer, the result is `outcome_unknown`, because the server may have applied it, and it is never retried. A redirect to another site is not followed, and a write does not follow redirects. The code is in the JSON response as `code`, with `data.status`, `data.step` and `data.httpStatus`.
+A bot challenge is recognized only in HTML responses, never in JSON. A write is sent once: if the request fails without an answer, the result is `outcome_unknown`, because the server may have applied it, and it is never retried. A write never follows a redirect, including a 307 or 308: the 3xx is its answer and the run stops with it. A read follows redirects only within the flow's site. The code is in the JSON response as `code`, with `data.status`, `data.step` and `data.httpStatus`.
 
 ### Writes
 
@@ -249,7 +249,7 @@ agent-browser flow run <name> --allow-write <all|id,id,...>
 
 `--allow-write` takes `all` or comma-separated write ids. A run only sends the writes among the requests its output needs, and a write `--allow-write` does not cover is never sent silently: the run stops with a confirmation request, and `confirm` approves one write at a time. Each write is a policy action named `flow_write:<id>`, so `--action-policy` can deny or require confirmation for it and `--confirm-actions flow_write:<id>` asks even when `--allow-write` covers it. 
 
-A param never fills the text of a GraphQL operation; it fills `variables` and the other fields. An operation with a placeholder in its text counts as a write, and a run refuses, before sending anything, a request that becomes a write once its values are filled in but is not in `writes`.
+A value is encoded for where it lands: a URL query or path segment, a form body, or a JSON string. Placeholders are filled in one pass, so a value that contains placeholder text is inserted as data. A flow with no `output` sends every request, and every write among them is gated like any other. A param never fills the text of a GraphQL operation; it fills `variables` and the other fields. An operation with a placeholder in its text counts as a write, and a run refuses, before sending anything, a request that becomes a write once its values are filled in but is not in `writes`.
 
 ### Discovery
 

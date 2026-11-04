@@ -18,6 +18,7 @@ mod model;
 mod outcome;
 mod recorder;
 mod send;
+mod template;
 
 pub use hint::*;
 pub use hosts::*;
@@ -26,6 +27,7 @@ pub use model::*;
 pub use outcome::*;
 pub use recorder::*;
 pub use send::*;
+pub use template::{Body, Parts, Slot};
 
 // ---------------------------------------------------------------------------
 // Request selection
@@ -229,101 +231,6 @@ pub fn parse_params(cmd: &Value) -> Result<Vec<(String, String)>, String> {
         }
     }
     Ok(out)
-}
-
-fn templatize(text: &str, params: &[(String, String)], encoded: bool) -> String {
-    let mut out = text.to_string();
-    for (name, value) in params {
-        if value.is_empty() {
-            continue;
-        }
-        let needle = if encoded {
-            urlencoding::encode(value).into_owned()
-        } else {
-            value.clone()
-        };
-        out = out.replace(&needle, &format!("{{{{{}}}}}", name));
-        if encoded && needle != *value {
-            out = out.replace(value.as_str(), &format!("{{{{{}}}}}", name));
-        }
-    }
-    out
-}
-
-/// Templatize a request body. The text of a GraphQL operation stays
-/// literal, so a param can fill `variables` and other fields but never the
-/// operation itself.
-fn templatize_body(body: &str, params: &[(String, String)]) -> String {
-    let Ok(mut parsed) = serde_json::from_str::<Value>(body) else {
-        return templatize(body, params, false);
-    };
-    let is_op = |v: &Value| v.get("query").is_some_and(|q| q.is_string());
-    let graphql = match &parsed {
-        Value::Array(items) => !items.is_empty() && items.iter().all(is_op),
-        other => is_op(other),
-    };
-    if !graphql {
-        return templatize(body, params, false);
-    }
-    let mut ops: Vec<&mut Value> = match &mut parsed {
-        Value::Array(items) => items.iter_mut().collect(),
-        other => vec![other],
-    };
-    for op in ops.iter_mut() {
-        if let Some(map) = op.as_object_mut() {
-            for (key, value) in map.iter_mut() {
-                if key != "query" {
-                    let _ = map_strings(value, &|t| Ok(templatize(t, params, false)));
-                }
-            }
-        }
-    }
-    serde_json::to_string(&parsed).unwrap_or_else(|_| body.to_string())
-}
-
-/// Fill `{{name}}` placeholders in one pass over the template. A value is
-/// appended as data and never scanned again; `{{@...}}` references are left
-/// for the run.
-fn fill(template: &str, params: &HashMap<String, String>, encoded: bool) -> Result<String, String> {
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(start) = rest.find("{{") {
-        out.push_str(&rest[..start]);
-        rest = &rest[start..];
-        if rest.starts_with("{{@") {
-            out.push_str("{{@");
-            rest = &rest[3..];
-            continue;
-        }
-        let Some(len) = rest.find("}}") else {
-            break;
-        };
-        let name = &rest[2..len];
-        let value = params
-            .get(name)
-            .ok_or_else(|| format!("missing --param {}", name))?;
-        if encoded {
-            out.push_str(&urlencoding::encode(value));
-        } else {
-            out.push_str(value);
-        }
-        rest = &rest[len + 2..];
-    }
-    out.push_str(rest);
-    Ok(out)
-}
-
-/// Apply `f` to every string in a JSON body and serialize it again, so a
-/// value with quotes or backslashes stays valid JSON. Bodies that are not
-/// JSON go through `f` as plain text.
-fn map_body(body: &str, f: &dyn Fn(&str) -> Result<String, String>) -> Result<String, String> {
-    match serde_json::from_str::<Value>(body) {
-        Ok(mut v) => {
-            map_strings(&mut v, f)?;
-            serde_json::to_string(&v).map_err(|e| e.to_string())
-        }
-        Err(_) => f(body),
-    }
 }
 
 fn map_strings(v: &mut Value, f: &dyn Fn(&str) -> Result<String, String>) -> Result<(), String> {
@@ -700,7 +607,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                     }
                     continue;
                 }
-                headers.insert(k.clone(), templatize(v, &given, false));
+                headers.insert(k.clone(), template::templatize(v, &given, Slot::Raw));
             }
             let item_fields = item_fields(&parsed);
             let id = format!("s{}r{}", index + 1, requests.len() + 1);
@@ -713,9 +620,12 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             requests.push(Request {
                 id,
                 method: e.method.clone(),
-                url: templatize(&e.url, &given, true),
+                url: template::templatize(&e.url, &given, Slot::Url),
                 headers,
-                body: e.post_data.as_deref().map(|b| templatize_body(b, &given)),
+                body: e.post_data.as_deref().map(|b| {
+                    let form = template::is_form(&e.request_headers);
+                    template::templatize_body(b, &given, form)
+                }),
                 expect: Expect {
                     status: e.status.map(|s| s as u16),
                     mime: e.mime_type.clone(),
@@ -1096,43 +1006,13 @@ fn link_requests(
     links
 }
 
-/// Values a reference placeholder in `text` points at, filled from the
-/// responses already received in this run.
-pub fn fill_references(
-    text: &str,
-    bodies: &HashMap<String, Value>,
-    encoded: bool,
-) -> Result<String, String> {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("{{@") {
-        let Some(len) = rest[start..].find("}}") else {
-            break;
-        };
-        out.push_str(&rest[..start]);
-        let inner = &rest[start + 3..start + len];
-        let (from, path) = inner
-            .split_once('.')
-            .ok_or(format!("bad reference {}", inner))?;
-        let body = bodies
-            .get(from)
-            .ok_or(format!("reference to {} before it ran", from))?;
-        let value = lookup(body, path)
-            .map(as_text)
-            .ok_or(format!("{} no longer has '{}'", from, path))?;
-        if encoded {
-            out.push_str(&urlencoding::encode(&value));
-        } else {
-            out.push_str(&value);
-        }
-        rest = &rest[start + len + 2..];
-    }
-    out.push_str(rest);
-    Ok(out)
-}
-
 /// Request ids a request needs answers from, in run order.
 pub fn dependencies(flow: &Flow, id: &str) -> Vec<String> {
+    // A flow with no output answers with nothing in particular, so a run
+    // sends every request and every write goes through the gate.
+    if id.is_empty() {
+        return flow.requests().map(|r| r.id.clone()).collect();
+    }
     let refs_of = |rid: &str| -> Vec<String> {
         flow.request(rid)
             .map(|r| {
@@ -1631,6 +1511,9 @@ pub struct PreparedRequest {
     pub expect: Expect,
     /// A run needs this request allowed before it sends it.
     pub write: bool,
+    /// The templates the text above was bound from; references stay
+    /// unbound until the run has the responses.
+    pub parts: Option<Parts>,
 }
 
 /// Requests to send for a run: the one the flow answers with, and the ones
@@ -1642,7 +1525,7 @@ pub fn prepare(
     let needed = dependencies(flow, &flow.output);
     Ok(prepare_all(flow, cmd_params)?
         .into_iter()
-        .filter(|r| flow.output.is_empty() || needed.contains(&r.id))
+        .filter(|r| needed.contains(&r.id))
         .collect())
 }
 
@@ -1675,29 +1558,40 @@ pub fn prepare_all(
     let mut out = Vec::new();
     for (index, step) in flow.steps.iter().enumerate() {
         for r in &step.requests {
-            let headers = r
+            let header_list: Vec<(String, String)> = r
                 .headers
                 .iter()
-                .filter_map(|(k, v)| Some((k.clone(), fill(v, &params, false).ok()?)))
+                .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
+            let headers = header_list
+                .iter()
+                .filter_map(|(k, v)| {
+                    let bound = template::bind_params(&template::parse(v), Slot::Raw, &params);
+                    Some((k.clone(), template::show(&bound.ok()?)))
+                })
+                .collect();
+            let url = template::bind_params(&template::parse(&r.url), Slot::Url, &params)?;
+            let form = template::is_form(&header_list);
             let body = match &r.body {
-                Some(b) => Some(map_body(b, &|t| fill(t, &params, false))?),
+                Some(b) => Some(Body::parse(b, form).bind_params(&params)?),
                 None => None,
             };
-            let url = fill(&r.url, &params, true)?;
+            let url_text = template::show(&url);
+            let body_text = body.as_ref().map(|b| b.show());
             let write = flow.write(&r.id).is_some();
-            if !write && becomes_write(&r.method, &url, body.as_deref()) {
+            if !write && becomes_write(&r.method, &url_text, body_text.as_deref()) {
                 return Err(not_listed_as_write(&r.id));
             }
             out.push(PreparedRequest {
                 id: r.id.clone(),
                 step: index + 1,
                 method: r.method.clone(),
-                url,
+                url: url_text,
                 headers,
-                body,
+                body: body_text,
                 expect: r.expect.clone(),
                 write,
+                parts: Some(Parts { url, body }),
             });
         }
     }
@@ -1707,10 +1601,14 @@ pub fn prepare_all(
 impl PreparedRequest {
     /// Fill reference placeholders from the responses received so far.
     pub fn resolve(&self, bodies: &HashMap<String, Value>) -> Result<PreparedRequest, String> {
+        let parts = self.parts.clone().unwrap_or_else(|| {
+            let form = template::is_form(&self.headers);
+            Parts::of_text(&self.url, self.body.as_deref(), form)
+        });
         let mut out = self.clone();
-        out.url = fill_references(&self.url, bodies, true)?;
-        if let Some(b) = &self.body {
-            out.body = Some(map_body(b, &|t| fill_references(t, bodies, false))?);
+        out.url = template::bind_refs(&parts.url, Slot::Url, bodies)?;
+        if let Some(body) = &parts.body {
+            out.body = Some(body.bind_refs(bodies)?);
         }
         if !out.write && becomes_write(&out.method, &out.url, out.body.as_deref()) {
             return Err(not_listed_as_write(&out.id));
@@ -1768,7 +1666,7 @@ fn collect_writes(
                 writes.push(Write {
                     id: r.id.clone(),
                     method: e.method.clone(),
-                    url: templatize(&e.url, given, true),
+                    url: template::templatize(&e.url, given, Slot::Url),
                     kind: if explicit {
                         WriteKind::Explicit
                     } else {
@@ -2142,6 +2040,7 @@ mod tests {
             body: None,
             expect: expect_of(json!({ "signature": signature(&json!({ "data": [{ "id": 1 }] })) })),
             write: false,
+            parts: None,
         }
     }
 
@@ -4164,9 +4063,18 @@ mod tests {
     fn a_response_value_with_its_own_reference_expands_once_and_ends() {
         let out = with_timeout(|| {
             let bodies = HashMap::from([("a".to_string(), json!({ "v": "{{@a.v}}", "w": "ok" }))]);
-            let one = fill_references("x={{@a.v}}&y={{@a.w}}", &bodies, false).unwrap();
-            let two = fill_references("{{@a.w}}{{@a.v}}", &bodies, false).unwrap();
-            (one, two)
+            let req = PreparedRequest {
+                method: "PUT".to_string(),
+                write: true,
+                body: Some("x={{@a.v}}&y={{@a.w}}".to_string()),
+                ..prepared("s2r1")
+            };
+            let one = req.resolve(&bodies).unwrap().body.unwrap();
+            let req = PreparedRequest {
+                body: Some("{{@a.w}}{{@a.v}}".to_string()),
+                ..req
+            };
+            (one, req.resolve(&bodies).unwrap().body.unwrap())
         });
         assert_eq!(out.0, "x={{@a.v}}&y=ok");
         assert_eq!(out.1, "ok{{@a.v}}");
@@ -4174,20 +4082,31 @@ mod tests {
 
     #[test]
     fn a_param_value_with_placeholder_text_is_inserted_literally() {
-        let params = HashMap::from([
-            ("a".to_string(), "{{b}}".to_string()),
-            ("b".to_string(), "X".to_string()),
-            ("c".to_string(), "{{missing}}".to_string()),
-        ]);
-        assert_eq!(fill("{{a}}-{{b}}", &params, false).unwrap(), "{{b}}-X");
-        assert_eq!(fill("{{c}}", &params, false).unwrap(), "{{missing}}");
-        assert!(fill("{{nope}}", &params, false)
-            .unwrap_err()
+        let flow = flow_of(json!({
+            "params": [
+                { "name": "a", "example": "{{b}}" },
+                { "name": "b", "example": "X" },
+                { "name": "c", "example": "{{@s1r1.id}}" }
+            ],
+            "output": "s1r1",
+            "writes": [{ "id": "s1r1", "method": "PUT", "kind": "explicit" }],
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "PUT", "url": "https://a.test/x",
+                "body": "{{a}}-{{b}}-{{c}}" }] }]
+        }));
+        let sent = prepare_all(&flow, &[]).unwrap();
+        assert_eq!(sent[0].body.as_deref(), Some("{{b}}-X-{{@s1r1.id}}"));
+        // A value that looks like a reference is data, not a reference.
+        let bodies = HashMap::from([("s1r1".to_string(), json!({ "id": "7" }))]);
+        let resolved = sent[0].resolve(&bodies).unwrap();
+        assert_eq!(resolved.body.as_deref(), Some("{{b}}-X-{{@s1r1.id}}"));
+        let missing = flow_of(json!({
+            "output": "s1r1",
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/{{nope}}" }] }]
+        }));
+        assert!(prepare_all(&missing, &[])
+            .err()
+            .unwrap()
             .contains("missing --param nope"));
-        assert_eq!(
-            fill("{{@s1r1.id}}", &params, false).unwrap(),
-            "{{@s1r1.id}}"
-        );
     }
 
     #[test]
@@ -4240,6 +4159,126 @@ mod tests {
         };
         let bodies = HashMap::from([("a".to_string(), json!({ "id": "remove" }))]);
         assert!(req.resolve(&bodies).err().unwrap().contains("write"));
+    }
+
+    #[test]
+    fn a_flow_without_an_output_gates_every_write_it_sends() {
+        for output in [json!(null), json!("")] {
+            let mut v = json!({
+                "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+                "steps": [{ "requests": [
+                    { "id": "s1r1", "method": "POST", "url": "https://a.test/cart" },
+                    { "id": "s1r2", "method": "GET", "url": "https://a.test/items" }
+                ] }]
+            });
+            if !output.is_null() {
+                v["output"] = output;
+            }
+            let flow = flow_of(v);
+            let sent: Vec<String> = prepare(&flow, &[])
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            assert_eq!(sent, vec!["s1r1", "s1r2"]);
+            assert_eq!(write_ids(&flow), vec!["s1r1"]);
+        }
+    }
+
+    #[test]
+    fn an_empty_dependency_does_not_empty_a_nonempty_output() {
+        let mut flow = flow_of(json!({
+            "name": "f", "origin": "site.example", "output": "s2r1",
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
+        }));
+        let dependency = RequestResult {
+            id: "s1r1".to_string(),
+            empty: true,
+            body: Some(json!({ "payload": {} })),
+            ..result(true, Some(200), false, None)
+        };
+        let output = RequestResult {
+            id: "s2r1".to_string(),
+            step: 2,
+            body: Some(json!({ "items": [{ "id": 7 }] })),
+            ..result(true, Some(200), false, None)
+        };
+        let out = finish_run(
+            &mut flow,
+            &[dependency, output],
+            "now",
+            1,
+            &Shape::default(),
+        );
+        assert_eq!(out["data"]["items"][0]["id"], 7, "{out}");
+        assert!(out.get("empty").is_none(), "{out}");
+    }
+
+    #[test]
+    fn a_form_param_is_encoded_into_its_field() {
+        let flow = flow_of(json!({
+            "params": [{ "name": "q", "example": "a" }],
+            "output": "s1r1",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/s",
+                "headers": { "content-type": "application/x-www-form-urlencoded" },
+                "body": "a={{q}}&b=1" }] }]
+        }));
+        let sent = prepare_all(&flow, &[("q".to_string(), "x&b=2+3 4".to_string())]).unwrap();
+        assert_eq!(sent[0].body.as_deref(), Some("a=x%26b%3D2%2B3%204&b=1"));
+    }
+
+    fn save_one_post(body: String, form: bool, params: &[(String, String)]) -> Value {
+        let mut r = recorder();
+        r.tag_now("p");
+        let mut e = entry(
+            "p",
+            "https://api.example.com.ar/s",
+            "Fetch",
+            "application/json",
+            r#"{"items":[{"id":1}]}"#,
+        );
+        e.method = "POST".to_string();
+        if form {
+            e.request_headers.push((
+                "Content-Type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            ));
+        }
+        e.post_data = Some(body);
+        let (flow, _) = build_flow_value(SaveInput {
+            name: "p",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[e],
+            params,
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        flow["steps"][1]["requests"][0].clone()
+    }
+
+    #[test]
+    fn a_typed_value_with_quotes_backslashes_and_newlines_is_found_in_a_json_body() {
+        let value = "a \"b\" \\ c\nd".to_string();
+        let body = serde_json::to_string(&json!({ "q": value, "n": 1 })).unwrap();
+        let saved = save_one_post(body, false, &[("q".to_string(), value.clone())]);
+        let text = saved["body"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["q"], "{{q}}", "{text}");
+        assert!(!text.contains("c\\nd"), "{text}");
+    }
+
+    #[test]
+    fn a_typed_value_is_found_in_its_encoded_form_in_a_form_body() {
+        let params = [("q".to_string(), "x&y+1 z".to_string())];
+        for body in ["a=x%26y%2B1%20z&b=2", "a=x%26y%2B1+z&b=2"] {
+            let saved = save_one_post(body.to_string(), true, &params);
+            assert_eq!(saved["body"], "a={{q}}&b=2", "{body}");
+        }
     }
 
     #[test]

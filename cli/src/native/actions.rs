@@ -12304,7 +12304,7 @@ async fn flow_routed_response(
 /// Sends a flow's requests directly, with the session's cookies and routes.
 struct HttpSender<'a> {
     state: &'a mut DaemonState,
-    client: reqwest::Client,
+    client: super::flow::HttpClients,
 }
 
 #[async_trait::async_trait]
@@ -19691,8 +19691,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let dir = tempfile::tempdir().unwrap();
         let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
         guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
-        let cases: [(&'static str, &str); 2] = [
+        let cases: [(&'static str, &str); 4] = [
             ("HTTP/1.1 303 See Other\r\nLocation: http://localhost:9/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", "was not followed"),
+            ("HTTP/1.1 307 Temporary Redirect\r\nLocation: /api/cart\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", "was not followed"),
+            ("HTTP/1.1 308 Permanent Redirect\r\nLocation: /api/cart\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", "was not followed"),
             ("", "outcome_unknown"),
         ];
         for (response, expect) in cases {
