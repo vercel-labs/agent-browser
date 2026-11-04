@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CloseTargetParams, CreateTargetParams,
-    CreateTargetResult, EvaluateParams,
+    session_matches, AttachToTargetParams, AttachToTargetResult, CloseTargetParams,
+    CreateTargetParams, CreateTargetResult, EvaluateParams,
 };
 use super::cookies::{self, Cookie};
 use crate::validation::{is_valid_session_name, sanitize_session_component, session_name_error};
@@ -200,7 +200,7 @@ async fn collect_storage_in_target(
         let mut page_loaded = false;
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(tokio::time::Duration::from_secs(2), event_rx.recv()).await {
-                Ok(Ok(evt)) if evt.session_id.as_deref() == Some(temp_session) => {
+                Ok(Ok(evt)) if session_matches(Some(temp_session), evt.session_id.as_deref()) => {
                     if evt.method == "Fetch.requestPaused" {
                         if let Some(request_id) =
                             evt.params.get("requestId").and_then(|v| v.as_str())
