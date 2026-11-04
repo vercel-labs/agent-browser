@@ -1863,7 +1863,6 @@ fn is_graphql_query(body: Option<&str>) -> bool {
 }
 
 /// A flow from a partial fixture: the required fields are filled in.
-
 #[cfg(test)]
 pub(crate) fn flow_of(mut v: Value) -> Flow {
     let o = v.as_object_mut().unwrap();
