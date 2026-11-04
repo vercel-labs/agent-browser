@@ -18,6 +18,8 @@ pub enum Slot {
     Json,
     /// Literal text: a header value or a body that is neither JSON nor a form.
     Raw,
+    /// A multipart body, where a value must not end a part.
+    Multipart,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -65,23 +67,52 @@ pub fn parse(text: &str) -> Vec<Part> {
 fn encode(value: &str, slot: Slot) -> String {
     match slot {
         Slot::Url | Slot::Form => urlencoding::encode(value).into_owned(),
-        Slot::Json | Slot::Raw => value.to_string(),
+        Slot::Json | Slot::Raw | Slot::Multipart => value.to_string(),
     }
+}
+
+/// A value that could change the structure of a part it is written into as
+/// is: a line break in a header, plain text or multipart body, or the
+/// boundary of a multipart body.
+fn breaks_structure(value: &str, slot: Slot, boundary: Option<&str>) -> Option<&'static str> {
+    if !matches!(slot, Slot::Raw | Slot::Multipart) {
+        return None;
+    }
+    if value.contains(['\r', '\n']) {
+        return Some("a line break");
+    }
+    if boundary.is_some_and(|b| !b.is_empty() && value.contains(b)) {
+        return Some("the multipart boundary");
+    }
+    None
+}
+
+fn refuse(what: &str, found: &str) -> String {
+    format!(
+        "{} has {}, which could break the structure of the request; nothing was sent",
+        what, found
+    )
 }
 
 /// Fill the params. Each value becomes literal data; references stay.
 pub fn bind_params(
     parts: &[Part],
     slot: Slot,
+    boundary: Option<&str>,
     params: &HashMap<String, String>,
 ) -> Result<Vec<Part>, String> {
     parts
         .iter()
         .map(|part| match part {
-            Part::Param(name) => params
-                .get(name)
-                .map(|v| Part::Lit(encode(v, slot)))
-                .ok_or_else(|| format!("missing --param {}", name)),
+            Part::Param(name) => {
+                let value = params
+                    .get(name)
+                    .ok_or_else(|| format!("missing --param {}", name))?;
+                if let Some(found) = breaks_structure(value, slot, boundary) {
+                    return Err(refuse(&format!("param {}", name), found));
+                }
+                Ok(Part::Lit(encode(value, slot)))
+            }
             other => Ok(other.clone()),
         })
         .collect()
@@ -91,6 +122,7 @@ pub fn bind_params(
 pub fn bind_refs(
     parts: &[Part],
     slot: Slot,
+    boundary: Option<&str>,
     bodies: &HashMap<String, Value>,
 ) -> Result<String, String> {
     let mut out = String::new();
@@ -108,6 +140,9 @@ pub fn bind_refs(
                 let value = lookup(body, path)
                     .map(as_text)
                     .ok_or(format!("{} no longer has '{}'", from, path))?;
+                if let Some(found) = breaks_structure(&value, slot, boundary) {
+                    return Err(refuse(&format!("the value of {}.{}", from, path), found));
+                }
                 out.push_str(&encode(&value, slot));
             }
         }
@@ -168,7 +203,7 @@ impl JsonTpl {
 
     fn bind(&self, params: &HashMap<String, String>) -> Result<JsonTpl, String> {
         Ok(match self {
-            JsonTpl::Str(parts) => JsonTpl::Str(bind_params(parts, Slot::Json, params)?),
+            JsonTpl::Str(parts) => JsonTpl::Str(bind_params(parts, Slot::Json, None, params)?),
             JsonTpl::Arr(items) => JsonTpl::Arr(
                 items
                     .iter()
@@ -190,34 +225,81 @@ impl JsonTpl {
 #[derive(Clone, Debug)]
 pub enum Body {
     Json(JsonTpl),
-    Text(Vec<Part>, Slot),
+    /// Text with the slot it is written in and, for multipart, its boundary.
+    Text(Vec<Part>, Slot, Option<String>),
+}
+
+/// How a body that is not JSON is written: a form by its content type or by
+/// its shape, multipart by its content type or its shape, otherwise as text.
+pub fn text_slot(text: &str, headers: &[(String, String)]) -> (Slot, Option<String>) {
+    let content_type = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    let lower = content_type.to_ascii_lowercase();
+    let boundary_of_header = || {
+        let at = lower.find("boundary=")?;
+        let raw = content_type[at + 9..].split(';').next()?.trim();
+        Some(raw.trim_matches('"').to_string())
+    };
+    let first_line = text.lines().next().unwrap_or("");
+    let looks_multipart = first_line.starts_with("--")
+        && text.contains("\r\n")
+        && text.contains("Content-Disposition");
+    if lower.contains("multipart/") || looks_multipart {
+        let boundary = boundary_of_header().or_else(|| {
+            looks_multipart.then(|| first_line.trim_start_matches('-').trim().to_string())
+        });
+        return (Slot::Multipart, boundary);
+    }
+    if lower.contains("application/x-www-form-urlencoded") || looks_like_form(text) {
+        return (Slot::Form, None);
+    }
+    (Slot::Raw, None)
+}
+
+/// `k=v(&k=v)*` on one line, however the request labels it.
+fn looks_like_form(text: &str) -> bool {
+    !text.is_empty()
+        && !text.contains(['\r', '\n'])
+        && text
+            .split('&')
+            .all(|pair| pair.split_once('=').is_some_and(|(k, _)| !k.is_empty()))
 }
 
 impl Body {
-    /// A body that parses as JSON is JSON; otherwise it is a form when the
-    /// request says so and plain text when it does not.
-    pub fn parse(text: &str, form: bool) -> Body {
+    pub fn parse(text: &str, headers: &[(String, String)]) -> Body {
         match serde_json::from_str::<Value>(text) {
             Ok(value) => Body::Json(JsonTpl::of(&value)),
-            Err(_) => Body::Text(parse(text), if form { Slot::Form } else { Slot::Raw }),
+            Err(_) => {
+                let (slot, boundary) = text_slot(text, headers);
+                Body::Text(parse(text), slot, boundary)
+            }
         }
     }
 
     pub fn bind_params(&self, params: &HashMap<String, String>) -> Result<Body, String> {
         Ok(match self {
             Body::Json(tpl) => Body::Json(tpl.bind(params)?),
-            Body::Text(parts, slot) => Body::Text(bind_params(parts, *slot, params)?, *slot),
+            Body::Text(parts, slot, boundary) => Body::Text(
+                bind_params(parts, *slot, boundary.as_deref(), params)?,
+                *slot,
+                boundary.clone(),
+            ),
         })
     }
 
     pub fn bind_refs(&self, bodies: &HashMap<String, Value>) -> Result<String, String> {
         match self {
             Body::Json(tpl) => {
-                let value =
-                    tpl.map(&|parts| Ok(Value::String(bind_refs(parts, Slot::Json, bodies)?)))?;
+                let value = tpl
+                    .map(&|parts| Ok(Value::String(bind_refs(parts, Slot::Json, None, bodies)?)))?;
                 serde_json::to_string(&value).map_err(|e| e.to_string())
             }
-            Body::Text(parts, slot) => bind_refs(parts, *slot, bodies),
+            Body::Text(parts, slot, boundary) => {
+                bind_refs(parts, *slot, boundary.as_deref(), bodies)
+            }
         }
     }
 
@@ -228,7 +310,7 @@ impl Body {
                 .map(&|parts| Ok(Value::String(show(parts))))
                 .and_then(|v| serde_json::to_string(&v).map_err(|e| e.to_string()))
                 .unwrap_or_default(),
-            Body::Text(parts, _) => show(parts),
+            Body::Text(parts, _, _) => show(parts),
         }
     }
 }
@@ -243,21 +325,12 @@ pub struct Parts {
 impl Parts {
     /// Templates read from a request's text, for a request that was not
     /// built from a flow file.
-    pub fn of_text(url: &str, body: Option<&str>, form: bool) -> Parts {
+    pub fn of_text(url: &str, body: Option<&str>, headers: &[(String, String)]) -> Parts {
         Parts {
             url: parse(url),
-            body: body.map(|b| Body::parse(b, form)),
+            body: body.map(|b| Body::parse(b, headers)),
         }
     }
-}
-
-/// Whether the headers say the body is a form.
-pub fn is_form(headers: &[(String, String)]) -> bool {
-    headers.iter().any(|(k, v)| {
-        k.eq_ignore_ascii_case("content-type")
-            && v.to_ascii_lowercase()
-                .contains("application/x-www-form-urlencoded")
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -312,9 +385,13 @@ pub fn templatize(text: &str, params: &[(String, String)], slot: Slot) -> String
 /// Templatize a request body in its own slot. The text of a GraphQL
 /// operation stays literal, so a param fills `variables` and other fields
 /// but never the operation itself.
-pub fn templatize_body(body: &str, params: &[(String, String)], form: bool) -> String {
+pub fn templatize_body(
+    body: &str,
+    params: &[(String, String)],
+    headers: &[(String, String)],
+) -> String {
     let Ok(mut parsed) = serde_json::from_str::<Value>(body) else {
-        return templatize(body, params, if form { Slot::Form } else { Slot::Raw });
+        return templatize(body, params, text_slot(body, headers).0);
     };
     let is_op = |v: &Value| v.get("query").is_some_and(|q| q.is_string());
     let graphql = match &parsed {

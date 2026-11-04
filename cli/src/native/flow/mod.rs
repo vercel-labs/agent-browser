@@ -622,10 +622,10 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                 method: e.method.clone(),
                 url: template::templatize(&e.url, &given, Slot::Url),
                 headers,
-                body: e.post_data.as_deref().map(|b| {
-                    let form = template::is_form(&e.request_headers);
-                    template::templatize_body(b, &given, form)
-                }),
+                body: e
+                    .post_data
+                    .as_deref()
+                    .map(|b| template::templatize_body(b, &given, &e.request_headers)),
                 expect: Expect {
                     status: e.status.map(|s| s as u16),
                     mime: e.mime_type.clone(),
@@ -1566,14 +1566,14 @@ pub fn prepare_all(
             let headers = header_list
                 .iter()
                 .filter_map(|(k, v)| {
-                    let bound = template::bind_params(&template::parse(v), Slot::Raw, &params);
+                    let bound =
+                        template::bind_params(&template::parse(v), Slot::Raw, None, &params);
                     Some((k.clone(), template::show(&bound.ok()?)))
                 })
                 .collect();
-            let url = template::bind_params(&template::parse(&r.url), Slot::Url, &params)?;
-            let form = template::is_form(&header_list);
+            let url = template::bind_params(&template::parse(&r.url), Slot::Url, None, &params)?;
             let body = match &r.body {
-                Some(b) => Some(Body::parse(b, form).bind_params(&params)?),
+                Some(b) => Some(Body::parse(b, &header_list).bind_params(&params)?),
                 None => None,
             };
             let url_text = template::show(&url);
@@ -1601,12 +1601,12 @@ pub fn prepare_all(
 impl PreparedRequest {
     /// Fill reference placeholders from the responses received so far.
     pub fn resolve(&self, bodies: &HashMap<String, Value>) -> Result<PreparedRequest, String> {
-        let parts = self.parts.clone().unwrap_or_else(|| {
-            let form = template::is_form(&self.headers);
-            Parts::of_text(&self.url, self.body.as_deref(), form)
-        });
+        let parts = self
+            .parts
+            .clone()
+            .unwrap_or_else(|| Parts::of_text(&self.url, self.body.as_deref(), &self.headers));
         let mut out = self.clone();
-        out.url = template::bind_refs(&parts.url, Slot::Url, bodies)?;
+        out.url = template::bind_refs(&parts.url, Slot::Url, None, bodies)?;
         if let Some(body) = &parts.body {
             out.body = Some(body.bind_refs(bodies)?);
         }
@@ -4076,7 +4076,7 @@ mod tests {
             };
             (one, req.resolve(&bodies).unwrap().body.unwrap())
         });
-        assert_eq!(out.0, "x={{@a.v}}&y=ok");
+        assert_eq!(out.0, "x=%7B%7B%40a.v%7D%7D&y=ok");
         assert_eq!(out.1, "ok{{@a.v}}");
     }
 
@@ -4279,6 +4279,61 @@ mod tests {
             let saved = save_one_post(body.to_string(), true, &params);
             assert_eq!(saved["body"], "a={{q}}&b=2", "{body}");
         }
+    }
+
+    fn post_flow(headers: Value, body: &str) -> Flow {
+        flow_of(json!({
+            "params": [{ "name": "q", "example": "x" }],
+            "output": "s1r1",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/s",
+                "headers": headers, "body": body }] }]
+        }))
+    }
+
+    #[test]
+    fn a_form_shaped_body_without_a_form_content_type_keeps_one_field_per_param() {
+        for headers in [
+            json!({ "content-type": "text/plain;charset=UTF-8" }),
+            json!({}),
+        ] {
+            let flow = post_flow(headers, "a={{q}}&b=1");
+            let sent = prepare_all(&flow, &[("q".to_string(), "a&b=c".to_string())]).unwrap();
+            assert_eq!(sent[0].body.as_deref(), Some("a=a%26b%3Dc&b=1"));
+        }
+    }
+
+    #[test]
+    fn a_value_that_could_break_a_multipart_or_raw_body_is_refused() {
+        let multipart =
+            "--XyZ\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n{{q}}\r\n--XyZ--\r\n";
+        let flow = post_flow(
+            json!({ "content-type": "multipart/form-data; boundary=XyZ" }),
+            multipart,
+        );
+        let refused = |flow: &Flow, value: &str| {
+            prepare_all(flow, &[("q".to_string(), value.to_string())])
+                .err()
+                .unwrap_or_default()
+        };
+        assert!(refused(&flow, "v\r\n--XyZ\r\nContent-Disposition: x").contains("line break"));
+        assert!(refused(&flow, "has XyZ inside").contains("boundary"));
+        assert!(prepare_all(&flow, &[("q".to_string(), "plain".to_string())]).is_ok());
+        // Without the header the shape still says multipart.
+        let bare = post_flow(json!({}), multipart);
+        assert!(refused(&bare, "a\nb").contains("line break"));
+        // Plain text and header values take no line break either.
+        let text = post_flow(json!({ "content-type": "text/plain" }), "hello {{q}}");
+        assert!(refused(&text, "a\nb").contains("line break"));
+        assert!(prepare_all(&text, &[("q".to_string(), "a b".to_string())]).is_ok());
+        let header = flow_of(json!({
+            "params": [{ "name": "q", "example": "x" }], "output": "s1r1",
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/s",
+                "headers": { "x-q": "{{q}}" } }] }]
+        }));
+        // A header with a refused value is dropped, never sent with a line break.
+        let sent = prepare_all(&header, &[("q".to_string(), "a\r\nX: 1".to_string())]).unwrap();
+        assert!(sent[0].headers.is_empty());
     }
 
     #[test]
