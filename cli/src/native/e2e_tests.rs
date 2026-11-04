@@ -5704,10 +5704,15 @@ worker.onerror = () => {
     );
 }
 
+const ECHO_WORKER: &str = "self.onmessage = event => self.postMessage('pong:' + event.data);";
+
 /// Serves a page that starts `new Worker('/echo-worker.js', { type: 'module' })`
-/// and posts to it right away, then returns what the page saw once both
+/// and posts to it twice right away, then once more later, and returns what the page saw once both
 /// replies arrived (or the worker errored).
-async fn run_module_worker_echo_with_domain_filter(page_headers: &'static str) -> String {
+async fn run_module_worker_echo_with_domain_filter(
+    page_headers: &'static str,
+    worker_body: &'static str,
+) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -5727,11 +5732,7 @@ async fn run_module_worker_echo_with_domain_filter(page_headers: &'static str) -
                     .to_string();
 
                 let (content_type, extra_headers, body) = if path == "/echo-worker.js" {
-                    (
-                        "application/javascript",
-                        "",
-                        "self.onmessage = event => self.postMessage('pong:' + event.data);",
-                    )
+                    ("application/javascript", "", worker_body)
                 } else {
                     (
                         "text/html",
@@ -5743,6 +5744,7 @@ const worker = new Worker('/echo-worker.js', { type: 'module' });
 worker.onmessage = event => window.workerReplies.push(event.data);
 worker.onerror = () => { window.workerError = 'worker:error'; };
 worker.postMessage('early');
+worker.postMessage('early2');
 setTimeout(() => worker.postMessage('late'), 500);
 </script>"#,
                     )
@@ -5813,9 +5815,9 @@ setTimeout(() => worker.postMessage('late'), 500);
 #[tokio::test]
 #[ignore]
 async fn e2e_domain_filter_module_worker_receives_early_messages() {
-    let result = run_module_worker_echo_with_domain_filter("").await;
+    let result = run_module_worker_echo_with_domain_filter("", ECHO_WORKER).await;
     assert_eq!(
-        result, "pong:early,pong:late",
+        result, "pong:early,pong:early2,pong:late",
         "Module worker should get messages posted right after construction"
     );
 }
@@ -5825,10 +5827,11 @@ async fn e2e_domain_filter_module_worker_receives_early_messages() {
 async fn e2e_domain_filter_module_worker_starts_under_blob_worker_csp() {
     let result = run_module_worker_echo_with_domain_filter(
         "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; worker-src 'self' blob:\r\n",
+        ECHO_WORKER,
     )
     .await;
     assert_eq!(
-        result, "pong:early,pong:late",
+        result, "pong:early,pong:early2,pong:late",
         "A CSP that allows blob: workers should allow the guarded worker to start"
     );
 }
@@ -15174,4 +15177,41 @@ async fn e2e_state_load_keeps_storage_away_from_page_scripts_and_redirects() {
     other_server.abort();
     redirect_server.abort();
     hook_server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_module_worker_awaiting_first_message_at_top_level() {
+    // The import only settles once the first message arrives, so holding
+    // messages until it settles would never deliver it.
+    let result = run_module_worker_echo_with_domain_filter(
+        "",
+        "const first = await new Promise(resolve => self.addEventListener('message', event => resolve(event.data), { once: true }));\n\
+         self.postMessage('pong:' + first);\n\
+         self.onmessage = event => self.postMessage('pong:' + event.data);",
+    )
+    .await;
+    assert_eq!(
+        result, "pong:early,pong:early2,pong:late",
+        "A module worker awaiting its first message at top level should still get it"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_module_worker_replays_held_messages_in_separate_tasks() {
+    // Natively each message is its own task, so microtasks queued by one
+    // handler run before the next message is handled.
+    let result = run_module_worker_echo_with_domain_filter(
+        "",
+        "self.onmessage = event => {\n\
+           self.postMessage('pong:' + event.data + (self.seen ? '' : ':first'));\n\
+           Promise.resolve().then(() => { self.seen = true; });\n\
+         };",
+    )
+    .await;
+    assert_eq!(
+        result, "pong:early:first,pong:early2,pong:late",
+        "Held messages should be replayed one task at a time"
+    );
 }
