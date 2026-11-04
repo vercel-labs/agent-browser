@@ -1617,7 +1617,7 @@ fn print_warning(resp: &Response) {
     }
 }
 
-/// Print command-specific help. Returns true if help was printed, false if command unknown.
+/// Print command-specific help. Returns false if no help page exists for the command.
 pub fn print_command_help(command: &str) -> bool {
     let help = match command {
         // === Navigation ===
@@ -2677,6 +2677,8 @@ Operations:
   get                                Get all cookies (default)
   set <name> <value> [options]       Set a cookie with optional properties
   clear                              Clear all cookies
+
+Unknown operations return an error.
 
 Cookie Set Options:
   --url <url>                        URL for the cookie (allows setting before page load)
@@ -3929,6 +3931,8 @@ pub fn print_help() {
 agent-browser - fast browser automation CLI for AI agents
 
 Usage: agent-browser <command> [args] [options]
+
+Unknown commands exit with status 1, including when help is requested.
 
 Start here (for AI agents):
   agent-browser skills get core
