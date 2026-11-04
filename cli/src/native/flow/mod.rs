@@ -717,14 +717,15 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         })
         .collect();
     if !unused.is_empty() {
+        given.retain(|(k, _)| !unused.contains(k));
         for req in steps.iter_mut().flat_map(|s| s.requests.iter_mut()) {
             for (id, key, original) in &referers {
                 if *id == req.id {
-                    req.headers.insert(key.clone(), original.clone());
+                    let kept = template::templatize(original, &given, Slot::Raw);
+                    req.headers.insert(key.clone(), kept);
                 }
             }
         }
-        given.retain(|(k, _)| !unused.contains(k));
     }
     let page_segments: Vec<String> = url::Url::parse(&start)
         .ok()
@@ -2601,6 +2602,43 @@ mod tests {
         );
         assert_eq!(save("s1r1").unwrap().0["output"], "s1r1");
         assert_eq!(save("s3r1").unwrap().0["output"], "s2r1");
+    }
+
+    #[test]
+    fn a_referer_keeps_the_placeholders_of_params_that_stay() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/search?q=tea&tab=recent" }),
+            None,
+            None,
+        );
+        r.tag_now("api");
+        let doc = entry(
+            "doc",
+            "https://app.example/search?q=tea&tab=recent",
+            "Document",
+            "text/html",
+            r#"<script id="d" type="application/json">{"a":1}</script>"#,
+        );
+        let mut api = entry(
+            "api",
+            "https://app.example/api/search?q=tea",
+            "Fetch",
+            "application/json",
+            r#"{"r":[]}"#,
+        );
+        api.request_headers.push((
+            "Referer".to_string(),
+            "https://app.example/search?q=tea&tab=recent".to_string(),
+        ));
+        let (flow, report) = flow_of_entries(&r, &[doc, api], None).unwrap();
+        assert_eq!(report["params"], json!(["q"]));
+        assert_eq!(
+            flow["steps"][0]["requests"][0]["headers"]["Referer"],
+            "https://app.example/search?q={{q}}&tab=recent"
+        );
     }
 
     #[test]
