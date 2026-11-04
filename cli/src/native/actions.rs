@@ -15472,10 +15472,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "replacement launch starts the real safaridriver"
+    )]
     async fn webdriver_launch_reuses_matching_config_and_closes_before_replacement() {
-        if cfg!(target_os = "macos") {
-            return;
-        }
         let vars = &[
             "AGENT_BROWSER_ENGINE",
             "AGENT_BROWSER_EXECUTABLE_PATH",
