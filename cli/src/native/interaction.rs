@@ -184,6 +184,37 @@ pub async fn fill(
         )
         .await?;
 
+    // Date and time inputs ignore inserted text, so set their value directly
+    // the way the browser's own picker would.
+    let picker = client
+        .send_command_typed::<_, EvaluateResult>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: FILL_DATE_TIME_INPUT_JS.to_string(),
+                object_id: Some(object_id.clone()),
+                arguments: Some(vec![CallArgument {
+                    value: Some(Value::String(value.to_string())),
+                    object_id: None,
+                }]),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+    match picker.result.value.as_ref().and_then(|v| v.as_str()) {
+        Some("set") => return Ok(()),
+        Some(input_type) if input_type != "text" => {
+            return Err(format!(
+                "Malformed value {:?} for <input type=\"{}\">, expected {}",
+                value,
+                input_type,
+                date_time_input_format(input_type)
+            ));
+        }
+        _ => {}
+    }
+
     // Select all + delete to clear
     client
         .send_command_typed::<_, Value>(
@@ -216,6 +247,30 @@ pub async fn fill(
         .await?;
 
     Ok(())
+}
+
+/// Returns `"set"` when the element is a date/time input and took the value,
+/// the input type when it rejected the value, and `"text"` otherwise.
+const FILL_DATE_TIME_INPUT_JS: &str = r#"function(value) {
+    const types = ['date', 'time', 'datetime-local', 'month', 'week'];
+    if (!(this instanceof HTMLInputElement) || !types.includes(this.type)) return 'text';
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(this, value.trim());
+    if (value.trim() !== '' && this.value === '') return this.type;
+    this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    this.dispatchEvent(new Event('change', { bubbles: true }));
+    return 'set';
+}"#;
+
+fn date_time_input_format(input_type: &str) -> &'static str {
+    match input_type {
+        "date" => "YYYY-MM-DD",
+        "time" => "HH:MM or HH:MM:SS",
+        "datetime-local" => "YYYY-MM-DDTHH:MM",
+        "month" => "YYYY-MM",
+        "week" => "YYYY-Www",
+        _ => "a value the input accepts",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
