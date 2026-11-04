@@ -170,6 +170,10 @@ jobs:
       - name: Typecheck Eve package
         run: pnpm --filter @agent-browser/eve typecheck
 
+      # Also check with the official TypeScript compiler while tsc-ts is new.
+      - name: Typecheck Eve package (tsc)
+        run: pnpm --filter @agent-browser/eve typecheck:tsc
+
       - name: Test Eve package
         run: pnpm --filter @agent-browser/eve test
 
