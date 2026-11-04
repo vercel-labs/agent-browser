@@ -1371,20 +1371,27 @@ fn main() {
     if let Some(ref namespace) = flags.namespace {
         env::set_var("AGENT_BROWSER_NAMESPACE", namespace);
     }
-    let clean = clean_args(&args);
+    let mut clean = clean_args(&args);
     tls::configure_process(&flags);
 
-    let has_help = args.iter().any(|a| a == "--help" || a == "-h");
-    let has_version = args.iter().any(|a| a == "--version" || a == "-V");
+    let options = flags::before_end_of_options(&clean);
+    let has_help = options.iter().any(|a| a == "--help" || a == "-h");
+    let has_version = options.iter().any(|a| a == "--version" || a == "-V");
 
     if has_help {
+        clean.retain(|arg| arg != "--help" && arg != "-h");
+        if clean.is_empty() || clean.iter().all(|arg| arg.starts_with('-')) {
+            print_help();
+            return;
+        }
         if let Some(cmd) = clean.first() {
-            if print_command_help(cmd) {
+            if commands::is_top_level_command(cmd) {
+                if !print_command_help(cmd) {
+                    print_help();
+                }
                 return;
             }
         }
-        print_help();
-        return;
     }
 
     if has_version {
@@ -2356,6 +2363,27 @@ mod tests {
         assert_eq!(result.server, "http://proxy.com:8080");
         assert_eq!(result.username.as_deref(), Some("user"));
         assert_eq!(result.password.as_deref(), Some("p@ss:w0rd"));
+    }
+
+    #[test]
+    fn test_parse_proxy_decodes_encoded_credentials() {
+        for (proxy, username, password) in [
+            (
+                "http://user%40name+tag:p%3Ass%40word%252F+tail@proxy.com:8080",
+                Some("user@name+tag"),
+                Some("p:ss@word%2F+tail"),
+            ),
+            ("http://user%3Aname@proxy.com:8080", Some("user:name"), None),
+            (
+                "http://user:pass%FF@proxy.com:8080",
+                Some("user"),
+                Some("pass%FF"),
+            ),
+        ] {
+            let result = parse_proxy(proxy);
+            assert_eq!(result.username.as_deref(), username, "proxy: {proxy}");
+            assert_eq!(result.password.as_deref(), password, "proxy: {proxy}");
+        }
     }
 
     #[test]

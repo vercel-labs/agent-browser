@@ -2479,8 +2479,14 @@ fn command_changes_restore_key(cmd: &Value, state: &DaemonState) -> bool {
         .is_some_and(|key| state.session_name.as_deref() != Some(key))
 }
 
+/// Whether the session holds a browser of any backend: CDP, a provider
+/// session, or a WebDriver session (Safari, iOS).
 fn has_active_browser_session(state: &DaemonState) -> bool {
-    state.browser.is_some() || state.active_provider_session.is_some()
+    state.browser.is_some()
+        || state.active_provider_session.is_some()
+        || state.webdriver_backend.is_some()
+        || state.appium.is_some()
+        || state.safari_driver.is_some()
 }
 
 async fn close_before_implicit_relaunch(state: &mut DaemonState) -> Result<(), String> {
@@ -2488,7 +2494,7 @@ async fn close_before_implicit_relaunch(state: &mut DaemonState) -> Result<(), S
         .active_provider_session
         .as_ref()
         .is_some_and(|active| provider_is_browser_use(&active.session.provider));
-    let result = close_current_browser(state).await;
+    let result = close_all_browser_backends(state).await;
     if browser_use {
         result
     } else {
@@ -2629,11 +2635,11 @@ pub(crate) async fn close_all_browser_backends(state: &mut DaemonState) -> Resul
     let close_result = close_current_browser(state).await;
 
     if let Some(ref mut webdriver) = state.webdriver_backend {
-        let _ = webdriver.close().await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), webdriver.close()).await;
     }
     state.webdriver_backend = None;
     if let Some(ref mut appium) = state.appium {
-        let _ = appium.close().await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), appium.close()).await;
     }
     state.appium = None;
     if let Some(ref mut driver) = state.safari_driver {
@@ -3017,7 +3023,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         } else if let Some(ref mut mgr) = state.browser {
             mgr.has_process_exited() || !mgr.is_connection_alive().await
         } else {
-            true
+            state.webdriver_backend.is_none()
         }
     } else {
         false
@@ -5660,7 +5666,7 @@ async fn apply_settings_patch(
 
     if relaunch && had_browser {
         let _ = auto_save_restore_state(state).await;
-        close_current_browser(state).await?;
+        close_all_browser_backends(state).await?;
         state.ref_map.invalidate_all_documents();
     }
 
@@ -5740,9 +5746,10 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     let mut outcome = apply_settings_patch(state, &patch, true).await?;
     let reusable = !outcome.relaunched_browser
-        && match state.browser.as_mut() {
-            Some(mgr) => !mgr.has_process_exited() && mgr.is_connection_alive().await,
-            None => false,
+        && match (state.browser.as_mut(), state.webdriver_backend.as_ref()) {
+            (Some(mgr), _) => !mgr.has_process_exited() && mgr.is_connection_alive().await,
+            (None, Some(webdriver)) => webdriver.is_connection_alive().await,
+            (None, None) => false,
         };
     if reusable {
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
@@ -8277,7 +8284,19 @@ async fn wait_for_downloaded_file(path: &std::path::Path) -> bool {
     path.exists()
 }
 
+/// `download`: clicks the selector and saves the resulting file at `path`.
+/// Only a browser this daemon launched may name files on the local filesystem.
 async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if state
+        .browser
+        .as_ref()
+        .is_some_and(|mgr| mgr.is_cdp_connection())
+    {
+        return Err(
+            "download is not supported over --cdp, --auto-connect, or a provider: the remote endpoint names the saved file, so only a browser agent-browser launched can save to a local path"
+                .to_string(),
+        );
+    }
     let result = download_to_path(cmd, state).await;
     // `download` points the browser at the destination's directory; restore the
     // configured one so later downloads land where `wait --download` expects.
@@ -8417,8 +8436,15 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     // With "allowAndName" behavior, Chrome saves the file using the GUID as filename.
     // Rename it to the user-requested filename.
     if let Some(guid) = downloaded_guid {
-        let guid_path = download_dir.join(&guid);
+        let guid_path = guid_download_path(&download_dir, &guid)?;
         if wait_for_downloaded_file(&guid_path).await {
+            if !may_move_download(&guid_path, true, Some(download_dir_str)) {
+                return Err(format!(
+                    "Refusing to move {}: it resolves outside {}",
+                    guid_path.display(),
+                    download_dir.display()
+                ));
+            }
             std::fs::rename(&guid_path, &dest)
                 .map_err(|e| format!("Failed to rename downloaded file: {}", e))?;
         } else {
@@ -11643,6 +11669,19 @@ async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<
     move_download(&saved, path_str).inspect_err(|_| state.downloads.release(&record.guid))
 }
 
+/// Returns the file Chrome saved for `guid` in `download_dir`.
+/// The GUID comes from a CDP event, so anything other than a single filename is rejected.
+fn guid_download_path(download_dir: &std::path::Path, guid: &str) -> Result<PathBuf, String> {
+    let path = download_dir.join(guid);
+    if path.file_name() != Some(std::ffi::OsStr::new(guid)) {
+        return Err(format!(
+            "Refusing to move downloaded file: invalid download GUID {:?}",
+            guid
+        ));
+    }
+    Ok(path)
+}
+
 /// The saved path comes from a CDP event, so only a browser this daemon
 /// launched is trusted to name a local file. A remote endpoint could otherwise
 /// point the move at any file the daemon can read.
@@ -14490,6 +14529,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn download_guid_must_name_a_file_in_the_download_dir() {
+        let dir = std::path::Path::new("/tmp/downloads");
+        assert_eq!(
+            super::guid_download_path(dir, "8f3c-21ab").unwrap(),
+            dir.join("8f3c-21ab")
+        );
+        for guid in ["", ".", "..", "../secret", "a/b", "/etc/passwd", "8f3c/"] {
+            assert!(
+                super::guid_download_path(dir, guid).is_err(),
+                "accepted {guid:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Chrome"]
+    async fn e2e_attached_download_fails_before_browser_or_filesystem_changes() {
+        let mut producer = super::BrowserManager::launch(super::LaunchOptions::default(), None)
+            .await
+            .unwrap();
+        let mut state = super::DaemonState::new();
+        state.browser = Some(
+            super::BrowserManager::connect_cdp(producer.get_cdp_url())
+                .await
+                .unwrap(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("new-directory").join("output.bin");
+
+        let error = super::handle_download(
+            &serde_json::json!({ "selector": "#dl", "path": destination }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("--cdp"), "{error}");
+        assert!(!destination.parent().unwrap().exists());
+        let _ = producer.close().await;
+    }
+
     async fn start_finished_download(
         state: &mut super::DaemonState,
         download_dir: &std::path::Path,
@@ -15373,11 +15453,10 @@ mod tests {
                 let mut buf = [0_u8; 2048];
                 let n = stream.read(&mut buf).await.unwrap_or(0);
                 let request = String::from_utf8_lossy(&buf[..n]);
-                assert!(
-                    request.starts_with(&format!("GET {} ", expected_path)),
-                    "unexpected webdriver request: {}",
-                    request.lines().next().unwrap_or("")
-                );
+                let (method, path) = expected_path
+                    .split_once(' ')
+                    .unwrap_or(("GET", expected_path));
+                assert!(request.starts_with(&format!("{} {} ", method, path)));
                 let body = body.to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -15390,6 +15469,119 @@ mod tests {
             handled
         });
         (port, handle)
+    }
+
+    fn safari_settings() -> crate::session_settings::Running {
+        let mut settings = crate::session_settings::Running::default();
+        settings.set(Key::Provider, json!("safari"));
+        settings.set(Key::Headed, json!(false));
+        settings
+    }
+
+    #[tokio::test]
+    async fn ordinary_commands_keep_the_active_webdriver_session() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_PROVIDER"]);
+        guard.set("AGENT_BROWSER_EXECUTABLE_PATH", "/missing/chrome-for-test");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+        let (port, server) = start_webdriver_response_server(vec![
+            (
+                "/session/test-session/url",
+                json!({ "value": "https://example.test/first" }),
+            ),
+            (
+                "/session/test-session/url",
+                json!({ "value": "https://example.test/first" }),
+            ),
+        ])
+        .await;
+        let mut state = DaemonState::new();
+        state.backend_type = BackendType::WebDriver;
+        state.webdriver_backend = Some(WebDriverBackend::new(
+            crate::native::webdriver::client::WebDriverClient::new_with_session(
+                port,
+                "test-session".to_string(),
+            ),
+        ));
+        state.settings = safari_settings();
+
+        for _ in 0..2 {
+            let response = execute_command(
+                &json!({ "id": "url", "action": "url", "provider": "safari" }),
+                &mut state,
+            )
+            .await;
+            assert_eq!(response["success"], true);
+            assert_eq!(response["data"]["url"], "https://example.test/first");
+            assert!(state.browser.is_none());
+            assert!(state.webdriver_backend.is_some());
+        }
+
+        assert_eq!(server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "replacement launch starts the real safaridriver"
+    )]
+    async fn webdriver_launch_reuses_matching_config_and_closes_before_replacement() {
+        let vars = &[
+            "AGENT_BROWSER_ENGINE",
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+            "AGENT_BROWSER_PROXY_USERNAME",
+            "AGENT_BROWSER_PROXY_PASSWORD",
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_ENABLE",
+            "AGENT_BROWSER_INIT_SCRIPTS",
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_HIDE_SCROLLBARS",
+            "AGENT_BROWSER_WEBGPU",
+            "AGENT_BROWSER_NO_XVFB",
+            "AGENT_BROWSER_NO_WEBMCP",
+        ];
+        let guard = EnvGuard::new(vars);
+        for name in vars {
+            guard.remove(name);
+        }
+        for changed_config in [false, true] {
+            let mut cmd =
+                json!({ "action": "launch", "provider": "safari", "port": 0, "headless": true });
+            let invalid_session = json!({ "value": { "error": "invalid session id", "message": "Session has ended" } });
+            let mut responses = vec![(
+                "/session/test-session/window/handles",
+                json!({ "value": ["window-1"] }),
+            )];
+            if !changed_config {
+                responses.push((
+                    "/session/test-session/window/handles",
+                    invalid_session.clone(),
+                ));
+            }
+            responses.push(("DELETE /session/test-session", invalid_session));
+            let (port, server) = start_webdriver_response_server(responses).await;
+            let mut state = DaemonState::new();
+            state.backend_type = BackendType::WebDriver;
+            state.webdriver_backend = Some(WebDriverBackend::new(
+                crate::native::webdriver::client::WebDriverClient::new_with_session(
+                    port,
+                    "test-session".to_string(),
+                ),
+            ));
+            state.settings = safari_settings();
+
+            let response = handle_launch_inner(&cmd, &mut state).await.unwrap();
+
+            assert_eq!(response["reused"], true);
+            assert!(state.webdriver_backend.is_some());
+            if changed_config {
+                cmd["headless"] = json!(false);
+            }
+            let result = handle_launch_inner(&cmd, &mut state).await;
+            assert!(result.is_err());
+            assert!(state.webdriver_backend.is_none());
+            assert!(state.browser.is_none());
+            assert_eq!(server.await.unwrap(), if changed_config { 2 } else { 3 });
+        }
     }
 
     fn unique_socket_dir(label: &str) -> PathBuf {
