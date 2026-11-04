@@ -5721,7 +5721,10 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
     }
 
-    let strict_state = patch.value(Key::StorageState).is_some();
+    // The command's own settings can name the file too (bare `open`).
+    let strict_state = patch.value(Key::StorageState).is_some()
+        || Patch::from_wire(cmd.get("settings"))
+            .is_ok_and(|settings| settings.value(Key::StorageState).is_some());
     match auto_launch_with(state, plugins_from_command_or_env(cmd), cmd, strict_state).await {
         Ok(extras) => {
             let mut result = json!({
@@ -20359,5 +20362,27 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             assert_eq!(state.settings.get(Key::Cdp), Some(&json!("9222")));
             assert_eq!(state.attached_target, Some(AttachedTarget::CdpPort(9222)));
         }
+    }
+
+    #[tokio::test]
+    async fn test_bare_open_with_an_unreadable_state_file_fails() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Profile, json!("/tmp/previous"));
+        let cmd = json!({
+            "id": "1",
+            "action": "launch",
+            "settings": { "storage-state": "/nonexistent/state.json" }
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(state.settings.get(Key::StorageState), None, "{resp}");
+        assert_eq!(
+            state.settings.get(Key::Profile),
+            Some(&json!("/tmp/previous"))
+        );
+        assert!(state.browser.is_none(), "the failed launch is closed");
     }
 }
