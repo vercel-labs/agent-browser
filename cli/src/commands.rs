@@ -2114,6 +2114,9 @@ fn parse_command_inner(
 
         // === Core Web Vitals + hydration ===
         "vitals" | "web-vitals" => {
+            for arg in &rest {
+                reject_batch_global_flag(batch_item, arg)?;
+            }
             let mut cmd = json!({ "id": id, "action": "vitals" });
             let json_out = rest.contains(&"--json");
             if json_out {
@@ -7092,5 +7095,32 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_batch_items_reject_global_flags_and_keep_literal_text() {
+        for item in [
+            "--session other open https://example.com",
+            "goto --init-script probe.js",
+            "screenshot --init-script probe.js",
+            "snapshot --init-script probe.js",
+            "vitals --init-script probe.js",
+        ] {
+            let err = parse_batch_command(&args(item), &default_flags()).unwrap_err();
+            assert!(
+                matches!(&err, ParseError::InvalidValue { message, .. } if message.contains("outer batch invocation")),
+                "{item}: {err:?}"
+            );
+        }
+        for item in [
+            "fill #field --json",
+            "type #field --clear",
+            "vitals https://example.com",
+        ] {
+            assert!(
+                parse_batch_command(&args(item), &default_flags()).is_ok(),
+                "{item}"
+            );
+        }
     }
 }
