@@ -909,7 +909,9 @@ fn select_unique_node_id(nodes: &[AXNode], role: &str, name: &str) -> Result<i64
         if node.ignored.unwrap_or(false) {
             continue;
         }
-        if extract_ax_string(&node.role) == role && extract_ax_string(&node.name) == name {
+        if normalize_ax_role(extract_ax_string(&node.role)) == role
+            && extract_ax_string(&node.name) == name
+        {
             if found.is_some() {
                 return Err(format!(
                     "Stale ref for role={} name={} cannot be recovered: several elements now match. Run snapshot again and use a fresh ref.",
@@ -931,6 +933,15 @@ fn select_unique_node_id(nodes: &[AXNode], role: &str, name: &str) -> Result<i64
             "Could not locate element with role={} name={}",
             role, name
         )),
+    }
+}
+
+/// Use the same iframe role for snapshot refs and stale-ref recovery.
+pub(super) fn normalize_ax_role(role: String) -> String {
+    if role == "IframePresentational" {
+        "Iframe".to_string()
+    } else {
+        role
     }
 }
 
@@ -1660,6 +1671,21 @@ mod tests {
     }
 
     #[test]
+    fn test_select_unique_node_id_normalizes_presentational_iframes() {
+        let mut nodes = vec![
+            ax("IframePresentational", "", Some(1), true),
+            ax("IframePresentational", "", Some(7), false),
+            ax("Iframe", "Other", Some(8), false),
+        ];
+        assert_eq!(select_unique_node_id(&nodes, "Iframe", ""), Ok(7));
+
+        nodes.push(ax("Iframe", "", Some(9), false));
+        assert!(select_unique_node_id(&nodes, "Iframe", "")
+            .unwrap_err()
+            .contains("several elements now match"));
+    }
+
+    #[test]
     fn test_select_unique_node_id_rejects_multiple_matches() {
         let ambiguous = "Stale ref for role=button name=Approve cannot be recovered: several elements now match. Run snapshot again and use a fresh ref.";
         let two_valid = vec![
@@ -1818,15 +1844,18 @@ mod tests {
 
     #[test]
     fn test_box_model_center() {
-        let model = BoxModel {
-            content: vec![10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
-            padding: vec![],
-            border: vec![],
-            margin: vec![],
-            width: 100,
-            height: 40,
-        };
-        let (x, y) = box_model_center(&model);
+        let response: DomGetBoxModelResult = serde_json::from_value(serde_json::json!({
+            "model": {
+                "content": [10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
+                "padding": [9.0, 19.0, 111.0, 19.0, 111.0, 61.0, 9.0, 61.0],
+                "border": [8.0, 18.0, 112.0, 18.0, 112.0, 62.0, 8.0, 62.0],
+                "margin": [7.0, 17.0, 113.0, 17.0, 113.0, 63.0, 7.0, 63.0],
+                "width": 100.5,
+                "height": 40.25
+            }
+        }))
+        .unwrap();
+        let (x, y) = box_model_center(&response.model);
         assert!((x - 60.0).abs() < 0.01);
         assert!((y - 40.0).abs() < 0.01);
     }

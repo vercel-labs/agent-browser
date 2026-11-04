@@ -24,12 +24,15 @@ agent-browser navigate https://app.example.com
     <tr><td><code>network route &lt;url&gt;</code></td><td>Intercept matching requests</td></tr>
     <tr><td><code>network route &lt;url&gt; --abort</code></td><td>Block matching requests</td></tr>
     <tr><td><code>network route &lt;url&gt; --body &lt;json&gt;</code></td><td>Fulfill matching requests with a mock body</td></tr>
+    <tr><td><code>network route &lt;url&gt; --body &lt;json&gt; --allow-origin &lt;origin&gt;</code></td><td>Let a page on that origin read the mock cross-origin</td></tr>
     <tr><td><code>network route "*" --resource-type script --abort</code></td><td>Block only a specific resource type</td></tr>
     <tr><td><code>network unroute [url]</code></td><td>Remove one route or all routes</td></tr>
   </tbody>
 </table>
 
 `--resource-type` accepts comma-separated resource types such as `script`, `image`, `font`, `xhr`, and `fetch`.
+
+A mock for a URL on another origin than the page (a page on `www.example.com` calling `api.example.com`) fails with a network error unless you pass `--allow-origin` with the page's origin. The mock then answers CORS checks and preflights for that origin only. JSON bodies are sent as `application/json`.
 
 ## Request log
 
@@ -69,6 +72,8 @@ agent-browser click @e4
 agent-browser network har stop ./trace.har
 ```
 
+If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
+
 Text response bodies (JSON, HTML, JavaScript, form data) are embedded in the HAR as `content.text` by default, captured while the browser still has them buffered so they survive navigation. The `--content` flag on `har start` controls this:
 
 <table>
@@ -88,10 +93,10 @@ HAR files include request headers, response headers, cookies, POST data, and res
 
 ```bash
 agent-browser batch \
-  '["open"]' \
-  '["network","route","*","--abort","--resource-type","script"]' \
-  '["navigate","http://localhost:3000"]' \
-  '["snapshot","-i"]'
+  "open" \
+  "network route * --abort --resource-type script" \
+  "navigate http://localhost:3000" \
+  "snapshot -i"
 ```
 
 Launching with `open` and no URL leaves the browser on `about:blank`, which gives routes time to register before the first real navigation.

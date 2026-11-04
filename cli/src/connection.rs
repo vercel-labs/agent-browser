@@ -109,12 +109,12 @@ pub fn get_socket_dir() -> PathBuf {
         } else if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
             if !runtime_dir.is_empty() {
                 PathBuf::from(runtime_dir).join("agent-browser")
-            } else if let Some(home) = dirs::home_dir() {
+            } else if let Some(home) = std::env::home_dir() {
                 home.join(".agent-browser")
             } else {
                 env::temp_dir().join("agent-browser")
             }
-        } else if let Some(home) = dirs::home_dir() {
+        } else if let Some(home) = std::env::home_dir() {
             home.join(".agent-browser")
         } else {
             env::temp_dir().join("agent-browser")
@@ -122,12 +122,12 @@ pub fn get_socket_dir() -> PathBuf {
     } else if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
         if !runtime_dir.is_empty() {
             PathBuf::from(runtime_dir).join("agent-browser")
-        } else if let Some(home) = dirs::home_dir() {
+        } else if let Some(home) = std::env::home_dir() {
             home.join(".agent-browser")
         } else {
             env::temp_dir().join("agent-browser")
         }
-    } else if let Some(home) = dirs::home_dir() {
+    } else if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser")
     } else {
         env::temp_dir().join("agent-browser")
@@ -508,6 +508,7 @@ pub struct DaemonOptions<'a> {
     pub idle_timeout: Option<&'a str>,
     pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
+    pub cdp_headers: Option<&'a str>,
     pub no_auto_dialog: bool,
     pub plugins: Option<&'a str>,
 }
@@ -622,6 +623,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if let Some(cdp) = opts.cdp {
         cmd.env("AGENT_BROWSER_CDP", cdp);
     }
+    if let Some(headers) = opts.cdp_headers {
+        cmd.env("AGENT_BROWSER_CDP_HEADERS", headers);
+    }
     if opts.no_auto_dialog {
         cmd.env("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
     }
@@ -641,6 +645,107 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// Daemon-owned options as written to `<session>.config`. The daemon reads
+/// these from env at startup, so changing one requires a restart.
+fn daemon_config_json(opts: &DaemonOptions) -> String {
+    json!({
+        "debug": opts.debug,
+        "action_policy": opts.action_policy,
+        "confirm_actions": opts.confirm_actions,
+        "idle_timeout": opts.idle_timeout,
+        "default_timeout": opts.default_timeout,
+        "no_auto_dialog": opts.no_auto_dialog,
+    })
+    .to_string()
+}
+
+/// Whether the running daemon's stored config satisfies this invocation.
+/// Policy options a command leaves unset defer to the running daemon, and a
+/// different explicit value requires a restart. Idle and default timeouts
+/// never restart a running daemon: they are lifetimes, not page state, so a
+/// differing value is reported by `ignored_timeout_overrides` instead.
+fn daemon_config_compatible(stored: &str, opts: &DaemonOptions) -> bool {
+    let Ok(stored) = serde_json::from_str::<Value>(stored) else {
+        // Config from an older CLI is a bare hash: compare it exactly.
+        return stored.trim() == daemon_config_fingerprint(opts);
+    };
+    let optional_matches = |key: &str, requested: Option<Value>| match requested {
+        None => true,
+        Some(requested) => stored.get(key) == Some(&requested),
+    };
+    optional_matches("action_policy", opts.action_policy.map(Value::from))
+        && optional_matches("confirm_actions", opts.confirm_actions.map(Value::from))
+        && stored.get("debug") == Some(&Value::Bool(opts.debug))
+        && stored.get("no_auto_dialog") == Some(&Value::Bool(opts.no_auto_dialog))
+}
+
+/// Timeouts this invocation sets explicitly that differ from the running
+/// daemon's, as `(name, requested, running)`. `running` is `None` when the
+/// daemon uses its built-in default.
+fn ignored_timeout_overrides(
+    stored: &str,
+    opts: &DaemonOptions,
+) -> Vec<(&'static str, String, Option<String>)> {
+    let Ok(stored) = serde_json::from_str::<Value>(stored) else {
+        return Vec::new();
+    };
+    let running = |key: &str| match stored.get(key) {
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    };
+    let mut ignored = Vec::new();
+    for (name, key, requested) in [
+        (
+            "idle timeout",
+            "idle_timeout",
+            opts.idle_timeout.map(str::to_string),
+        ),
+        (
+            "default timeout",
+            "default_timeout",
+            opts.default_timeout.map(|ms| ms.to_string()),
+        ),
+    ] {
+        if let Some(requested) = requested {
+            let current = running(key);
+            if current.as_deref() != Some(requested.as_str()) {
+                ignored.push((name, requested, current));
+            }
+        }
+    }
+    ignored
+}
+
+/// Default timeout the session's running daemon was started with, so a
+/// command that omits it waits on the client as long as the daemon does.
+pub fn running_daemon_default_timeout(session: &str) -> Option<u64> {
+    let stored = fs::read_to_string(get_config_path(session)).ok()?;
+    serde_json::from_str::<Value>(&stored)
+        .ok()?
+        .get("default_timeout")?
+        .as_u64()
+}
+
+fn warn_ignored_timeout_overrides(session: &str, opts: &DaemonOptions) {
+    let Ok(stored) = fs::read_to_string(get_config_path(session)) else {
+        return;
+    };
+    for (name, requested, current) in ignored_timeout_overrides(&stored, opts) {
+        let current = current
+            .map(|value| format!("{} {}", name, value))
+            .unwrap_or_else(|| "the default".to_string());
+        eprintln!(
+            "{} Ignoring {} {}: session \"{}\" is already running with {}. Close the session to change it.",
+            crate::color::warning_indicator(),
+            name,
+            requested,
+            session,
+            current
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonConfigStatus {
     Matches,
@@ -649,9 +754,8 @@ enum DaemonConfigStatus {
 }
 
 fn daemon_config_status(session: &str, opts: &DaemonOptions) -> DaemonConfigStatus {
-    let expected = daemon_config_fingerprint(opts);
     match fs::read_to_string(get_config_path(session)) {
-        Ok(actual) if actual.trim() == expected => DaemonConfigStatus::Matches,
+        Ok(stored) if daemon_config_compatible(&stored, opts) => DaemonConfigStatus::Matches,
         Ok(_) => DaemonConfigStatus::Different,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DaemonConfigStatus::Missing,
         Err(_) => DaemonConfigStatus::Different,
@@ -663,7 +767,7 @@ fn daemon_config_matches(session: &str, opts: &DaemonOptions) -> bool {
 }
 
 fn write_daemon_config(session: &str, opts: &DaemonOptions) {
-    let _ = fs::write(get_config_path(session), daemon_config_fingerprint(opts));
+    let _ = fs::write(get_config_path(session), daemon_config_json(opts));
 }
 
 fn daemon_pid_matches(session: &str, expected_pid: u32) -> bool {
@@ -876,7 +980,10 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
             // Fall through to spawn a new daemon below
         } else {
             match ready_existing_daemon_result(session, opts, Duration::from_secs(1)) {
-                Some(result) => return Ok(result),
+                Some(result) => {
+                    warn_ignored_timeout_overrides(session, opts);
+                    return Ok(result);
+                }
                 None => {
                     stop_existing_daemon_for_restart(session);
                     restarted = true;
@@ -1642,6 +1749,7 @@ mod tests {
             idle_timeout,
             default_timeout: None,
             cdp: None,
+            cdp_headers: None,
             no_auto_dialog,
             plugins: None,
         }
@@ -1679,7 +1787,7 @@ mod tests {
 
         let session = "race-config";
         let winner_opts = test_daemon_options(Some("1000"), false, None);
-        let loser_opts = test_daemon_options(Some("2000"), false, None);
+        let loser_opts = test_daemon_options(Some("1000"), true, None);
 
         fs::create_dir_all(get_socket_dir()).unwrap();
         fs::write(get_pid_path(session), "12345").unwrap();
@@ -1761,6 +1869,122 @@ mod tests {
         assert!(!result.already_running);
         assert!(result.restarted);
         assert!(daemon_config_matches(session, &opts));
+    }
+
+    #[test]
+    fn test_daemon_config_timeouts_never_require_restart() {
+        let mut started = test_daemon_options(Some("0"), false, None);
+        started.default_timeout = Some(90_000);
+        let stored = daemon_config_json(&started);
+
+        let mut changed = test_daemon_options(Some("60000"), false, None);
+        changed.default_timeout = Some(5_000);
+        assert!(daemon_config_compatible(&stored, &changed));
+        assert!(daemon_config_compatible(
+            &stored,
+            &test_daemon_options(None, false, None)
+        ));
+
+        let bare_daemon = daemon_config_json(&test_daemon_options(None, false, None));
+        assert!(daemon_config_compatible(&bare_daemon, &changed));
+    }
+
+    #[test]
+    fn test_daemon_config_reports_ignored_timeouts() {
+        let mut started = test_daemon_options(Some("0"), false, None);
+        started.default_timeout = Some(90_000);
+        let stored = daemon_config_json(&started);
+
+        assert!(ignored_timeout_overrides(&stored, &started).is_empty());
+        assert!(
+            ignored_timeout_overrides(&stored, &test_daemon_options(None, false, None)).is_empty()
+        );
+
+        let mut changed = test_daemon_options(Some("60000"), false, None);
+        changed.default_timeout = Some(5_000);
+        assert_eq!(
+            ignored_timeout_overrides(&stored, &changed),
+            vec![
+                ("idle timeout", "60000".to_string(), Some("0".to_string())),
+                (
+                    "default timeout",
+                    "5000".to_string(),
+                    Some("90000".to_string())
+                ),
+            ]
+        );
+
+        let bare_daemon = daemon_config_json(&test_daemon_options(None, false, None));
+        assert_eq!(
+            ignored_timeout_overrides(&bare_daemon, &changed),
+            vec![
+                ("idle timeout", "60000".to_string(), None),
+                ("default timeout", "5000".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_daemon_config_unset_policy_defers_and_different_policy_restarts() {
+        let mut started = test_daemon_options(None, false, None);
+        started.action_policy = Some("/tmp/policy.json");
+        let stored = daemon_config_json(&started);
+
+        assert!(daemon_config_compatible(
+            &stored,
+            &test_daemon_options(None, false, None)
+        ));
+        assert!(daemon_config_compatible(&stored, &started));
+
+        let mut changed = test_daemon_options(None, false, None);
+        changed.action_policy = Some("/tmp/other.json");
+        assert!(!daemon_config_compatible(&stored, &changed));
+    }
+
+    #[test]
+    fn test_daemon_config_bool_change_requires_restart() {
+        let base = test_daemon_options(None, false, None);
+        let mut debug = test_daemon_options(None, false, None);
+        debug.debug = true;
+        let stored = daemon_config_json(&base);
+
+        assert!(daemon_config_compatible(&stored, &base));
+        assert!(!daemon_config_compatible(&stored, &debug));
+        assert!(!daemon_config_compatible(
+            &stored,
+            &test_daemon_options(None, true, None)
+        ));
+    }
+
+    #[test]
+    fn test_running_daemon_default_timeout_reads_stored_config() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        fs::create_dir_all(get_socket_dir()).unwrap();
+
+        let mut started = test_daemon_options(None, false, None);
+        started.default_timeout = Some(90_000);
+        write_daemon_config("timeout-set", &started);
+        write_daemon_config("timeout-unset", &test_daemon_options(None, false, None));
+
+        assert_eq!(running_daemon_default_timeout("timeout-set"), Some(90_000));
+        assert_eq!(running_daemon_default_timeout("timeout-unset"), None);
+        assert_eq!(running_daemon_default_timeout("missing"), None);
+    }
+
+    #[test]
+    fn test_daemon_config_legacy_hash_compares_exactly() {
+        let opts = test_daemon_options(Some("1000"), false, None);
+        let stored = daemon_config_fingerprint(&opts);
+
+        assert!(daemon_config_compatible(&stored, &opts));
+        assert!(!daemon_config_compatible(
+            &stored,
+            &test_daemon_options(Some("2000"), false, None)
+        ));
+        assert!(ignored_timeout_overrides(&stored, &opts).is_empty());
     }
 
     // === Transient Error Detection Tests ===

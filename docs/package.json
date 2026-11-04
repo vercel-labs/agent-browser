@@ -23,6 +23,7 @@
     "@vercel/analytics": "^1.6.1",
     "@vercel/agent-readability": "0.5.1",
     "@vercel/geistdocs": "2.7.5",
+    "@vercel/microfrontends": "2.4.2",
     "@vercel/speed-insights": "^1.3.1",
     "fumadocs-core": "16.2.2",
     "fumadocs-mdx": "14.0.4",
