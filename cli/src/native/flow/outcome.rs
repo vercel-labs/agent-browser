@@ -328,8 +328,11 @@ pub fn finish_run(
     let shape_changed = attempts.iter().find(|a| a.shape_changed);
     // An empty answer cannot confirm the recorded lists still exist, so it
     // leaves the verified state as it was.
-    let empty = last.iter().any(|r| r.ok && r.empty);
-    if all_ok && shape_changed.is_none() && empty {
+    let any_empty = last.iter().any(|r| r.ok && r.empty);
+    // Only the answer itself reads as no results; an empty dependency does
+    // not replace a response that has data.
+    let empty = last.iter().any(|r| r.id == flow.output && r.ok && r.empty);
+    if all_ok && shape_changed.is_none() && any_empty {
     } else if all_ok && shape_changed.is_none() {
         flow.verified_at = Some(now.to_string());
     } else if shape_changed.is_some() || (!all_ok && attempts.iter().any(|r| !r.ok && r.drift)) {
@@ -383,7 +386,7 @@ pub fn finish_run(
         "name": flow.name,
         "origin": flow.origin,
         "ok": all_ok,
-        "verified": all_ok && shape_changed.is_none() && !empty,
+        "verified": all_ok && shape_changed.is_none() && !any_empty,
         "ms": total_ms,
         "steps": steps,
         "data": output,

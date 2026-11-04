@@ -12,7 +12,7 @@ pub struct RoutedResponse {
 
 /// Tier 1: send the request directly, with cookies from the live session.
 pub async fn run_http(
-    client: &reqwest::Client,
+    clients: &HttpClients,
     req: &PreparedRequest,
     cookie_header: Option<&str>,
     routed: Option<RoutedResponse>,
@@ -45,7 +45,7 @@ pub async fn run_http(
             )
         }
     };
-    let mut builder = client.request(method, &req.url);
+    let mut builder = clients.for_request(req).request(method, &req.url);
     for (k, v) in &req.headers {
         builder = builder.header(k, v);
     }
@@ -114,33 +114,62 @@ pub async fn run_http(
     with_retry_after(tier_result(req, Tier::Http, started, outcome), retry_after)
 }
 
-/// The direct-HTTP client. Redirects are followed only to hosts the
-/// session's domain filter allows, the same rule browser requests follow.
+/// The clients of a run: reads follow same-site redirects, writes never
+/// follow any.
+pub struct HttpClients {
+    reads: reqwest::Client,
+    writes: reqwest::Client,
+}
+
+impl HttpClients {
+    fn for_request(&self, req: &PreparedRequest) -> &reqwest::Client {
+        if req.write || is_write(&req.method, req.body.as_deref()) {
+            &self.writes
+        } else {
+            &self.reads
+        }
+    }
+}
+
 pub fn http_client(
     filter: Option<crate::native::network::DomainFilter>,
     flow: &Flow,
-) -> Result<reqwest::Client, String> {
+) -> Result<HttpClients, String> {
+    let build = |policy| {
+        reqwest::Client::builder()
+            .redirect(policy)
+            .timeout(Duration::from_secs(20))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))
+    };
+    Ok(HttpClients {
+        reads: build(read_redirects(filter, flow))?,
+        // The 3xx comes back as the answer, so a write that was sent is
+        // not sent again by a 307 or 308.
+        writes: build(reqwest::redirect::Policy::none())?,
+    })
+}
+
+/// Reads follow redirects only to hosts the session's domain filter allows,
+/// the same rule browser requests follow.
+fn read_redirects(
+    filter: Option<crate::native::network::DomainFilter>,
+    flow: &Flow,
+) -> reqwest::redirect::Policy {
     let hosts = HostPolicy::of(flow);
-    let policy = reqwest::redirect::Policy::custom(move |attempt| {
+    reqwest::redirect::Policy::custom(move |attempt| {
         let blocked = hosts.check(attempt.url().as_str()).err().or_else(|| {
             filter
                 .as_ref()
                 .and_then(|f| f.check_url(attempt.url().as_str()).err())
         });
         match blocked {
-            // The 3xx comes back as the response, so a write that was sent
-            // counts as answered.
             Some(_) => attempt.stop(),
             // reqwest's default redirect limit.
             None if attempt.previous().len() >= 10 => attempt.stop(),
             None => attempt.follow(),
         }
-    });
-    reqwest::Client::builder()
-        .redirect(policy)
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+    })
 }
 
 pub fn cookie_header(cookies: &[crate::native::cookies::Cookie]) -> String {
@@ -153,7 +182,7 @@ pub fn cookie_header(cookies: &[crate::native::cookies::Cookie]) -> String {
 
 /// The HTTP tier over a browser session's cookies and routes.
 pub async fn send(
-    client: &reqwest::Client,
+    client: &HttpClients,
     browser: &mut dyn Browser,
     req: &PreparedRequest,
 ) -> TierResult {
