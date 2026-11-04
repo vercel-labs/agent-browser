@@ -63,6 +63,14 @@ On macOS Apple Silicon, the installed 0.41.2 runtime passed a test through one M
 
 This verifies that local Chrome connection and interaction sequence. It does not establish that this Codex client has reloaded the servers, that every future connection avoids prompts, or that Intel and isolated-browser workflows have passed the same test. The public installer has not been rerun against the live Codex configuration for this update.
 
+## Automated checks
+
+The **Codex macOS integration** GitHub Actions workflow runs when this integration or its workflow changes. It uses Python's standard library on a hosted Ubuntu runner, with read-only repository permissions and no browser or API credentials. Run the same checks from the repository root with `python3 -B integrations/codex-macos/checks.py`.
+
+The checks use invented temporary files to verify private backup permissions and hashes, preservation of existing Codex settings, refusal to replace conflicting MCP entries, and rejection of a corrupt binary download. They also validate the generated direct WebSocket configuration and launcher syntax. A tracked-file allowlist and common sensitive-pattern checks flag unexpected publication content without printing matching values. Run these checks locally before pushing; a cloud check runs after content has reached GitHub. These checks supplement manual review; they cannot detect every kind of personal information or secret.
+
+The inherited Release workflow is restricted to `vercel-labs/agent-browser`, so merging this fork's integration does not publish upstream packages or create upstream-style releases. The upstream CI remains available for its original code and documentation checks.
+
 ## Roll back
 
 For the connection-address change, copy the reviewed local `chrome.json` backup back to `configs/chrome.json`, then restart the affected MCP client. This changes the connection configuration only.
