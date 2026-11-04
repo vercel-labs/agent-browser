@@ -1,10 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "installCommand": "corepack pnpm --filter docs install --frozen-lockfile",
-  "buildCommand": "corepack pnpm run build",
-  "git": {
-    "deploymentEnabled": {
-      "james/agent-browser-homepage": false
-    }
-  }
+  "buildCommand": "corepack pnpm run build"
 }
