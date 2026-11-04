@@ -557,6 +557,9 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     let mut bodies: Vec<(String, Value)> = Vec::new();
     let mut secret_requests: Vec<String> = Vec::new();
     let mut har_ids: HashMap<String, String> = HashMap::new();
+    // The id each request had in the capture (`s<seq>r<n>`), which `flow
+    // steps` numbering gives, next to its id in the saved range.
+    let mut capture_ids: Vec<(String, String)> = Vec::new();
 
     for (index, (seq, cmd)) in commands.iter().enumerate() {
         let tagged: Vec<&HarEntry> = input
@@ -616,6 +619,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                 bodies.push((id.clone(), parsed.clone()));
             }
             request_ids.push(id.clone());
+            capture_ids.push((format!("s{}r{}", seq, requests.len() + 1), id.clone()));
             har_ids.insert(id.clone(), e.request_id.clone());
             requests.push(Request {
                 id,
@@ -726,7 +730,22 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     params.extend(links.params);
     let output = match input.output {
         Some(id) if request_ids.iter().any(|r| r == id) => id.to_string(),
-        Some(id) => return Err(format!("unknown request id '{}' for --output", id)),
+        Some(id) => match capture_ids.iter().find(|(c, _)| c == id) {
+            Some((_, saved)) => saved.clone(),
+            None => {
+                let mut valid: Vec<String> = request_ids.clone();
+                for (c, s) in &capture_ids {
+                    if c != s {
+                        valid.push(c.clone());
+                    }
+                }
+                return Err(format!(
+                    "unknown request id '{}' for --output; valid ids: {}",
+                    id,
+                    valid.join(", ")
+                ));
+            }
+        },
         None => default_output(&steps),
     };
 
@@ -2222,6 +2241,62 @@ mod tests {
         let url = flow["steps"][0]["requests"][1]["url"].as_str().unwrap();
         assert_eq!(url, "https://app.example/api/v10/projects/{{id}}/env");
         assert_eq!(report["params"], json!(["id"]));
+    }
+
+    #[test]
+    fn output_accepts_the_capture_id_of_a_renumbered_request_and_errors_list_valid_ids() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/a" }),
+            None,
+            None,
+        );
+        r.tag_now("one");
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/b" }),
+            None,
+            None,
+        );
+        r.tag_now("two");
+        let entries = vec![
+            entry(
+                "one",
+                "https://app.example/api/one",
+                "Fetch",
+                "application/json",
+                r#"{"a":1}"#,
+            ),
+            entry(
+                "two",
+                "https://app.example/api/two",
+                "Fetch",
+                "application/json",
+                r#"{"b":2}"#,
+            ),
+        ];
+        // Save only the second step: its saved id is s1r1, its capture id s2r1.
+        let second = &r.commands[1..];
+        let save = |output: Option<&str>| {
+            build_flow_value(SaveInput {
+                name: "t",
+                recorder: &r,
+                commands: second,
+                description: None,
+                entries: &entries,
+                params: &[],
+                output,
+                created_at: String::new(),
+                login_wall: false,
+            })
+        };
+        let (flow, _) = save(Some("s2r1")).unwrap();
+        assert_eq!(flow["output"], "s1r1");
+        assert_eq!(save(Some("s1r1")).unwrap().0["output"], "s1r1");
+        let err = save(Some("s9r9")).unwrap_err();
+        assert!(err.contains("s1r1") && err.contains("s2r1"), "{err}");
     }
 
     #[test]
