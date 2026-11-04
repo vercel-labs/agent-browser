@@ -7,6 +7,8 @@ use super::*;
 pub enum Stop {
     /// A 401 or 403: the session is signed out or lacks access.
     AuthExpired,
+    /// A 401 or 403 for a request that needed a credential the file cannot hold.
+    CredentialNotSendable,
     /// A 429.
     RateLimited,
     /// A bot challenge page instead of data.
@@ -20,6 +22,7 @@ impl Stop {
     pub fn code(self) -> &'static str {
         match self {
             Stop::AuthExpired => "auth_expired",
+            Stop::CredentialNotSendable => "credential_not_sendable",
             Stop::RateLimited => "rate_limited",
             Stop::Blocked => "blocked",
             Stop::OutcomeUnknown => "outcome_unknown",
@@ -29,6 +32,9 @@ impl Stop {
     fn advice(self) -> &'static str {
         match self {
             Stop::AuthExpired => "Sign in again in the browser, then rerun",
+            Stop::CredentialNotSendable => {
+                "The flow cannot send the credential this request needs; use the page UI for this task"
+            }
             Stop::RateLimited => "Wait before rerunning",
             Stop::OutcomeUnknown => "Check the site before rerunning; the write is not sent again",
             Stop::Blocked => "Continue in the UI or let the user clear the challenge",
@@ -169,6 +175,16 @@ pub fn check_response(
         ));
     }
     match status {
+        401 | 403 if req.expect.stripped_auth => {
+            return Err(Failure::stop(
+                Stop::CredentialNotSendable,
+                status,
+                format!(
+                    "HTTP {}: the recording sent a credential header the file does not keep",
+                    status
+                ),
+            ))
+        }
         401 | 403 => {
             return Err(Failure::stop(
                 Stop::AuthExpired,

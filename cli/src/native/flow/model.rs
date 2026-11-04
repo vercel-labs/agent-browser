@@ -28,8 +28,6 @@ pub struct Flow {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub redacted_steps: Vec<usize>,
-    #[serde(default)]
     pub params: Vec<Param>,
     #[serde(default)]
     pub output: String,
@@ -142,6 +140,9 @@ pub struct Expect {
     pub item_fields: Vec<String>,
     #[serde(default)]
     pub extract: Option<Value>,
+    /// The recording sent credential headers that a run cannot copy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stripped_auth: bool,
 }
 
 impl Flow {

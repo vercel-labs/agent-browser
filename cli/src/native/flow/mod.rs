@@ -645,6 +645,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             seen.push(key);
             let body_len = serde_json::to_string(&parsed).map(|t| t.len()).unwrap_or(0);
             let mut headers = BTreeMap::new();
+            let mut stripped_auth = false;
             for (k, v) in &e.request_headers {
                 let lower = k.to_ascii_lowercase();
                 if lower.starts_with(':') {
@@ -652,6 +653,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                 }
                 let class = classify_header(&lower);
                 if class != HeaderClass::Kept {
+                    stripped_auth |= class == HeaderClass::Credential;
                     if !dropped_headers.contains(&lower) && lower != "host" {
                         dropped_headers.push(lower);
                     }
@@ -680,6 +682,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                     bytes: body_len as u64,
                     item_fields,
                     extract,
+                    stripped_auth,
                 },
             });
         }
@@ -795,12 +798,6 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             version: env!("CARGO_PKG_VERSION").to_string(),
         }),
         description: input.description.map(String::from),
-        redacted_steps: commands
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, c))| c["redacted"] == true)
-            .map(|(i, _)| i + 1)
-            .collect(),
         params,
         output: output.clone(),
         item_fields,
@@ -1942,6 +1939,7 @@ mod tests {
         );
         assert!(req["headers"].get("Cookie").is_none());
         assert!(req["headers"].get("X-CSRF-Token").is_none());
+        assert_eq!(req["expect"]["strippedAuth"], true);
         assert_eq!(flow["steps"][0]["requests"].as_array().unwrap().len(), 1);
         assert_eq!(flow["output"], "s1r1");
         assert_eq!(flow["verifiedAt"], Value::Null);
@@ -2860,7 +2858,6 @@ mod tests {
             r#"{"email":"{{email}}"}"#
         );
         assert_eq!(r.commands[2].1["value"], REDACTED);
-        assert_eq!(flow["redactedSteps"], json!([3]));
         let text = serde_json::to_string(&flow).unwrap();
         assert!(!text.contains("482913"));
         // The step holds no literal; only the param keeps the recorded example.
@@ -3970,6 +3967,27 @@ mod tests {
         assert_ne!(base_domain("a.vercel.app"), base_domain("b.vercel.app"));
         assert_eq!(base_domain("localhost"), "localhost");
         assert_eq!(base_domain("api.example.com.ar"), "example.com.ar");
+    }
+
+    #[test]
+    fn a_denied_request_that_needed_a_stripped_credential_is_not_an_expired_session() {
+        let mut req = prepared("s1r1");
+        for status in [401, 403] {
+            let f = check_response(&req, status, "{}").unwrap_err();
+            assert_eq!(f.stop, Some(Stop::AuthExpired), "{status}");
+        }
+        req.expect.stripped_auth = true;
+        for status in [401, 403] {
+            let f = check_response(&req, status, "{}").unwrap_err();
+            assert_eq!(f.stop, Some(Stop::CredentialNotSendable), "{status}");
+        }
+        assert_eq!(
+            Stop::CredentialNotSendable.code(),
+            "credential_not_sendable"
+        );
+        // Other statuses are judged the same either way.
+        let f = check_response(&req, 429, "{}").unwrap_err();
+        assert_eq!(f.stop, Some(Stop::RateLimited));
     }
 
     #[test]
