@@ -253,6 +253,8 @@ agent-browser flow run <name> --allow-write <all|id,id,...>
 
 `--allow-write` takes `all` or comma-separated write ids. A run only sends the writes among the requests its output needs, and a write `--allow-write` does not cover is never sent silently: the run stops with a confirmation request, and `confirm` approves one write at a time. Each write is a policy action named `flow_write:<id>`, so `--action-policy` can deny or require confirmation for it and `--confirm-actions flow_write:<id>` asks even when `--allow-write` covers it. These checks apply to the HTTP and in-page tiers. The command replay also sends writes no kept request covers; those need `--allow-write` or a confirmation too, and the policy file can deny them. A write the site accepted is never sent again by a lower tier.
 
+A param never fills the text of a GraphQL operation; it fills `variables` and the other fields. An operation with a placeholder in its text counts as a write, and a run refuses, before sending anything, a request that becomes a write once its values are filled in but is not in `writes`.
+
 ### Discovery
 
 After `open`, `back`, `forward`, `reload` or a tab switch, the response lists the saved flows for that site once per session, with their params, the recorded values and the item fields. A capturing session hides only the flows it saved itself. When the page also declares WebMCP tools, those come first and the hint suggests them when one covers the task.
