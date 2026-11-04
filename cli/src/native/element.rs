@@ -219,9 +219,14 @@ impl RefMap {
         }
     }
 
-    pub fn invalidate_page(&mut self, page_session: &str) {
+    /// Drop durable document refs for a specific page without clearing active snapshot refs.
+    pub fn invalidate_page_documents(&mut self, page_session: &str) {
         self.documents
             .retain(|(entry_page, _), _| entry_page != page_session);
+    }
+
+    pub fn invalidate_page(&mut self, page_session: &str) {
+        self.invalidate_page_documents(page_session);
         self.map.clear();
     }
 
@@ -1798,6 +1803,22 @@ mod tests {
         map.invalidate_page("page-b");
 
         assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
+        assert_eq!(map.durable_ref("page-b", None, 42), None);
+    }
+
+    #[test]
+    fn test_invalidate_page_documents_preserves_active_map() {
+        let mut map = RefMap::new();
+        map.add("e1".to_string(), Some(10), "button", "Save", None);
+        assert!(map.observe_document("page-a", None, "session-a", Some("loader-a")));
+        map.remember_durable_ref("page-a", None, 10, "e1");
+        assert!(map.observe_document("page-b", None, "session-b", Some("loader-b")));
+        map.remember_durable_ref("page-b", None, 42, "e2");
+
+        map.invalidate_page_documents("page-b");
+
+        assert!(map.get("e1").is_some());
+        assert_eq!(map.durable_ref("page-a", None, 10), Some("e1"));
         assert_eq!(map.durable_ref("page-b", None, 42), None);
     }
 

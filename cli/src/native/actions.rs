@@ -1879,15 +1879,21 @@ impl DaemonState {
                                     .map(ToString::to_string)
                                 {
                                     if destroyed_active_target {
+                                        self.ref_map.invalidate_page(&session_id);
                                         self.webmcp.clear_page_scope(&session_id);
                                     } else {
+                                        self.ref_map.invalidate_page_documents(&session_id);
                                         self.webmcp.clear_page_tools(&session_id);
                                     }
-                                }
-                                if let Some(session) = self.browser.as_ref().and_then(|browser| {
-                                    browser.session_id_for_target(&te.target_id)
-                                }) {
-                                    self.webmcp.observations.remove(session);
+                                    self.webmcp.observations.remove(&session_id);
+                                    if self
+                                        .pending_dialog
+                                        .as_ref()
+                                        .and_then(|d| d.session_id.as_deref())
+                                        == Some(session_id.as_str())
+                                    {
+                                        self.pending_dialog = None;
+                                    }
                                 }
                                 new_targets
                                     .retain(|entry| entry.target_info.target_id != te.target_id);
@@ -8126,15 +8132,22 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 }
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let tab_id = {
+    let (tab_id, closing_active, closed_session_id) = {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-        match cmd.get("tabId").and_then(|v| v.as_str()) {
+        let tab_id = match cmd.get("tabId").and_then(|v| v.as_str()) {
             Some(s) => {
                 let tab_ref = super::browser::TabRef::parse(s)?;
                 Some(mgr.resolve_tab_ref(&tab_ref)?)
             }
             None => None,
-        }
+        };
+        let active_tab_id = mgr.active_tab_id();
+        let closing_active = tab_id.is_none_or(|id| active_tab_id == Some(id));
+        let closed_session_id = tab_id
+            .or(active_tab_id)
+            .and_then(|id| mgr.session_id_for_tab(id))
+            .map(str::to_string);
+        (tab_id, closing_active, closed_session_id)
     };
     let dialog_session = state
         .pending_dialog
@@ -8147,11 +8160,30 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     };
     // Clear only after the close commits; a rejected close (last tab, bad
     // index) must not wipe the caller's refs and frame scope.
-    state.ref_map.begin_snapshot();
-    state.active_iframe_sessions.clear();
-    state.webmcp.clear_invocations();
-    state.active_frame_id = None;
-    state.refresh_active_iframe_sessions().await;
+    if let Some(ref closed_sid) = closed_session_id {
+        state.ref_map.invalidate_page_documents(closed_sid);
+        state.webmcp.observations.remove(closed_sid);
+        if state
+            .pending_dialog
+            .as_ref()
+            .and_then(|d| d.session_id.as_deref())
+            == Some(closed_sid.as_str())
+        {
+            state.pending_dialog = None;
+        }
+    }
+    if closing_active {
+        if let Some(ref closed_sid) = closed_session_id {
+            state.webmcp.clear_page_scope(closed_sid);
+        }
+        state.ref_map.begin_snapshot();
+        state.active_iframe_sessions.clear();
+        state.webmcp.clear_invocations();
+        state.active_frame_id = None;
+        state.refresh_active_iframe_sessions().await;
+    } else if let Some(ref closed_sid) = closed_session_id {
+        state.webmcp.clear_page_tools(closed_sid);
+    }
     Ok(result)
 }
 
@@ -20095,5 +20127,133 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+
+    #[tokio::test]
+    async fn test_handle_tab_close_background_preserves_active_state_and_cleans_closed_tab() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/browser/mock",
+            listener.local_addr().unwrap().port()
+        );
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+
+            while let Some(Ok(msg)) = rx.next().await {
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Ping(p) => {
+                        let _ = tx.send(Message::Pong(p)).await;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let Ok(cmd) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                let Some(id) = cmd["id"].as_u64() else {
+                    continue;
+                };
+                let method = cmd["method"].as_str().unwrap_or("");
+                let respond = |result: Value| json!({ "id": id, "result": result }).to_string();
+
+                let reply = match method {
+                    "Target.getTargets" => Some(respond(json!({
+                        "targetInfos": [
+                            { "targetId": "T1", "type": "page", "title": "Tab 1", "url": "https://one.test/", "attached": false },
+                            { "targetId": "T2", "type": "page", "title": "Tab 2", "url": "https://two.test/", "attached": false },
+                            { "targetId": "T3", "type": "page", "title": "Tab 3", "url": "https://three.test/", "attached": false },
+                        ]
+                    }))),
+                    "Target.attachToTarget" => {
+                        let target = cmd["params"]["targetId"].as_str().unwrap_or("");
+                        Some(respond(json!({ "sessionId": format!("S-{target}") })))
+                    }
+                    "Page.getFrameTree" => Some(respond(json!({
+                        "frameTree": { "frame": { "id": "F1", "url": "https://one.test/" } }
+                    }))),
+                    "Runtime.evaluate" => Some(respond(
+                        json!({ "result": { "type": "string", "value": "1" } }),
+                    )),
+                    _ => Some(respond(json!({}))),
+                };
+                if let Some(r) = reply {
+                    let _ = tx.send(Message::Text(r)).await;
+                }
+            }
+        });
+
+        let mut state = DaemonState::new();
+        let mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
+        state.browser = Some(mgr);
+
+        // Active tab is t1 (session S-T1). Seed active tab state and background tab state.
+        state
+            .ref_map
+            .add("e1".to_string(), Some(101), "button", "Submit", None);
+        assert!(state
+            .ref_map
+            .observe_document("S-T1", None, "S-T1", Some("loader-1")));
+        state.ref_map.remember_durable_ref("S-T1", None, 101, "e1");
+        assert!(state
+            .ref_map
+            .observe_document("S-T2", None, "S-T2", Some("loader-2")));
+        state.ref_map.remember_durable_ref("S-T2", None, 202, "e2");
+        state.active_frame_id = Some("child-frame".to_string());
+        state.active_iframe_sessions.insert("S-IFRAME".to_string());
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "confirm".to_string(),
+            message: "background confirm".to_string(),
+            url: "https://two.test/".to_string(),
+            default_prompt: None,
+            session_id: Some("S-T2".to_string()),
+        });
+
+        // Close background tab t2: active tab t1's refs and frame scope must remain intact,
+        // while t2's durable refs and pending dialog are cleaned up.
+        let res = handle_tab_close(&json!({ "tabId": "t2" }), &mut state)
+            .await
+            .expect("close background tab t2");
+        assert_eq!(res["closed"], json!(true));
+        assert_eq!(res["tabId"], json!("t2"));
+        assert!(
+            state.ref_map.get("e1").is_some(),
+            "closing a background tab must preserve active tab snapshot refs"
+        );
+        assert_eq!(
+            state.ref_map.durable_ref("S-T1", None, 101),
+            Some("e1"),
+            "active tab durable refs must be preserved"
+        );
+        assert_eq!(
+            state.ref_map.durable_ref("S-T2", None, 202),
+            None,
+            "closed background tab durable refs must be dropped"
+        );
+        assert_eq!(state.active_frame_id.as_deref(), Some("child-frame"));
+        assert!(state.active_iframe_sessions.contains("S-IFRAME"));
+        assert!(
+            state.pending_dialog.is_none(),
+            "pending dialog belonging to the closed tab must be cleared"
+        );
+
+        // Now close active tab t1: active refs and frame scope must be cleared.
+        let res = handle_tab_close(&json!({}), &mut state)
+            .await
+            .expect("close active tab t1");
+        assert_eq!(res["closed"], json!(true));
+        assert_eq!(res["tabId"], json!("t1"));
+        assert!(
+            state.ref_map.get("e1").is_none(),
+            "closing the active tab must clear snapshot refs"
+        );
+        assert_eq!(state.ref_map.durable_ref("S-T1", None, 101), None);
+        assert!(state.active_frame_id.is_none());
     }
 }
