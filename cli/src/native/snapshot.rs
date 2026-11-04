@@ -776,7 +776,7 @@ async fn find_cursor_interactive_elements(
     // - Uses querySelectorAll('*') to walk all elements
     // - Checks getComputedStyle(el).cursor === 'pointer'
     // - Checks onclick attribute/handler and tabindex
-    // - Skips interactiveTags (a, button, input, select, textarea, details, summary)
+    // - Skips interactiveTags (a, button, input, select, textarea, details)
     // - Skips elements with interactive ARIA roles
     // - Deduplicates inherited cursor:pointer from parent
     // - Skips empty text and zero-size elements
@@ -791,9 +791,9 @@ async fn find_cursor_interactive_elements(
         'menuitem':1, 'menuitemcheckbox':1, 'menuitemradio':1, 'option':1, 'searchbox':1,
         'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1
     };
-    var interactiveTags = {
-        'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
-    };
+var interactiveTags = {
+        'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1
+      };
 
     var allElements = document.body.querySelectorAll('*');
     for (var i = 0; i < allElements.length; i++) {
