@@ -970,22 +970,19 @@ fn link_requests(
         references: Vec::new(),
     };
     let given_values: Vec<&str> = given.iter().map(|(_, v)| v.as_str()).collect();
-    // A path segment that several requests share is the site's structure
-    // (`api`, `v10`), whatever a response happens to hold.
-    let mut segment_uses: HashMap<String, usize> = HashMap::new();
-    for req in steps.iter().flat_map(|s| s.requests.iter()) {
-        if let Ok(url) = url::Url::parse(&req.url) {
-            let mut own: Vec<String> = url
-                .path_segments()
-                .map(|p| p.map(String::from).collect())
+    // Path segments of each request, to tell a response value that is the
+    // site's own structure (`api`, `v10`) from one the run chooses.
+    let segments: HashMap<String, Vec<String>> = steps
+        .iter()
+        .flat_map(|s| s.requests.iter())
+        .map(|r| {
+            let segs = url::Url::parse(&r.url)
+                .ok()
+                .and_then(|u| u.path_segments().map(|p| p.map(String::from).collect()))
                 .unwrap_or_default();
-            own.sort();
-            own.dedup();
-            for seg in own {
-                *segment_uses.entry(seg).or_default() += 1;
-            }
-        }
-    }
+            (r.id.clone(), segs)
+        })
+        .collect();
     // Position of every request, writes included, so a write can take a value
     // from any response that came before it.
     let rank: HashMap<String, usize> = steps
@@ -1009,9 +1006,6 @@ fn link_requests(
                 if given_values.contains(&value.as_str()) || page_segments.contains(&value) {
                     continue;
                 }
-                if segment_uses.get(&value).is_some_and(|n| *n > 1) {
-                    continue;
-                }
                 // Blocks of the same document are one response, not a chain.
                 let same_response = |from: &str| {
                     har_ids.get(from).is_some() && har_ids.get(from) == har_ids.get(&id)
@@ -1026,6 +1020,15 @@ fn link_requests(
                 else {
                     continue;
                 };
+                // A value already in the path of the request it came from, or of
+                // one before it, is structure rather than data from that response.
+                let own_rank = rank.get(&from).copied().unwrap_or(0);
+                let structural = segments.iter().any(|(rid, segs)| {
+                    rank.get(rid).is_some_and(|r| *r <= own_rank) && segs.contains(&value)
+                });
+                if structural {
+                    continue;
+                }
                 // Words and codes like "es-AR" or "public" repeat across a site's
                 // responses; only generated values (ids, keys) are worth chaining.
                 if !in_list && !looks_generated(&value) {
@@ -2431,6 +2434,104 @@ mod tests {
         assert_eq!(
             flow["steps"][0]["requests"][0]["headers"]["Referer"],
             "https://app.example/env?create=true"
+        );
+    }
+
+    #[test]
+    fn an_id_two_later_paths_share_is_still_a_param() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/" }),
+            None,
+            None,
+        );
+        for id in ["projects", "env", "domains"] {
+            r.tag_now(id);
+        }
+        let entries = vec![
+            entry(
+                "projects",
+                "https://app.example/api/v9/projects",
+                "Fetch",
+                "application/json",
+                r#"{"projects":[{"id":"prj_Ab12cd"},{"id":"prj_Zz99yy"}]}"#,
+            ),
+            entry(
+                "env",
+                "https://app.example/api/v10/projects/prj_Ab12cd/env",
+                "Fetch",
+                "application/json",
+                r#"{"envs":[1]}"#,
+            ),
+            entry(
+                "domains",
+                "https://app.example/api/v9/projects/prj_Ab12cd/domains",
+                "Fetch",
+                "application/json",
+                r#"{"domains":[1,2]}"#,
+            ),
+        ];
+        let (flow, _) = flow_of_entries(&r, &entries, None).unwrap();
+        let reqs = &flow["steps"][0]["requests"];
+        assert_eq!(
+            reqs[1]["url"],
+            "https://app.example/api/v10/projects/{{id}}/env"
+        );
+        assert_eq!(
+            reqs[2]["url"],
+            "https://app.example/api/v9/projects/{{id}}/domains"
+        );
+    }
+
+    #[test]
+    fn a_single_value_two_later_paths_share_is_a_reference() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/" }),
+            None,
+            None,
+        );
+        for id in ["user", "members", "billing"] {
+            r.tag_now(id);
+        }
+        let entries = vec![
+            entry(
+                "user",
+                "https://app.example/api/user",
+                "Fetch",
+                "application/json",
+                r#"{"user":{"teamId":"team_Q8x7"}}"#,
+            ),
+            entry(
+                "members",
+                "https://app.example/teams/team_Q8x7/members",
+                "Fetch",
+                "application/json",
+                r#"{"m":[1]}"#,
+            ),
+            entry(
+                "billing",
+                "https://app.example/teams/team_Q8x7/billing",
+                "Fetch",
+                "application/json",
+                r#"{"b":[1,2]}"#,
+            ),
+        ];
+        let (flow, _) = flow_of_entries(&r, &entries, None).unwrap();
+        let reqs = &flow["steps"][0]["requests"];
+        for i in [1, 2] {
+            assert!(reqs[i]["url"]
+                .as_str()
+                .unwrap()
+                .contains("{{@s1r1.user.teamId}}"));
+        }
+        assert_eq!(
+            dependencies(&flow_of(flow.clone()), "s1r2"),
+            vec!["s1r1", "s1r2"]
         );
     }
 
