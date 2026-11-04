@@ -3606,7 +3606,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Click an element and save the download.",
+      "description": "Click an element and save the download. Only works with a browser agent-browser launched; rejected over --cdp, --auto-connect, or a provider.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -14792,7 +14792,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Wait for a browser download.",
+      "description": "Wait for a browser download. A path is rejected over --cdp, --auto-connect, or a provider.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
