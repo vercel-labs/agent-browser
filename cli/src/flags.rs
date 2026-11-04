@@ -425,6 +425,9 @@ pub(crate) fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     ];
     let mut i = 0;
     while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
         if args[i] == "--config" {
             return Some(args.get(i + 1).cloned());
         }
@@ -823,6 +826,9 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
     let mut wait_command_seen = false;
     while i < args.len() {
         let arg = args[i].as_str();
+        if arg == "--" {
+            break;
+        }
         if !arg.starts_with('-') && looks_like_command(arg) {
             if !seen_command {
                 wait_command_seen = arg == "wait";
@@ -1290,6 +1296,14 @@ fn looks_like_command(value: &str) -> bool {
     crate::commands::is_top_level_command(value)
 }
 
+/// Return arguments before the end-of-options marker.
+pub fn before_end_of_options(args: &[String]) -> &[String] {
+    &args[..args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len())]
+}
+
 pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
@@ -1373,6 +1387,10 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             skip_next = false;
             i += 1;
             continue;
+        }
+        if arg == "--" {
+            result.extend_from_slice(&args[i..]);
+            break;
         }
         if arg.starts_with("--restore=") {
             i += 1;
@@ -2217,6 +2235,28 @@ mod tests {
     #[test]
     fn test_extract_config_path_skips_flag_values() {
         assert_eq!(extract_config_path(&args("--args --config open")), None);
+    }
+
+    #[test]
+    fn test_end_of_options_stops_global_and_config_parsing() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_CONFIG"]);
+        env.remove("AGENT_BROWSER_CONFIG");
+        let input = args("fill #field -- --config /missing --json --session literal");
+        let baseline = try_parse_flags(&args("fill #field")).unwrap();
+        let flags = try_parse_flags(&input).unwrap();
+
+        assert_eq!(flags.json, baseline.json);
+        assert_eq!(flags.session, baseline.session);
+        assert_eq!(extract_config_path(&input), None);
+        assert_eq!(
+            clean_args(&input),
+            args("fill #field -- --config /missing --json --session literal")
+        );
+
+        let help_args = args("fill #field --help -- --version");
+        assert_eq!(before_end_of_options(&help_args), &help_args[..3]);
+        let version_args = args("fill #field --version -- --help");
+        assert_eq!(before_end_of_options(&version_args), &version_args[..3]);
     }
 
     #[test]

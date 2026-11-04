@@ -1617,7 +1617,7 @@ fn print_warning(resp: &Response) {
     }
 }
 
-/// Print command-specific help. Returns true if help was printed, false if command unknown.
+/// Print command-specific help. Returns false if no help page exists for the command.
 pub fn print_command_help(command: &str) -> bool {
     let help = match command {
         // === Navigation ===
@@ -1822,10 +1822,11 @@ Examples:
             r##"
 agent-browser fill - Clear and fill an input field
 
-Usage: agent-browser fill <selector> <text>
+Usage: agent-browser fill <selector> [--] <text>
 
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
+Put flags before --. Text after -- is literal, including values that look like flags.
 
 Global Options:
   --json               Output as JSON
@@ -1835,16 +1836,18 @@ Examples:
   agent-browser fill "#email" "user@example.com"
   agent-browser fill @e3 "Hello World"
   agent-browser fill "input[name='search']" "query"
+  agent-browser fill "#search" -- --json
 "##
         }
         "type" => {
             r##"
 agent-browser type - Type text into an element
 
-Usage: agent-browser type <selector> <text>
+Usage: agent-browser type <selector> [--clear] [--delay <ms>] [--] <text>
 
 Types text into the specified element character by character.
-Unlike fill, this does not clear existing content first.
+Use --clear to clear existing content first. Use --delay to set the delay between keystrokes in milliseconds.
+Use -- before text that looks like a flag to pass it literally. Put options before --.
 
 Global Options:
   --json               Output as JSON
@@ -1853,6 +1856,7 @@ Global Options:
 Examples:
   agent-browser type "#search" "hello"
   agent-browser type @e2 "additional text"
+  agent-browser --json type "#search" --clear --delay 10 -- --clear
 
 See Also:
   For typing into contenteditable editors (Lexical, ProseMirror, etc.)
@@ -1990,6 +1994,8 @@ agent-browser download - Download a file by clicking an element
 Usage: agent-browser download <selector> <path>
 
 Clicks an element that triggers a download and saves the file to the specified path.
+Only works with a browser agent-browser launched; rejected over --cdp,
+--auto-connect, or a provider because the remote endpoint names the saved file.
 
 Arguments:
   selector             Element to click (CSS selector or @ref)
@@ -2517,6 +2523,10 @@ Usage: agent-browser mouse <subcommand> [args]
 
 Performs low-level mouse operations for precise control.
 
+Coordinates and wheel deltas accept finite numbers, including decimals.
+Invalid values return an error. Omitted wheel deltas default to 100 vertically
+and 0 horizontally. Explicit zero values remain zero.
+
 Subcommands:
   move <x> <y>         Move mouse to coordinates
   down [button]        Press mouse button (left, right, middle)
@@ -2677,6 +2687,8 @@ Operations:
   get                                Get all cookies (default)
   set <name> <value> [options]       Set a cookie with optional properties
   clear                              Clear all cookies
+
+Unknown operations return an error.
 
 Cookie Set Options:
   --url <url>                        URL for the cookie (allows setting before page load)
@@ -3742,6 +3754,10 @@ Pass the arguments as a JSON object, or - to read them from stdin. Every tool
 is available unless --tools limits the call. Exit code: 0 on success, 1 when
 the tool reports an error, 2 for an unknown tool or invalid arguments.
 
+For tool calls that run the CLI, structuredContent.response contains parsed
+CLI JSON. stdout is included only when the output cannot be parsed as JSON;
+exitCode and stderr are always included.
+
 Pass --config <trusted-path> to agent-browser mcp or agent-browser mcp call to
 select one trusted config file. MCP tool child processes load only that file,
 replacing default user/project discovery. Put required safety policy in it.
@@ -3934,6 +3950,8 @@ pub fn print_help() {
 agent-browser - fast browser automation CLI for AI agents
 
 Usage: agent-browser <command> [args] [options]
+
+Unknown commands exit with status 1, including when help is requested.
 
 Start here (for AI agents):
   agent-browser skills get core
@@ -4172,6 +4190,7 @@ Options:
   --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY)
                              When launching Chrome, agent-browser accepts a proxy URL with a trailing slash.
                              Supports authenticated proxies: --proxy "http://user:pass@127.0.0.1:7890"
+                             Credentials are percent-decoded, so encode reserved characters (p@ss as p%40ss).
   --proxy-bypass <hosts>     Bypass proxy for these hosts (or AGENT_BROWSER_PROXY_BYPASS, NO_PROXY)
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
