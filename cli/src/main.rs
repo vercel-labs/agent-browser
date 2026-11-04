@@ -1558,8 +1558,9 @@ fn main() {
     let mut clean = clean_args(&args);
     tls::configure_process(&flags);
 
-    let has_help = args.iter().any(|a| a == "--help" || a == "-h");
-    let has_version = args.iter().any(|a| a == "--version" || a == "-V");
+    let options = flags::before_end_of_options(&clean);
+    let has_help = options.iter().any(|a| a == "--help" || a == "-h");
+    let has_version = options.iter().any(|a| a == "--version" || a == "-V");
 
     if has_help {
         clean.retain(|arg| arg != "--help" && arg != "-h");

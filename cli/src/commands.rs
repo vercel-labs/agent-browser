@@ -342,7 +342,7 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
     Ok(headers)
 }
 
-/// Parses command arguments into normalized command data.
+/// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
@@ -484,7 +484,12 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "fill".to_string(),
                 usage: "fill <selector> <text>",
             })?;
-            Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": rest[1..].join(" ") }))
+            let text = if rest.get(1) == Some(&"--") {
+                &rest[2..]
+            } else {
+                &rest[1..]
+            };
+            Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": text.join(" ") }))
         }
         "type" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -500,6 +505,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let mut i = 1;
             while i < rest.len() {
                 match rest[i] {
+                    "--" => {
+                        text_parts.extend_from_slice(&rest[i + 1..]);
+                        break;
+                    }
                     "--clear" => clear = true,
                     "--delay" => {
                         // Error rather than silently drop a malformed value;
@@ -4713,6 +4722,29 @@ mod tests {
         assert_eq!(cmd["action"], "fill");
         assert_eq!(cmd["selector"], "#input");
         assert_eq!(cmd["value"], "hello world");
+    }
+
+    #[test]
+    fn test_fill_and_type_preserve_text_after_end_of_options() {
+        let fill_args = args("fill #input -- --config /missing --json café 世界");
+        let fill = parse_command(&crate::flags::clean_args(&fill_args), &default_flags()).unwrap();
+        assert_eq!(fill["value"], "--config /missing --json café 世界");
+
+        let empty_fill = parse_command(&args("fill #input --"), &default_flags()).unwrap();
+        assert_eq!(empty_fill["value"], "");
+
+        let type_args =
+            args("type #input --clear --delay 7 -- --clear --delay 99 café 世界 -- --help");
+        let typed = parse_command(&crate::flags::clean_args(&type_args), &default_flags()).unwrap();
+        assert_eq!(typed["clear"], true);
+        assert_eq!(typed["delay"], 7);
+        assert_eq!(typed["text"], "--clear --delay 99 café 世界 -- --help");
+
+        let empty_type =
+            parse_command(&args("type #input --clear --delay 7 --"), &default_flags()).unwrap();
+        assert_eq!(empty_type["clear"], true);
+        assert_eq!(empty_type["delay"], 7);
+        assert_eq!(empty_type["text"], "");
     }
 
     #[test]

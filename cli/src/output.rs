@@ -1822,10 +1822,11 @@ Examples:
             r##"
 agent-browser fill - Clear and fill an input field
 
-Usage: agent-browser fill <selector> <text>
+Usage: agent-browser fill <selector> [--] <text>
 
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
+Put flags before --. Text after -- is literal, including values that look like flags.
 
 Global Options:
   --json               Output as JSON
@@ -1835,16 +1836,18 @@ Examples:
   agent-browser fill "#email" "user@example.com"
   agent-browser fill @e3 "Hello World"
   agent-browser fill "input[name='search']" "query"
+  agent-browser fill "#search" -- --json
 "##
         }
         "type" => {
             r##"
 agent-browser type - Type text into an element
 
-Usage: agent-browser type <selector> <text>
+Usage: agent-browser type <selector> [--clear] [--delay <ms>] [--] <text>
 
 Types text into the specified element character by character.
-Unlike fill, this does not clear existing content first.
+Use --clear to clear existing content first. Use --delay to set the delay between keystrokes in milliseconds.
+Use -- before text that looks like a flag to pass it literally. Put options before --.
 
 Global Options:
   --json               Output as JSON
@@ -1853,6 +1856,7 @@ Global Options:
 Examples:
   agent-browser type "#search" "hello"
   agent-browser type @e2 "additional text"
+  agent-browser --json type "#search" --clear --delay 10 -- --clear
 
 See Also:
   For typing into contenteditable editors (Lexical, ProseMirror, etc.)
