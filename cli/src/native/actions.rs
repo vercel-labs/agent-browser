@@ -3222,13 +3222,16 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     if matches!(state.backend_type, BackendType::WebDriver)
         && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
     {
-        return error_response(
+        let mut resp = error_response(
             &id,
             &format!(
                 "Action '{}' is not supported on the WebDriver backend",
                 action
             ),
         );
+        // The launch above may have run; report what it applied.
+        attach_settings_outcome(&mut resp, &settings_outcome);
+        return resp;
     }
 
     // A pending confirm/prompt dialog blocks the renderer's main thread, so
@@ -3269,13 +3272,15 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     | "tab_close"
             );
         if on_active_tab && !safe_during_dialog {
-            return error_response(
+            let mut resp = error_response(
                 &id,
                 &format!(
                     "A JavaScript {} dialog is blocking the page: \"{}\". Resolve it with `dialog accept` or `dialog dismiss`, then retry `{}`.",
                     dialog.dialog_type, dialog.message, action
                 ),
             );
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            return resp;
         }
     }
 

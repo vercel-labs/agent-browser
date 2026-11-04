@@ -152,13 +152,18 @@ fn batch_item_settings(
 
 /// Whether the daemon applied a forced relaunch for this response. A command
 /// denied by policy or parked for confirmation never reaches the launch, so it
-/// reports none and the next command carries the relaunch.
+/// reports none and the next command carries the relaunch. `confirm` replays
+/// the parked command and nests that command's response under `result`.
 fn response_applied_relaunch(resp: &connection::Response) -> bool {
-    resp.data
-        .as_ref()
-        .and_then(|data| data.pointer("/lifecycle/settings/forcedRelaunch"))
-        .and_then(|forced| forced.as_bool())
-        .unwrap_or(false)
+    let Some(data) = resp.data.as_ref() else {
+        return false;
+    };
+    [
+        "/lifecycle/settings/forcedRelaunch",
+        "/result/data/lifecycle/settings/forcedRelaunch",
+    ]
+    .iter()
+    .any(|path| data.pointer(path).and_then(|v| v.as_bool()) == Some(true))
 }
 
 /// Checks a `--cdp` value and its headers. The value is either a port number
@@ -2350,6 +2355,12 @@ mod tests {
         };
         assert!(response_applied_relaunch(&response(serde_json::json!({
             "lifecycle": { "settings": { "changes": [], "forcedRelaunch": true } }
+        }))));
+        assert!(response_applied_relaunch(&response(serde_json::json!({
+            "confirmed": true,
+            "result": { "success": true, "data": {
+                "lifecycle": { "settings": { "changes": [], "forcedRelaunch": true } }
+            } }
         }))));
         // Parked for confirmation or denied: the launch never ran.
         assert!(!response_applied_relaunch(&response(serde_json::json!({
