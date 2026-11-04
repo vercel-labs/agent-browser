@@ -242,6 +242,24 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
             const _allowed = {};
             function _agentBrowserInstallDomainFilter(_allowed, _baseOverride) {{
             const _global = globalThis;
+            // The filter can reach one global several times (new-document
+            // script, runtime evaluate, worker bootstrap). Wrapping again
+            // with the same list only nests worker bootstrap blobs, which
+            // CSP script-src can reject, so install once per list.
+            const _installKey = (typeof Symbol === 'function' && Symbol.for)
+                ? Symbol.for('agent-browser.domainFilter:' + JSON.stringify(_allowed))
+                : '__agentBrowserDomainFilter:' + JSON.stringify(_allowed);
+            if (_global[_installKey]) return;
+            try {{
+                Object.defineProperty(_global, _installKey, {{
+                    value: true,
+                    enumerable: false,
+                    writable: false,
+                    configurable: false
+                }});
+            }} catch (_) {{
+                return;
+            }}
             function _securityError(message) {{
                 if (typeof DOMException === 'function') {{
                     return new DOMException(message, 'SecurityError');
@@ -317,8 +335,26 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
                 const cacheKey = apiName + '|' + (isModule ? 'module' : 'classic') + '|' + absolute;
                 if (_workerUrlCache && _workerUrlCache.has(cacheKey)) return _workerUrlCache.get(cacheKey);
                 const installSource = '(' + _agentBrowserInstallDomainFilter.toString() + ')(' + JSON.stringify(_allowed) + ', ' + JSON.stringify(absolute) + ');\n';
+                // A module bootstrap has to load the real script with a dynamic
+                // import so it runs after the filter. The browser starts
+                // delivering messages as soon as the bootstrap body finishes,
+                // before the import settles, so hold message/connect events
+                // until the real script has registered its handlers.
+                const moduleSource =
+                    'const _abQueue = [];\n' +
+                    'const _abTypes = ["message", "connect"];\n' +
+                    'const _abHold = (event) => {{ event.stopImmediatePropagation(); _abQueue.push(event); }};\n' +
+                    'for (const type of _abTypes) self.addEventListener(type, _abHold);\n' +
+                    'try {{\n' +
+                    'await import(' + JSON.stringify(absolute) + ');\n' +
+                    '}} finally {{\n' +
+                    '  for (const type of _abTypes) self.removeEventListener(type, _abHold);\n' +
+                    '  for (const event of _abQueue.splice(0)) {{\n' +
+                    '    self.dispatchEvent(new MessageEvent(event.type, {{ data: event.data, origin: event.origin, lastEventId: event.lastEventId, ports: Array.from(event.ports || []) }}));\n' +
+                    '  }}\n' +
+                    '}}\n';
                 const source = installSource + (isModule
-                    ? 'await import(' + JSON.stringify(absolute) + ');\n'
+                    ? moduleSource
                     : 'importScripts(' + JSON.stringify(absolute) + ');\n');
                 const wrapped = _global.URL.createObjectURL(new Blob([source], {{ type: 'application/javascript' }}));
                 if (_workerUrlCache) _workerUrlCache.set(cacheKey, wrapped);
