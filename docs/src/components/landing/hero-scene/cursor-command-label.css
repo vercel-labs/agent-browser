@@ -1,0 +1,42 @@
+/* Pointers and their labels. No words anywhere: every participant has the
+   Vercel arrow (Geist ink, a crisp light edge) and one small ink circle with
+   its mark (Lil Pix for the browser agent, the brand marks for the others),
+   as on the use-case cards. Grayscale on purpose; the marks tell them apart.
+
+   Constant on screen: everything inside .ab-peer-body is sized by
+   --ss-unscale / --ab-zoom (true screen pixels), and --ab-zoom eases with the camera, so the
+   cursor neither grows nor shrinks when the scope zooms. */
+.ab-hero-demo {
+  & .ab-peer { position: absolute; top: 0; left: 0; z-index: 20; pointer-events: none; will-change: transform; transition: opacity .12s ease-out; }
+  /* True screen pixels: the stage's fit inverted (measured), over the camera's zoom */
+  & .ab-peer-body { position: absolute; left: 0; top: 0; transform: scale(calc(var(--ss-unscale, 1.6) / var(--ab-zoom, 1))); transform-origin: 0 0; }
+  /* The pointer, its hotspot at the origin; a press squeezes it from the tip */
+  & .ab-peer-pointer { position: absolute; left: 0; top: 0; transform-origin: 0 0; transition: transform .08s ease-out; }
+  & .ab-peer-pointer[data-pressed] { transform: scale(.86); }
+  /* The Vercel arrow: tip (3, 3) on the hotspot */
+  & .ab-peer-arrow { position: absolute; left: -3px; top: -3px; transition: opacity .12s ease-out; }
+  /* The I-beam over a field: hotspot (5, 8); the two crossfade, never popping */
+  & .ab-peer-ibeam { position: absolute; left: -5px; top: -8px; opacity: 0; transition: opacity .12s ease-out; }
+  & .ab-peer[data-kind='ibeam'] .ab-peer-ibeam { opacity: 1; }
+  & .ab-peer[data-kind='ibeam'] .ab-peer-arrow { opacity: 0; }
+
+  /* Brand colors on each agent's arrow and label circle (marks stay white).
+     The browser agent keeps Geist ink. */
+  & .ab-peer { --peer-color: var(--ds-gray-1000, #171717); }
+  & .ab-peer[data-peer='claude'] { --peer-color: #d97757; }
+  & .ab-peer[data-peer='openai'] { --peer-color: #000; }
+  & .ab-peer[data-peer='gemini'] { --peer-color: #4285f4; }
+  & .ab-peer .ab-vercel-arrow-fill { fill: var(--peer-color); }
+
+  /* The label: a 22px circle in the agent's color around its mark, no ring */
+  & .ab-peer-tile {
+    position: absolute; top: 0; left: 0;
+    display: grid; place-items: center;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--peer-color); color: var(--ds-background-100, #fff);
+    box-shadow: var(--ds-shadow-small, 0 2px 2px rgba(0, 0, 0, .04));
+    transform: translate(var(--lx, 12px), var(--ly, 16px));
+    transition: transform .25s cubic-bezier(.45, 0, .1, 1);
+  }
+  & [data-playing='false'] .ab-peer-tile, &.ab-hero-still .ab-peer-tile { transition: none; }
+}

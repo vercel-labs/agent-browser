@@ -1,0 +1,30 @@
+{
+  "repository": "https://github.com/benjitaylor/skills",
+  "commit": "802057409787133703c56001080169e347305572",
+  "path": "stageshow/kit",
+  "description": "Homepage runtime subset. Local adaptations remove unused controls, field variants, recorder support, and exports.",
+  "files": {
+    "kit/keys.tsx": "ab45f610aa1c2ccac54a966e8e8c804ed601258cc4e8071278d48cb8bc4f6c59",
+    "kit/cursor.tsx": "e3c73976b0cc132af659c6079470a5fd22709f894058a044dceddcdd761b12f4",
+    "kit/cursors.tsx": "cc5100bfe6393fb2635b644988557ca42589457b46faa81274e8683effadaae5",
+    "kit/cursor.css": "40c69aaff8c7c970f49ef9f9f4c6d8c3f89fdf4218d8aa703cf5b36483a9e42d",
+    "kit/ease.ts": "0b1699fa40ff569f2d21f54c910565affed7fed3059b8a04514feacd9ab61636",
+    "kit/act.ts": "2f2835e6600cd62022467ab8b67534f4f478b8eed4122deffdfc21901e3da573",
+    "kit/keys.css": "929ef94999bfd7fd6bc78c5026c98f5b4ff8483c8aecfa3bc87cfb2e466cfc3c",
+    "kit/reduced-motion.ts": "9f8926f18ce0489f2c4073d7041c82ee3b6cfb6c16ecd75aea3ef76c43581113",
+    "kit/looks.ts": "263a44eaa74b5d7f4efb7868080c1e04cbbd03a224c06ddf88fd27c47c6f92ac",
+    "kit/stage.css": "fa1b22a158235b7d3d0a89a46348d216d392a3ebdfd247f2a9a6041045e0f866",
+    "kit/clock.ts": "06f30986325edbd8d26273c94d3d92a0e68ce4bce09eb711aad68994d06bbc47",
+    "kit/window.tsx": "a854067dde2c9c4271bc355d48da45879face6ea2ecec96a16980b238d356783",
+    "kit/util.ts": "b999c044ea0022744588ccb56fea58a41dcc94a60c030856bae05a9beb6ad67f",
+    "kit/index.ts": "bcd2de4a10e0038083ed90b8616aff9375719ba39d70b9bb8af842ae23e45d44",
+    "kit/window.css": "f95bae539dd0525d2be41b12de516ce37f0b64901a6ed7889038861ed2c0b4cd",
+    "kit/measure.ts": "d782e507e8698952e2035260a41f7756c61dbeaf5cb81aede1e393bb0052964d",
+    "kit/stage.tsx": "75f75e600ace3a75aa04ebb72f6d6300af01e84529a418e08ad0d3d6a867ced3",
+    "kit/motion/Camera.css": "6bdc4d2b6a11b0275a5b4735c4b23b6839ccf0cf59193b804f3a5aac15688641",
+    "kit/controls/Field.css": "d48c35db3f1a7e966d2bc816bb492b6f1a2d69acf4e2f0e01b6fde475de0e54b",
+    "kit/controls/Field.tsx": "16dd3a339be85893929c361892a906c389ac24db87a9083291e63a66f15f5d59",
+    "kit/parts/Check.tsx": "e2dd0a7c25d1abeb14f6f091158f95f98fb99e8198bb6613398a39458e6eb762",
+    "kit/parts/Check.css": "5c4c2080ab705ce4e6febfa560337d7248b00de5381bd0be2be97e6e689734a9"
+  }
+}

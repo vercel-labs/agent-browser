@@ -62,7 +62,7 @@ export async function GET(req: NextRequest) {
     .slice(0, 20)
     .map(({ title, href, section, snippet }) => ({
       title,
-      href,
+      href: href === "/" ? "/docs" : href,
       section,
       snippet,
     }));

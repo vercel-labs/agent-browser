@@ -1,0 +1,46 @@
+/* Marketing and documentation use separate root layouts and stylesheets. */
+@import '@vercel/geistdocs/styles.css';
+@import './compat/styles.css';
+
+@custom-variant dark (&:where(.dark-theme, .dark-theme *));
+
+:root {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* Navbar: show only the Vercel triangle, not the Labs wordmark. */
+header a[aria-label='Vercel Labs'] svg {
+  display: none;
+}
+
+header a[aria-label='Vercel Labs']::before {
+  content: '';
+  display: block;
+  width: 20px;
+  height: 18px;
+  background-color: currentColor;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+body {
+  background-color: var(--ds-background-200) !important;
+  color: var(--ds-gray-1000);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.agent-landing {
+  min-height: 100vh;
+  overflow: clip;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-landing *,
+  .agent-landing *::before,
+  .agent-landing *::after {
+    scroll-behavior: auto !important;
+    animation: none !important;
+    transition: none !important;
+  }
+}

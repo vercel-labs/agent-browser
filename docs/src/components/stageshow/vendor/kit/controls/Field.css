@@ -1,0 +1,98 @@
+/* Field */
+
+@layer stageshow {
+  .ss-field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  /* The ring is a shadow, so focusing never moves the text */
+  .ss-field__box {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: var(--ss-control);
+    padding: 0 11px;
+    border-radius: var(--ss-radius-md);
+    background: var(--ss-surface);
+    box-shadow: inset 0 0 0 1px var(--ss-ink-4), 0 0 0 0 transparent;
+    font-size: 13px;
+    color: var(--ss-text-strong);
+    transition: box-shadow 0.2s ease, padding 0.35s cubic-bezier(0.45, 0, 0.1, 1);
+  }
+
+  .ss-field[data-focused] .ss-field__box {
+    box-shadow: inset 0 0 0 1px var(--ss-accent), 0 0 0 3px var(--ss-accent-soft);
+  }
+
+  .ss-field__text {
+    position: relative;
+    display: flex;
+    flex: 1;
+    align-items: center;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+    white-space: pre;
+  }
+
+  /* Leaves the moment the first character lands; fades back when emptied */
+  .ss-field__placeholder {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    color: var(--ss-text-faint);
+    translate: 0 -50%;
+    transition: opacity 0.2s ease;
+  }
+
+  .ss-field[data-filled] .ss-field__placeholder {
+    opacity: 0;
+    transition: none;
+  }
+
+  .ss-field__value[data-password] {
+    letter-spacing: 1.5px;
+  }
+  .ss-field__value {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    height: 24px;
+    padding: 0;
+    border-radius: var(--ss-radius-pill);
+    background-color: transparent;
+    transition: none;
+  }
+
+  /* Centered on the cap height, not the line box (which reads low) or the
+     x-height (which reads high once the words have ascenders: an email, a
+     name). Cap to baseline is what a real text field centers. The
+     placeholder is centered the same way, so they share a line. */
+  .ss-field__chars,
+  .ss-field__placeholder {
+    line-height: 1;
+    text-box: trim-both cap alphabetic;
+  }
+
+  .ss-field__chars {
+    display: block;
+  }
+
+  /* Solid while typing (each keystroke remounts it), blinking once it rests */
+  .ss-field__caret {
+    flex-shrink: 0;
+    transition: margin 0.35s cubic-bezier(0.45, 0, 0.1, 1);
+    width: 1.5px;
+    height: 16px;
+    margin-left: 1px;
+    border-radius: 1px;
+    background: var(--ss-accent);
+    animation: ss-caret 1.06s steps(1) 0.5s infinite;
+  }
+
+  @keyframes ss-caret {
+    50% { opacity: 0; }
+  }
+}

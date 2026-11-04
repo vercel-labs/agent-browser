@@ -74,6 +74,12 @@ jobs:
       - name: Build documentation
         run: pnpm --filter docs build
 
+      - name: Install Chrome for homepage parity checks
+        run: |
+          parity_cli="$(pnpm dlx --package=agent-browser@0.39.4 --allow-build=agent-browser --reporter=silent -c 'command -v agent-browser')"
+          "$parity_cli" install
+          echo "DOCS_BROWSER_CLI=$parity_cli" >> "$GITHUB_ENV"
+
       - name: Verify public documentation routes
         run: pnpm --filter docs test:routes ${{ matrix.environment == 'preview' && '--preview' || '' }}
 

@@ -1,0 +1,132 @@
+/* The browser's pages: a pin board and an inbox, abstract and light.
+   One size system: every control is 28px tall (header items, fields,
+   buttons, the compose button, sidebar items); the pin board's are round
+   pills, mail's have 8px corners; list rows are 44px with 24px avatars.
+   Stageshow's window and controls stay untouched; everything is sized to
+   browser scope's crop (about 243px of page visible at wide, 225 at compact). */
+.ab-hero-demo {
+  /* Tabs: the pin board, the inbox once opened, then the new-tab button.
+     A tab opens or closes by width and fade, never popping. */
+  & .ab-browser .ss-window__tab { position: relative; max-width: 140px; overflow: hidden; transition: max-width .45s cubic-bezier(.4, 0, .2, 1), opacity .25s ease-out, padding .45s cubic-bezier(.4, 0, .2, 1); }
+  & .ab-browser .ss-window__tab .ss-window__favicon { border-radius: 50%; background: var(--ds-gray-500, #c9c9c9); }
+  & .ab-browser:not([data-pin-tab]) .ss-window__tab:nth-child(2),
+  & .ab-browser:not([data-mail-tab]) .ss-window__tab:nth-child(3) { max-width: 0; padding-inline: 0; opacity: 0; }
+  /* The new-tab button: a plain glyph after the tabs, no tab shape */
+  & .ab-browser .ss-window__tab:nth-child(4) { width: auto; flex: none; background: transparent; box-shadow: none; padding-inline: 6px; }
+  & .ab-browser .ss-window__tab:nth-child(4) .ss-window__favicon { display: none; }
+  /* Title left, × at the tab's right end, as a browser tab draws it */
+  & .ab-browser .ss-window__tab-label { flex: 1; min-width: 0; }
+  & .ab-tab-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; width: 100%; }
+  & .ab-tab-title { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  & .ab-tab-close { display: grid; place-items: center; width: 14px; height: 14px; flex: none; border-radius: 4px; color: var(--ss-icon); }
+  & .ab-plus-home { position: absolute; left: 79.5px; top: -62px; width: 18px; height: 18px; pointer-events: none; }
+  & .ab-tab-plus { display: grid; place-items: center; width: 18px; height: 18px; color: var(--ss-icon); }
+  & .ab-address-content { display: flex; align-items: center; width: 100%; height: 15px; }
+
+  /* Pages crossfade: the inbox fades up in its tab, the session's pages leave on close */
+  & .ab-browser-body { position: relative; }
+  & .ab-page { position: absolute; inset: 0; opacity: 0; visibility: hidden; transition: opacity .25s ease-out, visibility .25s; }
+  & .ab-page[data-on] { opacity: 1; visibility: visible; }
+
+  /* The pin board */
+  /* The header ends inside browser scope's crop, so Log in is never cut */
+  & .ab-pin-header { display: flex; align-items: center; gap: 8px; width: var(--ab-visible); height: 48px; padding: 0 12px; }
+  /* A quiet mark: mid gray, so the header's one dark element is Log in */
+  & .ab-pin-logo { width: 28px; height: 28px; flex: none; border-radius: 50%; background: var(--ds-gray-600, #a8a8a8); }
+  & .ab-pin-search { display: flex; align-items: center; flex: 1; max-width: 168px; height: 28px; padding: 0 12px; border-radius: var(--ss-radius-pill); background: var(--ss-well); }
+  & .ab-pin-rest { position: relative; flex: 1; align-self: stretch; }
+  & .ab-pin-account { display: grid; justify-items: end; align-items: center; }
+  /* Signed in: the Log in pill fades out, then the avatar fades in at the same
+     right edge; neither resizes, so nothing reads as the pill shrinking */
+  & .ab-pin-login, & .ab-pin-avatar { grid-area: 1 / 1; transition: opacity .15s ease-out; }
+  /* Buttons are their shape alone (no label skeleton): a fixed width */
+  & .ab-pin-login { display: flex; align-items: center; width: 56px; height: 28px; border-radius: var(--ss-radius-pill); background: var(--ds-gray-1000, #171717); color: var(--ds-background-100, #fff); font: 500 11px/1 var(--ss-font); }
+  & .ab-pin-avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--ds-gray-400, #d9d9d9); opacity: 0; }
+  & .ab-pin-page[data-signed-in] .ab-pin-login { opacity: 0; }
+  & .ab-pin-page[data-signed-in] .ab-pin-avatar { opacity: 1; transition: opacity .2s ease-out .12s; }
+
+  /* Masonry: tiles in columns, the board a 2×2 block spanning two */
+  /* Four wide columns: side, the board's two (264, the copy's own size, well
+     inside the crop), side; the last runs past the crop's edge as filler */
+  & .ab-pin-grid { display: grid; grid-template-columns: 128px 264px 128px; gap: 8px; padding: 4px 12px 0; }
+  & .ab-pin-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  & .ab-pin-board { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-self: start; }
+  & .ab-pin-tile { display: block; border-radius: 12px; }
+  & .ab-pin-tile[data-tone='1'] { background: var(--ds-gray-200, #ebebeb); }
+  & .ab-pin-tile[data-tone='2'] { background: var(--ds-gray-300, #e6e6e6); }
+  & .ab-pin-tile[data-tone='3'] { background: var(--ds-gray-400, #d9d9d9); }
+  & .ab-pin-tile[data-tone='4'] { background: var(--ds-gray-500, #c9c9c9); }
+
+  /* The log-in modal: a small card over a light scrim */
+  /* Centered in what browser scope shows, not in the whole window */
+  & .ab-pin-modal { position: absolute; inset: 0; display: grid; justify-items: center; align-content: start; padding-top: 30px; padding-right: calc(100% - var(--ab-visible)); background: var(--ds-gray-alpha-300, rgba(0, 0, 0, .1)); opacity: 0; visibility: hidden; transition: opacity .25s ease-out, visibility .25s; }
+  & .ab-pin-modal[data-on] { opacity: 1; visibility: visible; }
+  & .ab-pin-card { --ss-control: 28px; display: grid; gap: 8px; will-change: transform; width: 210px; padding: 16px; border-radius: 12px; background: var(--ss-surface); box-shadow: var(--ss-shadow-window); translate: 0 6px; transition: translate .35s cubic-bezier(.22, 1, .36, 1); }
+  & .ab-pin-modal[data-on] .ab-pin-card { translate: 0 0; }
+  & .ab-pin-card > .ss-bar { margin: 2px 0 3px; }
+  & .ab-pin-card .ss-field__box { font-size: 11px; }
+  /* A typed field: Geist's input box, 11px text, a placeholder until the first key */
+  & .ab-bar-field { display: flex; align-items: center; gap: 0; height: 28px; padding: 0 10px; border-radius: var(--ss-radius-md); background: var(--ss-surface); box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); transition: box-shadow .2s ease; }
+  & .ab-bar-field[data-focused] { box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-600, rgba(0, 0, 0, .34)), 0 0 0 3px var(--ds-gray-alpha-100, rgba(0, 0, 0, .05)); }
+  /* A filled field's value: appears whole with a quick fade on fill */
+  & .ab-fill { display: flex; opacity: 0; transition: opacity .18s ease-out; }
+  & .ab-fill[data-on] { opacity: 1; }
+  & [data-playing='false'] .ab-fill { transition: none; }
+
+
+  & .ab-pin-submit { display: flex; align-items: center; justify-content: center; height: 28px; border-radius: var(--ss-radius-md); background: var(--ds-gray-1000, #171717); color: var(--ds-background-100, #fff); font: 500 11px/1 var(--ss-font); }
+
+  /* The captured board, as it rides with the cursor and lands in the message */
+  /* The board's tiles (264 × 144) in a white frame with 8px of padding all
+     round (280 × 160), scaled by its holder, so every copy is the same picture
+     and reads as a screenshot, not loose tiles */
+  & .ab-board-shot { position: absolute; left: 0; top: 0; width: 280px; height: 160px; padding: 8px; background: var(--ss-surface); transform-origin: 0 0; }
+  & .ab-board-shot-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  /* The inbox */
+  & .ab-mail-page { display: flex; }
+  & .ab-mail-side { flex: 0 0 96px; display: flex; flex-direction: column; gap: 4px; padding: 10px 8px; border-right: var(--ss-hairline, 1px) solid var(--ss-line); }
+  /* Compose is its glyph alone: a small black square, no word */
+  & .ab-mail-compose { display: grid; place-items: center; height: 28px; margin-bottom: 6px; border-radius: 6px; background: var(--ds-gray-1000, #171717); color: var(--ds-background-100, #fff); }
+  & .ab-mail-nav { display: flex; align-items: center; height: 28px; padding: 0 10px; border-radius: 6px; }
+  & .ab-mail-nav[data-selected] { background: var(--ss-well); }
+  & .ab-mail-main { position: relative; flex: 1; min-width: 0; padding: 4px 0 0; }
+  & .ab-mail-slot { overflow: hidden; }
+  & .ab-mail-row { display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 14px; border-bottom: var(--ss-hairline, 1px) solid var(--ss-line-faint); }
+  & .ab-mail-avatar { width: 24px; height: 24px; flex: none; border-radius: 50%; background: var(--ds-gray-300, #e6e6e6); }
+  & .ab-mail-lines { display: grid; gap: 6px; flex: 1; min-width: 0; }
+  & .ab-mail-rest { position: absolute; left: calc(var(--ab-visible) - 110px); top: 190px; width: 1px; height: 1px; }
+
+  /* Compose: a sheet over the list's right side */
+  /* Its right edge on the crop's visible edge, so Send and the close stay in view */
+  & .ab-compose { position: absolute; top: 10px; left: calc(var(--ab-visible) - 232px); width: 232px; will-change: transform; display: flex; flex-direction: column; border-radius: 12px; background: var(--ss-surface); box-shadow: var(--ss-shadow-window); opacity: 0; visibility: hidden; translate: 0 8px; transition: opacity .25s ease-out, translate .35s cubic-bezier(.22, 1, .36, 1), visibility .25s; }
+  & .ab-compose[data-on] { opacity: 1; visibility: visible; translate: 0 0; }
+  & .ab-compose-head { display: flex; align-items: center; justify-content: space-between; height: 36px; padding: 0 12px; border-bottom: var(--ss-hairline, 1px) solid var(--ss-line); color: var(--ss-text-strong); font: 500 11px/1 var(--ss-font); }
+  & .ab-compose-head svg { color: var(--ss-icon); }
+  & .ab-compose-line { display: flex; align-items: center; gap: 8px; height: 32px; margin: 0 12px; border-bottom: var(--ss-hairline, 1px) solid var(--ss-line-faint); font: 11px/1 var(--ss-font); color: var(--ss-text-strong); }
+  & .ab-compose-value { display: flex; align-items: center; }
+  & .ab-compose-body { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; }
+  /* Reserved at its final size, so the pasted copy lands without moving anything */
+  & .ab-compose-attach { position: relative; width: 80px; height: 46px; overflow: hidden; border-radius: 4px; box-shadow: 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); opacity: 0; }
+  & .ab-compose-attach .ab-board-shot { scale: calc(80 / 280); }
+  & .ab-compose-attach[data-on] { opacity: 1; }
+  & .ab-compose-foot { display: flex; padding: 0 12px 12px; }
+  & .ab-compose-send { display: flex; align-items: center; width: 56px; height: 28px; border-radius: 6px; background: var(--ds-gray-1000, #171717); color: var(--ds-background-100, #fff); font: 500 11px/1 var(--ss-font); }
+
+  /* The copy riding with the cursor, and its flights */
+  & .ab-carry { position: absolute; left: 0; top: 0; z-index: 19; width: 280px; height: 160px; overflow: hidden; border-radius: 12px; box-shadow: var(--ss-shadow-lift); transform-origin: 0 0; pointer-events: none; will-change: transform; }
+  & .ab-board-flash { position: absolute; z-index: 18; border-radius: 12px; background: var(--ds-background-100, #fff); pointer-events: none; }
+
+  & [data-playing='false'] :is(.ab-page, .ab-pin-modal, .ab-pin-card, .ab-compose, .ab-pin-login, .ab-pin-avatar, .ss-window__tab) { transition: none; }
+
+  & .ss-stage[data-layout='compact'] {
+    & .ab-pin-grid { grid-template-columns: 264px 128px; }
+    & .ab-pin-grid > .ab-pin-col:first-child { display: none; }
+    & .ab-pin-search { max-width: 96px; }
+    & .ab-mail-side { flex-basis: 52px; padding-inline: 8px; }
+    /* Two tabs and the + share the narrow strip evenly (the kit's tabs are 140) */
+    & .ab-browser .ss-window__tab:is(:nth-child(2), :nth-child(3)) { width: 98px; padding-inline: 10px; }
+    & .ab-mail-nav .ss-bar { max-width: 100%; }
+    & .ab-compose { width: 196px; left: calc(var(--ab-visible) - 196px); }
+  }
+}

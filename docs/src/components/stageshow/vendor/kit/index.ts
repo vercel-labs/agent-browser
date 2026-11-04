@@ -1,0 +1,11 @@
+// Runtime subset used by the homepage illustrations.
+export { Stage } from './stage'
+export { Window, Bar } from './window'
+export { Field } from './controls/Field'
+export { Check } from './parts/Check'
+export { clock } from './clock'
+export { useReducedMotion } from './reduced-motion'
+export type { Act, Script } from './act'
+export type { Point, Rect } from './measure'
+export type { Layout } from './looks'
+export type { Play } from './stage'
