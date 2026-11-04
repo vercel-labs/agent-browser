@@ -32,6 +32,34 @@
       {
         "from": "agent-browser network route <url> --body <json>  # Mock response",
         "to": "agent-browser network route <url> --body <json>  # Mock response\nagent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin"
+      },
+      {
+        "from": "agent-browser open --init-script <path>           # Register before first navigation (repeatable)\nagent-browser addinitscript <js>                  # Register at runtime (returns identifier)\nagent-browser removeinitscript <identifier>       # Remove from every tab in the session",
+        "to": "agent-browser --init-script <path> open <url>  # Register before first navigation (repeatable)\nagent-browser removeinitscript <identifier>"
+      },
+      {
+        "from": "See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.",
+        "to": "See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script removal, built-in React DevTools, and extensions."
+      },
+      {
+        "from": "See Init Scripts & Extensions for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.",
+        "to": "See Init Scripts & Extensions for launch-time scripts, script removal, built-in React DevTools, and extensions."
+      },
+      {
+        "from": "`key`, `session`, `allowedDomains`, and `idleTimeout`, so MCP clients",
+        "to": "`key`, `session`, and `allowedDomains`, so MCP clients"
+      },
+      {
+        "from": "key, session, allowedDomains, and idleTimeout, so MCP clients",
+        "to": "key, session, and allowedDomains, so MCP clients"
+      },
+      {
+        "from": "Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, and `allowedDomains`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. The common `idleTimeout` string maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. Each tool also accepts `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured `allowedDomains` is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.",
+        "to": "Each tool has typed fields such as `url`, `selector`, `text`, and `key`, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments `session`, `restore`, `allowedDomains`, `extraArgs`, `timeoutMs`, `namespace`, `restoreSave`, `restoreCheckUrl`, `restoreCheckText`, `restoreCheckFn`, `caCert`, `useSystemCa`, `clearCaCert`, and `idleTimeout`. A tool's schema lists only the ones that usually matter for it: `session` on every tool, `restore` on `open` and `tab_new`, `allowedDomains` and `extraArgs` on `open`, `tab_new`, and `read`, and `timeoutMs` on tools that navigate, wait, or run scripts. The server's `initialize` instructions describe all of them. `allowedDomains` maps to `--allowed-domains`, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. `idleTimeout` maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. `extraArgs` carries per-command options and display or emulation flags such as `--engine`; it cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
+      },
+      {
+        "from": "Each tool has typed fields such as url, selector, text, key, session, and allowedDomains, so MCP clients show meaningful approval prompts instead of raw command arrays. The common allowedDomains array maps to --allowed-domains and activates the same WebRTC containment and launch-mode restrictions. The common idleTimeout string maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. Each tool also accepts extraArgs for per-command options and display or emulation flags such as --engine; extraArgs cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured allowedDomains is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.",
+        "to": "Each tool has typed fields such as url, selector, text, and key, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments session, restore, allowedDomains, extraArgs, timeoutMs, namespace, restoreSave, restoreCheckUrl, restoreCheckText, restoreCheckFn, caCert, useSystemCa, clearCaCert, and idleTimeout. A tool's schema lists only the ones that usually matter for it: session on every tool, restore on open and tab_new, allowedDomains and extraArgs on open, tab_new, and read, and timeoutMs on tools that navigate, wait, or run scripts. The server's initialize instructions describe all of them. allowedDomains maps to --allowed-domains, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. idleTimeout maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. extraArgs carries per-command options and display or emulation flags such as --engine; it cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
       }
     ],
     "/configuration": [
@@ -162,8 +190,28 @@
     ],
     "/init-scripts": [
       {
+        "from": "Runtime scripts",
+        "to": "Removing init scripts"
+      },
+      {
         "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"cookies\",\"set\",\"--curl\",\"cookies.curl\",\"--domain\",\"localhost\"]' \\\n  '[\"navigate\",\"http://localhost:3000/target\"]'",
         "to": "agent-browser batch \\\n  \"open\" \\\n  \"network route * --abort --resource-type script\" \\\n  \"cookies set --curl cookies.curl --domain localhost\" \\\n  \"navigate http://localhost:3000/target\""
+      },
+      {
+        "from": "agent-browser addinitscript \"window.__testMode = true\"\n# Returns an identifier\n\nagent-browser removeinitscript <identifier>",
+        "to": "agent-browser removeinitscript <identifier>"
+      },
+      {
+        "from": "Runtime init scripts are useful after a session has started. They are still init scripts, so they affect future documents and navigations rather than rewriting already-executed page code.",
+        "to": ""
+      },
+      {
+        "from": "Runtime init-script identifiers are session-wide. `removeinitscript` removes the script from every open tab where it was registered and prevents it from being replayed into tabs opened later.",
+        "to": "Init-script identifiers are session-wide. `removeinitscript` removes a script from every open tab where it was registered and prevents it from being replayed into future tabs."
+      },
+      {
+        "from": "Runtime init-script identifiers are session-wide. removeinitscript removes the script from every open tab where it was registered and prevents it from being replayed into tabs opened later.",
+        "to": "Init-script identifiers are session-wide. removeinitscript removes a script from every open tab where it was registered and prevents it from being replayed into future tabs."
       }
     ],
     "/network": [

@@ -49,6 +49,17 @@ impl WebDriverBackend {
     pub fn new(client: super::client::WebDriverClient) -> Self {
         Self { client }
     }
+
+    pub async fn is_connection_alive(&self) -> bool {
+        matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.client.get_window_handles(),
+            )
+            .await,
+            Ok(Ok(_))
+        )
+    }
 }
 
 #[async_trait]
