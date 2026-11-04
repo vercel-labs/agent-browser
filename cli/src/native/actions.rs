@@ -20873,11 +20873,23 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         for (key, value) in &before {
             state.settings.set(*key, value.clone());
         }
+        // State the attempt replaces: the switch drops the attached target and
+        // the endpoint's headers, and clearing CA trust drops the bundle.
+        state.settings.set(Key::CaCert, json!("/tmp/ca.pem"));
+        state.effective_ca_cert = Some(EffectiveCaCert {
+            path: "/tmp/ca.pem".to_string(),
+            bundle: crate::ca_bundle::test_bundle(b"ca"),
+        });
+        state.attached_target = Some(AttachedTarget::CdpPort(9222));
+        state.cdp_headers = Some((
+            "9222".to_string(),
+            vec![("Authorization".to_string(), "Bearer a".to_string())],
+        ));
         let cmd = json!({
             "id": "1",
             "action": "navigate",
             "url": "about:blank",
-            "settings": { "cdp": "1" }
+            "settings": { "cdp": "1", "clear-ca-cert": true }
         });
 
         let resp = execute_command(&cmd, &mut state).await;
@@ -20887,6 +20899,21 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         for (key, value) in &before {
             assert_eq!(state.settings.get(*key), Some(value), "{key:?}");
         }
+        assert_eq!(
+            state.effective_ca_cert.as_ref().map(|ca| ca.path.as_str()),
+            Some("/tmp/ca.pem")
+        );
+        assert!(matches!(
+            state.attached_target,
+            Some(AttachedTarget::CdpPort(9222))
+        ));
+        assert_eq!(
+            state.cdp_headers,
+            Some((
+                "9222".to_string(),
+                vec![("Authorization".to_string(), "Bearer a".to_string())],
+            ))
+        );
     }
 
     #[test]
