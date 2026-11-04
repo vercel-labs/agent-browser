@@ -15588,7 +15588,7 @@ mod tests {
             assert_eq!(response["reused"], true);
             assert!(state.webdriver_backend.is_some());
             if changed_config {
-                cmd["headless"] = json!(false);
+                cmd["ignoreHTTPSErrors"] = json!(true);
             }
             let result = handle_launch_inner(&cmd, &mut state).await;
             assert!(result.is_err());
