@@ -104,6 +104,14 @@ impl fmt::Debug for Running {
     }
 }
 
+/// A connection target's value, or `None` when it is blank. The one rule for
+/// what counts as naming a browser, shared by the settings views and the
+/// launch commands.
+pub fn named(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
 impl Running {
     /// A session with every setting at its default.
     pub fn defaults() -> Running {
@@ -206,13 +214,13 @@ impl Running {
     }
 
     pub fn connection(&self) -> Connection {
-        // An empty target names no browser: `-p ""` resets to a local launch.
-        if let Some(cdp) = self.str(Key::Cdp).filter(|cdp| !cdp.is_empty()) {
-            Connection::Cdp(cdp)
-        } else if self.get(Key::AutoConnect).is_some() {
+        // A blank target names no browser: `-p ""` resets to a local launch.
+        if let Some(cdp) = self.str(Key::Cdp).as_deref().and_then(named) {
+            Connection::Cdp(cdp.to_string())
+        } else if self.get(Key::AutoConnect).and_then(Value::as_bool) == Some(true) {
             Connection::AutoConnect
-        } else if let Some(provider) = self.str(Key::Provider).filter(|p| !p.is_empty()) {
-            Connection::Provider(provider)
+        } else if let Some(provider) = self.str(Key::Provider).as_deref().and_then(named) {
+            Connection::Provider(provider.to_string())
         } else {
             Connection::Local
         }

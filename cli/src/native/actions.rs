@@ -12,7 +12,9 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
 use crate::session_files::SessionFile;
-use crate::session_settings::{spec, Connection, Effect, Key, Patch, Persist, Requested, Running};
+use crate::session_settings::{
+    named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running,
+};
 use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
@@ -318,17 +320,25 @@ enum AttachedTarget {
 impl AttachedTarget {
     /// Reads the connection target a launch command names, if any.
     fn named_by(cmd: &Value) -> Option<Self> {
-        if let Some(url) = cmd.get("cdpUrl").and_then(Value::as_str) {
+        // Blank, zero and false name no browser, here and in the settings.
+        if let Some(url) = cmd.get("cdpUrl").and_then(Value::as_str).and_then(named) {
             return Some(Self::CdpUrl(url.to_string()));
         }
-        if let Some(port) = cmd.get("cdpPort").and_then(Value::as_u64) {
+        if let Some(port) = cmd
+            .get("cdpPort")
+            .and_then(Value::as_u64)
+            .filter(|port| *port > 0)
+        {
             return Some(Self::CdpPort(port));
         }
         if cmd.get("autoConnect").and_then(Value::as_bool) == Some(true) {
             return Some(Self::AutoConnect);
         }
-        let provider = cmd.get("provider").and_then(Value::as_str)?;
-        (!provider.is_empty()).then(|| Self::Provider(provider.to_ascii_lowercase()))
+        let provider = cmd
+            .get("provider")
+            .and_then(Value::as_str)
+            .and_then(named)?;
+        Some(Self::Provider(provider.to_ascii_lowercase()))
     }
 
     /// The target a successful launch leaves the session attached to. The iOS and
@@ -2769,19 +2779,13 @@ fn append_launch_policy_actions(
     launch: &Value,
     plugins: &[crate::plugins::PluginConfig],
 ) {
-    if let Some(provider) = launch.get("provider").and_then(|v| v.as_str()) {
-        append_browser_provider_policy_action_for(actions, provider, plugins);
-    }
-
-    let local_launch = launch.get("provider").is_none()
-        && launch.get("cdpUrl").is_none()
-        && launch.get("cdpPort").is_none()
-        && !launch
-            .get("autoConnect")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-    if local_launch {
-        append_launch_mutator_policy_actions_for(actions, plugins);
+    // The same rule execution uses for what a launch connects to.
+    match AttachedTarget::named_by(launch) {
+        Some(AttachedTarget::Provider(provider)) => {
+            append_browser_provider_policy_action_for(actions, &provider, plugins);
+        }
+        Some(_) => {}
+        None => append_launch_mutator_policy_actions_for(actions, plugins),
     }
 }
 
@@ -4521,6 +4525,13 @@ async fn auto_launch_inner(
     let storage_state_path = if local { storage_state_path } else { None };
     let storage_state = storage_state_path.as_deref();
 
+    // An attached browser is whatever it is: an inherited engine name would
+    // mislabel it, so only a local launch or a provider reads the engine.
+    let engine = if matches!(connection, Connection::Cdp(_) | Connection::AutoConnect) {
+        None
+    } else {
+        engine
+    };
     state.engine = engine.as_deref().unwrap_or("chrome").to_string();
     write_engine_file(&state.session_id, &state.engine);
     write_extensions_file(&state.session_id, &state.settings);
@@ -5261,18 +5272,12 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
     let flag = |field: &str| cmd.get(field).and_then(Value::as_bool).map(Value::Bool);
     let list = |field: &str| string_array_from_command(cmd, field).map(Value::from);
 
-    if let Some(url) = string("cdpUrl") {
-        set(Key::Cdp, url);
-    } else if let Some(port) = cmd.get("cdpPort").and_then(Value::as_u64) {
-        set(Key::Cdp, Value::from(port.to_string()));
-    } else if cmd.get("autoConnect").and_then(Value::as_bool) == Some(true) {
-        set(Key::AutoConnect, Value::Bool(true));
-    } else if let Some(provider) = cmd
-        .get("provider")
-        .and_then(Value::as_str)
-        .filter(|p| !p.is_empty())
-    {
-        set(Key::Provider, Value::from(provider));
+    match AttachedTarget::named_by(cmd) {
+        Some(AttachedTarget::CdpUrl(url)) => set(Key::Cdp, Value::from(url)),
+        Some(AttachedTarget::CdpPort(port)) => set(Key::Cdp, Value::from(port.to_string())),
+        Some(AttachedTarget::AutoConnect) => set(Key::AutoConnect, Value::Bool(true)),
+        Some(AttachedTarget::Provider(provider)) => set(Key::Provider, Value::from(provider)),
+        None => {}
     }
     if let Some(headers) = cmd.get("cdpHeaders").filter(|h| h.is_object()) {
         set(Key::CdpHeaders, Value::from(headers.to_string()));
@@ -5582,6 +5587,8 @@ async fn apply_settings_patch(
         if keys.contains(&Key::ClearCaCert) {
             keys.push(Key::CaCert);
         }
+        // Values dropped because the session went external come back with it.
+        keys.extend(plan.ignored.iter().map(|change| change.key));
         Some(PendingSettings {
             keys,
             before: state.settings.clone(),
@@ -20497,5 +20504,112 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             .filter_map(|c| c["option"].as_str())
             .collect();
         assert!(dropped.contains(&"storage-state") && dropped.contains(&"proxy-password"));
+    }
+    #[test]
+    fn test_blank_targets_name_no_browser_anywhere() {
+        for cmd in [
+            json!({ "action": "launch", "cdpUrl": "" }),
+            json!({ "action": "launch", "cdpUrl": "  " }),
+            json!({ "action": "launch", "cdpPort": 0 }),
+            json!({ "action": "launch", "provider": " " }),
+            json!({ "action": "launch", "autoConnect": false }),
+        ] {
+            assert_eq!(AttachedTarget::named_by(&cmd), None, "{cmd}");
+            assert_eq!(AttachedTarget::from_launch_command(&cmd), None, "{cmd}");
+            assert!(launch_envelope_patch(&cmd, None).is_noop(), "{cmd}");
+        }
+        let mut settings = Running::defaults();
+        settings.set(Key::Cdp, json!(" "));
+        settings.set(Key::Provider, json!(""));
+        assert_eq!(settings.connection(), Connection::Local);
+        assert!(settings_launch_target(&settings).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_a_launch_with_a_blank_cdp_url_is_gated_as_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = dir.path().join("deny.json");
+        fs::write(&policy, r#"{"deny": ["plugin:stealth:launch.mutate"]}"#).unwrap();
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        let cmd = json!({
+            "id": "1",
+            "action": "launch",
+            "cdpUrl": "",
+            "plugins": provider_plugins(),
+            "settings": { "action-policy": policy.to_str().unwrap() }
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert!(
+            resp["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("denied by policy")),
+            "{resp}"
+        );
+        assert!(state.browser.is_none());
+        assert_eq!(state.attached_target, None);
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_switch_to_an_external_target_keeps_the_local_settings() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        let before = [
+            (Key::StorageState, json!("/tmp/state.json")),
+            (Key::Proxy, json!("http://proxy:8080")),
+            (Key::ProxyUsername, json!("user")),
+            (Key::ProxyPassword, json!("pw")),
+        ];
+        for (key, value) in &before {
+            state.settings.set(*key, value.clone());
+        }
+        let cmd = json!({
+            "id": "1",
+            "action": "navigate",
+            "url": "about:blank",
+            "settings": { "cdp": "1" }
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(state.settings.get(Key::Cdp), None);
+        for (key, value) in &before {
+            assert_eq!(state.settings.get(*key), Some(value), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn test_an_inherited_engine_does_not_label_an_attached_browser() {
+        let mut settings = Running::defaults();
+        settings.set(Key::Engine, json!("lightpanda"));
+        // CDP and auto-connect drop it; a plugin provider keeps it.
+        for target in [
+            (Key::Cdp, json!("ws://127.0.0.1:9999/x")),
+            (Key::AutoConnect, json!(true)),
+        ] {
+            let plan = settings.plan(&patch_with(vec![set_to(target.0, target.1)]));
+            assert_eq!(plan.next.engine(), None);
+        }
+        let plan = settings.plan(&patch_with(vec![set_to(
+            Key::Provider,
+            json!("browserbox"),
+        )]));
+        assert_eq!(plan.next.engine().as_deref(), Some("lightpanda"));
+    }
+
+    #[tokio::test]
+    async fn test_attaching_over_cdp_never_labels_the_browser_with_the_engine() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Engine, json!("lightpanda"));
+        state.settings.set(Key::Cdp, json!("1"));
+
+        // Nothing listens on port 1; the label is set before the attach.
+        assert!(auto_launch(&mut state, Vec::new()).await.is_err());
+
+        assert_eq!(state.engine, "chrome");
     }
 }

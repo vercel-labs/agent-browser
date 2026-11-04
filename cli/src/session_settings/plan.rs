@@ -242,7 +242,14 @@ impl Running {
         // file to replay into it, no proxy credentials to answer challenges
         // with. Inherited values are dropped, and reported as such.
         if next.connection() != Connection::Local {
-            for key in DROPPED_FOR_EXTERNAL {
+            // A CDP or auto-connect browser is not one agent-browser picks an
+            // engine for; plugin providers do read it.
+            let engine = matches!(
+                next.connection(),
+                Connection::Cdp(_) | Connection::AutoConnect
+            )
+            .then_some(Key::Engine);
+            for key in DROPPED_FOR_EXTERNAL.into_iter().chain(engine) {
                 if let Some(current) = next.get(key).cloned() {
                     ignored.push(Change {
                         key,

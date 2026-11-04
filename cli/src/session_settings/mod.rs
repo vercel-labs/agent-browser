@@ -20,7 +20,7 @@ pub use patch::{Patch, Requested};
 pub use proxy::parse_proxy;
 #[cfg(test)]
 pub use running::resolve_idle_timeout;
-pub use running::{Connection, IdleTimeout, Running, DEFAULT_IDLE_TIMEOUT_MS};
+pub use running::{named, Connection, IdleTimeout, Running, DEFAULT_IDLE_TIMEOUT_MS};
 #[allow(unused_imports)]
 pub use spec::{spec, spec_by_name, Effect, Key, Persist, Shape, Spec, SPECS};
 
