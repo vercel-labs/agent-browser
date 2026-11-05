@@ -136,6 +136,75 @@ fn batch_preserves_results_and_parse_errors_with_optional_command_omission() {
 }
 
 #[test]
+fn batch_rejects_item_global_flags_across_cli_and_mcp() {
+    let commands = json!([
+        ["stream", "status"],
+        ["open", "--init-script", "/tmp/probe.js"],
+        ["stream", "status"]
+    ]);
+    let mut expected_error: Option<String> = None;
+    for mode in ["quoted", "stdin", "mcp"] {
+        for bail in [false, true] {
+            let fixture = Fixture::new();
+            let rows = if mode == "mcp" {
+                let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "agent_browser_batch", "arguments": {
+                        "commands": commands, "session": "batch-test", "bail": bail}}});
+                let response = fixture.run(&["mcp", "--tools", "all"], &format!("{request}\n"), 0);
+                let result = &response["result"];
+                assert_eq!(result["isError"], true, "{response}");
+                assert_eq!(result["structuredContent"]["exitCode"], 1);
+                result["structuredContent"]["response"].clone()
+            } else {
+                let mut args = vec!["batch", "--json"];
+                if bail {
+                    args.push("--bail");
+                }
+                if mode == "quoted" {
+                    args.extend([
+                        "stream status",
+                        "open --init-script /tmp/probe.js",
+                        "stream status",
+                    ]);
+                }
+                fixture.run(&args, &commands.to_string(), 1)
+            };
+            let rows = rows.as_array().unwrap();
+            assert_eq!(rows.len(), if bail { 2 } else { 3 }, "{mode}: {rows:?}");
+            for (index, row) in rows.iter().enumerate() {
+                assert_identity(row, &commands[index], index, false);
+                assert_eq!(row["success"], index != 1, "{mode}: {row}");
+            }
+            let error = rows[1]["error"].as_str().unwrap();
+            let lower = error.to_lowercase();
+            assert!(
+                lower.contains("global flags") || lower.contains("batch command"),
+                "{mode}: {error}"
+            );
+            if let Some(expected) = &expected_error {
+                assert_eq!(error, expected, "{mode}");
+            } else {
+                expected_error = Some(error.to_string());
+            }
+        }
+    }
+
+    let fixture = Fixture::new();
+    for flag in ["--help", "-h", "--version", "-V"] {
+        let commands = json!([["open", flag]]);
+        let rows = fixture.run(&["batch", "--json"], &commands.to_string(), 1);
+        assert_eq!(rows.as_array().unwrap().len(), 1, "{flag}: {rows}");
+        assert_identity(&rows[0], &commands[0], 0, false);
+        assert_eq!(rows[0]["success"], false, "{flag}: {rows}");
+        assert_eq!(
+            rows[0]["error"].as_str(),
+            expected_error.as_deref(),
+            "{flag}"
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires Chrome"]
 fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
     const SECRET_VALUE: &str = "SECRET_VALUE";
@@ -192,6 +261,20 @@ fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
         assert_eq!(value["success"], true);
         assert_eq!(value["data"]["value"], SECRET_VALUE);
     }
+    let commands = json!([
+        ["fill", "#x", "--json"],
+        ["get", "value", "#x"],
+        ["type", "#x", "--clear", "--enable"],
+        ["get", "value", "#x"]
+    ]);
+    let rows = fixture.run(&["batch", "--json", "--bail"], &commands.to_string(), 0);
+    assert!(rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["success"] == true));
+    assert_eq!(rows[1]["result"]["value"], "--json");
+    assert_eq!(rows[3]["result"]["value"], "--enable");
     assert_eq!(fixture.run(&["close", "--json"], "", 0)["success"], true);
 }
 
