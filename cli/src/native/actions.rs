@@ -12596,6 +12596,7 @@ struct FlowWiring<'a> {
     state: &'a mut DaemonState,
     allow: &'a super::flow::AllowWrite,
     started_har: bool,
+    mark: usize,
 }
 
 impl<'a> FlowWiring<'a> {
@@ -12604,6 +12605,7 @@ impl<'a> FlowWiring<'a> {
             state,
             allow,
             started_har: false,
+            mark: 0,
         }
     }
 }
@@ -12646,7 +12648,8 @@ impl super::flow::Browser for FlowWiring<'_> {
         if self.started_har {
             handle_har_start(&json!({}), self.state).await?;
         }
-        Ok(self.state.har_entries.len())
+        self.mark = self.state.har_entries.len();
+        Ok(self.mark)
     }
 
     async fn run(&mut self, cmd: &Value) -> Value {
@@ -12663,6 +12666,16 @@ impl super::flow::Browser for FlowWiring<'_> {
             self.state.har_recording = false;
             self.state.har_entries.clear();
             self.state.har_body_total_bytes = 0;
+        } else {
+            // The session's own capture keeps only what it held before the run.
+            let keep = self.mark.min(self.state.har_entries.len());
+            let dropped: usize = self.state.har_entries[keep..]
+                .iter()
+                .map(|e| e.response_body.as_ref().map_or(0, |b| b.len()))
+                .sum();
+            self.state.har_entries.truncate(keep);
+            self.state.har_body_total_bytes =
+                self.state.har_body_total_bytes.saturating_sub(dropped);
         }
     }
 
