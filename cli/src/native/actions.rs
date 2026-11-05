@@ -5532,7 +5532,7 @@ async fn launch_firefox(
                     .await
                     .map_err(|reason| {
                         format!(
-                            "--engine firefox expects a Firefox WebDriver BiDi endpoint at {}; {}",
+                            "No Firefox WebDriver BiDi endpoint at {}; {}",
                             target_label(target),
                             reason
                         )
@@ -20374,7 +20374,7 @@ mod firefox_routing_tests {
         assert_eq!(resp["success"], false);
         let error = resp["error"].as_str().unwrap();
         assert!(
-            error.contains("--engine firefox expects a Firefox WebDriver BiDi endpoint"),
+            error.contains("No Firefox WebDriver BiDi endpoint"),
             "{error}"
         );
         assert!(state.firefox.is_none());
