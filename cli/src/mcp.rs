@@ -2795,6 +2795,15 @@ fn cli_tool_args(
                 name
             )));
         }
+        // A positional value such as open's url must not smuggle --session
+        // past the pinned session: with no explicit tool session the flag is
+        // not in `trusted`, so the CLI would resolve the injected name
+        // unscoped. extraArgs may still carry --session; it is scoped above.
+        if command_index.is_some() && name == "--session" && pinned_server_session().is_some() {
+            return Err(ProtocolError::invalid_params(
+                "Tool arguments may not set --session; the MCP server pins the session",
+            ));
+        }
     }
     if let Some(boundary) = text_boundary {
         args.extend(command_args[..boundary].iter().cloned());
@@ -6714,6 +6723,25 @@ mod tests {
         .unwrap();
         let flags = crate::flags::parse_flags(&args);
         assert_eq!(flags.session, "a--shop");
+    }
+
+    #[test]
+    fn url_session_flag_does_not_bypass_pinned_server_session() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.set("AGENT_BROWSER_SESSION", "a");
+
+        let err = cli_tool_args(
+            &json!({"extraArgs": ["victim", "https://example.com"]}),
+            vec!["open".to_string(), "--session".to_string()],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message.contains("may not set --session"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
