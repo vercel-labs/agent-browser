@@ -577,8 +577,10 @@ agent-browser --cdp 9222 snapshot         # Connect via CDP port
 agent-browser connect 9222                # Alternative: connect command
 agent-browser console                     # View console messages
 agent-browser console --clear             # Clear console
+agent-browser console --follow            # Stream console messages until Ctrl+C
 agent-browser errors                      # View page errors
 agent-browser errors --clear              # Clear errors
+agent-browser errors --follow             # Stream page errors until Ctrl+C
 agent-browser highlight @e1               # Highlight element
 agent-browser inspect                     # Open Chrome DevTools for this session
 agent-browser trace start                 # Start recording trace
