@@ -1,5 +1,6 @@
 //! Which hosts a flow may reach: the one place a URL is checked.
 
+use super::net::{check_literal, Reach};
 use super::*;
 
 /// Registrable part of a host, close enough for first-party checks:
@@ -52,6 +53,7 @@ fn host_matches(host: &str, allowed: &str) -> bool {
 pub struct HostPolicy {
     base: Vec<String>,
     narrowed: Vec<String>,
+    reach: Reach,
 }
 
 impl HostPolicy {
@@ -62,6 +64,7 @@ impl HostPolicy {
                 .map(|h| vec![base_domain(&h)])
                 .unwrap_or_default(),
             narrowed: Vec::new(),
+            reach: Reach::of_start(start_url),
         }
     }
 
@@ -98,7 +101,8 @@ impl HostPolicy {
             .host_str()
             .ok_or_else(|| format!("'{}' has no host", url))?;
         if self.allows_host(host) {
-            return Ok(());
+            // IP literals never reach the resolver, so they are checked here.
+            return check_literal(url, self.reach);
         }
         Err(format!(
             "{} is outside the hosts this flow may reach ({})",

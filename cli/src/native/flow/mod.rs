@@ -15,6 +15,7 @@ pub mod http;
 #[cfg(test)]
 mod memory;
 mod model;
+pub mod net;
 mod outcome;
 mod recorder;
 mod send;

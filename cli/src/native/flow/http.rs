@@ -1,5 +1,8 @@
 //! Sending a saved request directly, with the session's cookies.
 
+use std::sync::Arc;
+
+use super::net::{refusal_in, Reach, ReachResolver};
 use super::*;
 
 /// A session route (`network route`) that matches the request answers it,
@@ -102,6 +105,12 @@ pub async fn run_http(
                 Failure::new(true, Some(status), format!("could not read body: {}", e))
             })
         }
+        // The resolver refused the destination before any connection.
+        Err(e) if refusal_in(&e).is_some() => Err(Failure::new(
+            false,
+            None,
+            refusal_in(&e).unwrap_or_default(),
+        )),
         // A write that left the machine may have been applied.
         Err(e) if req.write && !e.is_connect() => Err(Failure::unknown_outcome(format!(
             "the write was sent but no response came back: {}",
@@ -133,9 +142,21 @@ pub fn http_client(
     filter: Option<crate::native::network::DomainFilter>,
     flow: &Flow,
 ) -> Result<HttpClients, String> {
+    let resolver = ReachResolver::system(Reach::of_start(&flow.start_url));
+    http_client_with(filter, flow, Arc::new(resolver))
+}
+
+/// `http_client` with the resolver given, so a test can make a name resolve
+/// to an address of its choosing.
+pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
+    filter: Option<crate::native::network::DomainFilter>,
+    flow: &Flow,
+    resolver: Arc<R>,
+) -> Result<HttpClients, String> {
     let build = |policy| {
         reqwest::Client::builder()
             .redirect(policy)
+            .dns_resolver(resolver.clone())
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))
