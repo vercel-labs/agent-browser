@@ -1653,7 +1653,7 @@ fn tool_description(flow: &Flow) -> String {
     if let Some(text) = flow.description.as_deref().filter(|t| !t.trim().is_empty()) {
         return text.chars().take(300).collect();
     }
-    let mut out = format!("Replays the task recorded on {}", flow.start_url);
+    let mut out = format!("Runs the task recorded on {}", flow.start_url);
     if !flow.item_fields.is_empty() {
         out.push_str(&format!(
             "; returns items with {}",
@@ -7334,6 +7334,13 @@ mod tests {
             // A value that is not a URL at all fails closed.
             let broken = json!({ "action": "navigate", "url": "http://[::1" });
             assert!(check_replay_commands(&flow, &[broken]).is_err());
+        }
+
+        #[test]
+        fn a_flows_tool_text_names_a_run_and_not_a_replay() {
+            let flow = flow_of(json!({ "startUrl": "https://a.test/" }));
+            let text = tool_description(&flow);
+            assert!(text.starts_with("Runs the task recorded on"), "{text}");
         }
 
         #[test]
