@@ -1311,12 +1311,23 @@ fn run_close_all(flags: &Flags) {
             }
         });
         match result {
-            Ok(resp) if resp.success => {
+            Ok(resp) if close_completed(&resp) => {
                 clear_closed_session(session);
                 closed.push(session.clone());
             }
             Ok(resp) => {
-                let err = resp.error.unwrap_or_else(|| "Unknown error".to_string());
+                // Denied, waiting for confirmation or failed: still running.
+                let waiting = resp
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("confirmation_required"))
+                    .and_then(|v| v.as_bool())
+                    == Some(true);
+                let err = match (resp.error, waiting) {
+                    (Some(err), _) => err,
+                    (None, true) => "close is waiting for confirmation".to_string(),
+                    (None, false) => "Unknown error".to_string(),
+                };
                 failed.push((session.clone(), err));
             }
             Err(_) => {

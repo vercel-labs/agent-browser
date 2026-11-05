@@ -1332,7 +1332,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
 }
 
 /// `path` made absolute against `cwd`; a blank value (a reset) is left alone.
-fn absolute_policy_path(path: &str, cwd: &std::path::Path) -> String {
+pub(crate) fn absolute_policy_path(path: &str, cwd: &std::path::Path) -> String {
     if path.trim().is_empty() {
         return path.to_string();
     }

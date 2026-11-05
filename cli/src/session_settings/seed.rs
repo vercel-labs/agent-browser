@@ -74,6 +74,12 @@ impl Running {
         if let Some(path) =
             lookup("AGENT_BROWSER_ACTION_POLICY").or_else(|| lookup("AGENT_BROWSER_POLICY"))
         {
+            // Stored with the session, so it must not depend on the directory
+            // a later daemon starts in.
+            let path = match env::current_dir() {
+                Ok(cwd) => crate::flags::absolute_policy_path(&path, &cwd),
+                Err(_) => path,
+            };
             r.set(Key::ActionPolicy, Value::from(path));
         }
 

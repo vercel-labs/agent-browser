@@ -240,6 +240,20 @@ pub fn clear_file(session: &str) {
     let _ = fs::remove_file(SessionFile::Settings.path(session));
 }
 
+/// `arg` as one shell word: unchanged when it is plain, single-quoted
+/// otherwise.
+fn shell_arg(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:=@%+,".contains(c));
+    if plain {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 /// Removes the settings files in `dir` whose session `is_live` rejects: what
 /// `close --all` leaves behind for sessions whose daemon is gone (idle exit,
 /// kill, a refused start). Returns the sessions cleared.
@@ -323,7 +337,7 @@ impl Running {
                 // The parent shows at most 500 bytes of this, so the way out
                 // comes first and the detail is cut.
                 let namespace = namespace
-                    .map(|ns| format!(" --namespace {}", ns))
+                    .map(|ns| format!(" --namespace {}", shell_arg(ns)))
                     .unwrap_or_default();
                 let mut end = why.len().min(300);
                 while !why.is_char_boundary(end) {
@@ -332,7 +346,7 @@ impl Running {
                 return Err(StoreError::SecuredUnreadable(format!(
                     "Stored session settings cannot be used; to clear them run: agent-browser{} --session {} close. {}",
                     namespace,
-                    session,
+                    shell_arg(session),
                     &why[..end]
                 )));
             }
@@ -597,7 +611,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("agent-browser --namespace team a --session s close"),
+                .contains("agent-browser --namespace 'team a' --session s close"),
             "{err}"
         );
     }
@@ -659,6 +673,37 @@ mod tests {
 
         assert_eq!(store.load(), Ok(Some(full_view())));
         assert_eq!(entries(dir.path()), ["s.settings"]);
+    }
+
+    #[test]
+    fn test_shell_arg_quotes_only_when_needed() {
+        assert_eq!(shell_arg("work-1.a"), "work-1.a");
+        assert_eq!(shell_arg("team a"), "'team a'");
+        assert_eq!(shell_arg("it's"), "'it'\\''s'");
+        assert_eq!(shell_arg(""), "''");
+        assert_eq!(shell_arg("a;rm"), "'a;rm'");
+    }
+
+    #[test]
+    fn test_boot_without_a_file_makes_either_policy_variable_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        let expected = cwd.join("rel/policy.json");
+        for pairs in [
+            &[("AGENT_BROWSER_ACTION_POLICY", "rel/policy.json")][..],
+            &[("AGENT_BROWSER_POLICY", "rel/policy.json")][..],
+        ] {
+            let seed = Running::from_lookup(|name| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.to_string())
+            });
+            assert_eq!(
+                seed.security().action_policy_path.as_deref(),
+                expected.to_str(),
+                "{pairs:?}"
+            );
+        }
     }
 
     #[test]

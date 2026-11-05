@@ -20,7 +20,7 @@ use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
 use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
-use crate::session_settings::{FsStore, Running, Store, DEFAULT_IDLE_TIMEOUT_MS};
+use crate::session_settings::{FsStore, Running, SecurityView, Store, DEFAULT_IDLE_TIMEOUT_MS};
 use crate::validation::{is_valid_session_name, session_name_error};
 
 /// What the daemon starts a session with: its settings and where the security
@@ -176,6 +176,16 @@ pub async fn run_daemon(session: &str) {
     }
 }
 
+/// Stores the security settings again once the daemon is reachable. A
+/// `close --all` that swept the file between this daemon reading it and
+/// becoming visible (pid and socket) would otherwise leave a contained
+/// session with nothing stored.
+fn repair_stored_security(store: &dyn Store, security: &SecurityView) {
+    if *security != SecurityView::default() {
+        let _ = store.save(security);
+    }
+}
+
 fn remaining_idle_timeout(activity: &IdleActivity, timeout_ms: u64) -> Option<Duration> {
     Duration::from_millis(timeout_ms).checked_sub(activity.elapsed())
 }
@@ -215,11 +225,14 @@ async fn run_socket_server(
     // AGENT_BROWSER_IDLE_TIMEOUT_MS is unset; an explicit 0 disables idle
     // shutdown entirely.
     let idle_timeout = startup.settings.idle_timeout();
+    let security = startup.settings.security();
+    let store = startup.store.clone();
     idle_activity.set_timeout(idle_timeout);
     let idle_timeout_ms = idle_timeout.map(|t| t.ms);
 
     let listener =
         UnixListener::bind(socket_path).map_err(|e| format!("Failed to bind socket: {}", e))?;
+    repair_stored_security(store.as_ref(), &security);
 
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
@@ -362,6 +375,8 @@ async fn run_socket_server(
     // AGENT_BROWSER_IDLE_TIMEOUT_MS is unset; an explicit 0 disables idle
     // shutdown entirely.
     let idle_timeout = startup.settings.idle_timeout();
+    let security = startup.settings.security();
+    let store = startup.store.clone();
     idle_activity.set_timeout(idle_timeout);
     let idle_timeout_ms = idle_timeout.map(|t| t.ms);
 
@@ -382,6 +397,7 @@ async fn run_socket_server(
     let socket_dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
     let port_path = SessionFile::Port.path_in(socket_dir, session);
     let _ = fs::write(&port_path, actual_port.to_string());
+    repair_stored_security(store.as_ref(), &security);
 
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
@@ -737,7 +753,28 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-    use crate::session_settings::{resolve_idle_timeout, IdleTimeout};
+    use crate::session_settings::{resolve_idle_timeout, IdleTimeout, MemStore};
+
+    #[test]
+    fn test_a_ready_daemon_restores_settings_a_sweep_removed() {
+        let store = MemStore::default();
+        let security = SecurityView {
+            allowed_domains: Some(vec!["example.com".into()]),
+            ..SecurityView::default()
+        };
+        assert_eq!(store.stored(), None);
+
+        repair_stored_security(&store, &security);
+
+        assert_eq!(store.stored(), Some(security));
+    }
+
+    #[test]
+    fn test_a_ready_daemon_without_security_settings_stores_nothing() {
+        let store = MemStore::default();
+        repair_stored_security(&store, &SecurityView::default());
+        assert_eq!(store.stored(), None);
+    }
 
     #[test]
     fn test_resolve_idle_timeout_unset_applies_default() {

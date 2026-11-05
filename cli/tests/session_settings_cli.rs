@@ -379,3 +379,40 @@ fn a_batch_close_that_policy_denies_keeps_the_settings() {
     assert!(session.settings().exists(), "a denied close clears nothing");
     session.kill_daemon();
 }
+
+#[test]
+fn close_all_does_not_clear_or_report_a_close_that_was_parked_or_denied() {
+    let session = Session::new();
+    let deny = session.tmp.path().join("deny.json");
+    fs::write(&deny, r#"{"deny":["close"]}"#).unwrap();
+    let parked_file = session.dir().join("parked.settings");
+    let denied_file = session.dir().join("denied.settings");
+    let run = |name: &str, extra: &[&str]| {
+        let mut args = vec!["--session", name, "--allowed-domains", "example.com"];
+        args.extend_from_slice(extra);
+        args.extend(["read", "http://127.0.0.1:1/", "--timeout", "1000"]);
+        session.command().args(&args).output().unwrap();
+    };
+    run("parked", &["--confirm-actions", "close"]);
+    run("denied", &["--action-policy", deny.to_str().unwrap()]);
+    assert!(parked_file.exists() && denied_file.exists());
+
+    let human = session.command().args(["close", "--all"]).output().unwrap();
+    let json = session.run(&["close", "--all"]);
+
+    let human_text = text(&human);
+    assert!(!human.status.success(), "{human_text}");
+    assert!(!human_text.contains("Closed session"), "{human_text}");
+    assert_eq!(json["data"]["closed"], 0, "{json}");
+    assert_eq!(json["success"], false, "{json}");
+    assert!(parked_file.exists(), "a parked close clears nothing");
+    assert!(denied_file.exists(), "a denied close clears nothing");
+    for name in ["parked", "denied"] {
+        let pid = fs::read_to_string(session.dir().join(format!("{name}.pid"))).unwrap();
+        assert!(Command::new("kill")
+            .args(["-9", pid.trim()])
+            .status()
+            .unwrap()
+            .success());
+    }
+}

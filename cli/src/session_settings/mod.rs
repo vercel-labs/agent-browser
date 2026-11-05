@@ -21,7 +21,6 @@ pub use patch::{Patch, Requested};
 pub use proxy::parse_proxy;
 #[cfg(test)]
 pub use running::resolve_idle_timeout;
-#[cfg(test)]
 pub use running::SecurityView;
 pub use running::{named, Connection, IdleTimeout, Running, DEFAULT_IDLE_TIMEOUT_MS};
 #[allow(unused_imports)]
