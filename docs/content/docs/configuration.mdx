@@ -103,6 +103,7 @@ Global options can be set in a trusted config file using their camelCase equival
     <tr><td><code>contentBoundaries</code></td><td><code>--content-boundaries</code></td><td>boolean</td></tr>
     <tr><td><code>maxOutput</code></td><td><code>--max-output</code></td><td>number</td></tr>
     <tr><td><code>allowedDomains</code></td><td><code>--allowed-domains</code></td><td>string[]; also disables WebRTC in supported Chromium sessions and requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins</td></tr>
+    <tr><td><code>capture</code></td><td><code>--capture</code></td><td>string[]; only <code>flow</code> is supported. A launch setting: passing it to a running session without it relaunches the browser with capture on. Ignored in project config</td></tr>
     <tr><td><code>actionPolicy</code></td><td><code>--action-policy</code></td><td>string</td></tr>
     <tr><td><code>confirmActions</code></td><td><code>--confirm-actions</code></td><td>string</td></tr>
     <tr><td><code>confirmInteractive</code></td><td><code>--confirm-interactive</code></td><td>boolean</td></tr>
@@ -267,7 +268,7 @@ These environment variables configure additional daemon and runtime behavior:
   <tbody>
     <tr><td><code>AGENT_BROWSER_CONFIG</code></td><td>Path to an explicit config file.</td><td>(default discovery)</td></tr>
     <tr><td><code>AGENT_BROWSER_SESSION</code></td><td>Isolated browser session name.</td><td><code>default</code></td></tr>
-    <tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance. <code>0</code>, <code>false</code>, <code>no</code> or an empty value leave it off.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ALLOW_FILE_ACCESS</code></td><td>Allow <code>file://</code> URLs to access local files.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_EXECUTABLE_PATH</code></td><td>Custom browser executable path.</td><td>(auto-discover)</td></tr>
     <tr><td><code>AGENT_BROWSER_PROFILE</code></td><td>Chrome profile name or persistent profile directory.</td><td>(none)</td></tr>
@@ -301,6 +302,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_HEADED</code></td><td>Show browser window instead of running headless (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_WEBGPU</code></td><td>Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_NO_XVFB</code></td><td>Disable automatic Xvfb virtual display for headed mode on displayless Linux hosts (<code>1</code> to disable).</td><td>(auto-Xvfb enabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_NO_VERSION_CHECK</code></td><td>Skip the outdated Chrome check, which fetches the Chrome Releases blog once per browser version in each session (<code>1</code> to disable).</td><td>(check enabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CLEAR_CA_CERT</code></td><td>Clear CA trust retained by the running browser session.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_USE_SYSTEM_CA</code></td><td>Use the operating system trust store for the CLI's own HTTPS requests (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_JSON</code></td><td>Use JSON output by default.</td><td>(disabled)</td></tr>

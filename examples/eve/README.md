@@ -1,11 +1,11 @@
-# Agent Browser eve Example
+# agent-browser eve example
 
 This is a scaffold-style [eve](https://eve.dev) app based on `eve init --channel-web-nextjs`. Its agent gets a full browser tool set from the [`@agent-browser/eve`](../../packages/@agent-browser/eve/) extension.
 
 - `agent/extensions/browser.ts` mounts the extension, composing 42 tools into the agent under the `browser` namespace (`browser__open`, `browser__snapshot`, `browser__click`, ...).
-- `agent/sandbox.ts` pre-installs Chromium system dependencies, `agent-browser`, and Chrome into the sandbox template with the `@agent-browser/eve/sandbox` helpers, so sessions never pay the install cost. Without this bootstrap the extension still works — it auto-installs on first tool use — just slower on fresh sandboxes.
+- `agent/sandbox.ts` pre-installs Chromium system dependencies, `agent-browser`, and Chrome into the sandbox template with the `@agent-browser/eve/sandbox` helpers, so sessions never pay the install cost. Without this bootstrap, the extension installs them on first tool use, which makes the first call in a fresh sandbox slower.
 
-## Run Locally
+## Run locally
 
 ```bash
 pnpm install

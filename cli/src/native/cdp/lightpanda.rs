@@ -128,7 +128,7 @@ pub fn find_lightpanda() -> Option<PathBuf> {
         }
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         let candidates = [
             home.join(".lightpanda/lightpanda"),
             home.join(".local/bin/lightpanda"),

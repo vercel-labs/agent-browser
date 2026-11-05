@@ -1212,6 +1212,50 @@ pub async fn get_element_attribute(
     Ok(result.result.value.unwrap_or(Value::Null))
 }
 
+/// What a field says about itself, so a recording can tell a credential
+/// from other input even when the field has no label.
+pub async fn get_field_traits(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Value, String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: "function() { \
+                    const label = (this.labels && this.labels[0] && this.labels[0].innerText) || ''; \
+                    const attr = (n) => this.getAttribute && this.getAttribute(n) || ''; \
+                    return { \
+                        type: this.type || '', \
+                        autocomplete: attr('autocomplete'), \
+                        hint: [attr('name'), this.id, attr('aria-label'), attr('placeholder'), label] \
+                            .filter(Boolean).join(' ') \
+                    }; }"
+                    .to_string(),
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    Ok(result.result.value.unwrap_or(Value::Null))
+}
+
 pub async fn is_element_visible(
     client: &CdpClient,
     session_id: &str,
@@ -1844,15 +1888,18 @@ mod tests {
 
     #[test]
     fn test_box_model_center() {
-        let model = BoxModel {
-            content: vec![10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
-            padding: vec![],
-            border: vec![],
-            margin: vec![],
-            width: 100,
-            height: 40,
-        };
-        let (x, y) = box_model_center(&model);
+        let response: DomGetBoxModelResult = serde_json::from_value(serde_json::json!({
+            "model": {
+                "content": [10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
+                "padding": [9.0, 19.0, 111.0, 19.0, 111.0, 61.0, 9.0, 61.0],
+                "border": [8.0, 18.0, 112.0, 18.0, 112.0, 62.0, 8.0, 62.0],
+                "margin": [7.0, 17.0, 113.0, 17.0, 113.0, 63.0, 7.0, 63.0],
+                "width": 100.5,
+                "height": 40.25
+            }
+        }))
+        .unwrap();
+        let (x, y) = box_model_center(&response.model);
         assert!((x - 60.0).abs() < 0.01);
         assert!((y - 40.0).abs() < 0.01);
     }
