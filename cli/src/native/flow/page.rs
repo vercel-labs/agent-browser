@@ -121,7 +121,15 @@ pub async fn send(
     deadline: Instant,
 ) -> TierResult {
     let started = Instant::now();
-    let tab = browser.tab_url().await;
+    let left = deadline.saturating_duration_since(Instant::now());
+    let Ok(tab) = tokio::time::timeout(left, browser.tab_url()).await else {
+        return TierResult::fail(
+            req,
+            Tier::Page,
+            started,
+            Failure::unavailable("the run's time is up".to_string()),
+        );
+    };
     if let Err(reason) = tab_on_site(flow, tab.as_deref()) {
         return TierResult::fail(req, Tier::Page, started, Failure::skipped(reason));
     }

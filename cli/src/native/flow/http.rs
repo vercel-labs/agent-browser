@@ -117,7 +117,15 @@ pub async fn run_http(
                 );
             }
             resp.text().await.map(|t| (status, t)).map_err(|e| {
-                Failure::new(true, Some(status), format!("could not read body: {}", e))
+                // A body cut short by the run's clock says nothing about the site.
+                let late = e.is_timeout() || Instant::now() >= deadline;
+                if late && req.write {
+                    Failure::unknown_outcome(format!("the write's answer did not arrive: {}", e))
+                } else if late {
+                    Failure::transport(format!("the answer did not arrive in time: {}", e))
+                } else {
+                    Failure::new(true, Some(status), format!("could not read body: {}", e))
+                }
             })
         }
         // A write that left the machine may have been applied.

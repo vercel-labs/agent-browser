@@ -232,7 +232,7 @@ Some responses end the run instead of falling to the next tier, because every ti
     <tr><td>429</td><td><code>rate_limited</code></td><td>The site is rate limiting the session. <code>data.retryAfter</code> carries the <code>Retry-After</code> value when the site sent one</td></tr>
     <tr><td>A write that may have been applied</td><td><code>outcome_unknown</code></td><td>The write was sent but no response came back, or the site answered it with a 5xx, 408, a redirect, or a 2xx that is not JSON, including a bot challenge page. It is not sent again; check the site before rerunning</td></tr>
     <tr><td>A write the site answered with a 2xx JSON body of a different shape</td><td><code>write_applied</code></td><td>The write was applied and is not sent again. The flow is marked unverified. Do not repeat the write; check the site for the result</td></tr>
-    <tr><td>A bot challenge page</td><td><code>blocked</code></td><td>The site served a challenge instead of data. Continue in the UI or let the user clear it</td></tr>
+    <tr><td>A bot challenge page in answer to a read</td><td><code>blocked</code></td><td>The site served a challenge instead of data. Continue in the UI or let the user clear it. A challenge in answer to a write that was sent is <code>outcome_unknown</code></td></tr>
   </tbody>
 </table>
 

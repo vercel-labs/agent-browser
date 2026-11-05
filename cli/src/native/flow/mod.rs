@@ -7095,6 +7095,8 @@ mod tests {
         poll_each_run: Option<String>,
         /// How long a command, or the in-page eval, takes to answer.
         delay: Duration,
+        /// Whether reading the tab's URL never returns in time.
+        tab_hangs: bool,
     }
 
     impl ScriptBrowser {
@@ -7107,7 +7109,13 @@ mod tests {
                 page: Err("no page".to_string()),
                 poll_each_run: None,
                 delay: Duration::ZERO,
+                tab_hangs: false,
             }
+        }
+
+        fn hanging_tab(mut self) -> ScriptBrowser {
+            self.tab_hangs = true;
+            self
         }
 
         fn slow(mut self, delay: Duration) -> ScriptBrowser {
@@ -7135,6 +7143,9 @@ mod tests {
             None
         }
         async fn tab_url(&mut self) -> Option<String> {
+            if self.tab_hangs {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
             self.tab.clone()
         }
         async fn eval(&mut self, _: &str) -> Result<Value, String> {
@@ -7772,6 +7783,98 @@ mod tests {
                 Ok((200, challenge.to_string())),
             );
             assert_eq!(r.stop, Some(Stop::Blocked));
+        }
+
+        #[test]
+        fn reading_the_tab_url_cannot_outlast_the_run_deadline() {
+            let flow = click_flow();
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new()).hanging_tab();
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(20),
+                soon(300),
+            ))
+            .ok()
+            .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(run.out_of_time(), "{:?}", run.failure);
+            // The page tier reads the tab first.
+            let req = PreparedRequest {
+                url: "https://a.test/items".to_string(),
+                ..prepared("s1r1")
+            };
+            let started = Instant::now();
+            let r = block_on(page::send(&flow, &mut browser, &req, soon(300)));
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+        }
+
+        /// A server that sends headers and part of a body, then stalls.
+        fn stalling_server() -> (String, std::net::TcpListener) {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/x", listener.local_addr().unwrap());
+            let accepting = listener.try_clone().unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = accepting.accept() {
+                    let mut buf = [0u8; 2048];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"a\"",
+                    );
+                    std::thread::sleep(Duration::from_secs(4));
+                }
+            });
+            (url, listener)
+        }
+
+        #[test]
+        fn a_body_that_stalls_past_the_run_deadline_is_not_drift() {
+            let (url, _listener) = stalling_server();
+            let mut flow = flow_of(json!({ "startUrl": url }));
+            let client = http_client(None, &flow).unwrap();
+            let req = PreparedRequest {
+                url,
+                ..prepared("s1r1")
+            };
+            let started = Instant::now();
+            let r = block_on(run_http(&client, &req, None, None, soon(500)));
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+            flow.verified_at = Some("then".to_string());
+            finish_run(&mut flow, &[r], "now", 1, &Shape::default());
+            assert_eq!(flow.verified_at.as_deref(), Some("then"));
+        }
+
+        #[test]
+        fn a_write_body_that_stalls_is_unknown() {
+            let (url, _listener) = stalling_server();
+            let flow = flow_of(json!({ "startUrl": url }));
+            let client = http_client(None, &flow).unwrap();
+            let req = PreparedRequest {
+                url,
+                write: true,
+                method: "POST".to_string(),
+                ..prepared("s1r1")
+            };
+            let r = block_on(run_http(&client, &req, None, None, soon(500)));
+            assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
         }
 
         #[test]

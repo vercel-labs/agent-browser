@@ -612,7 +612,21 @@ pub(super) async fn capture(
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         // The replay stops as soon as the tab leaves the flow's site.
-        if let Some(url) = browser.tab_url().await.filter(|u| u.starts_with("http")) {
+        // Reading the tab waits on the same page, so it has the run's clock too.
+        let left = run_deadline.saturating_duration_since(Instant::now());
+        let tab = match tokio::time::timeout(left, browser.tab_url()).await {
+            Ok(tab) => tab,
+            Err(_) => {
+                failed = Some(format!(
+                    "replay stopped after command {}: {}",
+                    i + 1,
+                    TIME_UP
+                ));
+                timed_out = true;
+                break;
+            }
+        };
+        if let Some(url) = tab.filter(|u| u.starts_with("http")) {
             if let Err(reason) = policy.check(&url) {
                 failed = Some(format!(
                     "replay stopped after command {}: {}",
