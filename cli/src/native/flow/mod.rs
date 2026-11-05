@@ -406,6 +406,52 @@ fn holds_secret(text: &str, secrets: &[String]) -> bool {
     })
 }
 
+/// Percent decoding that never fails: an escape that does not form valid
+/// UTF-8 stays as written, so the rest of the text is still compared.
+fn percent_decode_lossless(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut run: Vec<u8> = Vec::new();
+    let mut i = 0;
+    let flush = |run: &mut Vec<u8>, out: &mut String| {
+        let mut rest: &[u8] = run;
+        while !rest.is_empty() {
+            match std::str::from_utf8(rest) {
+                Ok(valid) => {
+                    out.push_str(valid);
+                    break;
+                }
+                Err(e) => {
+                    let (good, bad) = rest.split_at(e.valid_up_to());
+                    out.push_str(std::str::from_utf8(good).unwrap_or(""));
+                    let n = e.error_len().unwrap_or(bad.len());
+                    for b in &bad[..n] {
+                        out.push_str(&format!("%{:02X}", b));
+                    }
+                    rest = &bad[n..];
+                }
+            }
+        }
+        run.clear();
+    };
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                run.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        flush(&mut run, &mut out);
+        let ch_len = text[i..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&text[i..i + ch_len]);
+        i += ch_len;
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
 /// A request text as the server reads it: form encoding (`+` is a space),
 /// percent encoding, and the strings inside a JSON body, whose escapes the
 /// parser resolves.
@@ -414,9 +460,7 @@ fn decoded_forms(text: &str) -> Vec<String> {
     if let Ok(plus) = urlencoding::decode(&text.replace('+', " ")) {
         out.push(plus.into_owned());
     }
-    if let Ok(pct) = urlencoding::decode(text) {
-        out.push(pct.into_owned());
-    }
+    out.push(percent_decode_lossless(text));
     if let Ok(json) = serde_json::from_str::<Value>(text) {
         let mut strings = Vec::new();
         collect_scalars(&json, &mut strings);
@@ -799,9 +843,19 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             } else {
                 "only third-party traffic"
             };
-            gaps.push(
-                json!({ "step": index + 1, "command": describe_command(cmd), "reason": reason }),
-            );
+            // `kind` marks the reason a step with no request gets, so a save
+            // can replace it; the save report does not carry it.
+            let kind = if reason.starts_with("the page asked") {
+                "login-wall"
+            } else {
+                "no-requests"
+            };
+            gaps.push(json!({
+                "step": index + 1,
+                "command": describe_command(cmd),
+                "reason": reason,
+                "kind": kind,
+            }));
         }
         steps.push(Step {
             seq: *seq,
@@ -4343,6 +4397,92 @@ mod tests {
                 crate::output::format_flow_text(Some("flow_save"), &report).unwrap_or_default();
             assert!(!text.contains("91ab"), "{text}");
         }
+    }
+
+    #[test]
+    fn a_secret_in_a_url_that_does_not_decode_as_utf8_is_still_found() {
+        let secret = "x y%91qq\u{e9}";
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "@e1", "value": secret }),
+            None,
+            Some(&traits("text", "", "secret value")),
+        );
+        r.tag_now("save");
+        let mut save = entry(
+            "save",
+            "https://api.example.com.ar/api/echo/x%20y%91qq%C3%A9",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        save.method = "GET".to_string();
+        assert!(carries_secret(&save, &r.secrets));
+        let err = build_flow_value(SaveInput {
+            name: "echo",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[save],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap_err();
+        assert!(!err.contains("91qq") && !err.contains("%C3%A9"), "{err}");
+    }
+
+    #[test]
+    fn a_secret_in_a_url_that_does_not_decode_as_utf8_is_not_in_the_flow_file() {
+        let secret = "x y%91qq\u{e9}";
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+            None,
+        );
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "@e1", "value": secret }),
+            None,
+            Some(&traits("text", "", "secret value")),
+        );
+        r.tag_now("echo");
+        r.tag_now("home");
+        let echo = entry(
+            "echo",
+            "https://api.example.com.ar/api/echo/x%20y%91qq%C3%A9",
+            "Fetch",
+            "application/json",
+            r#"{"ok":true}"#,
+        );
+        let home = entry(
+            "home",
+            "https://api.example.com.ar/home",
+            "Fetch",
+            "application/json",
+            r#"{"items":[1]}"#,
+        );
+        let (flow, _) = build_flow_value(SaveInput {
+            name: "echo",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[echo, home],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let text = flow.to_string();
+        assert!(
+            !text.contains("91qq") && !text.contains("api/echo"),
+            "{text}"
+        );
     }
 
     #[test]

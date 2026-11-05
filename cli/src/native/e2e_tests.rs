@@ -15076,6 +15076,7 @@ const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
 <button id="stream" onclick="fetch('/api/stream')">Stream</button>
 <button id="moved" onclick="fetch('/api/moved')">Moved</button>
 <button id="hang" onclick="fetch('/api/hang?q=1')">Hang</button>
+<button id="both" onclick="login(); fetch('/api/hang?q=1')">Both</button>
 <button id="hangs" onclick="fetch('/api/hangs/' + document.getElementById('pw').value)">Hangs</button>
 <script>
 let csrf = ''; let user = '';
@@ -16021,6 +16022,101 @@ async fn e2e_requests_finalizes_a_redirect_hop() {
         .expect("target listed");
     assert_eq!(target["status"], 200, "{listed}");
     assert_eq!(target["mimeType"], "application/json", "{listed}");
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_keeps_the_secret_gap_next_to_the_loading_gap() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for cmd in [
+        json!({ "id": "f1", "action": "fill", "selector": "#email", "value": "ana@example.com" }),
+        json!({ "id": "f2", "action": "fill", "selector": "#pw", "value": "tk-91ab-77" }),
+        json!({ "id": "c1", "action": "click", "selector": "#both" }),
+        json!({ "id": "c2", "action": "click", "selector": "#slow" }),
+    ] {
+        assert_success(&exec(&cmd, &mut state).await);
+    }
+    fx.wait_until(|| {
+        fx.hits("POST /login") > 0 && fx.hits("GET /api/hang") > 0 && fx.hits("GET /api/slow") > 0
+    })
+    .await;
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "both", "timeout": 1500 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let gaps = saved["data"]["gaps"].as_array().unwrap();
+    let on_step: Vec<String> = gaps
+        .iter()
+        .filter(|g| g["command"] == "click #both")
+        .map(|g| g["reason"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        on_step.iter().any(|r| r.contains("secret field")),
+        "{saved}"
+    );
+    assert!(
+        on_step.iter().any(|r| r.contains("still loading at save")),
+        "{saved}"
+    );
+    assert!(!saved.to_string().contains("91ab"), "{saved}");
+    assert!(gaps.iter().all(|g| g.get("kind").is_none()), "{saved}");
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_request_detail_returns_the_final_redirect_hop() {
+    let fx = flow_fixture().await;
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(&exec(&json!({ "id": "r0", "action": "requests" }), &mut state).await);
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/target") > 0).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    state.drain_cdp_events_background().await.unwrap();
+    let id = state
+        .tracked_requests
+        .iter()
+        .find(|r| r.url.ends_with("/api/moved"))
+        .unwrap()
+        .request_id
+        .clone();
+    let detail = exec(
+        &json!({ "id": "d", "action": "request_detail", "requestId": id }),
+        &mut state,
+    )
+    .await;
+    assert_success(&detail);
+    assert_eq!(detail["data"]["status"], 200, "{detail}");
+    assert!(
+        detail["data"]["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/api/target"),
+        "{detail}"
+    );
+    assert!(
+        detail["data"]["responseBody"].to_string().contains("stove"),
+        "{detail}"
+    );
     let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 

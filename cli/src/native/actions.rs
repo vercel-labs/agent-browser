@@ -12333,8 +12333,15 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     // Requests still loading at the deadline are not in the flow. The step
     // that started one says so instead of the generic reason.
     if let Some(gaps) = report["gaps"].as_array_mut() {
-        gaps.retain(|g| !still_loading.iter().any(|l| l["step"] == g["step"]));
+        gaps.retain(|g| {
+            g["kind"] != "no-requests" || !still_loading.iter().any(|l| l["step"] == g["step"])
+        });
         gaps.extend(still_loading);
+        for g in gaps.iter_mut() {
+            if let Some(g) = g.as_object_mut() {
+                g.remove("kind");
+            }
+        }
     }
     Ok(report)
 }
@@ -12779,11 +12786,6 @@ fn har_parse_request_cookies(cookie_header: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Compute HAR `timings` and total `time` (ms) from a CDP `ResourceTiming`
-/// object and the optional `Network.loadingFinished` monotonic timestamp.
-///
-/// CDP timing values are milliseconds relative to `requestTime` (seconds since
-/// browser start). A value of `-1` means the phase did not occur.
 /// Copies a CDP `Response` (from `responseReceived` or a `redirectResponse`)
 /// onto its tracked request.
 fn tracked_fill_response(entry: &mut TrackedRequest, response: &Value) {
@@ -12828,6 +12830,11 @@ fn har_fill_response(entry: &mut HarEntry, response: &Value) {
     entry.cdp_timing = response.get("timing").cloned();
 }
 
+/// Compute HAR `timings` and total `time` (ms) from a CDP `ResourceTiming`
+/// object and the optional `Network.loadingFinished` monotonic timestamp.
+///
+/// CDP timing values are milliseconds relative to `requestTime` (seconds since
+/// browser start). A value of `-1` means the phase did not occur.
 fn har_compute_timings(
     cdp_timing: Option<&Value>,
     loading_finished_ts: Option<f64>,
@@ -13561,9 +13568,12 @@ async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<V
         .and_then(|v| v.as_str())
         .ok_or("Missing 'requestId' parameter")?;
 
+    // Redirect hops share a request id; the last one is the response a body
+    // belongs to.
     let entry = state
         .tracked_requests
         .iter()
+        .rev()
         .find(|r| r.request_id == request_id)
         .ok_or("Request not found")?;
 
