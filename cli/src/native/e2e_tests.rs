@@ -16112,3 +16112,109 @@ async fn e2e_flow_the_page_tier_fetch_does_not_answer_for_the_replay() {
     assert_eq!(out["data"]["ok"], true, "{out}");
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_a_route_limited_by_resource_type_applies_the_same_on_both_tiers() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("rt{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "rt" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let add_id = saved["data"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().contains("/api/cart"))
+        .and_then(|r| r["id"].as_str())
+        .unwrap()
+        .to_string();
+    assert_success(
+        &exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_save", "name": "rt", "from": 1, "output": add_id }),
+            ),
+            &mut state,
+        )
+        .await,
+    );
+    let path = dir.path().join("127.0.0.1").join("rt.json");
+    let original = std::fs::read_to_string(&path).unwrap();
+    for tier in ["http", "page"] {
+        let mut flow: Value = serde_json::from_str(&original).unwrap();
+        for step in flow["steps"].as_array_mut().unwrap() {
+            for req in step["requests"].as_array_mut().unwrap() {
+                if req["id"] == add_id.as_str() {
+                    req["tier"] = json!(tier);
+                }
+            }
+        }
+        std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+        // (route limited to, whether the mock answers the write); Chrome
+        // reports the in-page fetch() as an XHR to request interception
+        for (limit, mocked) in [("fetch", false), ("xhr", true)] {
+            assert_success(
+                &exec(
+                    &run(
+                        &mut n,
+                        json!({
+                            "action": "route",
+                            "url": "*/api/cart",
+                            "resourceType": limit,
+                            "response": { "status": 200, "body": "{\"cart\":[7]}" },
+                        }),
+                    ),
+                    &mut state,
+                )
+                .await,
+            );
+            let before = fx.hits("POST /api/cart");
+            let out = exec(
+                &run(
+                    &mut n,
+                    json!({ "action": "flow_run", "name": "rt", "params": {}, "allowWrite": "all" }),
+                ),
+                &mut state,
+            )
+            .await;
+            assert_eq!(out["data"]["ok"], true, "{tier} {limit}: {out}");
+            assert_eq!(
+                fx.hits("POST /api/cart"),
+                before + usize::from(!mocked),
+                "{tier} tier, route limited to {limit}: {out}"
+            );
+            assert_success(
+                &exec(
+                    &run(&mut n, json!({ "action": "unroute", "url": "*/api/cart" })),
+                    &mut state,
+                )
+                .await,
+            );
+        }
+    }
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}

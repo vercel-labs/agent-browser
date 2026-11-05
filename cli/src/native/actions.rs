@@ -12523,19 +12523,40 @@ async fn flow_field_traits(
     Some(super::flow::FieldTraits::from_value(&value))
 }
 
+/// CDP `resourceType` of a flow's direct request: the type Fetch.requestPaused
+/// reports for the page tier's `fetch()` (Chrome reports it as XHR).
+const FLOW_DIRECT_RESOURCE_TYPE: &str = "XHR";
+
+/// The route that answers a request: the first one, in registration order,
+/// whose URL pattern and resource types match and that aborts or has a
+/// response. Shared by browser interception and the flow HTTP tier.
+fn select_route<'a>(
+    routes: &'a [RouteEntry],
+    url: &str,
+    resource_type: &str,
+) -> Option<&'a RouteEntry> {
+    routes.iter().find(|route| {
+        route_url_matches(&route.url_pattern, url)
+            && (route.resource_types.is_empty()
+                || route
+                    .resource_types
+                    .iter()
+                    .any(|rt| rt.eq_ignore_ascii_case(resource_type)))
+            && (route.abort || route.response.is_some())
+    })
+}
+
 /// The session route that would answer this request in the page, if any.
 async fn flow_routed_response(
     state: &DaemonState,
     url: &str,
 ) -> Option<super::flow::RoutedResponse> {
     let routes = state.routes.read().await;
-    let route = routes.iter().find(|r| {
-        route_url_matches(&r.url_pattern, url)
-            && (r.resource_types.is_empty()
-                || r.resource_types
-                    .iter()
-                    .any(|t| t.eq_ignore_ascii_case("fetch") || t.eq_ignore_ascii_case("xhr")))
-    })?;
+    flow_route_answer(&routes, url)
+}
+
+fn flow_route_answer(routes: &[RouteEntry], url: &str) -> Option<super::flow::RoutedResponse> {
+    let route = select_route(routes, url, FLOW_DIRECT_RESOURCE_TYPE)?;
     if route.abort {
         return Some(super::flow::RoutedResponse {
             abort: true,
@@ -13344,49 +13365,36 @@ async fn resolve_fetch_paused(
     }
 
     // Route matching
-    for route in routes {
-        let url_matches = route_url_matches(&route.url_pattern, &paused.url);
+    if let Some(route) = select_route(routes, &paused.url, &paused.resource_type) {
+        if route.abort {
+            let _ = client
+                .send_command(
+                    "Fetch.failRequest",
+                    Some(json!({
+                        "requestId": paused.request_id,
+                        "errorReason": "Failed"
+                    })),
+                    Some(session_id),
+                )
+                .await;
+            return;
+        }
 
-        let resource_type_matches = route.resource_types.is_empty()
-            || route
-                .resource_types
-                .iter()
-                .any(|rt| rt.eq_ignore_ascii_case(&paused.resource_type));
-
-        let matches = url_matches && resource_type_matches;
-
-        if matches {
-            if route.abort {
-                let _ = client
-                    .send_command(
-                        "Fetch.failRequest",
-                        Some(json!({
-                            "requestId": paused.request_id,
-                            "errorReason": "Failed"
-                        })),
-                        Some(session_id),
-                    )
-                    .await;
-                return;
-            }
-
-            if let Some(ref resp) = route.response {
-                let (status, headers, encoded) =
-                    mocked_response(resp, paused.request_headers.as_ref());
-                let _ = client
-                    .send_command(
-                        "Fetch.fulfillRequest",
-                        Some(json!({
-                            "requestId": paused.request_id,
-                            "responseCode": status,
-                            "responseHeaders": headers,
-                            "body": encoded,
-                        })),
-                        Some(session_id),
-                    )
-                    .await;
-                return;
-            }
+        if let Some(ref resp) = route.response {
+            let (status, headers, encoded) = mocked_response(resp, paused.request_headers.as_ref());
+            let _ = client
+                .send_command(
+                    "Fetch.fulfillRequest",
+                    Some(json!({
+                        "requestId": paused.request_id,
+                        "responseCode": status,
+                        "responseHeaders": headers,
+                        "body": encoded,
+                    })),
+                    Some(session_id),
+                )
+                .await;
+            return;
         }
     }
 
@@ -20931,6 +20939,134 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             patterns.is_empty(),
             "No routes/filters/headers → no patterns"
         );
+    }
+
+    fn route(pattern: &str, types: &[&str], response: bool, abort: bool) -> RouteEntry {
+        RouteEntry {
+            url_pattern: pattern.to_string(),
+            response: response.then(|| RouteResponse {
+                status: Some(201),
+                body: Some(pattern.to_string()),
+                content_type: None,
+                headers: None,
+                allow_origin: None,
+            }),
+            abort,
+            resource_types: types.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn test_route_selection_table() {
+        let order = "http://h/api/order";
+        // (routes, url, resource type, expected body, "abort", or none)
+        let cases: Vec<(Vec<RouteEntry>, &str, &str, Option<&str>)> = vec![
+            (
+                vec![route("*/api/order", &["fetch"], true, false)],
+                order,
+                "XHR",
+                None,
+            ),
+            (
+                vec![route("*/api/order", &["xhr"], true, false)],
+                order,
+                "XHR",
+                Some("*/api/order"),
+            ),
+            (
+                vec![route("*/api/order", &["XHR"], true, false)],
+                order,
+                "XHR",
+                Some("*/api/order"),
+            ),
+            (
+                vec![route("*/api/order", &[], true, false)],
+                order,
+                "XHR",
+                Some("*/api/order"),
+            ),
+            (
+                vec![route("*/api/order", &["document"], true, false)],
+                order,
+                "XHR",
+                None,
+            ),
+            (
+                vec![route("*/api/other", &[], true, false)],
+                order,
+                "XHR",
+                None,
+            ),
+            (
+                vec![route("*/api/order", &[], false, true)],
+                order,
+                "XHR",
+                Some("abort"),
+            ),
+            // a matching route with no response and no abort does not stop the scan
+            (
+                vec![
+                    route("*/api/*", &[], false, false),
+                    route("*/api/order", &[], true, false),
+                ],
+                order,
+                "XHR",
+                Some("*/api/order"),
+            ),
+            // the first answering route wins; a fetch-only route earlier is skipped
+            (
+                vec![
+                    route("*/api/order", &["fetch"], true, false),
+                    route("*/api/*", &["xhr"], true, false),
+                ],
+                order,
+                "XHR",
+                Some("*/api/*"),
+            ),
+            (
+                vec![
+                    route("*/api/*", &[], true, false),
+                    route("*/api/order", &[], false, true),
+                ],
+                order,
+                "XHR",
+                Some("*/api/*"),
+            ),
+            // the browser's own types go through the same predicate
+            (
+                vec![route("*/a", &["fetch"], true, false)],
+                "http://h/a",
+                "Fetch",
+                Some("*/a"),
+            ),
+            (
+                vec![route("*/a", &["xhr"], true, false)],
+                "http://h/a",
+                "Fetch",
+                None,
+            ),
+        ];
+        for (i, (routes, url, rt, want)) in cases.iter().enumerate() {
+            let got = select_route(routes, url, rt).map(|r| {
+                if r.abort {
+                    "abort".to_string()
+                } else {
+                    r.response.as_ref().unwrap().body.clone().unwrap()
+                }
+            });
+            assert_eq!(got.as_deref(), *want, "case {i}");
+            // The flow's direct request is classified as the page's fetch().
+            if *rt == FLOW_DIRECT_RESOURCE_TYPE {
+                let flow = flow_route_answer(routes, url).map(|r| {
+                    if r.abort {
+                        "abort".to_string()
+                    } else {
+                        r.body
+                    }
+                });
+                assert_eq!(flow.as_deref(), *want, "flow case {i}");
+            }
+        }
     }
 
     #[tokio::test]
