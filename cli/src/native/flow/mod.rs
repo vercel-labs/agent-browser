@@ -7189,6 +7189,67 @@ mod tests {
             block_on(replay::send(flow, &[], browser, &mut run, &req, &ctx))
         }
 
+        fn pending(url: &str) -> HarEntry {
+            entry("p", url, "Fetch", "", "")
+        }
+
+        fn click_flow() -> Flow {
+            flow_of(json!({ "steps": [
+                { "command": { "action": "click", "selector": "#a" } },
+                { "command": { "action": "click", "selector": "#b" } }
+            ] }))
+        }
+
+        #[test]
+        fn a_third_party_request_that_never_finishes_does_not_hold_the_replay() {
+            let flow = click_flow();
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), vec![pending("https://tracker.example/poll")]);
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(5),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+
+        #[test]
+        fn each_replayed_command_waits_on_its_own_clock() {
+            let flow = click_flow();
+            // A first-party request that never finishes makes every command
+            // wait out its clock; the last command must still get its retry.
+            let mut browser = ScriptBrowser::new(
+                vec![
+                    json!({ "success": true }),
+                    json!({ "success": true }),
+                    json!({ "success": false, "error": "No element found for #b" }),
+                    json!({ "success": true }),
+                ],
+                vec![pending("https://api.a.test/poll")],
+            );
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_millis(400),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            assert_eq!(browser.ran.len(), 4);
+        }
+
         #[test]
         fn a_write_answer_captured_before_a_failing_command_is_drift() {
             let flow = cart_flow();

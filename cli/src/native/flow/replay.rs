@@ -365,8 +365,12 @@ pub fn replay_result(
 /// What the single replay of a run captured.
 pub struct ReplayRun {
     entries: Vec<HarEntry>,
-    failure: Option<String>,
+    pub(super) failure: Option<String>,
 }
+
+/// How long one replayed command, and the final wait for bodies, may wait
+/// for the page: the request timeout.
+const REPLAY_WAIT: Duration = Duration::from_secs(20);
 
 /// The replay tier over a browser. The recording runs at most once per run;
 /// every request that falls back to it reads from that capture.
@@ -411,7 +415,7 @@ pub async fn send(
                 id
             )));
         }
-        match capture(flow, params, browser, ctx.wanted, started).await {
+        match capture(flow, params, browser, ctx.wanted, REPLAY_WAIT).await {
             Ok(captured) => *run = Some(captured),
             Err(Ok(reason)) => return fail(Failure::unavailable(reason)),
             Err(Err(reason)) => return fail(Failure::drift(reason)),
@@ -446,15 +450,29 @@ pub async fn send(
     }
 }
 
+/// A request a later command may depend on: first-party, not telemetry, an
+/// XHR/Fetch or a document, and not a stream (a long poll never finishes).
+fn may_settle(e: &HarEntry, policy: &HostPolicy) -> bool {
+    if !policy.allows_url(&e.url) || is_telemetry(&e.url) {
+        return false;
+    }
+    let mime = e.mime_type.to_ascii_lowercase();
+    match e.resource_type.as_str() {
+        "XHR" | "Fetch" => mime.is_empty() || mime.contains("json"),
+        "Document" => mime.is_empty() || mime.contains("html"),
+        _ => false,
+    }
+}
+
 /// Run the recorded commands once and capture the requests they send.
 /// `Err(Ok(reason))` means the replay cannot run at all, `Err(Err(reason))`
 /// that it could not start.
-async fn capture(
+pub(super) async fn capture(
     flow: &Flow,
     params: &[(String, String)],
     browser: &mut dyn Browser,
     wanted: &[&PreparedRequest],
-    started: Instant,
+    wait: Duration,
 ) -> Result<ReplayRun, Result<String, String>> {
     browser.ensure_browser().await.map_err(Err)?;
     let mark = browser.begin_capture().await.map_err(Err)?;
@@ -469,9 +487,12 @@ async fn capture(
         browser.end_capture().await;
         return Err(Ok(reason));
     }
+    let policy = HostPolicy::of(flow);
     let mut failed = None;
     for (i, c) in commands.into_iter().enumerate() {
         let mut c = c;
+        // Each command waits on its own clock.
+        let deadline = Instant::now() + wait;
         c["id"] = json!(format!("flow-replay-{}", i + 1));
         // A page opened by the replay may still be rendering the element.
         let resp = loop {
@@ -480,17 +501,20 @@ async fn capture(
                 .get("error")
                 .and_then(|e| e.as_str())
                 .is_some_and(|e| e.contains("No element found") || e.contains("Element not found"));
-            if !missing || Instant::now() >= started + Duration::from_secs(20) {
+            if !missing || Instant::now() >= deadline {
                 break resp;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         };
         // The next command may depend on what this one fetched (a token the
-        // page keeps), so let its requests finish first.
+        // page keeps), so let its first-party requests finish first.
         loop {
             let seen = browser.captured_since(mark).await;
-            if seen.iter().all(|e| e.loading_finished_timestamp.is_some())
-                || Instant::now() >= started + Duration::from_secs(20)
+            if seen
+                .iter()
+                .filter(|e| may_settle(e, &policy))
+                .all(|e| e.loading_finished_timestamp.is_some())
+                || Instant::now() >= deadline
             {
                 break;
             }
@@ -498,7 +522,7 @@ async fn capture(
         }
         // The replay stops as soon as the tab leaves the flow's site.
         if let Some(url) = browser.tab_url().await.filter(|u| u.starts_with("http")) {
-            if let Err(reason) = HostPolicy::of(flow).check(&url) {
+            if let Err(reason) = policy.check(&url) {
                 failed = Some(format!(
                     "replay stopped after command {}: {}",
                     i + 1,
@@ -520,7 +544,7 @@ async fn capture(
     }
     // Bodies arrive on later event drains; wait within the request timeout
     // until every request that may fall back has its answer.
-    let deadline = started + Duration::from_secs(20);
+    let deadline = Instant::now() + wait;
     while failed.is_none() {
         let slice = browser.captured_since(mark).await;
         let ready = |w: &&PreparedRequest| {
