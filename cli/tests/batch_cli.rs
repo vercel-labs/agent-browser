@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const COMMANDS: &str = r#"[["stream","status"],["PUBLIC_SENTINEL"],["stream","status"]]"#;
@@ -383,5 +383,112 @@ fn batch_send_error_preserves_identity_without_a_daemon_response() {
         );
         assert!(row.get("result").is_none(), "{row}");
     }
+    server.join().unwrap();
+}
+
+#[test]
+fn errors_content_boundaries_skip_empty_results() {
+    let fixture = Fixture::new();
+    let bootstrap = fixture.run(&["stream", "status", "--json"], "", 0);
+    assert_eq!(bootstrap["success"], true);
+    let pid_file = fixture.0.path().join("s/batch-test.pid");
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    std::fs::remove_file(pid_file).unwrap();
+    let socket = fixture.0.path().join("s/batch-test.sock");
+    std::fs::remove_file(&socket).unwrap();
+    let listener = UnixListener::bind(socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        for errors in [
+            json!([]),
+            json!([{ "text": "first error" }, { "text": "second error" }]),
+            json!([]),
+            json!([]),
+        ] {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for an errors request"
+                );
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(err) => panic!("failed to accept errors request: {err}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                if stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .is_err()
+                {
+                    continue;
+                }
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                if line.is_empty() {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["action"], "errors");
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({ "success": true, "data": { "errors": errors } })
+                )
+                .unwrap();
+                break;
+            }
+        }
+    });
+
+    let empty = fixture.run_raw(&["errors", "--content-boundaries"], "", 0);
+    assert!(empty.stdout.is_empty(), "{empty:?}");
+
+    let populated = fixture.run_raw(&["errors", "--content-boundaries"], "", 0);
+    let output = std::str::from_utf8(&populated.stdout).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines.len(), 4, "{output}");
+    assert!(
+        lines[0].starts_with("--- AGENT_BROWSER_PAGE_CONTENT "),
+        "{output}"
+    );
+    let nonce = lines[0]
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("nonce="))
+        .unwrap();
+    assert!(lines[1].contains("first error"), "{output}");
+    assert!(lines[2].contains("second error"), "{output}");
+    assert_eq!(
+        lines[3],
+        format!("--- END_AGENT_BROWSER_PAGE_CONTENT nonce={nonce} ---")
+    );
+
+    let json = fixture.run(&["errors", "--content-boundaries", "--json"], "", 0);
+    assert_eq!(json["data"]["errors"], json!([]));
+    assert!(json["_boundary"].is_object(), "{json}");
+
+    let mcp = fixture.run(
+        &[
+            "mcp",
+            "call",
+            "agent_browser_errors",
+            r#"{"session":"batch-test"}"#,
+        ],
+        "",
+        0,
+    );
+    assert_eq!(mcp["isError"], false, "{mcp}");
+    assert_eq!(
+        mcp["structuredContent"]["response"]["data"]["errors"],
+        json!([])
+    );
     server.join().unwrap();
 }

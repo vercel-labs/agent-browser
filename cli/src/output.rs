@@ -1366,6 +1366,9 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         // Errors
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
+            if errors.is_empty() {
+                return;
+            }
             let lines: Vec<String> = errors
                 .iter()
                 .map(|err| {
