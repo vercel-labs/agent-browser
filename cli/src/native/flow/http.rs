@@ -143,7 +143,7 @@ pub fn http_client(
     flow: &Flow,
 ) -> Result<HttpClients, String> {
     let resolver = ReachResolver::system(Reach::of_start(&flow.start_url));
-    http_client_with(filter, flow, Arc::new(resolver))
+    http_client_with(filter, flow, Arc::new(resolver), Vec::new())
 }
 
 /// `http_client` with the resolver given, so a test can make a name resolve
@@ -152,9 +152,14 @@ pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
     filter: Option<crate::native::network::DomainFilter>,
     flow: &Flow,
     resolver: Arc<R>,
+    proxies: Vec<reqwest::Proxy>,
 ) -> Result<HttpClients, String> {
     let build = |policy| {
-        reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder();
+        for p in &proxies {
+            builder = builder.proxy(p.clone());
+        }
+        builder
             .redirect(policy)
             .dns_resolver(resolver.clone())
             .timeout(Duration::from_secs(20))

@@ -209,6 +209,8 @@ pub struct ReachResolver {
     pub inner: Arc<dyn Resolve>,
     pub reach: Reach,
     pub non_public: fn(IpAddr) -> bool,
+    /// Proxy hosts from the user's configuration: trusted, never filtered.
+    pub trusted: Vec<String>,
 }
 
 impl ReachResolver {
@@ -217,17 +219,53 @@ impl ReachResolver {
             inner: Arc::new(SystemResolver),
             reach,
             non_public: is_non_public,
+            trusted: proxy_hosts(|k| std::env::var(k).ok()),
         }
     }
+}
+
+/// Hosts of the proxies the environment configures, lowercase. reqwest
+/// resolves a proxy's host through the same resolver as the target's.
+pub fn proxy_hosts(env: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let mut hosts = Vec::new();
+    for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        for k in [key.to_string(), key.to_ascii_lowercase()] {
+            let Some(v) = env(&k).filter(|v| !v.trim().is_empty()) else {
+                continue;
+            };
+            let v = v.trim();
+            let full = if v.contains("://") {
+                v.to_string()
+            } else {
+                format!("http://{v}")
+            };
+            if let Some(h) = url::Url::parse(&full).ok().and_then(|u| {
+                u.host_str()
+                    .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+            }) {
+                if !hosts.contains(&h) {
+                    hosts.push(h);
+                }
+            }
+        }
+    }
+    hosts
 }
 
 impl Resolve for ReachResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let host = name.as_str().to_string();
         let (reach, non_public) = (self.reach, self.non_public);
+        let trusted = self
+            .trusted
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(host.trim_end_matches('.')));
         let inner = self.inner.resolve(name);
         Box::pin(async move {
             let addrs: Vec<SocketAddr> = inner.await?.collect();
+            if trusted {
+                return Ok(Box::new(addrs.into_iter()) as Addrs);
+            }
             let kept = admit(&host, addrs, reach, non_public)?;
             Ok(Box::new(kept.into_iter()) as Addrs)
         })
@@ -424,6 +462,7 @@ mod tests {
             inner: Arc::new(Fixed(vec![sock("127.0.0.1")])),
             reach: Reach::Public,
             non_public: is_non_public,
+            trusted: vec![],
         };
         let err = match rebound.resolve(name()).await {
             Ok(_) => panic!("loopback must be refused"),
@@ -434,6 +473,7 @@ mod tests {
             inner: Arc::new(Fixed(vec![sock("93.184.216.34")])),
             reach: Reach::Public,
             non_public: is_non_public,
+            trusted: vec![],
         };
         assert_eq!(ok.resolve(name()).await.unwrap().count(), 1);
     }
@@ -491,8 +531,9 @@ mod tests {
             inner: Arc::new(Fixed(mapped)),
             reach: Reach::of_start(start),
             non_public,
+            trusted: vec![],
         };
-        http_client_with(None, &flow, Arc::new(resolver)).unwrap()
+        http_client_with(None, &flow, Arc::new(resolver), vec![]).unwrap()
     }
 
     const OK: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
@@ -590,8 +631,9 @@ mod tests {
             inner: Arc::new(ByName(port)),
             reach: Reach::Public,
             non_public: loopback_is_public,
+            trusted: vec![],
         };
-        let client = http_client_with(None, &flow, Arc::new(resolver)).unwrap();
+        let client = http_client_with(None, &flow, Arc::new(resolver), vec![]).unwrap();
         let res = run_http(
             &client,
             &request(&format!("http://ok.example.com:{port}/")),
@@ -659,5 +701,53 @@ mod tests {
         let mixed = HostPolicy::from_start("https://shop.example.com/");
         assert!(mixed.check("http://127.0.0.1/").is_err());
         assert!(mixed.check("https://api.example.com/").is_ok());
+    }
+
+    #[test]
+    fn proxy_hosts_from_the_environment() {
+        let env = |k: &str| match k {
+            "HTTPS_PROXY" => Some("http://User:pw@Proxy.Corp:3128".to_string()),
+            "http_proxy" => Some("proxy.corp:3128".to_string()),
+            "ALL_PROXY" => Some("socks5://10.0.0.9:1080".to_string()),
+            "NO_PROXY" => Some("example.com".to_string()),
+            _ => None,
+        };
+        assert_eq!(proxy_hosts(env), vec!["proxy.corp", "10.0.0.9"]);
+        assert!(proxy_hosts(|_| None).is_empty());
+    }
+
+    async fn through_proxy(trusted: Vec<String>) -> (crate::native::flow::RequestResult, usize) {
+        let (port, hits) = serve(OK.to_string()).await;
+        let flow =
+            flow_of(json!({ "startUrl": "https://app.example.com/", "origin": "example.com" }));
+        let resolver = ReachResolver {
+            inner: Arc::new(Fixed(vec![SocketAddr::new(ip("127.0.0.1"), port)])),
+            reach: Reach::Public,
+            non_public: is_non_public,
+            trusted,
+        };
+        let proxy = reqwest::Proxy::all(format!("http://proxy.corp:{port}")).unwrap();
+        let client =
+            crate::native::flow::http_client_with(None, &flow, Arc::new(resolver), vec![proxy])
+                .unwrap();
+        let res = run_http(&client, &request("http://app.example.com/"), None, None).await;
+        (res, hits.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn a_private_proxy_host_is_resolved_through_the_filter() {
+        let (res, hits) = through_proxy(vec![]).await;
+        assert!(res
+            .reason
+            .unwrap_or_default()
+            .contains("proxy.corp resolved to a non-public"));
+        assert_eq!(hits, 0);
+    }
+
+    #[tokio::test]
+    async fn a_configured_proxy_host_is_not_filtered() {
+        let (res, hits) = through_proxy(vec!["proxy.corp".to_string()]).await;
+        assert!(!res.reason.unwrap_or_default().contains("resolved to"));
+        assert_eq!(hits, 1, "the request went to the proxy");
     }
 }
