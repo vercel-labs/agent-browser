@@ -70,6 +70,7 @@ pub(crate) fn full_flags() -> Flags {
     f.color_scheme = Some("dark".to_string());
     f.download_path = Some("/downloads".to_string());
     f.context = Some("tenant-a".to_string());
+    f.capture = Some(vec!["flow".to_string()]);
     f.allowed_domains = Some(vec!["a.test".to_string(), "*.b.test".to_string()]);
     f.action_policy = Some("/policy.json".to_string());
     f.confirm_actions = Some("click,fill".to_string());
@@ -218,6 +219,7 @@ fn patch_carries_every_daemon_options_field() {
     assert_eq!(set(&p, Key::RestoreCheckText), json!("Welcome")); // restore_check_text
     assert_eq!(set(&p, Key::RestoreCheckFn), json!("() => true")); // restore_check_fn
     assert_eq!(set(&p, Key::DownloadPath), json!("/downloads")); // download_path
+    assert_eq!(set(&p, Key::Capture), json!(["flow"])); // capture
     assert_eq!(set(&p, Key::AllowedDomains), json!(["a.test", "*.b.test"])); // allowed_domains
     assert_eq!(set(&p, Key::ActionPolicy), json!("/policy.json")); // action_policy
     assert_eq!(set(&p, Key::ConfirmActions), json!("click,fill")); // confirm_actions
