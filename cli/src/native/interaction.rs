@@ -253,8 +253,10 @@ pub async fn fill(
 /// the input type when it rejected the value, and `"text"` otherwise.
 const FILL_DATE_TIME_INPUT_JS: &str = r#"function(value) {
     const types = ['date', 'time', 'datetime-local', 'month', 'week'];
-    if (!(this instanceof HTMLInputElement) || !types.includes(this.type)) return 'text';
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    // tagName + own-realm prototype: instanceof HTMLInputElement fails across iframe realms
+    if (!this || String(this.tagName).toUpperCase() !== 'INPUT' || !types.includes(this.type)) return 'text';
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(this), 'value')?.set;
+    if (!setter) return 'text';
     setter.call(this, value.trim());
     if (value.trim() !== '' && this.value === '') return this.type;
     this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
