@@ -164,6 +164,37 @@ const URL_KEYS: &[&str] = &[
     "url", "href", "src", "action", "uri", "location", "origin", "target",
 ];
 
+/// A URL pattern with `*` (a `wait --url` glob): its host part is checked
+/// with each `*` standing for a letter, so a pattern can only reach the
+/// site's own hosts; a pattern whose host cannot be read is refused. A
+/// pattern with no host is a path and stays on the page's site.
+fn check_glob(policy: &HostPolicy, text: &str) -> Result<(), String> {
+    let refused = || format!("'{}' is not a URL on the flow's site", text.trim());
+    let text: String = text
+        .trim_start_matches(|c: char| c.is_control() || c == ' ')
+        .replace('\\', "/");
+    let rest = match text.split_once("://") {
+        Some((scheme, rest))
+            if matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") =>
+        {
+            rest
+        }
+        Some(_) => return Err(refused()),
+        None if text.starts_with("//") => text.trim_start_matches('/'),
+        None => return Ok(()),
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit('@').next().unwrap_or("");
+    let host = match hostport.rsplit_once(':') {
+        Some((host, port)) if !port.contains(']') => host,
+        _ => hostport,
+    };
+    if host.is_empty() || !policy.allows_host(&host.replace('*', "a")) {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 /// Check one value the way a browser reads it: the URL parser drops tabs,
 /// newlines and leading control characters, so a string that parses as an
 /// http(s) URL is host-checked whatever it looks like before parsing. A value
@@ -182,6 +213,10 @@ fn check_value(
             let forced = key.is_some_and(|k| URL_KEYS.contains(&k));
             let parsed = match (url::Url::parse(text), forced) {
                 (Ok(parsed), _) => Some(parsed),
+                (Err(_), true) if text.contains('*') => {
+                    check_glob(policy, text)?;
+                    None
+                }
                 (Err(_), true) => Some(
                     base.and_then(|b| b.join(text).ok())
                         .ok_or_else(|| format!("'{}' is not a valid URL", text.trim()))?,

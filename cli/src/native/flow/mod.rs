@@ -7560,6 +7560,37 @@ mod tests {
         }
 
         #[test]
+        fn wait_globs_on_the_site_pass_the_replay_host_check() {
+            let flow = flow_of(
+                json!({ "startUrl": "https://example.com/app", "allowedHosts": ["example.com"] }),
+            );
+            let check = |url: &str| {
+                check_replay_commands(&flow, &[json!({ "action": "wait", "url": url })])
+            };
+            for ok in [
+                "https://example.com:*/x",
+                "**/dashboard",
+                "*/cart",
+                "https://*.example.com/x",
+                "//www.example.com:*/",
+                "https://example.com/**",
+            ] {
+                assert!(check(ok).is_ok(), "{ok}: {:?}", check(ok));
+            }
+            for bad in [
+                "https://evil.test:*/x",
+                "https://*/x",
+                "//*.evil.test/x",
+                "https://example.com@evil.test:*/",
+                "https://*evil.test/",
+                "https://example.com.*/x",
+                "ftp://example.com:*/x",
+            ] {
+                assert!(check(bad).is_err(), "{bad}");
+            }
+        }
+
+        #[test]
         fn a_write_answer_captured_before_a_failing_command_is_drift() {
             let flow = cart_flow();
             let mut browser = ScriptBrowser::new(
