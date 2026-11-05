@@ -1888,15 +1888,18 @@ mod tests {
 
     #[test]
     fn test_box_model_center() {
-        let model = BoxModel {
-            content: vec![10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
-            padding: vec![],
-            border: vec![],
-            margin: vec![],
-            width: 100,
-            height: 40,
-        };
-        let (x, y) = box_model_center(&model);
+        let response: DomGetBoxModelResult = serde_json::from_value(serde_json::json!({
+            "model": {
+                "content": [10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
+                "padding": [9.0, 19.0, 111.0, 19.0, 111.0, 61.0, 9.0, 61.0],
+                "border": [8.0, 18.0, 112.0, 18.0, 112.0, 62.0, 8.0, 62.0],
+                "margin": [7.0, 17.0, 113.0, 17.0, 113.0, 63.0, 7.0, 63.0],
+                "width": 100.5,
+                "height": 40.25
+            }
+        }))
+        .unwrap();
+        let (x, y) = box_model_center(&response.model);
         assert!((x - 60.0).abs() < 0.01);
         assert!((y - 40.0).abs() < 0.01);
     }

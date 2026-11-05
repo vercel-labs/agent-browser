@@ -343,7 +343,7 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
     Ok(headers)
 }
 
-/// Parses command arguments into normalized command data.
+/// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
@@ -352,7 +352,6 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     // doesn't already carry an explicit timeout. Centralised here so that new
     // wait variants automatically inherit the default without per-variant wiring.
     inherit_wait_timeout(&mut result, flags.default_timeout);
-    attach_ca_cert_to_launch_command(&mut result, flags);
 
     Ok(result)
 }
@@ -368,18 +367,6 @@ pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
         .is_some_and(|action| action.starts_with("wait"));
     if is_wait && cmd.get("timeout").is_none() {
         cmd["timeout"] = json!(timeout);
-    }
-}
-
-pub fn attach_ca_cert_to_launch_command(cmd: &mut Value, flags: &Flags) {
-    if cmd.get("action").and_then(Value::as_str) != Some("launch") {
-        return;
-    }
-    if let Some(ref ca) = flags.ca_cert {
-        cmd["caCert"] = json!(ca);
-    }
-    if flags.clear_ca_cert {
-        cmd["clearCaCert"] = json!(true);
     }
 }
 
@@ -415,7 +402,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let url = match first_url {
                 Some(u) => *u,
                 None if cmd == "open" => {
-                    return Ok(json!({ "id": id, "action": "launch", "headless": !flags.headed }));
+                    return Ok(json!({ "id": id, "action": "launch" }));
                 }
                 None => {
                     return Err(ParseError::MissingArguments {
@@ -486,7 +473,12 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "fill".to_string(),
                 usage: "fill <selector> <text>",
             })?;
-            Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": rest[1..].join(" ") }))
+            let text = if rest.get(1) == Some(&"--") {
+                &rest[2..]
+            } else {
+                &rest[1..]
+            };
+            Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": text.join(" ") }))
         }
         "type" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -502,6 +494,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let mut i = 1;
             while i < rest.len() {
                 match rest[i] {
+                    "--" => {
+                        text_parts.extend_from_slice(&rest[i + 1..]);
+                        break;
+                    }
                     "--clear" => clear = true,
                     "--delay" => {
                         // Error rather than silently drop a malformed value;
@@ -1652,7 +1648,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(json!({ "id": id, "action": "cookies_set", "cookies": [cookie] }))
                 }
                 "clear" => Ok(json!({ "id": id, "action": "cookies_clear" })),
-                _ => Ok(json!({ "id": id, "action": "cookies_get" })),
+                "get" => Ok(json!({ "id": id, "action": "cookies_get" })),
+                _ => Err(ParseError::UnknownSubcommand {
+                    subcommand: op.to_string(),
+                    valid_options: &["get", "set", "clear"],
+                }),
             }
         }
 
@@ -3418,6 +3418,7 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+/// Parse mouse arguments, requiring finite coordinates and wheel deltas.
 fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["move", "down", "up", "wheel"];
 
@@ -3431,18 +3432,8 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "mouse move".to_string(),
                 usage: "mouse move <x> <y>",
             })?;
-            let x = x_str
-                .parse::<i32>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "mouse move".to_string(),
-                    usage: "mouse move <x> <y>",
-                })?;
-            let y = y_str
-                .parse::<i32>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "mouse move".to_string(),
-                    usage: "mouse move <x> <y>",
-                })?;
+            let x = parse_finite_f64(x_str, "mouse move x", "mouse move <x> <y>")?;
+            let y = parse_finite_f64(y_str, "mouse move y", "mouse move <x> <y>")?;
             let mut cmd = json!({ "id": id, "action": "mousemove", "x": x, "y": y });
             let mut i = 3;
             while i < rest.len() {
@@ -3477,11 +3468,15 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             Ok(json!({ "id": id, "action": "mouseup", "button": rest.get(1).unwrap_or(&"left") }))
         }
         Some("wheel") => {
-            let dy = rest
-                .get(1)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(100);
-            let dx = rest.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            let usage = "mouse wheel [deltaY] [deltaX]";
+            let dy = match rest.get(1) {
+                Some(raw) => parse_finite_f64(raw, "mouse wheel deltaY", usage)?,
+                None => 100.0,
+            };
+            let dx = match rest.get(2) {
+                Some(raw) => parse_finite_f64(raw, "mouse wheel deltaX", usage)?,
+                None => 0.0,
+            };
             Ok(json!({ "id": id, "action": "wheel", "deltaX": dx, "deltaY": dy }))
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
@@ -3892,6 +3887,7 @@ mod tests {
             webgpu: false,
             no_webmcp: false,
             no_xvfb: false,
+            no_xvfb_set: false,
             device: None,
             auto_connect: false,
             pin_tab: false,
@@ -3942,6 +3938,7 @@ mod tests {
             idle_timeout: None,
             default_timeout: None,
             no_auto_dialog: false,
+            relaunch: false,
             model: None,
             plugins: Vec::new(),
             verbose: false,
@@ -4555,16 +4552,19 @@ mod tests {
     fn test_open_without_url_launches() {
         let cmd = parse_command(&args("open"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
-        assert_eq!(cmd["headless"], true);
+        assert!(cmd.get("headless").is_none());
     }
 
     #[test]
-    fn test_open_without_url_headed() {
+    fn test_open_without_url_leaves_headed_to_settings() {
         let mut flags = default_flags();
         flags.headed = true;
         let cmd = parse_command(&args("open"), &flags).unwrap();
         assert_eq!(cmd["action"], "launch");
-        assert_eq!(cmd["headless"], false);
+        assert!(
+            cmd.get("headless").is_none(),
+            "headed rides in the settings patch, not the launch command"
+        );
     }
 
     #[test]
@@ -4917,11 +4917,60 @@ mod tests {
     }
 
     #[test]
+    fn test_mouse_move_decimal_coordinates() {
+        let cmd = parse_command(&args("mouse move 10.5 20.25"), &default_flags()).unwrap();
+        assert_eq!(cmd["x"], 10.5);
+        assert_eq!(cmd["y"], 20.25);
+    }
+
+    #[test]
+    fn test_mouse_rejects_invalid_or_nonfinite_values() {
+        for command in [
+            "mouse move nope 1",
+            "mouse move NaN 1",
+            "mouse move 1 nope",
+            "mouse move 1 inf",
+            "mouse wheel nope",
+            "mouse wheel NaN",
+            "mouse wheel 1 nope",
+            "mouse wheel 1 -inf",
+        ] {
+            assert!(matches!(
+                parse_command(&args(command), &default_flags()),
+                Err(ParseError::InvalidValue { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn test_fill() {
         let cmd = parse_command(&args("fill #input hello world"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "fill");
         assert_eq!(cmd["selector"], "#input");
         assert_eq!(cmd["value"], "hello world");
+    }
+
+    #[test]
+    fn test_fill_and_type_preserve_text_after_end_of_options() {
+        let fill_args = args("fill #input -- --config /missing --json café 世界");
+        let fill = parse_command(&crate::flags::clean_args(&fill_args), &default_flags()).unwrap();
+        assert_eq!(fill["value"], "--config /missing --json café 世界");
+
+        let empty_fill = parse_command(&args("fill #input --"), &default_flags()).unwrap();
+        assert_eq!(empty_fill["value"], "");
+
+        let type_args =
+            args("type #input --clear --delay 7 -- --clear --delay 99 café 世界 -- --help");
+        let typed = parse_command(&crate::flags::clean_args(&type_args), &default_flags()).unwrap();
+        assert_eq!(typed["clear"], true);
+        assert_eq!(typed["delay"], 7);
+        assert_eq!(typed["text"], "--clear --delay 99 café 世界 -- --help");
+
+        let empty_type =
+            parse_command(&args("type #input --clear --delay 7 --"), &default_flags()).unwrap();
+        assert_eq!(empty_type["clear"], true);
+        assert_eq!(empty_type["delay"], 7);
+        assert_eq!(empty_type["text"], "");
     }
 
     #[test]
@@ -6049,10 +6098,21 @@ mod tests {
 
     #[test]
     fn test_mouse_wheel() {
-        let cmd = parse_command(&args("mouse wheel 100 50"), &default_flags()).unwrap();
+        let cmd = parse_command(&args("mouse wheel 100.5 50.25"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wheel");
-        assert_eq!(cmd["deltaY"], 100);
-        assert_eq!(cmd["deltaX"], 50);
+        assert_eq!(cmd["deltaY"], 100.5);
+        assert_eq!(cmd["deltaX"], 50.25);
+    }
+
+    #[test]
+    fn test_mouse_wheel_defaults_and_zero() {
+        let defaults = parse_command(&args("mouse wheel"), &default_flags()).unwrap();
+        assert_eq!(defaults["deltaY"], 100.0);
+        assert_eq!(defaults["deltaX"], 0.0);
+
+        let zero = parse_command(&args("mouse wheel 0 0"), &default_flags()).unwrap();
+        assert_eq!(zero["deltaY"], 0.0);
+        assert_eq!(zero["deltaX"], 0.0);
     }
 
     #[test]

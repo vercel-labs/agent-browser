@@ -116,7 +116,7 @@ agent-browser flow run search --param q="toaster" --fields title,price --limit 3
 
 ### Capturing
 
-`--capture flow` is a launch option, like `--allowed-domains`. It applies when the session opens and records every command with the requests it caused until `close`. Passing it to a session that is already running without it fails with a message to close and reopen. `flow` is the only supported value; any other value fails and lists the supported ones.
+`--capture flow` is a launch setting, like `--allowed-domains`. It records every command with the requests it caused until `close`. Passing it to a session that is already running without it relaunches the browser, as any changed launch setting does, and capture starts from that page. Later commands that repeat it or omit it do not relaunch. `flow` is the only supported value; any other value fails and lists the supported ones.
 
 Every recorded command returns `recorded: {seq}` in its JSON response. Failed commands stay in the recording with `ok: false`, because a failed click may still have sent requests, but the saved file keeps only the requests. `close` reports `unsaved: {steps: N}` when steps after the last save exist.
 

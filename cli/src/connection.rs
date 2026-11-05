@@ -663,61 +663,15 @@ fn daemon_config_json(opts: &DaemonOptions) -> String {
 }
 
 /// Whether the running daemon's stored config satisfies this invocation.
-/// Policy options a command leaves unset defer to the running daemon, and a
-/// different explicit value requires a restart. Idle and default timeouts
-/// never restart a running daemon: they are lifetimes, not page state, so a
-/// differing value is reported by `ignored_timeout_overrides` instead.
+/// Only `debug` needs a restart: it redirects the daemon's stderr at startup.
+/// Every other option is a session setting the daemon applies in place when
+/// the command carries it.
 fn daemon_config_compatible(stored: &str, opts: &DaemonOptions) -> bool {
     let Ok(stored) = serde_json::from_str::<Value>(stored) else {
         // Config from an older CLI is a bare hash: compare it exactly.
         return stored.trim() == daemon_config_fingerprint(opts);
     };
-    let optional_matches = |key: &str, requested: Option<Value>| match requested {
-        None => true,
-        Some(requested) => stored.get(key) == Some(&requested),
-    };
-    optional_matches("action_policy", opts.action_policy.map(Value::from))
-        && optional_matches("confirm_actions", opts.confirm_actions.map(Value::from))
-        && stored.get("debug") == Some(&Value::Bool(opts.debug))
-        && stored.get("no_auto_dialog") == Some(&Value::Bool(opts.no_auto_dialog))
-}
-
-/// Timeouts this invocation sets explicitly that differ from the running
-/// daemon's, as `(name, requested, running)`. `running` is `None` when the
-/// daemon uses its built-in default.
-fn ignored_timeout_overrides(
-    stored: &str,
-    opts: &DaemonOptions,
-) -> Vec<(&'static str, String, Option<String>)> {
-    let Ok(stored) = serde_json::from_str::<Value>(stored) else {
-        return Vec::new();
-    };
-    let running = |key: &str| match stored.get(key) {
-        Some(Value::String(value)) => Some(value.clone()),
-        Some(Value::Number(value)) => Some(value.to_string()),
-        _ => None,
-    };
-    let mut ignored = Vec::new();
-    for (name, key, requested) in [
-        (
-            "idle timeout",
-            "idle_timeout",
-            opts.idle_timeout.map(str::to_string),
-        ),
-        (
-            "default timeout",
-            "default_timeout",
-            opts.default_timeout.map(|ms| ms.to_string()),
-        ),
-    ] {
-        if let Some(requested) = requested {
-            let current = running(key);
-            if current.as_deref() != Some(requested.as_str()) {
-                ignored.push((name, requested, current));
-            }
-        }
-    }
-    ignored
+    stored.get("debug") == Some(&Value::Bool(opts.debug))
 }
 
 /// Default timeout the session's running daemon was started with, so a
@@ -730,23 +684,22 @@ pub fn running_daemon_default_timeout(session: &str) -> Option<u64> {
         .as_u64()
 }
 
-fn warn_ignored_timeout_overrides(session: &str, opts: &DaemonOptions) {
-    let Ok(stored) = fs::read_to_string(get_config_path(session)) else {
+/// Records a default timeout changed while the daemon runs, so a command that
+/// omits the flag waits on the client as long as the daemon now does. `None`
+/// removes it. A missing or legacy config is left alone.
+pub fn record_daemon_default_timeout(session: &str, timeout: Option<u64>) {
+    let path = get_config_path(session);
+    let Ok(stored) = fs::read_to_string(&path) else {
         return;
     };
-    for (name, requested, current) in ignored_timeout_overrides(&stored, opts) {
-        let current = current
-            .map(|value| format!("{} {}", name, value))
-            .unwrap_or_else(|| "the default".to_string());
-        eprintln!(
-            "{} Ignoring {} {}: session \"{}\" is already running with {}. Close the session to change it.",
-            crate::color::warning_indicator(),
-            name,
-            requested,
-            session,
-            current
-        );
-    }
+    let Ok(Value::Object(mut config)) = serde_json::from_str::<Value>(&stored) else {
+        return;
+    };
+    match timeout {
+        Some(ms) => config.insert("default_timeout".to_string(), json!(ms)),
+        None => config.remove("default_timeout"),
+    };
+    let _ = fs::write(&path, Value::Object(config).to_string());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -983,10 +936,7 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
             // Fall through to spawn a new daemon below
         } else {
             match ready_existing_daemon_result(session, opts, Duration::from_secs(1)) {
-                Some(result) => {
-                    warn_ignored_timeout_overrides(session, opts);
-                    return Ok(result);
-                }
+                Some(result) => return Ok(result),
                 None => {
                     stop_existing_daemon_for_restart(session);
                     restarted = true;
@@ -1790,7 +1740,8 @@ mod tests {
 
         let session = "race-config";
         let winner_opts = test_daemon_options(Some("1000"), false, None);
-        let loser_opts = test_daemon_options(Some("1000"), true, None);
+        let mut loser_opts = test_daemon_options(Some("1000"), false, None);
+        loser_opts.debug = true;
 
         fs::create_dir_all(get_socket_dir()).unwrap();
         fs::write(get_pid_path(session), "12345").unwrap();
@@ -1875,13 +1826,16 @@ mod tests {
     }
 
     #[test]
-    fn test_daemon_config_timeouts_never_require_restart() {
+    fn test_daemon_config_session_settings_never_require_restart() {
         let mut started = test_daemon_options(Some("0"), false, None);
         started.default_timeout = Some(90_000);
+        started.action_policy = Some("/tmp/policy.json");
         let stored = daemon_config_json(&started);
 
-        let mut changed = test_daemon_options(Some("60000"), false, None);
+        let mut changed = test_daemon_options(Some("60000"), true, None);
         changed.default_timeout = Some(5_000);
+        changed.action_policy = Some("/tmp/other.json");
+        changed.confirm_actions = Some("click");
         assert!(daemon_config_compatible(&stored, &changed));
         assert!(daemon_config_compatible(
             &stored,
@@ -1893,59 +1847,7 @@ mod tests {
     }
 
     #[test]
-    fn test_daemon_config_reports_ignored_timeouts() {
-        let mut started = test_daemon_options(Some("0"), false, None);
-        started.default_timeout = Some(90_000);
-        let stored = daemon_config_json(&started);
-
-        assert!(ignored_timeout_overrides(&stored, &started).is_empty());
-        assert!(
-            ignored_timeout_overrides(&stored, &test_daemon_options(None, false, None)).is_empty()
-        );
-
-        let mut changed = test_daemon_options(Some("60000"), false, None);
-        changed.default_timeout = Some(5_000);
-        assert_eq!(
-            ignored_timeout_overrides(&stored, &changed),
-            vec![
-                ("idle timeout", "60000".to_string(), Some("0".to_string())),
-                (
-                    "default timeout",
-                    "5000".to_string(),
-                    Some("90000".to_string())
-                ),
-            ]
-        );
-
-        let bare_daemon = daemon_config_json(&test_daemon_options(None, false, None));
-        assert_eq!(
-            ignored_timeout_overrides(&bare_daemon, &changed),
-            vec![
-                ("idle timeout", "60000".to_string(), None),
-                ("default timeout", "5000".to_string(), None),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_daemon_config_unset_policy_defers_and_different_policy_restarts() {
-        let mut started = test_daemon_options(None, false, None);
-        started.action_policy = Some("/tmp/policy.json");
-        let stored = daemon_config_json(&started);
-
-        assert!(daemon_config_compatible(
-            &stored,
-            &test_daemon_options(None, false, None)
-        ));
-        assert!(daemon_config_compatible(&stored, &started));
-
-        let mut changed = test_daemon_options(None, false, None);
-        changed.action_policy = Some("/tmp/other.json");
-        assert!(!daemon_config_compatible(&stored, &changed));
-    }
-
-    #[test]
-    fn test_daemon_config_bool_change_requires_restart() {
+    fn test_daemon_config_debug_change_requires_restart() {
         let base = test_daemon_options(None, false, None);
         let mut debug = test_daemon_options(None, false, None);
         debug.debug = true;
@@ -1953,10 +1855,6 @@ mod tests {
 
         assert!(daemon_config_compatible(&stored, &base));
         assert!(!daemon_config_compatible(&stored, &debug));
-        assert!(!daemon_config_compatible(
-            &stored,
-            &test_daemon_options(None, true, None)
-        ));
     }
 
     #[test]
@@ -1987,7 +1885,6 @@ mod tests {
             &stored,
             &test_daemon_options(Some("2000"), false, None)
         ));
-        assert!(ignored_timeout_overrides(&stored, &opts).is_empty());
     }
 
     // === Transient Error Detection Tests ===
@@ -2194,5 +2091,33 @@ mod tests {
         assert!(!version_path.exists());
 
         let _ = fs::remove_dir(&dir);
+    }
+    #[test]
+    fn test_recorded_default_timeout_is_what_later_commands_inherit() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        fs::create_dir_all(get_socket_dir()).unwrap();
+
+        let mut started = test_daemon_options(None, false, None);
+        started.default_timeout = Some(90_000);
+        started.action_policy = Some("/tmp/policy.json");
+        write_daemon_config("timeout-live", &started);
+
+        record_daemon_default_timeout("timeout-live", Some(5_000));
+        assert_eq!(running_daemon_default_timeout("timeout-live"), Some(5_000));
+        let stored = fs::read_to_string(get_config_path("timeout-live")).unwrap();
+        assert!(
+            stored.contains("policy.json"),
+            "other options are kept: {stored}"
+        );
+
+        record_daemon_default_timeout("timeout-live", None);
+        assert_eq!(running_daemon_default_timeout("timeout-live"), None);
+
+        // No config, no file created.
+        record_daemon_default_timeout("never-started", Some(1));
+        assert!(!get_config_path("never-started").exists());
     }
 }

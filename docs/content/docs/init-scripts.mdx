@@ -29,18 +29,17 @@ agent-browser --enable react-devtools open http://localhost:3000
 
 `react-devtools` is the built-in feature currently available. It installs the React DevTools hook before application code runs and is required for `react tree`, `react inspect`, `react renders`, and `react suspense`.
 
-## Runtime scripts
+<span id="runtime-scripts" />
+
+## Removing init scripts
+
+Register scripts before the first navigation with `--init-script <path>`. Runtime registration is unsupported. Init scripts run before page JavaScript in future documents and do not change code that has already run.
 
 ```bash
-agent-browser addinitscript "window.__testMode = true"
-# Returns an identifier
-
 agent-browser removeinitscript <identifier>
 ```
 
-Runtime init scripts are useful after a session has started. They are still init scripts, so they affect future documents and navigations rather than rewriting already-executed page code.
-
-Runtime init-script identifiers are session-wide. `removeinitscript` removes the script from every open tab where it was registered and prevents it from being replayed into tabs opened later.
+Init-script identifiers are session-wide. `removeinitscript` removes a script from every open tab where it was registered and prevents it from being replayed into future tabs.
 
 ## Pre-navigation setup
 
