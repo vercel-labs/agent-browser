@@ -89,7 +89,7 @@ struct ActiveProviderSession {
 #[derive(Clone)]
 pub struct HarEntry {
     pub request_id: String,
-    /// Seconds since Unix epoch (CDP `wallTime`), with sub-second precision.
+    /// Seconds since Unix epoch from CDP `wallTime` or a BiDi event timestamp.
     pub wall_time: f64,
     // Request fields
     pub method: String,
@@ -113,6 +113,8 @@ pub struct HarEntry {
     /// Monotonic timestamp (seconds) from `Network.loadingFinished`; used to
     /// compute the `receive` timing phase.
     pub loading_finished_timestamp: Option<f64>,
+    pub response_started_timestamp: Option<f64>,
+    pub response_completed_timestamp: Option<f64>,
     /// Response body fetched via `Network.getResponseBody` when the entry
     /// finished loading, subject to the active [`HarContentMode`] and size caps.
     pub response_body: Option<String>,
@@ -2229,6 +2231,8 @@ impl DaemonState {
                                         response_body_size: -1,
                                         cdp_timing: None,
                                         loading_finished_timestamp: None,
+                                        response_started_timestamp: None,
+                                        response_completed_timestamp: None,
                                         response_body: None,
                                         response_body_base64: false,
                                     });
@@ -12428,8 +12432,13 @@ fn har_entry_to_json(e: HarEntry) -> Value {
         .map(|(k, v)| json!({ "name": k, "value": v }))
         .collect();
 
-    let (timings, total_time) =
-        har_compute_timings(e.cdp_timing.as_ref(), e.loading_finished_timestamp);
+    let (timings, total_time) = e
+        .response_started_timestamp
+        .zip(e.response_completed_timestamp)
+        .map(|(started, completed)| har_compute_bidi_timings(e.wall_time, started, completed))
+        .unwrap_or_else(|| {
+            har_compute_timings(e.cdp_timing.as_ref(), e.loading_finished_timestamp)
+        });
 
     let mime_type = if e.mime_type.is_empty() {
         "application/octet-stream".to_string()
@@ -12667,6 +12676,18 @@ fn har_compute_timings(
     }
 
     (timings, total)
+}
+
+fn har_compute_bidi_timings(started: f64, response_started: f64, completed: f64) -> (Value, f64) {
+    let millis = |end: f64, start: f64| ((end - start) * 1000.0).max(0.0);
+    (
+        json!({
+            "send": 0,
+            "wait": millis(response_started, started),
+            "receive": millis(completed, response_started),
+        }),
+        millis(completed, started),
+    )
 }
 
 /// Format a Unix epoch timestamp (seconds, fractional) as RFC 3339 using the
@@ -19312,6 +19333,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 42,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: Some(1773576000.4),
+            response_completed_timestamp: Some(1773576000.42),
             response_body: None,
             response_body_base64: false,
         };
@@ -19337,6 +19360,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
         assert_eq!(har["response"]["cookies"][0]["value"], "xyz");
         assert_eq!(har["_resourceType"], "XHR");
+        assert_eq!(har["timings"]["send"], 0);
+        assert!((har["timings"]["wait"].as_f64().unwrap() - 400.0).abs() < 0.001);
+        assert!((har["timings"]["receive"].as_f64().unwrap() - 20.0).abs() < 0.001);
+        assert!((har["time"].as_f64().unwrap() - 420.0).abs() < 0.001);
         // No body captured: content carries size/MIME only.
         assert!(har["response"]["content"].get("text").is_none());
         assert!(har["response"]["content"].get("encoding").is_none());
@@ -19362,6 +19389,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 13,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: Some(r#"{"items":[1]}"#.to_string()),
             response_body_base64: false,
         };
@@ -19369,6 +19398,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let har = har_entry_to_json(entry.clone());
         assert_eq!(har["response"]["content"]["text"], r#"{"items":[1]}"#);
         assert!(har["response"]["content"].get("encoding").is_none());
+        assert_eq!(har["timings"]["send"], 0);
+        assert_eq!(har["timings"]["wait"], 0);
+        assert_eq!(har["timings"]["receive"], 0);
+        assert_eq!(har["time"], 0.0);
 
         entry.response_body = Some("aGVsbG8=".to_string());
         entry.response_body_base64 = true;
@@ -19458,6 +19491,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 0,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: None,
             response_body_base64: false,
         };
@@ -19515,6 +19550,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 128,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: None,
             response_body_base64: false,
         });
@@ -19564,6 +19601,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 64,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: None,
             response_body_base64: false,
         });

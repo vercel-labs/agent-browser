@@ -455,12 +455,13 @@ async fn apply_events(state: &mut DaemonState, events: Vec<Value>) {
         let id = p.request.request.as_str();
         match method {
             "network.beforeRequestSent" => request_started(state, &p),
-            "network.responseStarted" => response_seen(state, &p),
+            "network.responseStarted" => response_seen(state, &p, true),
             "network.responseCompleted" => {
-                response_seen(state, &p);
+                response_seen(state, &p, false);
                 if let Some(ff) = state.firefox.as_mut() {
                     ff.inflight.remove(id);
                 }
+                har_request_body(state, id).await;
                 har_body(state, id).await;
             }
             "network.fetchError" => {
@@ -504,6 +505,8 @@ fn request_started(state: &mut DaemonState, p: &NetworkEvent) {
             response_body_size: -1,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: None,
             response_body_base64: false,
         });
@@ -524,7 +527,7 @@ fn request_started(state: &mut DaemonState, p: &NetworkEvent) {
     }
 }
 
-fn response_seen(state: &mut DaemonState, p: &NetworkEvent) {
+fn response_seen(state: &mut DaemonState, p: &NetworkEvent, started: bool) {
     let id = p.request.request.as_str();
     let response = &p.response;
     let status = response.status;
@@ -548,6 +551,12 @@ fn response_seen(state: &mut DaemonState, p: &NetworkEvent) {
                 .unwrap_or_default();
             entry.response_headers = headers;
             entry.response_body_size = response.body_size.or(response.content.size).unwrap_or(-1);
+            let timestamp = Some(p.timestamp as f64 / 1000.0);
+            if started {
+                entry.response_started_timestamp = timestamp;
+            } else {
+                entry.response_completed_timestamp = timestamp;
+            }
         }
     }
     if state.request_tracking {
@@ -564,15 +573,50 @@ fn response_seen(state: &mut DaemonState, p: &NetworkEvent) {
     }
 }
 
-/// Reads the body bytes of a collected response as `(text, is_base64)`.
-async fn response_data(bidi: &BidiClient, id: &str) -> Result<(String, bool), String> {
+async fn data(bidi: &BidiClient, id: &str, data_type: &str) -> Result<(String, bool), String> {
     let r: NetworkData = bidi
         .send_typed(
             "network.getData",
-            &json!({"dataType": "response", "request": id}),
+            &json!({"dataType": data_type, "request": id}),
         )
         .await?;
     Ok((r.bytes.raw().to_string(), r.bytes.is_base64()))
+}
+
+async fn har_request_body(state: &mut DaemonState, id: &str) {
+    let wanted = state.har_recording
+        && state
+            .har_entries
+            .iter()
+            .rev()
+            .find(|e| e.request_id == id)
+            .is_some_and(|e| e.post_data.is_none());
+    let Some(ff) = state.firefox.as_ref().filter(|_| wanted) else {
+        return;
+    };
+    let Ok((body, base64)) = data(&ff.bidi, id, "request").await else {
+        return;
+    };
+    let body = if base64 {
+        let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body)
+        else {
+            return;
+        };
+        let Ok(body) = String::from_utf8(bytes) else {
+            return;
+        };
+        body
+    } else {
+        body
+    };
+    if let Some(entry) = state
+        .har_entries
+        .iter_mut()
+        .rev()
+        .find(|e| e.request_id == id)
+    {
+        entry.post_data = Some(body);
+    }
 }
 
 async fn har_body(state: &mut DaemonState, id: &str) {
@@ -593,7 +637,7 @@ async fn har_body(state: &mut DaemonState, id: &str) {
     let Some(ff) = state.firefox.as_ref().filter(|_| wanted) else {
         return;
     };
-    let Ok((body, base64)) = response_data(&ff.bidi, id).await else {
+    let Ok((body, base64)) = data(&ff.bidi, id, "response").await else {
         return;
     };
     if body.is_empty()
@@ -757,7 +801,7 @@ pub async fn request_detail(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         state.firefox.as_ref(),
         cmd.get("requestId").and_then(Value::as_str),
     ) {
-        if let Ok((body, base64)) = response_data(&ff.bidi, id).await {
+        if let Ok((body, base64)) = data(&ff.bidi, id, "response").await {
             result["responseBody"] = if base64 {
                 json!(format!("[base64, {} chars]", body.len()))
             } else {
@@ -810,7 +854,7 @@ pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             && p.response.url.contains(pattern)
             && in_active_tab(ff, event["params"]["context"].as_str().unwrap_or("")).await
         {
-            let (body, _) = response_data(&ff.bidi, &p.request.request).await?;
+            let (body, _) = data(&ff.bidi, &p.request.request, "response").await?;
             return Ok(json!({
                 "body": body,
                 "status": p.response.status.unwrap_or(0),
@@ -1483,6 +1527,68 @@ mod tests {
         assert!(!top_level_context_changed(
             &json!({"method":"log.entryAdded", "params":{}})
         ));
+    }
+
+    #[tokio::test]
+    async fn har_captures_request_body_and_bidi_timestamps() {
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(|v| {
+            if v["params"]["dataType"] == "request" {
+                json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD1oYXItcHJvYmU="}})
+            } else {
+                json!({"bytes": {"type": "string", "value": "har-response"}})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.har_recording = true;
+        state.har_content_mode = HarContentMode::All;
+        let request = json!({
+            "request": "r1",
+            "url": "http://example.com/har-probe",
+            "method": "POST",
+            "headers": [{
+                "name": "Content-Type",
+                "value": {"type": "string", "value": "application/x-www-form-urlencoded"}
+            }],
+            "bodySize": 17,
+            "initiatorType": "fetch",
+        });
+        let response = json!({
+            "status": 200,
+            "statusText": "OK",
+            "protocol": "http/1.1",
+            "mimeType": "text/plain",
+            "headers": [],
+            "bodySize": 13,
+        });
+
+        apply_events(
+            &mut state,
+            vec![
+                json!({
+                    "method": "network.beforeRequestSent",
+                    "params": {"timestamp": 1_800_000_000_250_u64, "request": request},
+                }),
+                json!({
+                    "method": "network.responseStarted",
+                    "params": {"timestamp": 1_800_000_000_650_u64, "request": request, "response": response},
+                }),
+                json!({
+                    "method": "network.responseCompleted",
+                    "params": {"timestamp": 1_800_000_000_670_u64, "request": request, "response": response},
+                }),
+            ],
+        )
+        .await;
+
+        let entry = &state.har_entries[0];
+        assert_eq!(entry.post_data.as_deref(), Some("payload=har-probe"));
+        assert_eq!(entry.request_body_size, 17);
+        assert!((entry.wall_time - 1_800_000_000.25).abs() < 0.00001);
+        assert!((entry.response_started_timestamp.unwrap() - 1_800_000_000.65).abs() < 0.00001);
+        assert!((entry.response_completed_timestamp.unwrap() - 1_800_000_000.67).abs() < 0.00001);
+        assert_eq!(entry.response_body.as_deref(), Some("har-response"));
     }
 
     #[tokio::test]
