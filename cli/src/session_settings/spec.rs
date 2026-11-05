@@ -176,6 +176,9 @@ fn read_cdp_headers(f: &Flags) -> Option<Requested> {
     string(&f.cdp_headers)
 }
 fn read_auto_connect(f: &Flags) -> Option<Requested> {
+    if f.no_auto_connect {
+        return Some(Requested::Default);
+    }
     on(f.auto_connect)
 }
 fn read_provider(f: &Flags) -> Option<Requested> {

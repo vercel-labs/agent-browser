@@ -3925,6 +3925,8 @@ mod tests {
             cli_headed: false,
             cli_webgpu: false,
             cli_no_webmcp: false,
+            cli_auto_connect: false,
+            no_auto_connect: false,
             cli_restore: false,
             cli_pin_tab: false,
             cli_input_mode: false,
