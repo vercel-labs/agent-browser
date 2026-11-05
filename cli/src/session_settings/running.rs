@@ -104,6 +104,14 @@ impl fmt::Debug for Running {
     }
 }
 
+/// A connection target's value, or `None` when it is blank. The one rule for
+/// what counts as naming a browser, shared by the settings views and the
+/// launch commands.
+pub fn named(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
 impl Running {
     /// A session with every setting at its default.
     pub fn defaults() -> Running {
@@ -118,9 +126,43 @@ impl Running {
         self.values.get(&key)
     }
 
-    /// Profile directory or name the session was started with, if any.
-    pub fn profile(&self) -> Option<String> {
-        self.str(Key::Profile)
+    pub(super) fn remove(&mut self, key: Key) {
+        self.values.remove(&key);
+    }
+
+    /// Stores a value from a plan and keeps the temporary env-seed fields in
+    /// step with it.
+    pub(super) fn assign(&mut self, key: Key, value: Value) {
+        match key {
+            Key::Extensions => {
+                let items: Vec<&str> = value
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                self.extensions_file = (!items.is_empty()).then(|| items.join(","));
+            }
+            Key::Headed => self.provider_headed = value.as_bool().unwrap_or(false),
+            _ => {}
+        }
+        self.values.insert(key, value);
+    }
+
+    /// Puts a setting back to a value it had, or to its default.
+    pub fn put_back(&mut self, key: Key, value: Option<Value>) {
+        match value {
+            Some(value) => self.assign(key, value),
+            None => self.unassign(key),
+        }
+    }
+
+    /// Resets a setting to its default.
+    pub(super) fn unassign(&mut self, key: Key) {
+        match key {
+            Key::Extensions => self.extensions_file = None,
+            Key::Headed => self.provider_headed = false,
+            _ => {}
+        }
+        self.values.remove(&key);
     }
 
     fn str(&self, key: Key) -> Option<String> {
@@ -172,12 +214,13 @@ impl Running {
     }
 
     pub fn connection(&self) -> Connection {
-        if let Some(cdp) = self.str(Key::Cdp) {
-            Connection::Cdp(cdp)
-        } else if self.get(Key::AutoConnect).is_some() {
+        // A blank target names no browser: `-p ""` resets to a local launch.
+        if let Some(cdp) = self.str(Key::Cdp).as_deref().and_then(named) {
+            Connection::Cdp(cdp.to_string())
+        } else if self.get(Key::AutoConnect).and_then(Value::as_bool) == Some(true) {
             Connection::AutoConnect
-        } else if let Some(provider) = self.str(Key::Provider) {
-            Connection::Provider(provider)
+        } else if let Some(provider) = self.str(Key::Provider).as_deref().and_then(named) {
+            Connection::Provider(provider.to_string())
         } else {
             Connection::Local
         }
@@ -225,10 +268,6 @@ impl Running {
         self.bool(Key::HideScrollbars).unwrap_or(true)
     }
 
-    pub fn webgpu(&self) -> bool {
-        self.bool(Key::Webgpu).unwrap_or(false)
-    }
-
     pub fn webmcp(&self) -> bool {
         self.bool(Key::Webmcp).unwrap_or(true)
     }
@@ -250,6 +289,11 @@ impl Running {
         self.str(Key::ColorScheme)
     }
 
+    /// Name of the isolated BrowserContext an external browser session opens.
+    pub fn context(&self) -> Option<String> {
+        self.str(Key::Context)
+    }
+
     /// Headed as handed to plugin providers. Looser than `headed()`, which
     /// accepts only `1` and `true`: `yes` or `on` count here.
     pub fn plugin_provider_headed(&self) -> bool {
@@ -262,18 +306,6 @@ impl Running {
 
     pub fn no_auto_dialog(&self) -> bool {
         self.bool(Key::NoAutoDialog).unwrap_or(false)
-    }
-
-    pub fn executable_path(&self) -> Option<String> {
-        self.str(Key::ExecutablePath)
-    }
-
-    pub fn proxy_username(&self) -> Option<String> {
-        self.str(Key::ProxyUsername)
-    }
-
-    pub fn proxy_password(&self) -> Option<String> {
-        self.str(Key::ProxyPassword)
     }
 
     /// Built-in init scripts such as `react-devtools`.

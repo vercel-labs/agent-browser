@@ -33,7 +33,7 @@ keys! {
     Engine, Headed, Profile, Args, ExecutablePath, Extensions, Proxy, ProxyBypass,
     ProxyUsername, ProxyPassword, UserAgent, IgnoreHttpsErrors, AllowFileAccess,
     HideScrollbars, Webgpu, Webmcp, NoXvfb, CaCert, ClearCaCert, InitScripts, Enable,
-    Plugins, StorageState, ColorScheme, DownloadPath,
+    Plugins, StorageState, ColorScheme, DownloadPath, Context,
     // Security.
     AllowedDomains, ActionPolicy, ConfirmActions,
     // Lifetimes and per-session behaviour.
@@ -118,7 +118,32 @@ pub(super) fn redacted(key: Key, value: &Value) -> Value {
             return Value::from(parse_proxy(raw).server);
         }
     }
+    if key == Key::Cdp {
+        if let Some(raw) = value.as_str() {
+            return Value::from(redact_url(raw));
+        }
+    }
     value.clone()
+}
+
+/// A URL without userinfo and with its query and fragment hidden, since both
+/// commonly carry tokens. A bare port or anything that is not a URL is kept.
+pub(super) fn redact_url(raw: &str) -> String {
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let (scheme, rest) = raw.split_at(scheme_end + 3);
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let (path, hidden) = match tail.find(['?', '#']) {
+        Some(at) => (&tail[..at], true),
+        None => (tail, false),
+    };
+    format!(
+        "{scheme}{host}{path}{}",
+        if hidden { "?<redacted>" } else { "" }
+    )
 }
 
 fn set(value: Value) -> Option<Requested> {
@@ -226,7 +251,8 @@ fn read_webmcp(f: &Flags) -> Option<Requested> {
     (f.no_webmcp || f.cli_no_webmcp).then_some(Requested::Set(Value::Bool(!f.no_webmcp)))
 }
 fn read_no_xvfb(f: &Flags) -> Option<Requested> {
-    on(f.no_xvfb)
+    // An explicit off value has to reach a session that was started with it on.
+    (f.no_xvfb || f.no_xvfb_set).then_some(Requested::Set(Value::Bool(f.no_xvfb)))
 }
 fn read_ca_cert(f: &Flags) -> Option<Requested> {
     string(&f.ca_cert)
@@ -254,6 +280,9 @@ fn read_color_scheme(f: &Flags) -> Option<Requested> {
 }
 fn read_download_path(f: &Flags) -> Option<Requested> {
     string(&f.download_path)
+}
+fn read_context(f: &Flags) -> Option<Requested> {
+    string(&f.context)
 }
 fn read_allowed_domains(f: &Flags) -> Option<Requested> {
     f.allowed_domains
@@ -596,6 +625,16 @@ pub static SPECS: &[Spec] = &[
         false,
         Str,
         read_download_path
+    ),
+    row!(
+        Context,
+        "context",
+        "--context",
+        Launch,
+        Memory,
+        false,
+        Str,
+        read_context
     ),
     row!(
         AllowedDomains,

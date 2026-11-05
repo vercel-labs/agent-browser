@@ -2057,6 +2057,7 @@ const SHARED_ARGUMENTS: &[&str] = &[
     "useSystemCa",
     "clearCaCert",
     "idleTimeout",
+    "relaunch",
     "extraArgs",
     "timeoutMs",
 ];
@@ -2088,6 +2089,7 @@ fn advertised_shared_arguments(name: &str) -> Vec<&'static str> {
     let launches = LAUNCH_TOOLS.contains(&name);
     if launches {
         keys.push("restore");
+        keys.push("relaunch");
     }
     if launches || name == TOOL_READ {
         keys.push("allowedDomains");
@@ -2114,6 +2116,10 @@ fn shared_property(key: &str) -> Value {
             "items": { "type": "string" },
             "description": "Restrict browser and read traffic to these domain patterns."
         }),
+        "relaunch" => json!({
+            "type": "boolean",
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch)."
+        }),
         "extraArgs" => json!({
             "type": "array",
             "items": { "type": "string" },
@@ -2129,7 +2135,7 @@ fn shared_property(key: &str) -> Value {
     }
 }
 
-const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool accepts these optional arguments even when its schema does not list them: session (isolated browser session name), restore (true or a key; restores and auto-saves browser state when the call launches the browser), allowedDomains (domain patterns that restrict browser and read traffic when the call launches the browser; also disables RTCPeerConnection in Chromium sessions, and is rejected when the server environment or config already sets allowed domains), extraArgs (extra CLI arguments such as --engine; global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config, are rejected, so set those in the MCP server environment or config), timeoutMs (positive integer, maximum milliseconds to wait for the tool call), namespace (isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (conditions restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), and idleTimeout (such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown).";
+const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool accepts these optional arguments even when its schema does not list them: session (isolated browser session name), restore (true or a key; restores and auto-saves browser state when the call launches the browser), allowedDomains (domain patterns that restrict browser and read traffic when the call launches the browser; also disables RTCPeerConnection in Chromium sessions, and is rejected when the server environment or config already sets allowed domains), extraArgs (extra CLI arguments such as --engine; global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config, are rejected, so set those in the MCP server environment or config), timeoutMs (positive integer, maximum milliseconds to wait for the tool call), namespace (isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (conditions restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), idleTimeout (such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown), and relaunch (boolean, relaunch the session's browser even when no setting changed).";
 
 /// Levenshtein distance, for suggesting a close argument name.
 fn edit_distance(a: &str, b: &str) -> usize {
@@ -4195,6 +4201,10 @@ fn append_common_global_args(
         args.push(idle_timeout);
     }
 
+    if optional_bool(arguments, "relaunch")?.unwrap_or(false) {
+        args.push("--relaunch".to_string());
+    }
+
     if let Some(restore) = arguments.get("restore") {
         if let Some(enabled) = restore.as_bool() {
             if enabled {
@@ -5494,21 +5504,24 @@ mod tests {
         assert_eq!(flags.engine.as_deref(), Some("obscura"));
         assert_eq!(flags.executable_path.as_deref(), Some("/tmp/obscura"));
         assert_eq!(flags.proxy_bypass.as_deref(), Some("localhost"));
-        let mut launch = json!({"action": "launch"});
-        crate::attach_obscura_proxy_bypass(&mut launch, &flags);
-        assert_eq!(launch["proxyBypass"], "localhost");
-        assert!(launch.get("proxy").is_none());
+        use crate::session_settings::{Key, Patch, Requested};
+        let patch = Patch::from_flags(&flags);
+        assert_eq!(patch.value(Key::ProxyBypass), Some(&json!("localhost")));
+        assert!(patch.get(Key::Proxy).is_none());
 
         let mut flags = flags;
         flags.proxy_bypass = None;
-        crate::attach_obscura_proxy_bypass(&mut launch, &flags);
-        assert_eq!(launch.get("proxyBypass"), Some(&Value::Null));
+        assert_eq!(
+            Patch::from_flags(&flags).get(Key::ProxyBypass),
+            Some(&Requested::Default),
+            "an unset bypass is an explicit clear for Obscura"
+        );
         for engine in [None, Some("chrome"), Some("lightpanda")] {
             flags.engine = engine.map(String::from);
-            flags.proxy_bypass = Some("localhost".into());
-            let mut launch = json!({"action": "launch"});
-            crate::attach_obscura_proxy_bypass(&mut launch, &flags);
-            assert_eq!(launch, json!({"action": "launch"}));
+            assert!(
+                Patch::from_flags(&flags).get(Key::ProxyBypass).is_none(),
+                "only Obscura clears the bypass"
+            );
         }
     }
 
@@ -5834,6 +5847,18 @@ mod tests {
         let err =
             reject_unknown_arguments(TOOL_CLICK, &click, &json!({ "zzzzzzzz": 1 })).unwrap_err();
         assert!(!err.message.contains("Did you mean"), "{}", err.message);
+    }
+
+    #[test]
+    fn common_global_args_include_relaunch() {
+        let mut args = Vec::new();
+        append_common_global_args(&mut args, &json!({ "relaunch": true }), None).unwrap();
+        assert_eq!(args, vec!["--relaunch"]);
+        assert!(crate::flags::parse_flags(&args).relaunch);
+
+        let mut none = Vec::new();
+        append_common_global_args(&mut none, &json!({ "relaunch": false }), None).unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]
