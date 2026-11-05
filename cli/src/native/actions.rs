@@ -1430,11 +1430,10 @@ impl DaemonState {
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
-                bidi::tabs::reset_refs(self);
-                self.update_stream_client().await;
             }
         }
         if previous_firefox_context != self.firefox.as_ref().map(|ff| ff.top_context.clone()) {
+            bidi::tabs::reset_refs(self);
             self.update_stream_client().await;
         } else if firefox_tabs_changed || self.firefox_tabs_dirty {
             self.broadcast_firefox_tabs().await;
