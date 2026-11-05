@@ -1237,12 +1237,35 @@ fn run_dashboard_stop(json_mode: bool) {
 }
 
 /// Forgets what a session keeps once it is closed: its saved TLS selection and
-/// its stored security settings. Done here as well as in the daemon so a
-/// session whose daemon cannot start (a settings file it refuses) can still be
-/// cleared with `close`.
+/// its stored security settings. Called only after the daemon confirmed the
+/// close, so a close that policy denied or a confirmation parked leaves the
+/// session contained.
 fn clear_closed_session(session: &str) {
     tls::clear_session(session);
     session_settings::clear_file(session);
+}
+
+/// What `close` forgets before it is sent. The stored security settings go now
+/// only when no daemon is running: one that is running still enforces them
+/// and drops them itself once the close succeeds, and a session that could not
+/// start (a settings file it refuses) can still be cleared with `close`.
+fn forget_before_close(session: &str) {
+    tls::clear_session(session);
+    if !connection::daemon_ready(session) {
+        session_settings::clear_file(session);
+    }
+}
+
+/// Whether a response says the browser was closed, as opposed to denied,
+/// parked for confirmation or failed.
+fn close_completed(resp: &connection::Response) -> bool {
+    resp.success
+        && resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("closed"))
+            .and_then(|v| v.as_bool())
+            == Some(true)
 }
 
 fn run_close_all(flags: &Flags) {
@@ -1255,6 +1278,11 @@ fn run_close_all(flags: &Flags) {
         .iter()
         .map(|s| (s.name.clone(), s.pid))
         .collect();
+
+    // Sessions whose daemon is gone still hold their stored security settings.
+    session_settings::clear_orphans(&get_socket_dir(), |session| {
+        sessions.iter().any(|(name, _)| name == session) || connection::daemon_ready(session)
+    });
 
     if sessions.is_empty() {
         if flags.json {
@@ -1612,7 +1640,7 @@ fn main() {
     }
     match cmd.get("action").and_then(|v| v.as_str()) {
         Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
-        Some("close") => clear_closed_session(&flags.session),
+        Some("close") => forget_before_close(&flags.session),
         _ => {}
     }
     // Handle --password-stdin for auth save
@@ -1877,6 +1905,9 @@ fn main() {
             let success = resp.success;
             // Extract action for context-specific output handling
             let action = cmd.get("action").and_then(|v| v.as_str());
+            if action == Some("close") && close_completed(&resp) {
+                clear_closed_session(&flags.session);
+            }
             print_response_with_opts(&resp, action, &output_opts);
             if !success {
                 exit(1);
@@ -2011,7 +2042,7 @@ fn run_batch(
         attach_input_mode(&mut parsed, flags);
         match parsed.get("action").and_then(|v| v.as_str()) {
             Some("read") => parsed["tls"] = json!(tls::session_options(flags, &flags.session)),
-            Some("close") => clear_closed_session(&flags.session),
+            Some("close") => tls::clear_session(&flags.session),
             _ => {}
         }
 
@@ -2030,6 +2061,9 @@ fn run_batch(
 
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
+                if action.as_deref() == Some("close") && close_completed(&resp) {
+                    clear_closed_session(&flags.session);
+                }
                 relaunch_applied |= response_applied_relaunch(&resp);
                 if flags.json {
                     let mut result = batch_result_identity(i, cmd_args, omit_command);

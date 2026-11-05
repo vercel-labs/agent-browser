@@ -1323,7 +1323,20 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         }
         i += 1;
     }
+    // The policy is stored with the session and read again by later daemons,
+    // which start in whatever directory their command ran from.
+    if let (Some(path), Ok(cwd)) = (flags.action_policy.as_mut(), env::current_dir()) {
+        *path = absolute_policy_path(path, &cwd);
+    }
     Ok(flags)
+}
+
+/// `path` made absolute against `cwd`; a blank value (a reset) is left alone.
+fn absolute_policy_path(path: &str, cwd: &std::path::Path) -> String {
+    if path.trim().is_empty() {
+        return path.to_string();
+    }
+    cwd.join(path).to_string_lossy().into_owned()
 }
 
 fn looks_like_command(value: &str) -> bool {
@@ -1476,6 +1489,36 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_policy_path_is_made_absolute_against_the_given_directory() {
+        use std::path::Path;
+        assert_eq!(
+            super::absolute_policy_path("policy.json", Path::new("/a")),
+            "/a/policy.json"
+        );
+        assert_eq!(
+            super::absolute_policy_path("policy.json", Path::new("/b")),
+            "/b/policy.json"
+        );
+        assert_eq!(
+            super::absolute_policy_path("/abs/p.json", Path::new("/a")),
+            "/abs/p.json"
+        );
+        assert_eq!(super::absolute_policy_path("", Path::new("/a")), "");
+        assert_eq!(super::absolute_policy_path("  ", Path::new("/a")), "  ");
+    }
+
+    #[test]
+    fn test_parsed_action_policy_flag_is_absolute() {
+        let args: Vec<String> = ["--action-policy", "rel/policy.json", "open"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let flags = parse_flags(&args);
+        let policy = flags.action_policy.unwrap();
+        assert!(std::path::Path::new(&policy).is_absolute(), "{policy}");
+        assert!(policy.ends_with("rel/policy.json"), "{policy}");
+    }
     use super::*;
     use crate::test_utils::EnvGuard;
 

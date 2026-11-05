@@ -76,6 +76,17 @@ impl Session {
         self.output(&args)
     }
 
+    /// Like `touch`, from another working directory.
+    fn touch_in(&self, cwd: &std::path::Path, flags: &[&str]) -> Output {
+        let mut args = flags.to_vec();
+        args.extend(["read", "http://127.0.0.1:1/", "--timeout", "1000"]);
+        self.command()
+            .current_dir(cwd)
+            .args(&args)
+            .output()
+            .unwrap()
+    }
+
     fn pid(&self) -> u32 {
         fs::read_to_string(self.dir().join(format!("{SESSION}.pid")))
             .unwrap()
@@ -103,6 +114,16 @@ impl Session {
     }
 }
 
+const BLOCKED: &str = "not in the allowed domains list";
+
+fn text(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.command().arg("close").output();
@@ -126,12 +147,19 @@ fn stored_settings_survive_a_killed_daemon_until_close() {
 
     let pid = session.pid();
     session.kill_daemon();
-    session.touch(&[]);
+    let after_kill = session.touch(&[]);
     assert_ne!(session.pid(), pid, "the daemon was replaced");
     assert_eq!(fs::read_to_string(session.settings()).unwrap(), stored);
+    assert!(text(&after_kill).contains(BLOCKED), "{}", text(&after_kill));
 
     assert_eq!(session.run(&["close"])["success"], true);
     assert!(!session.settings().exists());
+    let after_close = session.touch(&[]);
+    assert!(
+        !text(&after_close).contains(BLOCKED),
+        "{}",
+        text(&after_close)
+    );
 }
 
 #[test]
@@ -205,4 +233,149 @@ fn close_clears_a_file_when_no_daemon_is_running() {
     session.run(&["close"]);
 
     assert!(!session.settings().exists());
+}
+
+#[test]
+fn a_cli_driven_restart_keeps_the_settings_and_the_filter() {
+    let session = Session::new();
+    session.touch(&["--allowed-domains", "example.com"]);
+    let stored = fs::read_to_string(session.settings()).unwrap();
+    let pid = session.pid();
+
+    // A changed daemon option makes the CLI stop the daemon and start another.
+    let out = session.touch(&["--debug"]);
+
+    assert_ne!(session.pid(), pid, "the daemon was restarted");
+    assert_eq!(fs::read_to_string(session.settings()).unwrap(), stored);
+    assert!(text(&out).contains(BLOCKED), "{}", text(&out));
+}
+
+#[test]
+fn a_version_restart_keeps_the_settings_and_the_filter() {
+    let session = Session::new();
+    session.touch(&["--allowed-domains", "example.com"]);
+    let stored = fs::read_to_string(session.settings()).unwrap();
+    let pid = session.pid();
+    fs::write(session.dir().join(format!("{SESSION}.version")), "0.0.0").unwrap();
+
+    let out = session.touch(&[]);
+
+    assert_ne!(session.pid(), pid, "the daemon was restarted");
+    assert_eq!(fs::read_to_string(session.settings()).unwrap(), stored);
+    assert!(text(&out).contains(BLOCKED), "{}", text(&out));
+}
+
+#[test]
+fn a_close_that_policy_denies_keeps_the_settings() {
+    let session = Session::new();
+    let policy = session.tmp.path().join("policy.json");
+    fs::write(&policy, r#"{"deny":["close"]}"#).unwrap();
+    session.touch(&[
+        "--allowed-domains",
+        "example.com",
+        "--action-policy",
+        policy.to_str().unwrap(),
+    ]);
+    assert!(session.settings().exists());
+
+    let out = session.output(&["close"]);
+
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(session.settings().exists(), "a denied close clears nothing");
+    let stored = fs::read_to_string(session.settings()).unwrap();
+    assert!(stored.contains("example.com") && stored.contains("policy.json"));
+    session.kill_daemon();
+}
+
+#[test]
+fn a_close_parked_for_confirmation_keeps_the_settings() {
+    let session = Session::new();
+    session.touch(&[
+        "--allowed-domains",
+        "example.com",
+        "--confirm-actions",
+        "close",
+    ]);
+    assert!(session.settings().exists());
+
+    let out = session.output(&["close"]);
+
+    assert!(text(&out).contains("confirm"), "{}", text(&out));
+    assert!(session.settings().exists(), "a parked close clears nothing");
+    session.kill_daemon();
+}
+
+#[test]
+fn a_batch_stopped_before_its_close_keeps_the_settings() {
+    let session = Session::new();
+    session.touch(&["--allowed-domains", "example.com"]);
+
+    let out = session.output(&[
+        "batch",
+        "--bail",
+        "read http://127.0.0.1:1/ --timeout 1000",
+        "close",
+    ]);
+
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(session.settings().exists(), "the close never ran");
+    session.kill_daemon();
+}
+
+#[test]
+fn a_relative_policy_path_is_stored_absolute_and_keeps_its_directory() {
+    let session = Session::new();
+    let (a, b) = (session.tmp.path().join("a"), session.tmp.path().join("b"));
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("policy.json"), "{}").unwrap();
+    fs::write(b.join("policy.json"), r#"{"default":"deny"}"#).unwrap();
+
+    session.touch_in(&a, &["--action-policy", "policy.json"]);
+    let expected = a.canonicalize().unwrap().join("policy.json");
+    let stored: Value =
+        serde_json::from_str(&fs::read_to_string(session.settings()).unwrap()).unwrap();
+    assert_eq!(stored["actionPolicy"], expected.to_str().unwrap());
+
+    // The next daemon starts in another directory and still uses a's policy.
+    session.kill_daemon();
+    session.touch_in(&b, &[]);
+    let after: Value =
+        serde_json::from_str(&fs::read_to_string(session.settings()).unwrap()).unwrap();
+    assert_eq!(after["actionPolicy"], expected.to_str().unwrap());
+}
+
+#[test]
+fn close_all_clears_settings_of_sessions_whose_daemon_is_gone() {
+    let session = Session::new();
+    session.touch(&["--allowed-domains", "example.com"]);
+    session.kill_daemon();
+    assert!(session.settings().exists());
+    let refused = session.dir().join("refused.settings");
+    fs::write(&refused, "{not json").unwrap();
+
+    let out = session.output(&["close", "--all"]);
+
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!session.settings().exists());
+    assert!(!refused.exists());
+}
+
+#[test]
+fn a_batch_close_that_policy_denies_keeps_the_settings() {
+    let session = Session::new();
+    let policy = session.tmp.path().join("policy.json");
+    fs::write(&policy, r#"{"deny":["close"]}"#).unwrap();
+    session.touch(&[
+        "--allowed-domains",
+        "example.com",
+        "--action-policy",
+        policy.to_str().unwrap(),
+    ]);
+
+    let out = session.output(&["batch", "close"]);
+
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(session.settings().exists(), "a denied close clears nothing");
+    session.kill_daemon();
 }
