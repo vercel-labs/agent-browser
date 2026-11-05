@@ -1366,9 +1366,19 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         // Errors
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
-            for err in errors {
-                let msg = err.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                println!("{} {}", color::error_indicator(), msg);
+            let lines: Vec<String> = errors
+                .iter()
+                .map(|err| {
+                    let msg = err.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    format!("{} {}", color::error_indicator(), msg)
+                })
+                .collect();
+            if opts.content_boundaries {
+                print_with_boundaries(&lines.join("\n"), origin, opts);
+            } else {
+                for line in lines {
+                    println!("{line}");
+                }
             }
             return;
         }
