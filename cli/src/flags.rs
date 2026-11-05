@@ -56,6 +56,13 @@ fn push_launch_arg(args: &mut Vec<String>, current: &mut String) {
     current.clear();
 }
 
+fn split_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|d| d.trim().to_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect()
+}
+
 /// Parse idle timeout from user-friendly format, returning an error on conversion overflow.
 /// Supports "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
 fn parse_idle_timeout(s: &str) -> Result<String, String> {
@@ -162,6 +169,7 @@ pub struct Config {
     pub content_boundaries: Option<bool>,
     pub max_output: Option<usize>,
     pub allowed_domains: Option<Vec<String>>,
+    pub capture: Option<Vec<String>>,
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: Option<bool>,
@@ -247,6 +255,7 @@ impl Config {
             content_boundaries: other.content_boundaries.or(self.content_boundaries),
             max_output: other.max_output.or(self.max_output),
             allowed_domains: other.allowed_domains.or(self.allowed_domains),
+            capture: other.capture.or(self.capture),
             action_policy: other.action_policy.or(self.action_policy),
             confirm_actions: other.confirm_actions.or(self.confirm_actions),
             confirm_interactive: other.confirm_interactive.or(self.confirm_interactive),
@@ -412,6 +421,7 @@ pub(crate) fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--download-path",
         "--max-output",
         "--allowed-domains",
+        "--capture",
         "--action-policy",
         "--confirm-actions",
         "--engine",
@@ -512,6 +522,8 @@ pub struct Flags {
     /// Env-only (AGENT_BROWSER_NO_XVFB): disable automatic Xvfb for headed
     /// launches on displayless Linux hosts.
     pub no_xvfb: bool,
+    /// AGENT_BROWSER_NO_XVFB is set, to any value, so an off value can be sent.
+    pub no_xvfb_set: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
     pub pin_tab: bool,
@@ -522,6 +534,7 @@ pub struct Flags {
     pub content_boundaries: bool,
     pub max_output: Option<usize>,
     pub allowed_domains: Option<Vec<String>>,
+    pub capture: Option<Vec<String>>,
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
@@ -532,6 +545,8 @@ pub struct Flags {
     pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
     pub default_timeout: Option<u64>, // AGENT_BROWSER_DEFAULT_TIMEOUT in ms
     pub no_auto_dialog: bool,
+    /// `--relaunch`: relaunch the session's browser even when no setting changed.
+    pub relaunch: bool,
     pub model: Option<String>,
     pub plugins: Vec<PluginConfig>,
     pub verbose: bool,
@@ -560,6 +575,11 @@ pub struct Flags {
     pub cli_headed: bool,
     pub cli_webgpu: bool,
     pub cli_no_webmcp: bool,
+    /// True when `--auto-connect` was passed on the command line.
+    pub cli_auto_connect: bool,
+    /// True when `--no-auto-connect` (or `--auto-connect false`) was passed:
+    /// the session returns to a local launch, whatever env or config say.
+    pub no_auto_connect: bool,
     pub cli_restore: bool,
     /// True when --pin-tab / --no-pin-tab was passed on the command line, so
     /// an explicit disable can be sent to the daemon (a bare `pin_tab: false`
@@ -733,6 +753,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         no_webmcp: env_var_is_truthy("AGENT_BROWSER_NO_WEBMCP")
             || config.no_webmcp.unwrap_or(false),
         no_xvfb: env_var_is_truthy("AGENT_BROWSER_NO_XVFB"),
+        no_xvfb_set: env::var_os("AGENT_BROWSER_NO_XVFB").is_some(),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
@@ -762,6 +783,10 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                     .collect()
             })
             .or(config.allowed_domains),
+        capture: env::var("AGENT_BROWSER_CAPTURE")
+            .ok()
+            .map(|s| split_list(&s))
+            .or(config.capture),
         action_policy: env::var("AGENT_BROWSER_ACTION_POLICY")
             .ok()
             .or(config.action_policy),
@@ -792,6 +817,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             .and_then(|s| s.parse::<u64>().ok()),
         no_auto_dialog: env_var_is_truthy("AGENT_BROWSER_NO_AUTO_DIALOG")
             || config.no_auto_dialog.unwrap_or(false),
+        relaunch: false,
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
         plugins,
         verbose: false,
@@ -816,6 +842,8 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         cli_headed: false,
         cli_webgpu: false,
         cli_no_webmcp: false,
+        cli_auto_connect: false,
+        no_auto_connect: false,
         cli_restore: false,
         cli_pin_tab: false,
         cli_input_mode: false,
@@ -1113,6 +1141,21 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             "--auto-connect" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.auto_connect = val;
+                if val {
+                    flags.cli_auto_connect = true;
+                } else {
+                    flags.no_auto_connect = true;
+                }
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--no-auto-connect" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                if val {
+                    flags.auto_connect = false;
+                    flags.no_auto_connect = true;
+                }
                 if consumed {
                     i += 1;
                 }
@@ -1183,6 +1226,12 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                             .filter(|d| !d.is_empty())
                             .collect(),
                     );
+                    i += 1;
+                }
+            }
+            "--capture" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.capture = Some(split_list(s));
                     i += 1;
                 }
             }
@@ -1269,6 +1318,13 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                     i += 1;
                 }
             }
+            "--relaunch" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.relaunch = val;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--model" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.model = Some(s.clone());
@@ -1319,6 +1375,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--allow-file-access",
         "--hide-scrollbars",
         "--auto-connect",
+        "--no-auto-connect",
         "--pin-tab",
         "--no-pin-tab",
         "--no-ca-cert",
@@ -1327,6 +1384,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--content-boundaries",
         "--confirm-interactive",
         "--no-auto-dialog",
+        "--relaunch",
         "-v",
         "--verbose",
         "-q",
@@ -1365,6 +1423,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--download-path",
         "--max-output",
         "--allowed-domains",
+        "--capture",
         "--action-policy",
         "--confirm-actions",
         "--config",
@@ -2719,6 +2778,95 @@ mod tests {
         ];
         let clean = clean_args(&input);
         assert_eq!(clean, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_no_auto_connect_flag() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let flags = parse_flags(&args("--no-auto-connect open example.com"));
+        assert!(flags.no_auto_connect);
+        assert!(!flags.auto_connect);
+        assert!(!flags.cli_auto_connect);
+        assert_eq!(
+            clean_args(&args("--no-auto-connect open example.com")),
+            args("open example.com")
+        );
+        assert_eq!(
+            clean_args(&args("--no-auto-connect true open example.com")),
+            args("open example.com")
+        );
+    }
+
+    #[test]
+    fn test_no_auto_connect_false_is_not_a_reset() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let flags = parse_flags(&args("--no-auto-connect false open"));
+        assert!(!flags.no_auto_connect);
+    }
+
+    #[test]
+    fn test_auto_connect_false_is_the_same_reset() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let flags = parse_flags(&args("--auto-connect false open"));
+        assert!(flags.no_auto_connect);
+        assert!(!flags.auto_connect);
+        assert!(!flags.cli_auto_connect);
+        let flags = parse_flags(&args("--auto-connect open"));
+        assert!(flags.auto_connect && flags.cli_auto_connect && !flags.no_auto_connect);
+    }
+
+    #[test]
+    fn test_no_auto_connect_beats_env_auto_connect() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.set("AGENT_BROWSER_AUTO_CONNECT", "1");
+        assert!(parse_flags(&args("open")).auto_connect);
+        let flags = parse_flags(&args("--no-auto-connect open"));
+        assert!(!flags.auto_connect);
+        assert!(flags.no_auto_connect);
+    }
+
+    #[test]
+    fn test_auto_connect_env_is_on_only_for_a_truthy_value() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        for (value, on) in [
+            ("1", true),
+            ("true", true),
+            ("0", false),
+            ("false", false),
+            ("no", false),
+            ("", false),
+        ] {
+            guard.set("AGENT_BROWSER_AUTO_CONNECT", value);
+            let patch = crate::session_settings::Patch::from_flags(&parse_flags(&args("open")));
+            let expected = on.then_some(serde_json::Value::Bool(true));
+            assert_eq!(
+                patch.value(crate::session_settings::Key::AutoConnect),
+                expected.as_ref(),
+                "AGENT_BROWSER_AUTO_CONNECT={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_no_auto_connect_beats_config_auto_connect() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"autoConnect": true}"#).unwrap();
+        let config = config.to_string_lossy().into_owned();
+        let with_config = |extra: &str| {
+            let mut a = vec!["--config".to_string(), config.clone()];
+            a.extend(args(extra));
+            parse_flags(&a)
+        };
+        assert!(with_config("open").auto_connect);
+        let flags = with_config("--no-auto-connect open");
+        assert!(!flags.auto_connect);
+        assert!(flags.no_auto_connect);
     }
 
     #[test]

@@ -1,13 +1,13 @@
 //! A patch: the settings one invocation set explicitly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde_json::{Map, Value};
 
 use crate::flags::Flags;
 
-use super::spec::{redacted, spec, spec_by_name, Key, SPECS};
+use super::spec::{redacted, spec, spec_by_name, Effect, Key, Persist, SPECS};
 use super::SettingsError;
 
 /// What an invocation asks for one setting.
@@ -22,7 +22,16 @@ pub enum Requested {
 #[derive(Clone, Default, PartialEq)]
 pub struct Patch {
     entries: BTreeMap<Key, Requested>,
+    /// Relaunch the browser even when no setting changed (`--relaunch`).
+    relaunch: bool,
+    /// Keys whose requested value equals the running one but whose content
+    /// differs (a CA file edited in place). Daemon-side only: never sent.
+    changed_in_place: BTreeSet<Key>,
 }
+
+/// Wire name of the forced-relaunch marker. It is not a setting, so it has no
+/// row in the table.
+const RELAUNCH_FIELD: &str = "relaunch";
 
 impl fmt::Debug for Patch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -32,6 +41,9 @@ impl fmt::Debug for Patch {
                 Requested::Set(v) => map.entry(&spec(*key).name, &redacted(*key, v)),
                 Requested::Default => map.entry(&spec(*key).name, &"<default>"),
             };
+        }
+        if self.relaunch {
+            map.entry(&RELAUNCH_FIELD, &true);
         }
         map.finish()
     }
@@ -44,11 +56,62 @@ impl Patch {
             .iter()
             .filter_map(|s| (s.read)(flags).map(|requested| (s.key, requested)))
             .collect();
-        Patch { entries }
+        Patch {
+            entries,
+            relaunch: flags.relaunch,
+            changed_in_place: BTreeSet::new(),
+        }
     }
 
     pub fn is_noop(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && !self.relaunch
+    }
+
+    /// Whether the invocation asked for a relaunch regardless of changes.
+    pub fn forces_relaunch(&self) -> bool {
+        self.relaunch
+    }
+
+    /// Marks a key as changed even if its value equals the running one.
+    pub fn mark_changed_in_place(&mut self, key: Key) {
+        self.changed_in_place.insert(key);
+    }
+
+    pub fn is_changed_in_place(&self, key: Key) -> bool {
+        self.changed_in_place.contains(&key)
+    }
+
+    /// The patch without its launch settings and without a forced relaunch:
+    /// what a command that never launches a browser can apply.
+    pub fn without_launch_settings(&self) -> Patch {
+        let mut live = self.clone();
+        live.relaunch = false;
+        live.entries
+            .retain(|key, _| spec(*key).effect == Effect::Live);
+        live
+    }
+
+    /// The patch without the security settings that apply at once (action
+    /// policy, confirm actions): what a confirmation replay may apply, so it
+    /// cannot put back a policy that changed after the command was parked.
+    /// Allowed domains stay: they apply only at the launch the replay runs.
+    pub fn without_live_security_settings(&self) -> Patch {
+        let mut patch = self.clone();
+        patch.entries.retain(|key, _| {
+            let spec = spec(*key);
+            !(spec.persist == Persist::Secured && spec.effect == Effect::Live)
+        });
+        patch
+    }
+
+    /// Drops the forced relaunch, for a command that follows one that carried it.
+    pub fn clear_relaunch(&mut self) {
+        self.relaunch = false;
+    }
+
+    /// Drops a key the patch would otherwise carry.
+    pub fn remove(&mut self, key: Key) {
+        self.entries.remove(&key);
     }
 
     pub fn get(&self, key: Key) -> Option<&Requested> {
@@ -72,7 +135,7 @@ impl Patch {
         if self.is_noop() {
             return None;
         }
-        let object: Map<String, Value> = self
+        let mut object: Map<String, Value> = self
             .entries
             .iter()
             .map(|(key, requested)| {
@@ -83,6 +146,9 @@ impl Patch {
                 (spec(*key).name.to_string(), value)
             })
             .collect();
+        if self.relaunch {
+            object.insert(RELAUNCH_FIELD.to_string(), Value::Bool(true));
+        }
         Some(Value::Object(object))
     }
 
@@ -92,9 +158,24 @@ impl Patch {
         };
         let object = wire.as_object().ok_or(SettingsError::NotAnObject)?;
         let mut entries = BTreeMap::new();
+        let mut relaunch = false;
         for (name, value) in object {
+            if name == RELAUNCH_FIELD {
+                relaunch = value.as_bool().ok_or_else(|| {
+                    SettingsError::UnknownKey(format!("{} (expected a boolean)", name))
+                })?;
+                continue;
+            }
             let s = spec_by_name(name).ok_or_else(|| SettingsError::UnknownKey(name.clone()))?;
             let requested = if value.is_null() {
+                if s.persist == Persist::Secured {
+                    // Containment is never cleared by a bare null; a reset
+                    // needs an explicit flag.
+                    return Err(SettingsError::Invalid(
+                        s.key,
+                        "a security setting cannot be cleared this way".to_string(),
+                    ));
+                }
                 Requested::Default
             } else if s.shape.accepts(value) {
                 Requested::Set(value.clone())
@@ -106,6 +187,20 @@ impl Patch {
             };
             entries.insert(s.key, requested);
         }
-        Ok(Patch { entries })
+        Ok(Patch {
+            entries,
+            relaunch,
+            changed_in_place: BTreeSet::new(),
+        })
+    }
+
+    /// A patch that sets the given keys. Used for tests and for translating
+    /// a daemon-side launch command.
+    pub fn from_entries(entries: impl IntoIterator<Item = (Key, Requested)>) -> Patch {
+        Patch {
+            entries: entries.into_iter().collect(),
+            relaunch: false,
+            changed_in_place: BTreeSet::new(),
+        }
     }
 }
