@@ -240,6 +240,16 @@ pub fn clear_file(session: &str) {
     let _ = fs::remove_file(SessionFile::Settings.path(session));
 }
 
+/// Starts the error a daemon prints when it refuses to start because of the
+/// stored settings file.
+const REFUSAL_PREFIX: &str = "Stored session settings cannot be used";
+
+/// Whether a daemon start failure (its stderr, as the parent reports it) is
+/// that refusal.
+pub fn is_refusal(error: &str) -> bool {
+    error.contains(REFUSAL_PREFIX)
+}
+
 /// `arg` as one shell word: unchanged when it is plain, single-quoted
 /// otherwise.
 fn shell_arg(arg: &str) -> String {
@@ -344,7 +354,8 @@ impl Running {
                     end -= 1;
                 }
                 return Err(StoreError::SecuredUnreadable(format!(
-                    "Stored session settings cannot be used; to clear them run: agent-browser{} --session {} close. {}",
+                    "{}; to clear them run: agent-browser{} --session {} close. {}",
+                    REFUSAL_PREFIX,
                     namespace,
                     shell_arg(session),
                     &why[..end]

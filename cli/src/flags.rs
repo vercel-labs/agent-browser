@@ -1348,17 +1348,25 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
     // The policy is stored with the session and read again by later daemons,
     // which start in whatever directory their command ran from.
     if let (Some(path), Ok(cwd)) = (flags.action_policy.as_mut(), env::current_dir()) {
-        *path = absolute_policy_path(path, &cwd);
+        *path = absolute_policy_path(path, &cwd).map_err(|e| format!("--action-policy: {}", e))?;
     }
     Ok(flags)
 }
 
 /// `path` made absolute against `cwd`; a blank value (a reset) is left alone.
-pub(crate) fn absolute_policy_path(path: &str, cwd: &std::path::Path) -> String {
+/// A result that is not valid UTF-8 is an error: storing a lossy path would
+/// point nowhere and the policy would deny every action.
+pub(crate) fn absolute_policy_path(path: &str, cwd: &std::path::Path) -> Result<String, String> {
     if path.trim().is_empty() {
-        return path.to_string();
+        return Ok(path.to_string());
     }
-    cwd.join(path).to_string_lossy().into_owned()
+    let joined = cwd.join(path);
+    joined.to_str().map(str::to_string).ok_or_else(|| {
+        format!(
+            "the policy path {} must be valid UTF-8; pass an absolute path to a file whose directories are valid UTF-8",
+            joined.display()
+        )
+    })
 }
 
 fn looks_like_command(value: &str) -> bool {
@@ -1514,21 +1522,36 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
 mod tests {
     #[test]
     fn test_policy_path_is_made_absolute_against_the_given_directory() {
-        use std::path::Path;
-        assert_eq!(
-            super::absolute_policy_path("policy.json", Path::new("/a")),
-            "/a/policy.json"
+        use std::path::{Path, PathBuf};
+        let (a, b) = (
+            std::env::temp_dir().join("a"),
+            std::env::temp_dir().join("b"),
         );
+        let abs =
+            |path: &str, cwd: &Path| PathBuf::from(super::absolute_policy_path(path, cwd).unwrap());
+        assert_eq!(abs("policy.json", &a), a.join("policy.json"));
+        assert_eq!(abs("policy.json", &b), b.join("policy.json"));
+        let absolute = std::env::temp_dir().join("abs").join("p.json");
+        assert_eq!(abs(absolute.to_str().unwrap(), &a), absolute);
+        assert_eq!(super::absolute_policy_path("", &a).unwrap(), "");
+        assert_eq!(super::absolute_policy_path("  ", &a).unwrap(), "  ");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_policy_path_in_a_non_utf8_directory_is_an_error() {
+        use std::os::unix::ffi::OsStrExt;
+        let cwd = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfe"));
+
+        let err = super::absolute_policy_path("policy.json", cwd).unwrap_err();
+
+        assert!(err.contains("valid UTF-8"), "{err}");
+        assert!(err.contains("absolute path"), "{err}");
+        // An absolute path needs nothing from the directory.
         assert_eq!(
-            super::absolute_policy_path("policy.json", Path::new("/b")),
-            "/b/policy.json"
+            super::absolute_policy_path("/ok/p.json", cwd).unwrap(),
+            "/ok/p.json"
         );
-        assert_eq!(
-            super::absolute_policy_path("/abs/p.json", Path::new("/a")),
-            "/abs/p.json"
-        );
-        assert_eq!(super::absolute_policy_path("", Path::new("/a")), "");
-        assert_eq!(super::absolute_policy_path("  ", Path::new("/a")), "  ");
     }
 
     #[test]
@@ -1540,7 +1563,11 @@ mod tests {
         let flags = parse_flags(&args);
         let policy = flags.action_policy.unwrap();
         assert!(std::path::Path::new(&policy).is_absolute(), "{policy}");
-        assert!(policy.ends_with("rel/policy.json"), "{policy}");
+        assert!(
+            std::path::Path::new(&policy)
+                .ends_with(std::path::Path::new("rel").join("policy.json")),
+            "{policy}"
+        );
     }
     use super::*;
     use crate::test_utils::EnvGuard;

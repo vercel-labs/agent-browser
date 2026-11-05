@@ -416,3 +416,40 @@ fn close_all_does_not_clear_or_report_a_close_that_was_parked_or_denied() {
             .success());
     }
 }
+
+#[test]
+fn close_with_a_dead_daemon_is_still_governed_by_the_stored_policy() {
+    let session = Session::new();
+    let policy = session.tmp.path().join("policy.json");
+    fs::write(&policy, r#"{"deny":["close"]}"#).unwrap();
+    session.touch(&[
+        "--allowed-domains",
+        "example.com",
+        "--action-policy",
+        policy.to_str().unwrap(),
+    ]);
+    let stored = fs::read_to_string(session.settings()).unwrap();
+    session.kill_daemon();
+
+    let out = session.output(&["close"]);
+
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("denied by policy"), "{}", text(&out));
+    assert_eq!(fs::read_to_string(session.settings()).unwrap(), stored);
+    let after = session.touch(&[]);
+    assert!(text(&after).contains(BLOCKED), "{}", text(&after));
+    session.kill_daemon();
+}
+
+#[test]
+fn close_clears_a_corrupt_file_when_the_daemon_is_dead() {
+    let session = Session::new();
+    session.touch(&["--allowed-domains", "example.com"]);
+    session.kill_daemon();
+    session.write("{not json");
+
+    let out = session.output(&["close"]);
+
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!session.settings().exists());
+}

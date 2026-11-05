@@ -78,7 +78,7 @@ impl Running {
             // Stored with the session, so it must not depend on the directory
             // a later daemon starts in.
             let path = match env::current_dir() {
-                Ok(cwd) => crate::flags::absolute_policy_path(&path, &cwd),
+                Ok(cwd) => crate::flags::absolute_policy_path(&path, &cwd).unwrap_or(path),
                 Err(_) => path,
             };
             r.set(Key::ActionPolicy, Value::from(path));

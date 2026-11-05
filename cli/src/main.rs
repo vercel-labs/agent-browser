@@ -1249,14 +1249,28 @@ fn clear_closed_session(session: &str) {
     session_settings::clear_file(session);
 }
 
-/// What `close` forgets before it is sent. The stored security settings go now
-/// only when no daemon is running: one that is running still enforces them
-/// and drops them itself once the close succeeds, and a session that could not
-/// start (a settings file it refuses) can still be cleared with `close`.
+/// What `close` forgets before it is sent. The stored security settings stay:
+/// the daemon that handles the close (a running one, or one `close` starts)
+/// enforces them, so a policy that denies `close` still applies, and drops
+/// them itself once the close succeeds.
 fn forget_before_close(session: &str) {
     tls::clear_session(session);
-    if !connection::daemon_ready(session) {
-        session_settings::clear_file(session);
+}
+
+/// Starts or reuses the session's daemon. A `close` whose daemon refuses to
+/// start because of the stored settings file clears that file and tries once
+/// more, so a corrupt file can always be cleared with `close`.
+fn ensure_daemon_for(
+    session: &str,
+    opts: &DaemonOptions,
+    is_close: bool,
+) -> Result<connection::DaemonResult, String> {
+    match ensure_daemon(session, opts) {
+        Err(e) if is_close && session_settings::is_refusal(&e) => {
+            session_settings::clear_file(session);
+            ensure_daemon(session, opts)
+        }
+        other => other,
     }
 }
 
@@ -1842,7 +1856,8 @@ fn main() {
         plugins: Some(plugin_registry_json.as_str()),
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
+    let is_close = cmd.get("action").and_then(|v| v.as_str()) == Some("close");
+    let daemon_result = match ensure_daemon_for(&flags.session, &daemon_opts, is_close) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
