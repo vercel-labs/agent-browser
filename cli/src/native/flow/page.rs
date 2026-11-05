@@ -114,12 +114,29 @@ pub fn tab_on_site(flow: &Flow, current: Option<&str>) -> Result<(), String> {
 }
 
 /// The in-page tier over the active tab.
-pub async fn send(flow: &Flow, browser: &mut dyn Browser, req: &PreparedRequest) -> TierResult {
+pub async fn send(
+    flow: &Flow,
+    browser: &mut dyn Browser,
+    req: &PreparedRequest,
+    deadline: Instant,
+) -> TierResult {
     let started = Instant::now();
     let tab = browser.tab_url().await;
     if let Err(reason) = tab_on_site(flow, tab.as_deref()) {
         return TierResult::fail(req, Tier::Page, started, Failure::skipped(reason));
     }
-    let value = browser.eval(&page_fetch_script(req)).await;
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return TierResult::fail(
+            req,
+            Tier::Page,
+            started,
+            Failure::unavailable("the run's time is up".to_string()),
+        );
+    }
+    let value = match tokio::time::timeout(left, browser.eval(&page_fetch_script(req))).await {
+        Ok(value) => value,
+        Err(_) => Err("the run's time is up".to_string()),
+    };
     page_result(&HostPolicy::of(flow), req, started, value)
 }

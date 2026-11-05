@@ -3778,7 +3778,7 @@ mod tests {
         }));
         let req = prepare_all(&flow, &[]).unwrap().remove(0);
         let mut browser = SilentBrowser;
-        let result = block_on(page::send(&flow, &mut browser, &req));
+        let result = block_on(page::send(&flow, &mut browser, &req, far()));
         assert!(!result.ok);
         assert!(result.skipped, "{:?}", result.reason);
         assert!(result.drift);
@@ -6927,7 +6927,7 @@ mod tests {
             status: 503,
             body: String::new(),
         });
-        let r = block_on(run_http(&client, &req, None, routed));
+        let r = block_on(run_http(&client, &req, None, routed, far()));
         assert_eq!(r.stop, None, "{:?}", r.reason);
         assert_eq!(r.status, Some(503));
         assert_eq!(r.reason.as_deref(), Some("HTTP 503"));
@@ -7093,6 +7093,8 @@ mod tests {
         page: Result<Value, String>,
         /// A request that never finishes, started by every command.
         poll_each_run: Option<String>,
+        /// How long a command, or the in-page eval, takes to answer.
+        delay: Duration,
     }
 
     impl ScriptBrowser {
@@ -7104,7 +7106,13 @@ mod tests {
                 ran: Vec::new(),
                 page: Err("no page".to_string()),
                 poll_each_run: None,
+                delay: Duration::ZERO,
             }
+        }
+
+        fn slow(mut self, delay: Duration) -> ScriptBrowser {
+            self.delay = delay;
+            self
         }
 
         fn polling(mut self, url: &str) -> ScriptBrowser {
@@ -7130,6 +7138,7 @@ mod tests {
             self.tab.clone()
         }
         async fn eval(&mut self, _: &str) -> Result<Value, String> {
+            tokio::time::sleep(self.delay).await;
             self.page.clone()
         }
         async fn ensure_browser(&mut self) -> Result<(), String> {
@@ -7139,6 +7148,7 @@ mod tests {
             Ok(0)
         }
         async fn run(&mut self, cmd: &Value) -> Value {
+            tokio::time::sleep(self.delay).await;
             let reply = self
                 .replies
                 .get(self.ran.len())
@@ -7302,7 +7312,7 @@ mod tests {
                 let mut browser = ScriptBrowser::new(Vec::new(), Vec::new()).answering_in_page(
                     json!({ "status": 200, "text": r#"{"data":[{"id":1}]}"#, "url": url }),
                 );
-                block_on(page::send(&flow, &mut browser, &req))
+                block_on(page::send(&flow, &mut browser, &req, far()))
             };
             for off in ["https://evil.test/x", "not a url"] {
                 let r = answer(off);
@@ -7326,7 +7336,7 @@ mod tests {
         }
 
         #[test]
-        fn scheme_relative_urls_pass_the_replay_host_check() {
+        fn scheme_relative_urls_are_host_checked_like_a_browser() {
             let flow = flow_of(
                 json!({ "startUrl": "https://example.com/app", "allowedHosts": ["example.com"] }),
             );
@@ -7590,8 +7600,182 @@ mod tests {
             }
         }
 
+        fn soon(ms: u64) -> Instant {
+            Instant::now() + Duration::from_millis(ms)
+        }
+
         #[test]
-        fn a_write_answer_captured_before_a_failing_command_is_drift() {
+        fn a_replayed_command_cannot_outlast_the_run_deadline() {
+            let flow = click_flow();
+            // Each command takes 5s; the run has 400ms.
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), Vec::new()).slow(Duration::from_secs(5));
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(20),
+                soon(400),
+            ))
+            .ok()
+            .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(run.out_of_time(), "{:?}", run.failure);
+        }
+
+        #[test]
+        fn a_replayed_wait_is_stamped_with_the_time_left() {
+            let flow = flow_of(json!({ "steps": [
+                { "command": { "action": "wait", "selector": "#late", "timeout": 60000 } },
+                { "command": { "action": "wait", "selector": "#other" } }
+            ] }));
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new());
+            block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(20),
+                soon(5000),
+            ))
+            .ok()
+            .unwrap();
+            for cmd in browser.ran.iter().filter(|c| c["action"] == "wait") {
+                let t = cmd["timeout"].as_u64().unwrap_or(u64::MAX);
+                assert!(t <= 5000, "{cmd}");
+            }
+        }
+
+        #[test]
+        fn a_read_that_runs_out_of_time_is_not_drift() {
+            let flow = click_flow();
+            let req = PreparedRequest {
+                url: "https://a.test/items".to_string(),
+                ..prepared("s1r1")
+            };
+            let ledger = WriteLedger::default();
+            let ctx = SendCtx {
+                ledger: &ledger,
+                wanted: &[],
+            };
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), Vec::new()).polling("https://api.a.test/poll");
+            let mut run = None;
+            let r = block_on(replay::send(
+                &flow,
+                &[],
+                &mut browser,
+                &mut run,
+                &req,
+                &ctx,
+                soon(300),
+            ));
+            assert!(!r.ok && !r.drift && !r.skipped, "{:?}", r.reason);
+            assert!(
+                r.reason.as_deref().unwrap_or("").contains("time is up"),
+                "{:?}",
+                r.reason
+            );
+            let mut flow = flow;
+            flow.verified_at = Some("then".to_string());
+            let results = [r];
+            assert!(!unverify_on_shape_change(&mut flow, &results));
+            let outcome = RunOutcome::failed(&results, &flow);
+            assert!(matches!(outcome, RunOutcome::Failed { .. }), "{outcome:?}");
+        }
+
+        #[test]
+        fn the_page_tier_cannot_outlast_the_run_deadline() {
+            let flow = click_flow();
+            let req = PreparedRequest {
+                url: "https://a.test/items".to_string(),
+                ..prepared("s1r1")
+            };
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new())
+                .answering_in_page(json!({ "status": 200, "text": "{}" }))
+                .slow(Duration::from_secs(5));
+            let started = Instant::now();
+            let r = block_on(page::send(&flow, &mut browser, &req, soon(300)));
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+            // A write that may have gone out is unknown.
+            let write = PreparedRequest {
+                write: true,
+                method: "POST".to_string(),
+                ..req
+            };
+            let r = block_on(page::send(&flow, &mut browser, &write, soon(300)));
+            assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
+        }
+
+        #[test]
+        fn the_http_tier_cannot_outlast_the_run_deadline() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/x", listener.local_addr().unwrap());
+            let flow = flow_of(json!({ "startUrl": url }));
+            let client = http_client(None, &flow).unwrap();
+            let req = PreparedRequest {
+                url,
+                ..prepared("s1r1")
+            };
+            // The server accepts and never answers.
+            let started = Instant::now();
+            let r = block_on(run_http(&client, &req, None, None, soon(400)));
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+            // With no time left nothing is sent.
+            let r = block_on(run_http(&client, &req, None, None, Instant::now()));
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+            assert!(
+                r.reason.as_deref().unwrap_or("").contains("time is up"),
+                "{:?}",
+                r.reason
+            );
+            drop(listener);
+        }
+
+        #[test]
+        fn a_write_answered_with_a_challenge_page_is_unknown_not_blocked() {
+            let (_, requests) = cart_write("http");
+            let challenge = "<html><body>cf-chl captcha</body></html>";
+            let r = tier_result(
+                &requests[0],
+                Tier::Http,
+                Instant::now(),
+                Ok((200, challenge.to_string())),
+            );
+            assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
+            // A read keeps the challenge stop.
+            let read = PreparedRequest {
+                write: false,
+                method: "GET".to_string(),
+                ..requests[0].clone()
+            };
+            let r = tier_result(
+                &read,
+                Tier::Http,
+                Instant::now(),
+                Ok((200, challenge.to_string())),
+            );
+            assert_eq!(r.stop, Some(Stop::Blocked));
+        }
+
+        #[test]
+        fn a_write_answer_captured_before_a_failing_command_is_answered_from_the_capture() {
             let flow = cart_flow();
             let mut browser = ScriptBrowser::new(
                 failing_last_command(),
@@ -7622,7 +7806,7 @@ mod tests {
         }
 
         #[test]
-        fn a_write_without_a_captured_body_is_drift() {
+        fn a_write_without_a_captured_body_is_unknown() {
             let flow = cart_flow();
             let req = prepare_all(&flow, &[]).unwrap().remove(0);
             // A 2xx with no body, a status 0, and a binary body: the site

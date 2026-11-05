@@ -552,6 +552,19 @@ pub fn tier_result_of(
                 f.drift = false;
                 f.reason = format!("{}: the write may have been applied", f.reason);
             }
+            // A challenge page in answer to a write that went out does not say
+            // it was not applied.
+            if sent
+                && req.write
+                && f.stop == Some(Stop::Blocked)
+                && matches!(f.status, Some(200..=299))
+            {
+                f.stop = Some(Stop::OutcomeUnknown);
+                f.reason = format!(
+                    "{}: the write was sent, but the answer does not say it was applied",
+                    f.reason
+                );
+            }
             // A write the site answered with a 2xx JSON body of another shape
             // was applied. Any other accepted-looking answer (a redirect to a
             // login, an HTML page) does not say it was.

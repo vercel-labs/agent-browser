@@ -168,6 +168,8 @@ const URL_KEYS: &[&str] = &[
 /// with each `*` standing for a letter, so a pattern can only reach the
 /// site's own hosts; a pattern whose host cannot be read is refused. A
 /// pattern with no host is a path and stays on the page's site.
+/// Forms with no readable host, such as `https:/evil.test`, are left to the
+/// browser, which refuses them as invalid URLs.
 fn check_glob(policy: &HostPolicy, text: &str) -> Result<(), String> {
     let refused = || format!("'{}' is not a URL on the flow's site", text.trim());
     let text: String = text
@@ -414,7 +416,19 @@ pub fn replay_result(
 pub struct ReplayRun {
     entries: Vec<HarEntry>,
     pub(super) failure: Option<String>,
+    timed_out: bool,
 }
+
+impl ReplayRun {
+    /// The replay stopped because the run's time was up, not because of the site.
+    pub(super) fn out_of_time(&self) -> bool {
+        self.timed_out
+    }
+}
+
+/// Why a replay or request stopped for lack of time, which says nothing
+/// about the site.
+const TIME_UP: &str = "the run's time is up";
 
 /// How long one replayed command, and the final wait for bodies, may wait
 /// for the page: the request timeout. The run's own deadline caps the sum.
@@ -491,7 +505,12 @@ pub async fn send(
         };
     }
     if let Some(reason) = captured.failure.clone() {
-        return fail(Failure::drift(reason));
+        // Running out of time says nothing about the site.
+        return fail(if captured.timed_out {
+            Failure::unavailable(reason)
+        } else {
+            Failure::drift(reason)
+        });
     }
     match replay_lookup(&captured.entries, req) {
         Ok(entry) => replay_result(req, started, Some(entry)),
@@ -539,23 +558,35 @@ pub(super) async fn capture(
     }
     let policy = HostPolicy::of(flow);
     let mut failed = None;
+    let mut timed_out = false;
     for (i, c) in commands.into_iter().enumerate() {
         let mut c = c;
-        // A command waits on its own clock, within the run's.
         if Instant::now() >= run_deadline {
             failed = Some(format!(
-                "replay stopped before command {}: the run's time is up",
-                i + 1
+                "replay stopped before command {}: {}",
+                i + 1,
+                TIME_UP
             ));
+            timed_out = true;
             break;
         }
+        // A command waits on its own clock, within the run's.
         let deadline = (Instant::now() + wait).min(run_deadline);
         // Only the requests this command starts are waited on.
         let first_own = browser.captured_since(mark).await.len();
         c["id"] = json!(format!("flow-replay-{}", i + 1));
         // A page opened by the replay may still be rendering the element.
         let resp = loop {
-            let resp = browser.run(&c).await;
+            let left = run_deadline.saturating_duration_since(Instant::now());
+            // A command that waits gets no more than the time left.
+            if c["action"].as_str().is_some_and(|a| a.starts_with("wait")) {
+                let own = c["timeout"].as_u64().unwrap_or(u64::MAX);
+                c["timeout"] = json!(own.min(left.as_millis() as u64));
+            }
+            let resp = match tokio::time::timeout(left, browser.run(&c)).await {
+                Ok(resp) => resp,
+                Err(_) => json!({ "success": false, "error": TIME_UP }),
+            };
             let missing = resp
                 .get("error")
                 .and_then(|e| e.as_str())
@@ -592,13 +623,18 @@ pub(super) async fn capture(
             }
         }
         if resp.get("success") != Some(&json!(true)) {
-            failed = Some(format!(
-                "replaying command {} failed: {}",
-                i + 1,
-                resp.get("error")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("unknown error")
-            ));
+            timed_out = Instant::now() >= run_deadline;
+            failed = Some(if timed_out {
+                format!("replay stopped at command {}: {}", i + 1, TIME_UP)
+            } else {
+                format!(
+                    "replaying command {} failed: {}",
+                    i + 1,
+                    resp.get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("unknown error")
+                )
+            });
             break;
         }
     }
@@ -612,7 +648,17 @@ pub(super) async fn capture(
                 e.response_body.is_some() || e.status.is_some_and(|s| !(200..300).contains(&s))
             })
         };
-        if wanted.iter().all(ready) || Instant::now() >= deadline {
+        if wanted.iter().all(ready) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            if Instant::now() >= run_deadline {
+                failed = Some(format!(
+                    "replay stopped before every answer arrived: {}",
+                    TIME_UP
+                ));
+                timed_out = true;
+            }
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -622,5 +668,6 @@ pub(super) async fn capture(
     Ok(ReplayRun {
         entries,
         failure: failed,
+        timed_out,
     })
 }

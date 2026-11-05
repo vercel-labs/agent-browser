@@ -12364,7 +12364,7 @@ async fn handle_flow_run_inner(
     mut flow: super::flow::Flow,
 ) -> Result<Value, String> {
     let started = std::time::Instant::now();
-    let replay_deadline = started + std::time::Duration::from_millis(state.timeout_ms(cmd));
+    let run_deadline = started + std::time::Duration::from_millis(state.timeout_ms(cmd));
     let name = flow.name.clone();
     let name = name.as_str();
     let params = super::flow::parse_params(cmd)?;
@@ -12402,7 +12402,7 @@ async fn handle_flow_run_inner(
             flow: &flow,
             params: &params,
             replay_run: None,
-            replay_deadline,
+            run_deadline,
         };
         let check = |req: &super::flow::PreparedRequest| -> Result<(), String> {
             hosts
@@ -12743,8 +12743,8 @@ struct DaemonSenders<'a> {
     flow: &'a super::flow::Flow,
     params: &'a [(String, String)],
     replay_run: Option<super::flow::ReplayRun>,
-    /// When the replay must be done, so the CLI is still waiting for it.
-    replay_deadline: std::time::Instant,
+    /// When the run must be done, so the CLI is still waiting for it.
+    run_deadline: std::time::Instant,
 }
 
 #[async_trait::async_trait]
@@ -12757,8 +12757,8 @@ impl super::flow::Senders for DaemonSenders<'_> {
     ) -> super::flow::TierResult {
         use super::flow::{http, page, replay, Tier};
         match tier {
-            Tier::Http => http::send(&self.client, &mut self.wiring, req).await,
-            Tier::Page => page::send(self.flow, &mut self.wiring, req).await,
+            Tier::Http => http::send(&self.client, &mut self.wiring, req, self.run_deadline).await,
+            Tier::Page => page::send(self.flow, &mut self.wiring, req, self.run_deadline).await,
             Tier::Replay => {
                 replay::send(
                     self.flow,
@@ -12767,7 +12767,7 @@ impl super::flow::Senders for DaemonSenders<'_> {
                     &mut self.replay_run,
                     req,
                     ctx,
-                    self.replay_deadline,
+                    self.run_deadline,
                 )
                 .await
             }
@@ -20534,11 +20534,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let dir = tempfile::tempdir().unwrap();
         let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
         guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        // The fixture is a write, so a challenge in answer to it may have been applied.
         let cases: [(&'static str, &str, &str); 4] = [
             ("HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}", "auth_expired", ""),
             ("HTTP/1.1 403 Forbidden\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}", "auth_expired", ""),
             ("HTTP/1.1 429 Too Many Requests\r\nretry-after: 17\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}", "rate_limited", "17"),
-            ("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 41\r\nconnection: close\r\n\r\n<html>cf-chl-bypass captcha challenge</html", "blocked", ""),
+            ("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 41\r\nconnection: close\r\n\r\n<html>cf-chl-bypass captcha challenge</html", "outcome_unknown", ""),
         ];
         for (response, kind, retry) in cases {
             write_flow_fixture(dir.path(), serve_fixed(response));

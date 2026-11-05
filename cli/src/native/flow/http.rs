@@ -16,6 +16,7 @@ pub async fn run_http(
     req: &PreparedRequest,
     cookie_header: Option<&str>,
     routed: Option<RoutedResponse>,
+    deadline: Instant,
 ) -> TierResult {
     let started = Instant::now();
     if let Some(r) = routed {
@@ -45,7 +46,20 @@ pub async fn run_http(
             )
         }
     };
-    let mut builder = clients.for_request(req).request(method, &req.url);
+    // The request gets no more than the run has left.
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return tier_result(
+            req,
+            Tier::Http,
+            started,
+            Err(Failure::unavailable("the run's time is up".to_string())),
+        );
+    }
+    let mut builder = clients
+        .for_request(req)
+        .request(method, &req.url)
+        .timeout(left.min(Duration::from_secs(20)));
     for (k, v) in &req.headers {
         builder = builder.header(k, v);
     }
@@ -187,8 +201,9 @@ pub async fn send(
     client: &HttpClients,
     browser: &mut dyn Browser,
     req: &PreparedRequest,
+    deadline: Instant,
 ) -> TierResult {
     let cookie = browser.cookie_header(&req.url).await;
     let routed = browser.routed_response(&req.url).await;
-    run_http(client, req, cookie.as_deref(), routed).await
+    run_http(client, req, cookie.as_deref(), routed, deadline).await
 }
