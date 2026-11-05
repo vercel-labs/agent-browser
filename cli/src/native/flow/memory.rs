@@ -106,6 +106,7 @@ impl Senders for MemorySenders {
                     shape_changed: false,
                     stop: Some(stop),
                     transport: false,
+                    skipped: false,
                 }),
             );
         }

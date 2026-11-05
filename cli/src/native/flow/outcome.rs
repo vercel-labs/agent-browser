@@ -71,6 +71,8 @@ pub struct TierResult {
     pub soft_stop: Option<Stop>,
     /// The request never got an answer; another tier may reach the site.
     pub transport: bool,
+    /// The tier was not tried, so the result says nothing about it.
+    pub skipped: bool,
     pub retry_after: Option<String>,
 }
 
@@ -97,6 +99,7 @@ impl TierResult {
             stop: f.stop,
             soft_stop: None,
             transport: f.transport,
+            skipped: f.skipped,
             retry_after: None,
         }
     }
@@ -110,12 +113,21 @@ pub struct Failure {
     pub shape_changed: bool,
     pub stop: Option<Stop>,
     pub transport: bool,
+    pub skipped: bool,
 }
 
 impl Failure {
     /// The way failed in a way another way may not: try the next tier.
     pub fn drift(reason: String) -> Failure {
         Failure::new(true, None, reason)
+    }
+
+    /// The tier was not tried; another tier may still send the request.
+    pub fn skipped(reason: String) -> Failure {
+        Failure {
+            skipped: true,
+            ..Failure::new(true, None, reason)
+        }
     }
 
     /// The tier cannot express this run; that says nothing about the site.
@@ -132,6 +144,7 @@ impl Failure {
             shape_changed: false,
             stop: Some(Stop::OutcomeUnknown),
             transport: false,
+            skipped: false,
         }
     }
 
@@ -143,6 +156,7 @@ impl Failure {
             shape_changed: false,
             stop: None,
             transport: false,
+            skipped: false,
         }
     }
 
@@ -165,6 +179,7 @@ impl Failure {
             shape_changed: false,
             stop: Some(stop),
             transport: false,
+            skipped: false,
         }
     }
 }
@@ -437,6 +452,7 @@ fn check_response_on(
             shape_changed: true,
             stop: None,
             transport: false,
+            skipped: false,
         });
     }
     if let Err(reason) = signature_matches(&req.expect.signature, &current) {
@@ -463,6 +479,7 @@ fn check_response_on(
             shape_changed: true,
             stop: None,
             transport: false,
+            skipped: false,
         });
     }
     Ok((parsed, false))
@@ -473,6 +490,18 @@ pub fn tier_result(
     tier: Tier,
     started: Instant,
     outcome: Result<(u16, String), Failure>,
+) -> TierResult {
+    tier_result_of(req, tier, started, outcome, true)
+}
+
+/// `sent` is false for an answer a session route made up: no write left the
+/// machine, so a 5xx or 408 does not mean it may have been applied.
+pub fn tier_result_of(
+    req: &PreparedRequest,
+    tier: Tier,
+    started: Instant,
+    outcome: Result<(u16, String), Failure>,
+    sent: bool,
 ) -> TierResult {
     let ms = started.elapsed().as_millis();
     let outcome = match req.expect.extract.as_ref().filter(|x| !x.is_null()) {
@@ -506,17 +535,16 @@ pub fn tier_result(
             stop: None,
             soft_stop: None,
             transport: false,
+            skipped: false,
             retry_after: None,
         },
         Err(mut f) => {
-            // A write answered with a 5xx or 408 may still have been applied.
-            if req.write && f.stop.is_none() && matches!(f.status, Some(408 | 500..=599)) {
+            // A write answered with a 5xx or 408 may still have been applied,
+            // unless a session route answered it and nothing was sent.
+            if sent && req.write && f.stop.is_none() && matches!(f.status, Some(408 | 500..=599)) {
                 f.stop = Some(Stop::OutcomeUnknown);
                 f.drift = false;
-                f.reason = format!(
-                    "{}: the write may have been applied, so it is not sent again",
-                    f.reason
-                );
+                f.reason = format!("{}: the write may have been applied", f.reason);
             }
             // The recording sent credentials or a signature a run cannot
             // copy, so a 401 or 403 may only mean this tier lacks them; the
@@ -585,27 +613,35 @@ pub fn finish_run(
     } else if shape_changed.is_some() || (!all_ok && attempts.iter().any(|r| !r.ok && r.drift)) {
         flow.verified_at = None;
     }
-    // Remember the tier that worked, so the next run starts there.
-    // A transport error is not a sign the tier stopped working.
+    // Remember the tier that worked, so the next run starts there. A transport
+    // error or a skipped tier says nothing about its tier, so the next run
+    // starts after the last tier that failed for a reason that does.
     for r in last.iter().filter(|r| r.ok) {
-        let only_transport = {
-            let before: Vec<&TierResult> = attempts
+        let learned = attempts
+            .iter()
+            .take_while(|a| !std::ptr::eq(*a, *r))
+            .filter(|a| a.id == r.id && !a.transport && !a.skipped)
+            .last();
+        let before_any = attempts
+            .iter()
+            .take_while(|a| !std::ptr::eq(*a, *r))
+            .any(|a| a.id == r.id);
+        let next = match learned {
+            Some(f) => Tier::ALL
                 .iter()
-                .take_while(|a| !std::ptr::eq(*a, *r))
-                .filter(|a| a.id == r.id)
-                .collect();
-            !before.is_empty() && before.iter().all(|a| a.transport)
+                .position(|t| *t == f.tier)
+                .and_then(|i| Tier::ALL.get(i + 1).copied()),
+            None if before_any => continue,
+            None => Some(r.tier),
         };
-        if only_transport {
-            continue;
-        }
+        let Some(next) = next else { continue };
         for req in flow
             .steps
             .iter_mut()
             .flat_map(|s| s.requests.iter_mut())
             .filter(|req| req.id == r.id)
         {
-            req.tier = (r.tier != Tier::Http).then_some(r.tier);
+            req.tier = (next != Tier::Http).then_some(next);
         }
     }
     let output = last

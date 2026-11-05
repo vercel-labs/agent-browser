@@ -97,7 +97,7 @@ pub async fn send(flow: &Flow, browser: &mut dyn Browser, req: &PreparedRequest)
     let started = Instant::now();
     let tab = browser.tab_url().await;
     if let Err(reason) = tab_on_site(flow, tab.as_deref()) {
-        return TierResult::fail(req, Tier::Page, started, Failure::drift(reason));
+        return TierResult::fail(req, Tier::Page, started, Failure::skipped(reason));
     }
     let value = browser.eval(&page_fetch_script(req)).await;
     page_result(req, started, value)

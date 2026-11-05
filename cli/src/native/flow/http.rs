@@ -28,7 +28,7 @@ pub async fn run_http(
         } else {
             Ok((r.status, r.body))
         };
-        return tier_result(req, Tier::Http, started, outcome);
+        return tier_result_of(req, Tier::Http, started, outcome, false);
     }
     let method = match reqwest::Method::from_bytes(req.method.as_bytes()) {
         Ok(m) => m,
@@ -98,6 +98,7 @@ pub async fn run_http(
                         shape_changed: false,
                         stop: None,
                         transport: false,
+                        skipped: false,
                     }),
                 );
             }

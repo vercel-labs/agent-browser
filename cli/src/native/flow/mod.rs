@@ -5508,6 +5508,7 @@ mod tests {
             stop: kind,
             soft_stop: None,
             transport: false,
+            skipped: false,
             retry_after: None,
         }
     }
@@ -6789,6 +6790,65 @@ mod tests {
         };
         finish_run(&mut flow, &[transport, replay], "now", 1, &Shape::default());
         assert_eq!(flow.steps[0].requests[0].tier, Some(Tier::Page));
+    }
+
+    #[test]
+    fn a_skipped_tier_does_not_move_the_preferred_tier() {
+        let skipped = |tier| TierResult {
+            skipped: true,
+            ..result(tier, false, None, true, None)
+        };
+        let transport = TierResult {
+            transport: true,
+            ..result(Tier::Http, false, None, false, None)
+        };
+        let replay = result(Tier::Replay, true, Some(200), false, None);
+        let tier_after = |attempts: &[TierResult]| {
+            let mut flow = flow_with_request(None, false);
+            finish_run(&mut flow, attempts, "now", 1, &Shape::default());
+            flow.steps[0].requests[0].tier
+        };
+        // Transport error, skipped page, replay answers: nothing was learned.
+        assert_eq!(
+            tier_after(&[transport, skipped(Tier::Page), replay.clone()]),
+            None
+        );
+        // The http shape changed and the page was not tried: start at the page.
+        let mut shape = result(Tier::Http, false, Some(200), true, None);
+        shape.shape_changed = true;
+        assert_eq!(
+            tier_after(&[shape, skipped(Tier::Page), replay]),
+            Some(Tier::Page)
+        );
+        // The page answered after http drifted: unchanged.
+        let drifted = result(Tier::Http, false, Some(200), true, None);
+        let page = result(Tier::Page, true, Some(200), false, None);
+        assert_eq!(tier_after(&[drifted, page]), Some(Tier::Page));
+    }
+
+    #[test]
+    fn a_routed_write_answered_with_a_5xx_is_not_an_unknown_outcome() {
+        let mut req = prepared("s1r1");
+        req.write = true;
+        let client = http_client(None, &flow_of(json!({}))).unwrap();
+        let routed = Some(RoutedResponse {
+            abort: false,
+            status: 503,
+            body: String::new(),
+        });
+        let r = block_on(run_http(&client, &req, None, routed));
+        assert_eq!(r.stop, None, "{:?}", r.reason);
+        assert_eq!(r.status, Some(503));
+        assert_eq!(r.reason.as_deref(), Some("HTTP 503"));
+    }
+
+    #[test]
+    fn an_unknown_write_outcome_says_not_sent_again_once() {
+        let mut req = prepared("s1r1");
+        req.write = true;
+        let r = tier_result(&req, Tier::Http, Instant::now(), Ok((503, String::new())));
+        let msg = RunOutcome::stopped(&[r]).unwrap().message("f");
+        assert_eq!(msg.matches("not sent again").count(), 1, "{msg}");
     }
 
     #[test]
