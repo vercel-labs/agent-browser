@@ -38,7 +38,6 @@ pub(crate) fn full_flags() -> Flags {
     f.cdp = Some("ws://127.0.0.1:9333/devtools".to_string());
     f.cli_cdp = true;
     f.cdp_headers = Some(r#"{"Authorization":"Bearer x"}"#.to_string());
-    f.cli_cdp_headers = true;
     f.extensions = vec!["/ext/a".to_string(), "/ext/b".to_string()];
     f.init_scripts = vec!["/init/a.js".to_string()];
     f.enable = vec!["react-devtools".to_string()];
@@ -1441,7 +1440,6 @@ fn environment_connection_values_are_ambient_and_flags_are_explicit() {
 
     let mut f = ambient_flags(Some("9222"), Some("ios"), Some(r#"{"A":"b"}"#));
     f.cli_cdp = true;
-    f.cli_cdp_headers = true;
     f.cli_provider = true;
     let p = Patch::from_flags(&f);
     for key in [Key::Cdp, Key::Provider, Key::CdpHeaders] {
@@ -1490,18 +1488,61 @@ fn an_explicit_target_replaces_the_session_target_and_beats_an_ambient_one() {
 }
 
 #[test]
-fn ambient_headers_follow_only_an_ambient_target() {
+fn headers_are_credentials_and_ride_with_any_endpoint() {
     let headers = Some(r#"{"A":"b"}"#);
+    // Headers alone, and headers with an explicit target, are never ambient.
     let p = Patch::from_flags(&ambient_flags(None, None, headers));
-    assert!(p.get(Key::CdpHeaders).is_none());
+    assert!(p.get(Key::CdpHeaders).is_some() && !p.is_ambient(Key::CdpHeaders));
 
-    let p = Patch::from_flags(&ambient_flags(Some("9222"), None, headers));
-    assert!(p.is_ambient(Key::CdpHeaders));
+    let mut f = ambient_flags(Some("ws://b.example/cdp"), None, headers);
+    f.cli_cdp = true;
+    let plan = Running::defaults().plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.cdp_headers().as_deref(),
+        Some(r#"{"A":"b"}"#),
+        "env headers must ride with an explicit --cdp"
+    );
 
-    let running = running_with(&[(Key::Cdp, json!("ws://a.example/cdp"))]);
-    let plan = running.plan(&p);
-    assert!(plan.changes.is_empty() && !plan.relaunch);
-    assert_eq!(plan.next.cdp_headers(), None);
+    // An ambient target that loses to the session target still lets rotated
+    // headers through: the session reconnects with them.
+    let running = running_with(&[
+        (Key::Cdp, json!("ws://a.example/cdp")),
+        (Key::CdpHeaders, json!(r#"{"A":"old"}"#)),
+    ]);
+    let rotated = Patch::from_flags(&ambient_flags(
+        Some("ws://a.example/cdp"),
+        None,
+        Some(r#"{"A":"new"}"#),
+    ));
+    let plan = running.plan(&rotated);
+    assert!(changed_keys(&plan).contains(&Key::CdpHeaders));
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(r#"{"A":"new"}"#));
+}
+
+#[test]
+fn effective_targets_resolve_flags_over_defaults_and_defaults_by_precedence() {
+    let t = |f: &Flags| effective_targets(f);
+    // Two defaults: cdp wins over auto-connect over provider.
+    let both = ambient_flags(Some("9222"), Some("ios"), None);
+    assert_eq!(t(&both).cdp.as_deref(), Some("9222"));
+    assert_eq!(t(&both).provider, None);
+    let mut auto = ambient_flags(None, Some("ios"), None);
+    auto.auto_connect = true;
+    assert!(t(&auto).auto_connect && t(&auto).provider.is_none());
+
+    // An explicit target drops every default.
+    let mut f = ambient_flags(Some("9222"), Some("ios"), None);
+    f.cli_provider = true;
+    assert_eq!((t(&f).cdp, t(&f).provider.as_deref()), (None, Some("ios")));
+    let mut f = ambient_flags(Some("9222"), Some("ios"), None);
+    f.cli_cdp = true;
+    assert_eq!((t(&f).cdp.as_deref(), t(&f).provider), (Some("9222"), None));
+
+    // An explicit blank provider names nothing, so the default stays.
+    let mut f = ambient_flags(Some("9222"), Some(""), None);
+    f.cli_provider = true;
+    assert_eq!(t(&f).cdp.as_deref(), Some("9222"));
+    assert_eq!(t(&f).provider.as_deref(), Some(""));
 }
 
 #[test]
@@ -1516,9 +1557,9 @@ fn blank_ambient_values_name_nothing_and_one_ambient_target_wins() {
 
 #[test]
 fn ambient_marks_survive_the_wire_and_reject_unknown_names() {
-    let patch = Patch::from_flags(&ambient_flags(Some("9222"), None, Some(r#"{"A":"b"}"#)));
+    let patch = Patch::from_flags(&ambient_flags(Some("9222"), None, None));
     let wire = patch.to_wire().unwrap();
-    assert_eq!(wire["ambient"], json!(["cdp", "cdp-headers"]));
+    assert_eq!(wire["ambient"], json!(["cdp"]));
     let back = Patch::from_wire(Some(&wire)).unwrap();
     assert_eq!(back, patch);
     assert!(back.is_ambient(Key::Cdp));
@@ -1527,7 +1568,13 @@ fn ambient_marks_survive_the_wire_and_reject_unknown_names() {
     let plain = json!({"cdp": "9222"});
     assert!(!Patch::from_wire(Some(&plain)).unwrap().is_ambient(Key::Cdp));
 
-    for bad in [json!("cdp"), json!(["headed"]), json!([1]), json!(["nope"])] {
+    for bad in [
+        json!("cdp"),
+        json!(["headed"]),
+        json!(["cdp-headers"]),
+        json!([1]),
+        json!(["nope"]),
+    ] {
         let wire = json!({"cdp": "9222", "ambient": bad});
         assert!(Patch::from_wire(Some(&wire)).is_err(), "{bad}");
     }
@@ -1542,4 +1589,76 @@ fn without_ambient_connection_keeps_explicit_entries() {
     assert!(p.get(Key::Cdp).is_none());
     assert!(p.get(Key::Headed).is_some());
     assert!(p.to_wire().unwrap().get("ambient").is_none());
+}
+
+// ---- where the connection markers come from ----
+
+/// Parses `args` with the given environment and an empty config file.
+fn parse_with_env(env: &[(&str, &str)], args: &[&str]) -> Flags {
+    let all: Vec<String> = std::env::vars()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with("AGENT_BROWSER_"))
+        .collect();
+    let mut names: Vec<&str> = all.iter().map(String::as_str).collect();
+    names.extend(env.iter().map(|(k, _)| *k));
+    let guard = EnvGuard::new(&names);
+    for name in &names {
+        guard.remove(name);
+    }
+    for (k, v) in env {
+        guard.set(k, v);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.json");
+    std::fs::write(&config, "{}").unwrap();
+    let mut argv = vec![
+        "--config".to_string(),
+        config.to_string_lossy().into_owned(),
+    ];
+    argv.extend(args.iter().map(|a| a.to_string()));
+    try_parse_flags(&argv).unwrap()
+}
+
+#[test]
+fn connection_flags_set_their_marker_and_environment_values_do_not() {
+    let f = parse_with_env(&[], &["--cdp", "9222"]);
+    assert!(f.cli_cdp && !f.cli_provider);
+    let f = parse_with_env(&[], &["-p", "ios"]);
+    assert!(f.cli_provider && !f.cli_cdp);
+    let f = parse_with_env(&[], &["--provider", "ios"]);
+    assert!(f.cli_provider);
+
+    let f = parse_with_env(
+        &[
+            ("AGENT_BROWSER_CDP", "9222"),
+            ("AGENT_BROWSER_PROVIDER", "ios"),
+        ],
+        &[],
+    );
+    assert_eq!(f.cdp.as_deref(), Some("9222"));
+    assert_eq!(f.provider.as_deref(), Some("ios"));
+    assert!(!f.cli_cdp && !f.cli_provider);
+}
+
+#[test]
+fn parsed_flags_and_environment_reach_the_wire_as_explicit_and_ambient() {
+    let env = [("AGENT_BROWSER_CDP", "9222")];
+    let wire = Patch::from_flags(&parse_with_env(&env, &["get", "url"]))
+        .to_wire()
+        .unwrap();
+    assert_eq!(wire["cdp"], "9222");
+    assert_eq!(wire["ambient"], json!(["cdp"]));
+
+    let wire = Patch::from_flags(&parse_with_env(&env, &["--cdp", "9333", "get", "url"]))
+        .to_wire()
+        .unwrap();
+    assert_eq!(wire["cdp"], "9333");
+    assert!(wire.get("ambient").is_none());
+
+    // A provider on the command line drops the environment cdp.
+    let wire = Patch::from_flags(&parse_with_env(&env, &["-p", "ios", "get", "url"]))
+        .to_wire()
+        .unwrap();
+    assert_eq!(wire["provider"], "ios");
+    assert!(wire.get("cdp").is_none() && wire.get("ambient").is_none());
 }

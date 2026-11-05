@@ -42,11 +42,57 @@ const RELAUNCH_FIELD: &str = "relaunch";
 const AMBIENT_FIELD: &str = "ambient";
 
 /// The settings an environment or config value can make ambient.
-pub(super) const AMBIENT_KEYS: [Key; 4] =
-    [Key::Cdp, Key::AutoConnect, Key::Provider, Key::CdpHeaders];
+pub(super) const AMBIENT_KEYS: [Key; 3] = [Key::Cdp, Key::AutoConnect, Key::Provider];
 
-/// Ambient targets in precedence order, highest first.
-const AMBIENT_TARGETS: [Key; 3] = [Key::Cdp, Key::AutoConnect, Key::Provider];
+/// The connection targets of one invocation after the environment and config
+/// defaults are resolved against the command line.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Targets {
+    pub cdp: Option<String>,
+    pub provider: Option<String>,
+    pub auto_connect: bool,
+}
+
+/// Which targets an invocation names. A target on the command line wins and
+/// drops the environment and config ones. Without one, a blank default names
+/// nothing and a single default is kept, picked by precedence: cdp, then
+/// auto-connect, then provider. A blank `-p ""` is kept: it resets the session.
+pub fn effective_targets(flags: &Flags) -> Targets {
+    let blank = |v: &String| v.trim().is_empty();
+    let mut cdp = flags.cdp.clone();
+    let mut provider = flags.provider.clone();
+    let mut auto_connect = flags.auto_connect;
+    if !flags.cli_cdp && cdp.as_ref().is_some_and(blank) {
+        cdp = None;
+    }
+    if !flags.cli_provider && provider.as_ref().is_some_and(blank) {
+        provider = None;
+    }
+    let explicit = flags.cli_cdp && cdp.is_some()
+        || flags.cli_provider && provider.as_ref().is_some_and(|v| !blank(v))
+        || flags.cli_auto_connect && auto_connect;
+    if explicit {
+        if !flags.cli_cdp {
+            cdp = None;
+        }
+        if !flags.cli_provider {
+            provider = None;
+        }
+        auto_connect &= flags.cli_auto_connect;
+    } else if cdp.is_some() {
+        auto_connect = false;
+        if !flags.cli_provider {
+            provider = None;
+        }
+    } else if auto_connect && !flags.cli_provider {
+        provider = None;
+    }
+    Targets {
+        cdp,
+        provider,
+        auto_connect,
+    }
+}
 
 impl fmt::Debug for Patch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -75,39 +121,22 @@ impl Patch {
             .iter()
             .filter_map(|s| (s.read)(flags).map(|requested| (s.key, requested)))
             .collect();
+        let targets = effective_targets(flags);
         let mut ambient = BTreeSet::new();
         for key in AMBIENT_KEYS {
-            let explicit = match key {
-                Key::Cdp => flags.cli_cdp,
-                Key::CdpHeaders => flags.cli_cdp_headers,
-                Key::Provider => flags.cli_provider,
-                _ => flags.cli_auto_connect || flags.no_auto_connect,
+            let (kept, explicit) = match key {
+                Key::Cdp => (targets.cdp.is_some(), flags.cli_cdp),
+                Key::Provider => (targets.provider.is_some(), flags.cli_provider),
+                _ => (
+                    targets.auto_connect || flags.no_auto_connect || flags.cli_auto_connect,
+                    flags.cli_auto_connect || flags.no_auto_connect,
+                ),
             };
-            if explicit {
-                continue;
+            if !kept {
+                entries.remove(&key);
+            } else if !explicit && entries.contains_key(&key) {
+                ambient.insert(key);
             }
-            match entries.get(&key) {
-                // A blank value from the environment names nothing.
-                Some(Requested::Set(Value::String(v))) if v.trim().is_empty() => {
-                    entries.remove(&key);
-                }
-                Some(Requested::Set(_)) => {
-                    ambient.insert(key);
-                }
-                _ => {}
-            }
-        }
-        // Two ambient targets would flap between commands: only the one the
-        // precedence picks is kept.
-        if let Some(winner) = AMBIENT_TARGETS.iter().find(|k| ambient.contains(k)) {
-            for key in AMBIENT_TARGETS {
-                if key != *winner && ambient.remove(&key) {
-                    entries.remove(&key);
-                }
-            }
-        } else if ambient.remove(&Key::CdpHeaders) {
-            // Ambient headers only describe an ambient target.
-            entries.remove(&Key::CdpHeaders);
         }
         Patch {
             entries,
