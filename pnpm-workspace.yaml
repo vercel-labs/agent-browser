@@ -6,9 +6,12 @@ packages:
 minimumReleaseAge: 2880
 # First-party packages are exempt so @agent-browser/eve can depend on a
 # just-released @agent-browser/sandbox without waiting out the release age.
+# tsc-ts and its platform packages are Vercel Labs packages too.
 minimumReleaseAgeExclude:
   - '@agent-browser/sandbox'
   - eve
+  - tsc-ts
+  - '@tsc-ts/*'
 allowBuilds:
   esbuild: false
   '@mongodb-js/zstd': false
