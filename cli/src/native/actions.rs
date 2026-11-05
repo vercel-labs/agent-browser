@@ -12651,6 +12651,8 @@ impl super::flow::Browser for FlowWiring<'_> {
         if self.started_har {
             handle_har_start(&json!({}), self.state).await?;
         }
+        // Earlier tiers' responses may still be queued; they are not the replay's.
+        let _ = self.state.drain_cdp_events_background().await;
         self.mark = self.state.har_entries.len();
         Ok(self.mark)
     }
@@ -12665,6 +12667,7 @@ impl super::flow::Browser for FlowWiring<'_> {
     }
 
     async fn end_capture(&mut self) {
+        let _ = self.state.drain_cdp_events_background().await;
         if self.started_har {
             self.state.har_recording = false;
             self.state.har_entries.clear();

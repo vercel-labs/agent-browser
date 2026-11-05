@@ -15071,6 +15071,7 @@ const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
 <button id="items" onclick="items()">Items</button>
 <button id="gql" onclick="gql()">Gql</button>
 <button id="add" onclick="add()">Add</button>
+<button id="flaky" onclick="fetch('/api/flaky?_=' + Date.now())">Flaky</button>
 <button id="cartadd" onclick="fetch('/cart/remove?id=7')">CartAdd</button>
 <script>
 let csrf = ''; let user = '';
@@ -15107,6 +15108,7 @@ const FLOW_FIXTURE_FIRES: &[(&str, &str)] = &[
     ("#gql", "POST /graphql"),
     ("#add", "POST /api/cart"),
     ("#cartadd", "GET /cart/remove"),
+    ("#flaky", "GET /api/flaky"),
 ];
 
 impl FlowFixture {
@@ -15244,6 +15246,19 @@ async fn flow_fixture() -> FlowFixture {
                         r#"{"ok":true}"#,
                     )
                     .await
+                }
+                ("GET", "/api/flaky") if path.contains("_=") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"ok":true}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/flaky") => {
+                    reply(&mut stream, "401 Unauthorized", "application/json", "", "{}").await
                 }
                 ("GET", "/api/session") if signed_in => {
                     reply(
@@ -16032,5 +16047,61 @@ async fn e2e_flow_a_write_the_replay_sent_is_not_sent_again_by_a_later_request()
         before + 1,
         "one POST per run: {sent}"
     );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_the_page_tier_fetch_does_not_answer_for_the_replay() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("p{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#flaky" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    assert_success(
+        &exec(
+            &run(&mut n, json!({ "action": "flow_save", "name": "pf" })),
+            &mut state,
+        )
+        .await,
+    );
+    // The page tier asks the exact URL, which the site rejects; the replay's
+    // own request carries a cache-buster and is answered.
+    let path = dir.path().join("127.0.0.1").join("pf.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["url"].as_str().unwrap().contains("/api/flaky") {
+                req["url"] = json!(format!("{}/api/flaky", fx.site));
+                req["tier"] = json!("page");
+                req["expect"]["strippedAuth"] = json!(true);
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    let out = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "pf", "params": {} }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(out["data"]["ok"], true, "{out}");
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
