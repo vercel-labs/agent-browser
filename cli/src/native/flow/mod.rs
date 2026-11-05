@@ -5750,6 +5750,40 @@ mod tests {
     }
 
     #[test]
+    fn a_write_answered_with_a_server_error_is_not_sent_again() {
+        use memory::{MemorySenders, Scripted};
+        for status in [500u16, 502, 503, 408] {
+            let (flow, requests) = run_flow(json!({
+                "output": "s1r1",
+                "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+                "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] }]
+            }));
+            let mut senders = MemorySenders::default()
+                .answer(Tier::Http, "s1r1", Scripted::json(status, "{}"))
+                .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
+            let results =
+                block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+            assert_eq!(
+                senders.sent,
+                vec![(Tier::Http, "s1r1".to_string())],
+                "{status}"
+            );
+            assert_eq!(results.last().unwrap().stop, Some(Stop::OutcomeUnknown));
+        }
+        // A 4xx rejection means the write was not applied; the page may still send it.
+        let (flow, requests) = run_flow(json!({
+            "output": "s1r1",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] }]
+        }));
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::json(422, "{}"))
+            .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
+        block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert_eq!(senders.times("s1r1"), 2);
+    }
+
+    #[test]
     fn the_run_loop_refuses_a_request_the_check_rejects() {
         use memory::MemorySenders;
         let (flow, requests) = run_flow(json!({

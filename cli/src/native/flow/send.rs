@@ -16,8 +16,9 @@ pub struct WriteLedger {
 }
 
 impl WriteLedger {
-    /// Note a write's answer: only an accepted answer or an unknown outcome
-    /// means it may have been applied; a 4xx rejection does not.
+    /// Note a write's answer: an accepted answer or an unknown outcome (which
+    /// includes a 5xx or 408) means it may have been applied; a 4xx rejection
+    /// does not.
     pub fn record(&mut self, req: &PreparedRequest, result: &TierResult) {
         if req.write && (is_accepted(result.status) || result.stop == Some(Stop::OutcomeUnknown)) {
             self.sent.insert(req.id.clone());

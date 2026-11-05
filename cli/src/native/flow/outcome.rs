@@ -509,6 +509,15 @@ pub fn tier_result(
             retry_after: None,
         },
         Err(mut f) => {
+            // A write answered with a 5xx or 408 may still have been applied.
+            if req.write && f.stop.is_none() && matches!(f.status, Some(408 | 500..=599)) {
+                f.stop = Some(Stop::OutcomeUnknown);
+                f.drift = false;
+                f.reason = format!(
+                    "{}: the write may have been applied, so it is not sent again",
+                    f.reason
+                );
+            }
             // The recording sent credentials or a signature a run cannot
             // copy, so a 401 or 403 may only mean this tier lacks them; the
             // next tier sends them from the page.
