@@ -567,6 +567,8 @@ agent-browser profiler start              # Start Chrome DevTools profiling
 agent-browser profiler stop trace.json    # Stop and save profile
 ```
 
+You can also connect to a page WebSocket URL such as `ws://localhost:9222/devtools/page/abc123`. Console messages, network requests, HAR recording, tracing, and profiling work on that page through both CLI commands and MCP tools.
+
 ## React / Web Vitals
 
 Requires `--enable react-devtools` at launch for the `react ...` commands. `vitals` and `pushstate` are framework-agnostic.
