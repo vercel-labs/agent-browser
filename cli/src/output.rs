@@ -4615,6 +4615,8 @@ Options:
   --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
   --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
                              (or AGENT_BROWSER_NO_WEBMCP env)
+  --no-auto-connect          Return a session attached with --auto-connect to a local launch
+                             (or --auto-connect false; overrides AGENT_BROWSER_AUTO_CONNECT)
   --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
   --cdp-headers <json>       Headers for --cdp discovery and handshake, e.g. Authorization
                              (or AGENT_BROWSER_CDP_HEADERS env)
