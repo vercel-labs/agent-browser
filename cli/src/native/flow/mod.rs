@@ -3801,7 +3801,15 @@ mod tests {
         };
         let mut run = None;
         let mut browser = SilentBrowser;
-        let result = block_on(replay::send(&flow, &[], &mut browser, &mut run, &req, &ctx));
+        let result = block_on(replay::send(
+            &flow,
+            &[],
+            &mut browser,
+            &mut run,
+            &req,
+            &ctx,
+            far(),
+        ));
         assert!(!result.ok);
         assert_eq!(
             result.stop,
@@ -3823,6 +3831,7 @@ mod tests {
             &mut run,
             &read,
             &ctx,
+            far(),
         ));
         assert_eq!(result.stop, None);
         assert!(result.drift);
@@ -7082,6 +7091,8 @@ mod tests {
         entries: Vec<HarEntry>,
         ran: Vec<Value>,
         page: Result<Value, String>,
+        /// A request that never finishes, started by every command.
+        poll_each_run: Option<String>,
     }
 
     impl ScriptBrowser {
@@ -7092,7 +7103,13 @@ mod tests {
                 entries,
                 ran: Vec::new(),
                 page: Err("no page".to_string()),
+                poll_each_run: None,
             }
+        }
+
+        fn polling(mut self, url: &str) -> ScriptBrowser {
+            self.poll_each_run = Some(url.to_string());
+            self
         }
 
         fn answering_in_page(mut self, page: Value) -> ScriptBrowser {
@@ -7128,6 +7145,9 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| json!({ "success": true }));
             self.ran.push(cmd.clone());
+            if let Some(url) = &self.poll_each_run {
+                self.entries.push(entry("p", url, "Fetch", "", ""));
+            }
             reply
         }
         async fn captured_since(&mut self, _: usize) -> Vec<HarEntry> {
@@ -7137,6 +7157,10 @@ mod tests {
         fn write_approved(&self, _: &Write) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(3600)
     }
 
     fn finished(mut e: HarEntry) -> HarEntry {
@@ -7193,7 +7217,15 @@ mod tests {
                 wanted: &[],
             };
             let mut run = None;
-            block_on(replay::send(flow, &[], browser, &mut run, &req, &ctx))
+            block_on(replay::send(
+                flow,
+                &[],
+                browser,
+                &mut run,
+                &req,
+                &ctx,
+                far(),
+            ))
         }
 
         fn pending(url: &str) -> HarEntry {
@@ -7219,6 +7251,7 @@ mod tests {
                 &mut browser,
                 &[],
                 Duration::from_secs(5),
+                far(),
             ))
             .ok()
             .unwrap();
@@ -7250,6 +7283,7 @@ mod tests {
                 &mut browser,
                 &[],
                 Duration::from_millis(400),
+                far(),
             ))
             .ok()
             .unwrap();
@@ -7470,6 +7504,59 @@ mod tests {
                 assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{name}: {:?}", r.reason);
                 assert!(!r.drift && !r.ok, "{name}");
             }
+        }
+
+        #[test]
+        fn a_replay_with_a_poll_after_every_command_ends_by_the_run_deadline() {
+            let flow = flow_of(json!({ "steps": [
+                { "command": { "action": "click", "selector": "#a" } },
+                { "command": { "action": "click", "selector": "#b" } },
+                { "command": { "action": "click", "selector": "#c" } }
+            ] }));
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), Vec::new()).polling("https://api.a.test/poll");
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_millis(400),
+                started + Duration::from_millis(1000),
+            ))
+            .ok()
+            .unwrap();
+            // Four commands at 400ms each would be 1600ms.
+            assert!(
+                started.elapsed() < Duration::from_millis(1300),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(run.failure.is_some());
+        }
+
+        #[test]
+        fn a_poll_started_by_an_earlier_command_does_not_hold_a_later_one() {
+            let flow = click_flow();
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), vec![pending("https://api.a.test/poll")]);
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(5),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
         }
 
         #[test]

@@ -12364,6 +12364,7 @@ async fn handle_flow_run_inner(
     mut flow: super::flow::Flow,
 ) -> Result<Value, String> {
     let started = std::time::Instant::now();
+    let replay_deadline = started + std::time::Duration::from_millis(state.timeout_ms(cmd));
     let name = flow.name.clone();
     let name = name.as_str();
     let params = super::flow::parse_params(cmd)?;
@@ -12401,6 +12402,7 @@ async fn handle_flow_run_inner(
             flow: &flow,
             params: &params,
             replay_run: None,
+            replay_deadline,
         };
         let check = |req: &super::flow::PreparedRequest| -> Result<(), String> {
             hosts
@@ -12741,6 +12743,8 @@ struct DaemonSenders<'a> {
     flow: &'a super::flow::Flow,
     params: &'a [(String, String)],
     replay_run: Option<super::flow::ReplayRun>,
+    /// When the replay must be done, so the CLI is still waiting for it.
+    replay_deadline: std::time::Instant,
 }
 
 #[async_trait::async_trait]
@@ -12763,6 +12767,7 @@ impl super::flow::Senders for DaemonSenders<'_> {
                     &mut self.replay_run,
                     req,
                     ctx,
+                    self.replay_deadline,
                 )
                 .await
             }

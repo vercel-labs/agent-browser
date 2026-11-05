@@ -382,7 +382,7 @@ pub struct ReplayRun {
 }
 
 /// How long one replayed command, and the final wait for bodies, may wait
-/// for the page: the request timeout.
+/// for the page: the request timeout. The run's own deadline caps the sum.
 const REPLAY_WAIT: Duration = Duration::from_secs(20);
 
 /// The replay tier over a browser. The recording runs at most once per run;
@@ -394,6 +394,7 @@ pub async fn send(
     run: &mut Option<ReplayRun>,
     req: &PreparedRequest,
     ctx: &SendCtx<'_>,
+    run_deadline: Instant,
 ) -> TierResult {
     let started = Instant::now();
     let fail = |f: Failure| TierResult::fail(req, Tier::Replay, started, f);
@@ -428,7 +429,7 @@ pub async fn send(
                 id
             )));
         }
-        match capture(flow, params, browser, ctx.wanted, REPLAY_WAIT).await {
+        match capture(flow, params, browser, ctx.wanted, REPLAY_WAIT, run_deadline).await {
             Ok(captured) => *run = Some(captured),
             Err(Ok(reason)) => return fail(Failure::unavailable(reason)),
             Err(Err(reason)) => return fail(Failure::drift(reason)),
@@ -486,6 +487,7 @@ pub(super) async fn capture(
     browser: &mut dyn Browser,
     wanted: &[&PreparedRequest],
     wait: Duration,
+    run_deadline: Instant,
 ) -> Result<ReplayRun, Result<String, String>> {
     browser.ensure_browser().await.map_err(Err)?;
     let mark = browser.begin_capture().await.map_err(Err)?;
@@ -504,8 +506,17 @@ pub(super) async fn capture(
     let mut failed = None;
     for (i, c) in commands.into_iter().enumerate() {
         let mut c = c;
-        // Each command waits on its own clock.
-        let deadline = Instant::now() + wait;
+        // A command waits on its own clock, within the run's.
+        if Instant::now() >= run_deadline {
+            failed = Some(format!(
+                "replay stopped before command {}: the run's time is up",
+                i + 1
+            ));
+            break;
+        }
+        let deadline = (Instant::now() + wait).min(run_deadline);
+        // Only the requests this command starts are waited on.
+        let first_own = browser.captured_since(mark).await.len();
         c["id"] = json!(format!("flow-replay-{}", i + 1));
         // A page opened by the replay may still be rendering the element.
         let resp = loop {
@@ -525,6 +536,7 @@ pub(super) async fn capture(
             let seen = browser.captured_since(mark).await;
             if seen
                 .iter()
+                .skip(first_own)
                 .filter(|e| may_settle(e, &policy))
                 .all(|e| e.loading_finished_timestamp.is_some())
                 || Instant::now() >= deadline
@@ -557,7 +569,7 @@ pub(super) async fn capture(
     }
     // Bodies arrive on later event drains; wait within the request timeout
     // until every request that may fall back has its answer.
-    let deadline = Instant::now() + wait;
+    let deadline = (Instant::now() + wait).min(run_deadline);
     while failed.is_none() {
         let slice = browser.captured_since(mark).await;
         let ready = |w: &&PreparedRequest| {
