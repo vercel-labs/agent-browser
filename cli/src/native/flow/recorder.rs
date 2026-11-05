@@ -4,7 +4,10 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use super::{build_flow, may_become_candidate, save_start_url, write_flow, HostPolicy, SaveInput};
+use super::{
+    build_flow, carries_secret, describe_command, dropped_name, may_become_candidate,
+    save_start_url, write_flow, HostPolicy, SaveInput,
+};
 use crate::native::actions::{HarEntry, FIND_ACTIONS};
 use crate::native::element::RefMap;
 
@@ -421,16 +424,17 @@ impl FlowRecorder {
         Ok((from, to))
     }
 
-    /// The requests that could become flow requests, tagged to a step in the
-    /// range, that have not finished loading, so their response body is not on
-    /// the entry yet, as `METHOD /path`. Third-party, telemetry and streaming
-    /// requests never count.
-    pub fn unfinished_requests(
+    /// A gap for each request that could become a flow request, tagged to a
+    /// step in the range, that has not finished loading, so its response body
+    /// is not on the entry yet. Third-party, telemetry and streaming requests
+    /// never count. The gap names the step that started the request and the
+    /// request by method and path, with a secret hidden as a dropped request is.
+    pub fn loading_gaps(
         &self,
         from: Option<u64>,
         to: Option<u64>,
         entries: &[HarEntry],
-    ) -> Vec<String> {
+    ) -> Vec<Value> {
         let Ok((first, last)) = self.resolve_range(from, to) else {
             return Vec::new();
         };
@@ -446,19 +450,24 @@ impl FlowRecorder {
         let policy = HostPolicy::from_start(&start);
         entries
             .iter()
-            .filter(|e| {
-                e.loading_finished_timestamp.is_none()
-                    && self
-                        .request_tags
-                        .get(&e.request_id)
-                        .is_some_and(|seq| *seq >= first && *seq <= last)
-                    && may_become_candidate(e, &policy)
-            })
-            .map(|e| {
-                let path = url::Url::parse(&e.url)
-                    .map(|u| u.path().to_string())
-                    .unwrap_or_else(|_| e.url.clone());
-                format!("{} {}", e.method, path)
+            .filter(|e| e.loading_finished_timestamp.is_none() && may_become_candidate(e, &policy))
+            .filter_map(|e| {
+                let seq = *self.request_tags.get(&e.request_id)?;
+                let index = commands.iter().position(|(s, _)| *s == seq)?;
+                let known = carries_secret(e, &self.secrets);
+                let label = if known || self.unknown_secret_seqs.contains(&seq) {
+                    dropped_name(e, &self.secrets, known)
+                } else {
+                    let path = url::Url::parse(&e.url)
+                        .map(|u| u.path().to_string())
+                        .unwrap_or_else(|_| e.url.clone());
+                    format!("{} {}", e.method, path)
+                };
+                Some(json!({
+                    "step": index + 1,
+                    "command": describe_command(&commands[index].1),
+                    "reason": format!("still loading at save: {label}"),
+                }))
             })
             .collect()
     }

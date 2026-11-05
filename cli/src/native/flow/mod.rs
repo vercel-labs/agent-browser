@@ -352,7 +352,7 @@ pub fn describe_command(cmd: &Value) -> String {
 
 /// How a dropped request is named: its path without the query, with any
 /// segment that holds a secret hidden. When the secret is unknown, only the host.
-fn dropped_name(e: &HarEntry, secrets: &[String], known: bool) -> String {
+pub(super) fn dropped_name(e: &HarEntry, secrets: &[String], known: bool) -> String {
     let Ok(url) = url::Url::parse(&e.url) else {
         return format!("{} ?", e.method);
     };
@@ -381,7 +381,7 @@ fn dropped_name(e: &HarEntry, secrets: &[String], known: bool) -> String {
     format!("{} {}", e.method, path)
 }
 
-fn carries_secret(e: &HarEntry, secrets: &[String]) -> bool {
+pub(super) fn carries_secret(e: &HarEntry, secrets: &[String]) -> bool {
     holds_secret(&e.url, secrets)
         || e.post_data
             .as_deref()

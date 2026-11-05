@@ -2083,6 +2083,16 @@ impl DaemonState {
                                     self.flow.tag(&request_id, wall_time);
                                 }
                                 if self.request_tracking {
+                                    if let Some(redirect) = event.params.get("redirectResponse") {
+                                        if let Some(prev) = self
+                                            .tracked_requests
+                                            .iter_mut()
+                                            .rev()
+                                            .find(|e| e.request_id == request_id)
+                                        {
+                                            tracked_fill_response(prev, redirect);
+                                        }
+                                    }
                                     let headers =
                                         request.get("headers").cloned().unwrap_or(json!({}));
                                     let resource_type = event
@@ -2122,7 +2132,6 @@ impl DaemonState {
                                     .get("requestId")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
-                                let status = response.get("status").and_then(|v| v.as_i64());
                                 if self.har_recording {
                                     if let Some(entry) = self
                                         .har_entries
@@ -2134,20 +2143,13 @@ impl DaemonState {
                                     }
                                 }
                                 if self.request_tracking {
-                                    let resp_headers = response.get("headers").cloned();
-                                    let resp_mime = response
-                                        .get("mimeType")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
                                     if let Some(entry) = self
                                         .tracked_requests
                                         .iter_mut()
                                         .rev()
                                         .find(|e| e.request_id == request_id)
                                     {
-                                        entry.status = status;
-                                        entry.mime_type = resp_mime;
-                                        entry.response_headers = resp_headers;
+                                        tracked_fill_response(entry, response);
                                     }
                                 }
                             }
@@ -12307,7 +12309,7 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let mut still_loading;
     loop {
         state.drain_cdp_events_background().await?;
-        still_loading = state.flow.unfinished_requests(from, to, &state.har_entries);
+        still_loading = state.flow.loading_gaps(from, to, &state.har_entries);
         if still_loading.is_empty() || tokio::time::Instant::now() >= deadline {
             break;
         }
@@ -12324,16 +12326,11 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         entries: &entries,
         login_wall,
     })?;
-    // Requests still loading at the deadline are not in the flow.
-    let step = report["steps"].clone();
+    // Requests still loading at the deadline are not in the flow. The step
+    // that started one says so instead of the generic reason.
     if let Some(gaps) = report["gaps"].as_array_mut() {
-        for request in still_loading {
-            gaps.push(json!({
-                "step": step,
-                "command": "flow save",
-                "reason": format!("still loading at save: {request}"),
-            }));
-        }
+        gaps.retain(|g| !still_loading.iter().any(|l| l["step"] == g["step"]));
+        gaps.extend(still_loading);
     }
     Ok(report)
 }
@@ -12783,6 +12780,17 @@ fn har_parse_request_cookies(cookie_header: &str) -> Vec<Value> {
 ///
 /// CDP timing values are milliseconds relative to `requestTime` (seconds since
 /// browser start). A value of `-1` means the phase did not occur.
+/// Copies a CDP `Response` (from `responseReceived` or a `redirectResponse`)
+/// onto its tracked request.
+fn tracked_fill_response(entry: &mut TrackedRequest, response: &Value) {
+    entry.status = response.get("status").and_then(|v| v.as_i64());
+    entry.mime_type = response
+        .get("mimeType")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    entry.response_headers = response.get("headers").cloned();
+}
+
 /// Copies a CDP `Response` (from `responseReceived` or a `redirectResponse`)
 /// onto its HAR entry.
 fn har_fill_response(entry: &mut HarEntry, response: &Value) {

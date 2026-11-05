@@ -15076,6 +15076,7 @@ const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
 <button id="stream" onclick="fetch('/api/stream')">Stream</button>
 <button id="moved" onclick="fetch('/api/moved')">Moved</button>
 <button id="hang" onclick="fetch('/api/hang?q=1')">Hang</button>
+<button id="hangs" onclick="fetch('/api/hangs/' + document.getElementById('pw').value)">Hangs</button>
 <script>
 let csrf = ''; let user = '';
 async function login() { await fetch('/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: document.getElementById('email').value, pw: document.getElementById('pw').value }) }); }
@@ -15298,6 +15299,14 @@ async fn flow_fixture() -> FlowFixture {
                         "",
                     )
                     .await
+                }
+                ("GET", r) if r.starts_with("/api/hangs/") => {
+                    tokio::spawn(async move {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n[")
+                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    });
                 }
                 ("GET", "/api/hang") => {
                     // First-party JSON headers, then a body that never ends.
@@ -15933,12 +15942,85 @@ async fn e2e_flow_save_reports_requests_still_loading_at_the_deadline() {
         1,
         "{saved}"
     );
-    let gaps = saved["data"]["gaps"].to_string();
-    assert!(
-        gaps.contains("still loading at save: GET /api/hang"),
+    let gaps = saved["data"]["gaps"].as_array().unwrap();
+    // The step that started the request owns the gap, and nothing else is
+    // said about that step.
+    let for_step_2: Vec<&Value> = gaps.iter().filter(|g| g["step"] == 2).collect();
+    assert_eq!(for_step_2.len(), 1, "{saved}");
+    assert_eq!(for_step_2[0]["command"], "click #hang", "{saved}");
+    assert_eq!(
+        for_step_2[0]["reason"], "still loading at save: GET /api/hang",
         "{saved}"
     );
-    assert!(!gaps.contains("q=1"), "{saved}");
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_gap_for_a_loading_request_does_not_print_a_secret() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for cmd in [
+        json!({ "id": "f", "action": "fill", "selector": "#pw", "value": "tk-91ab-77" }),
+        json!({ "id": "c1", "action": "click", "selector": "#hangs" }),
+        json!({ "id": "c2", "action": "click", "selector": "#slow" }),
+    ] {
+        assert_success(&exec(&cmd, &mut state).await);
+    }
+    fx.wait_until(|| fx.hits("GET /api/hangs/") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "secret", "timeout": 1500 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    assert!(!saved.to_string().contains("91ab"), "{saved}");
+    let text = crate::output::format_flow_text(Some("flow_save"), &saved["data"]).unwrap();
+    assert!(!text.contains("91ab"), "{text}");
+    assert!(text.contains("still loading at save"), "{text}");
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_requests_finalizes_a_redirect_hop() {
+    let fx = flow_fixture().await;
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(&exec(&json!({ "id": "r0", "action": "requests" }), &mut state).await);
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/target") > 0).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    state.drain_cdp_events_background().await.unwrap();
+    let listed = exec(&json!({ "id": "r1", "action": "requests" }), &mut state).await;
+    assert_success(&listed);
+    let requests = listed["data"]["requests"].as_array().unwrap();
+    let hop = requests
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().ends_with("/api/moved"))
+        .expect("hop listed");
+    assert_eq!(hop["status"], 302, "{listed}");
+    let target = requests
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().ends_with("/api/target"))
+        .expect("target listed");
+    assert_eq!(target["status"], 200, "{listed}");
+    assert_eq!(target["mimeType"], "application/json", "{listed}");
     let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 
