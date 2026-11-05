@@ -1688,6 +1688,7 @@ fn main() {
                 error: None,
                 code: None,
                 warning: None,
+                recorded: None,
             },
             Err(e) => connection::Response {
                 success: false,
@@ -1695,6 +1696,7 @@ fn main() {
                 error: Some(e),
                 code: None,
                 warning: None,
+                recorded: None,
             },
         };
         let output_opts = OutputOptions::from_flags(&flags);
@@ -2491,6 +2493,7 @@ mod tests {
         flags.download_path = None;
         flags.engine = None;
         flags.allowed_domains = None;
+        flags.capture = None;
         flags.init_scripts.clear();
         flags.enable.clear();
         flags.extensions.clear();
@@ -2888,6 +2891,7 @@ mod tests {
             })),
             error: None,
             warning: None,
+            recorded: None,
         };
 
         let prompt = confirmation_prompt_from_response(&resp).unwrap();

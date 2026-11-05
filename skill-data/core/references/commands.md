@@ -262,6 +262,24 @@ agent-browser network har stop [output.har]    # Stop and save HAR
 
 If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
 
+## Saved flows
+
+```bash
+agent-browser --capture flow open <url>               # Open a session that records its commands and requests
+agent-browser flow steps [--json]                     # Recorded steps: seq, command, URL, request count, ok or failed
+agent-browser flow save <name> [--param k=v]... [--output <id>] [--description <text>]  # Keep first-party JSON requests, turn values into params; --output takes a saved id (s1r1, numbered within the range) or a capture id s<step>r<n>; an id that means two requests is refused
+agent-browser flow save <name> --from <seq> --to <seq>  # Save a range of steps
+agent-browser flow run <name> [--param k=v]...        # Send the saved requests over HTTP
+agent-browser flow run <name> --where field=value --fields a,b.c --limit 5  # Return only matching items and fields
+agent-browser flow list [--origin <host>]             # Saved flows, with params and verified state
+```
+
+`--capture flow` is a launch setting: on a running session without capture it relaunches the browser with capture on, and later commands that repeat or omit it do not relaunch. Every recorded command returns `recorded: {seq}` in JSON. Failed commands stay in the recording with `ok: false`. Saving does not stop the capture, so one session can save several flows; by default `flow save` starts at the last navigation after the previous save. `close` reports `unsaved: {steps: N}` when steps after the last save exist. `har stop` is unavailable while capture is on; use `flow save`.
+
+`flow save` keeps first-party JSON responses and, for pages rendered on the server, JSON the HTML embeds (`__NEXT_DATA__`, JSON-LD, `window.x = {...}` state); a run fetches the page and reads the same block back. `flow save` also finds params on its own: a value the task sent that came from an item of an earlier response (an id picked from a list) becomes a param, and a value copied from a single field (a session key) is filled from that response on every run. The save report lists them, plus the steps it could not turn into requests and why, such as a login the recording stopped at.
+
+Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGENT_BROWSER_FLOWS_DIR`) and are `version: 1`; a file with an unknown field fails to load. Cookies, `authorization` and token or CSRF headers are never saved. A value typed with `fill`, `type`, `keyboard type` or `inserttext` is saved as a param (`{{name}}` in the requests, no copy of the value, so a run needs `--param name=value`) or, when the field is a password, `one-time-code`, `cc-*` or otherwise secret, as `<redacted>`. A run sends the saved requests over direct HTTP and checks each response shape against the recording; a mismatch fails the run with `drifted`, naming the missing key, and marks the flow unverified (use the page, then save again). A 401 or 403 stops the run with `auth_expired`, or with `credential_not_sendable` when the recording sent a credential header the file does not keep (use the page UI, signing in again does not help), with `request_signed` when the request carries a recorded signature or timestamp header with a per-request value (`X-Sig`, `X-Ts`, nonce, hmac; it expires, use the page), a 429 with `rate_limited` (and `retryAfter` when the site sent one), and a bot challenge with `blocked`. A write with no answer returns `outcome_unknown` and is never sent again. Requests, redirects and navigations outside the base domain of the flow's start URL are rejected, regardless of `--allowed-domains`. `flow save` lists the saved writes with ids: explicit ones (non-GET, GraphQL mutations) and suspected ones (a GET whose path has a whole `logout`, `signout`, `unsubscribe`, `delete` or `remove` segment). `flow run <name> --allow-write <all|id,...>` sends the writes it covers; any other write asks for confirmation as policy action `flow_write:<id>`, which `--action-policy` and `--confirm-actions` also see.
+
 ## Tabs and Windows
 
 ```bash
