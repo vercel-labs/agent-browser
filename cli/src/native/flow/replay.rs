@@ -166,9 +166,13 @@ const URL_KEYS: &[&str] = &[
 
 /// Check one value the way a browser reads it: the URL parser drops tabs,
 /// newlines and leading control characters, so a string that parses as an
-/// http(s) URL is host-checked whatever it looks like before parsing.
+/// http(s) URL is host-checked whatever it looks like before parsing. A value
+/// under a URL key is resolved against the flow's start URL first, so
+/// `//host/x`, `///host/x` and `\\host/x` are checked as the browser opens
+/// them; one that does not resolve is refused.
 fn check_value(
     policy: &HostPolicy,
+    base: Option<&url::Url>,
     v: &Value,
     key: Option<&str>,
     scripts: &mut bool,
@@ -176,9 +180,17 @@ fn check_value(
     match v {
         Value::String(text) => {
             let forced = key.is_some_and(|k| URL_KEYS.contains(&k));
-            if let Ok(parsed) = url::Url::parse(text) {
+            let parsed = match (url::Url::parse(text), forced) {
+                (Ok(parsed), _) => Some(parsed),
+                (Err(_), true) => Some(
+                    base.and_then(|b| b.join(text).ok())
+                        .ok_or_else(|| format!("'{}' is not a valid URL", text.trim()))?,
+                ),
+                (Err(_), false) => None,
+            };
+            if let Some(parsed) = parsed {
                 match parsed.scheme() {
-                    "http" | "https" => policy.check(text)?,
+                    "http" | "https" => policy.check(parsed.as_str())?,
                     "about" if parsed.as_str() == "about:blank" => {}
                     scheme
                         if forced
@@ -196,13 +208,13 @@ fn check_value(
         }
         Value::Array(items) => items
             .iter()
-            .try_for_each(|i| check_value(policy, i, key, scripts)),
+            .try_for_each(|i| check_value(policy, base, i, key, scripts)),
         Value::Object(map) => {
             for (k, item) in map {
                 if SCRIPT_KEYS.contains(&k.as_str()) && item.is_string() {
                     *scripts = true;
                 }
-                check_value(policy, item, Some(k), scripts)?;
+                check_value(policy, base, item, Some(k), scripts)?;
             }
             Ok(())
         }
@@ -214,6 +226,7 @@ fn check_value(
 /// every URL in it stays on the flow's site.
 pub fn check_replay_commands(flow: &Flow, commands: &[Value]) -> Result<(), String> {
     let policy = HostPolicy::of(flow);
+    let base = url::Url::parse(&flow.start_url).ok();
     for cmd in commands {
         let action = cmd["action"].as_str().unwrap_or("");
         if !REPLAY_ACTIONS.contains(&action) {
@@ -223,7 +236,7 @@ pub fn check_replay_commands(flow: &Flow, commands: &[Value]) -> Result<(), Stri
             ));
         }
         let mut scripts = false;
-        check_value(&policy, cmd, None, &mut scripts)?;
+        check_value(&policy, base.as_ref(), cmd, None, &mut scripts)?;
         if scripts {
             return Err(format!(
                 "the recorded command '{}' carries a script, which a replay does not run",

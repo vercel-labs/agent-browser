@@ -7292,6 +7292,51 @@ mod tests {
         }
 
         #[test]
+        fn scheme_relative_urls_pass_the_replay_host_check() {
+            let flow = flow_of(
+                json!({ "startUrl": "https://example.com/app", "allowedHosts": ["example.com"] }),
+            );
+            for bad in [
+                "//evil.test/x",
+                "///evil.test/x",
+                "\\\\evil.test/x",
+                "/\\evil.test/x",
+                "\t//evil.test/x",
+                " //evil.test/x",
+                "//example.com.evil.test/x",
+            ] {
+                for cmd in [
+                    json!({ "action": "navigate", "url": bad }),
+                    json!({ "action": "tab_new", "url": bad }),
+                    json!({ "action": "wait", "extra": { "url": bad } }),
+                ] {
+                    assert!(
+                        check_replay_commands(&flow, std::slice::from_ref(&cmd)).is_err(),
+                        "{cmd}"
+                    );
+                }
+            }
+            for ok in [
+                "//example.com/x",
+                "//www.example.com/x",
+                "/cart",
+                "cart?q=1",
+                "?q=1",
+                "#top",
+                "",
+            ] {
+                let cmd = json!({ "action": "navigate", "url": ok });
+                assert!(
+                    check_replay_commands(&flow, &[cmd]).is_ok(),
+                    "{ok:?} is on the site"
+                );
+            }
+            // A value that is not a URL at all fails closed.
+            let broken = json!({ "action": "navigate", "url": "http://[::1" });
+            assert!(check_replay_commands(&flow, &[broken]).is_err());
+        }
+
+        #[test]
         fn a_write_answer_captured_before_a_failing_command_is_drift() {
             let flow = cart_flow();
             let mut browser = ScriptBrowser::new(
