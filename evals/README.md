@@ -142,6 +142,35 @@ skill-loading
 
 JSON mode (`--json`) outputs structured results for programmatic consumption.
 
+## Snapshot source A/B eval
+
+`snapshot-source/run.ts` compares `snapshot --source ax`, `apc` and `hybrid` on 26 browser tasks (20 from v1 and 6 held-out ones) with an agent in the loop: forms, same-origin and cross-origin iframes, shadow DOM, div-button apps, heavy pages and hidden-content traps. The agent gets one tool that runs `agent-browser` commands and a `done` tool. The harness forces `-i --source <variant>` onto every snapshot the agent requests, so the three variants share the prompt, the model, and the pages.
+
+```bash
+cd evals
+export AI_GATEWAY_API_KEY=...
+bun run snapshot-source/run.ts --model anthropic/claude-haiku-4.5 --reps 2
+```
+
+Fixture pages are served locally by `snapshot-source/fixtures.ts`. Each page posts its outcomes to the server, and each task in `snapshot-source/tasks.ts` has a check over those recorded events or the final URL, so success never depends on what the model claims. `localhost` and `127.0.0.1` are different sites, which puts their frames in separate renderer processes.
+
+`hybrid` is not a public source. The runner sets `AGENT_BROWSER_SNAPSHOT_HYBRID` for that variant, which makes the CLI accept `--source hybrid`. Like `AGENT_BROWSER_AX_DEEP`, it is for the eval harness only.
+
+Options: `--variants ax,apc,hybrid`, `--reps N`, `--tasks id,id`, `--concurrency N`, `--max-steps N` (default 25, counted as a failure when reached), `--out dir`. `AGENT_BROWSER_BIN` selects the binary. Snapshot tokens use `o200k_base` from `js-tiktoken` when it can be imported (set `TIKTOKEN_MODULE` to its path), and chars/4 otherwise. The summary records the tokenizer.
+
+Per run it records success, snapshot tokens, agent prompt and completion tokens from the gateway, steps, and wall time. The summary applies the decision rule: a variant survives if it completes more tasks than `ax`, or cuts snapshot tokens by at least 25% at equal success. The v2 rule is applied per model: (a) apc success at least ax, (b) apc mean snapshot tokens at most 0.75 x ax, (c) iframe success at least ax minus one run. `snapshot-source/decide.ts` combines the summaries of several models; a variant survives only when the rule holds on all of them. Results go to `evals/results/snapshot-source/`, which is gitignored.
+
+### v3: public pages, ax-deep control and pre-registered rule
+
+`snapshot-source/run3.ts` adds a fourth variant, `ax-deep`, the ax snapshot with the same nested-frame expansion that apc and hybrid get (the runner sets `AGENT_BROWSER_AX_DEEP` for it), and 40 public-page tasks in `snapshot-source/public-tasks.ts` across 17 sites. Public checks read the final URL, an echoed form payload, page state through the browser, or compare the agent's answer with ground truth the harness fetches independently at run time. `snapshot-source/validate-public.ts` proves every check fails on the untouched page and passes after a scripted solution. A block or captcha page voids the unit for every variant and model. `snapshot-source/PREREGISTRATION.md` holds the survival rule, fixed before the run, and `snapshot-source/analyze3.ts <results dir>` applies it with bootstrap confidence intervals and a paired McNemar test.
+
+```bash
+bun run snapshot-source/run3.ts --models anthropic/claude-haiku-4.5,openai/gpt-4.1-mini,google/gemini-3.5-flash-lite --out results/snapshot-source/v3/run
+bun run snapshot-source/analyze3.ts results/snapshot-source/v3/run
+```
+
+Runs are resumable: a run whose JSON exists under `<out>/runs` is loaded instead of repeated. At most two sessions run at once and sites are visited one at a time.
+
 ## Live WebMCP context eval
 
 `webmcp-context.py` runs a real Codex agent against a local shop with the thin agent-browser skill installed in an isolated workspace. It uses the existing Codex login and configuration, without rewriting the user's configuration or requiring AI Gateway credentials. Build the native CLI first, then run:

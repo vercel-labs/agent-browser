@@ -6514,11 +6514,23 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .and_then(|v| v.as_u64())
             .map(|d| d as usize),
         urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
+        source: match cmd.get("source").and_then(|v| v.as_str()) {
+            None => super::apc::SnapshotSource::Ax,
+            Some(s) => super::apc::SnapshotSource::parse(s)
+                .ok_or_else(|| format!("Unknown snapshot source '{s}'. Use ax or apc"))?,
+        },
+        viewport: cmd
+            .get("viewport")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     };
+    if options.viewport && options.source != super::apc::SnapshotSource::Apc {
+        return Err("--viewport requires --source apc".to_string());
+    }
 
     let previous_refs = state.ref_map.ref_ids();
     state.ref_map.begin_snapshot();
-    let tree = snapshot::take_snapshot(
+    let mut tree = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
         &options,
@@ -6527,6 +6539,12 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &state.iframe_sessions,
     )
     .await?;
+    if options.source != super::apc::SnapshotSource::Ax && state.active_frame_id.is_some() {
+        tree = format!(
+            "# note: --source {} reads the main frame only; the ax snapshot of the active frame follows\n{tree}",
+            options.source.as_str()
+        );
+    }
 
     let url = mgr.get_url().await.unwrap_or_default();
 
@@ -6566,6 +6584,8 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         "compact": options.compact,
         "depth": options.depth,
         "urls": options.urls,
+        "source": options.source.as_str(),
+        "viewport": options.viewport,
     }))
     .unwrap_or_default();
     let previous = state.snapshot_revisions.get(&session_id).cloned();

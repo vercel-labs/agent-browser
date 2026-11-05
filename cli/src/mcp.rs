@@ -967,7 +967,9 @@ fn tools() -> Vec<Value> {
                 "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector." },
                 "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." },
                 "delta": { "type": "boolean", "default": false, "description": "Return full state once, then unchanged or bounded structural deltas. Apply changes to refs and treeChange (zero-based startLine, deleteCount, lines) to the previous tree." },
-                "full": { "type": "boolean", "default": false, "description": "Force full state while updating the delta baseline." }
+                "full": { "type": "boolean", "default": false, "description": "Force full state while updating the delta baseline." },
+                "source": { "type": "string", "enum": ["ax", "apc"], "default": "ax", "description": "Experimental for apc. Tree source: ax (accessibility tree) or apc (Chrome Annotated Page Content; Chrome and Chromium only, internal schema that can change between releases). apc falls back to ax with a warning when its payload is unavailable or fails its checks." },
+                "viewport": { "type": "boolean", "default": false, "description": "Only include nodes visible in the viewport. Requires source apc." }
             }),
             &[],
         ),
@@ -3081,6 +3083,13 @@ fn snapshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError
     if optional_bool(arguments, "full")?.unwrap_or(false) {
         args.push("--full".to_string());
     }
+    if let Some(source) = optional_string(arguments, "source")? {
+        args.push("--source".to_string());
+        args.push(source);
+    }
+    if optional_bool(arguments, "viewport")?.unwrap_or(false) {
+        args.push("--viewport".to_string());
+    }
 
     Ok(args)
 }
@@ -4826,6 +4835,8 @@ mod tests {
             json!({}),
             json!({"interactive": false, "selector": "#content"}),
             json!({"compact": true, "interactive": false}),
+            json!({"source": "apc", "viewport": true}),
+            json!({"source": "ax"}),
         ] {
             let args = snapshot_command_args(&arguments).unwrap();
             let flags = crate::flags::parse_flags(&args);
@@ -4839,6 +4850,11 @@ mod tests {
             if arguments["compact"] == true {
                 assert_eq!(command["compact"], true);
             }
+            assert_eq!(command.get("source"), arguments.get("source"));
+            assert_eq!(
+                command["viewport"].as_bool().unwrap_or(false),
+                arguments["viewport"].as_bool().unwrap_or(false)
+            );
         }
     }
 

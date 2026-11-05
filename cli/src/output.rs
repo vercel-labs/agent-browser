@@ -2704,6 +2704,15 @@ Options:
       --delta          Return full state once, then unchanged or structural deltas
                        Deltas include ref changes and an exact treeChange line splice
       --full           Force full state and update the delta baseline
+      --source <src>   Tree source: ax (default) or apc (experimental)
+      --viewport       With --source apc, keep only nodes visible in the viewport
+
+Sources: ax reads the accessibility tree. apc is experimental: it reads Chrome's
+Annotated Page Content, so it works in Chrome and Chromium only, and it depends on an
+internal schema that can change between releases. When the payload cannot be decoded or
+fails its checks, apc falls back to ax automatically and prints one "# warning:" line
+with the reason and the Chrome version. Iframes get refs; frames in another process use
+the ax tree of that frame, nested under the iframe line.
 
 Compact snapshots keep visible text, status text, and their direct ancestors.
 Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
@@ -2721,6 +2730,8 @@ Examples:
   agent-browser snapshot -s "#main-content"
   agent-browser snapshot --delta
   agent-browser snapshot --delta --full
+  agent-browser snapshot -i --source apc
+  agent-browser snapshot -i --source apc --viewport
 "##
         }
 
