@@ -1757,6 +1757,237 @@ async fn e2e_snapshot_and_click_ref() {
     assert_success(&resp);
 }
 
+async fn snapshot_with(state: &mut DaemonState, id: &str, extra: Value) -> String {
+    let mut cmd = json!({ "id": id, "action": "snapshot", "interactive": true });
+    for (k, v) in extra.as_object().unwrap() {
+        cmd[k] = v.clone();
+    }
+    let resp = Box::pin(execute_command(&cmd, state)).await;
+    assert_success(&resp);
+    get_data(&resp)["snapshot"].as_str().unwrap().to_string()
+}
+
+fn ref_in_line(snapshot: &str, needle: &str) -> String {
+    let line = snapshot
+        .lines()
+        .find(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no line with {needle} in {snapshot}"));
+    let start = line.find("ref=").expect("line has a ref") + 4;
+    line[start..].split([',', ']']).next().unwrap().to_string()
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_sources_apc_and_hybrid() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let html = r#"<!doctype html><title>start</title><h1>Signup</h1>
+<form onsubmit="event.preventDefault();var f=new FormData(this);document.title='sub:'+f.get('email')+':'+f.get('plan')">
+<label for="em">Email address</label><input id="em" name="email" type="email" required>
+<label><input type="radio" name="plan" value="free"> Free</label>
+<label><input type="radio" name="plan" value="pro"> Pro</label>
+<button type="submit">Join</button></form>
+<button style="width:0;height:0;padding:0;border:0;font-size:0">Ghost</button>
+<div style="height:3000px"></div><button>Below the fold</button>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let ax = snapshot_with(&mut state, "3", json!({})).await;
+    assert!(ax.contains("Ghost"), "AX lists the zero-size button: {ax}");
+
+    let apc = snapshot_with(&mut state, "4", json!({ "source": "apc" })).await;
+    assert!(apc.contains("textbox \"Email address\""), "{apc}");
+    assert!(
+        apc.contains("radio \"Pro\""),
+        "radio named from its label: {apc}"
+    );
+    assert!(
+        !apc.contains("Ghost"),
+        "zero-size node is not rendered: {apc}"
+    );
+    assert!(!apc.contains("warning"), "no fallback expected: {apc}");
+
+    let hybrid = snapshot_with(&mut state, "5", json!({ "source": "hybrid" })).await;
+    assert!(hybrid.contains("Join"), "{hybrid}");
+    assert!(
+        !hybrid.contains("Ghost"),
+        "hybrid prunes zero-size refs: {hybrid}"
+    );
+
+    let viewport = snapshot_with(
+        &mut state,
+        "6",
+        json!({ "source": "apc", "viewport": true }),
+    )
+    .await;
+    assert!(viewport.contains("Join"), "{viewport}");
+    assert!(
+        !viewport.contains("Below the fold"),
+        "offscreen node dropped: {viewport}"
+    );
+    assert!(apc.contains("Below the fold"), "{apc}");
+
+    // Refs from the APC snapshot drive the normal action commands.
+    for (id, action, needle, extra) in [
+        (
+            "8",
+            "fill",
+            "textbox \"Email address\"",
+            json!({ "value": "a@b.co" }),
+        ),
+        ("9", "click", "radio \"Pro\"", json!({})),
+        ("10", "click", "button \"Join\"", json!({})),
+    ] {
+        let fresh = snapshot_with(&mut state, &format!("s{id}"), json!({ "source": "apc" })).await;
+        let reference = ref_in_line(&fresh, needle);
+        let mut cmd = json!({ "id": id, "action": action, "selector": format!("@{reference}") });
+        for (k, v) in extra.as_object().unwrap() {
+            cmd[k] = v.clone();
+        }
+        let resp = Box::pin(execute_command(&cmd, &mut state)).await;
+        assert_success(&resp);
+    }
+    let resp = Box::pin(execute_command(
+        &json!({ "id": "11", "action": "title" }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "sub:a@b.co:pro");
+
+    let resp = Box::pin(execute_command(
+        &json!({ "id": "99", "action": "close" }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+}
+
+/// Serves a page with one same-origin and one cross-site iframe. Each button in a frame reports
+/// to `/hit/<name>`, and the recorded hits are returned through the shared list.
+async fn start_frame_fixture_server() -> (
+    u16,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = hits.clone();
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let body = if let Some(name) = path.strip_prefix("/hit/") {
+                    seen.lock().unwrap().push(name.to_string());
+                    "ok".to_string()
+                } else if path == "/same" {
+                    "<!doctype html><label for=n>Name</label><input id=n>\
+                     <button onclick=\"fetch('/hit/same-'+n.value)\">Save name</button>"
+                        .to_string()
+                } else if path == "/cross" {
+                    format!(
+                        "<!doctype html><button onclick=\"fetch('http://127.0.0.1:{port}/hit/cross')\">Approve</button>"
+                    )
+                } else {
+                    format!(
+                        "<!doctype html><title>frames</title><h1>Frames</h1>\
+                         <iframe src=\"/same\" height=120></iframe>\
+                         <iframe src=\"http://localhost:{port}/cross\" height=120></iframe>"
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                     Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (port, hits, handle)
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_apc_iframe_refs() {
+    let (port, hits, _server) = start_frame_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{port}/") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    for source in ["apc", "hybrid"] {
+        let snapshot = snapshot_with(&mut state, "3", json!({ "source": source })).await;
+        assert!(
+            snapshot.contains("textbox \"Name\""),
+            "{source}: {snapshot}"
+        );
+        assert!(
+            snapshot.contains("button \"Approve\""),
+            "{source} lists the cross-site frame control: {snapshot}"
+        );
+        assert!(!snapshot.contains("# warning"), "{source}: {snapshot}");
+    }
+    let snapshot = snapshot_with(&mut state, "4", json!({ "source": "apc" })).await;
+    assert!(
+        snapshot.contains("iframe") && !snapshot.contains("[read-only"),
+        "frames carry refs and no read-only marker: {snapshot}"
+    );
+
+    // Same-origin frame: APC refs act through the page session. Cross-site frame: AX refs
+    // routed to the frame's own session.
+    let name = ref_in_line(&snapshot, "textbox \"Name\"");
+    let save = ref_in_line(&snapshot, "button \"Save name\"");
+    let approve = ref_in_line(&snapshot, "button \"Approve\"");
+    for (id, action, reference, extra) in [
+        ("5", "fill", &name, json!({ "value": "ada" })),
+        ("6", "click", &save, json!({})),
+        ("7", "click", &approve, json!({})),
+    ] {
+        let mut cmd = json!({ "id": id, "action": action, "selector": format!("@{reference}") });
+        for (k, v) in extra.as_object().unwrap() {
+            cmd[k] = v.clone();
+        }
+        assert_success(&Box::pin(execute_command(&cmd, &mut state)).await);
+    }
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let mut recorded = hits.lock().unwrap().clone();
+    recorded.sort();
+    assert_eq!(recorded, vec!["cross".to_string(), "same-ada".to_string()]);
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_snapshot_refs_survive_dom_updates_and_never_recycle() {

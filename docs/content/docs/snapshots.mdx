@@ -30,8 +30,46 @@ agent-browser snapshot -i -c -d 5         # Combine options
     <tr><td><code>-c, --compact</code></td><td>Remove empty structural elements</td></tr>
     <tr><td><code>-d, --depth</code></td><td>Limit tree depth</td></tr>
     <tr><td><code>-s, --selector</code></td><td>Scope to CSS selector</td></tr>
+    <tr><td><code>--source &lt;ax|apc&gt;</code></td><td>Where the tree comes from. Default <code>ax</code>. <code>apc</code> is experimental</td></tr>
+    <tr><td><code>--viewport</code></td><td>Experimental. With <code>--source apc</code>, only nodes visible in the viewport</td></tr>
   </tbody>
 </table>
+
+## Experimental source: apc
+
+By default the tree comes from the browser accessibility tree. Chrome can also describe a page as Annotated Page Content (APC), a rendered view built from the layout tree that carries geometry, click signals, and DOM node ids. `--source apc` renders that view.
+
+```bash
+agent-browser snapshot -i --source apc
+agent-browser snapshot -i --source apc --viewport
+```
+
+`--source apc` is experimental. It works in Chrome and Chromium only. APC is an internal Chrome format with no stability guarantee, so it can change between releases. When apc cannot be used, the snapshot falls back to `ax` automatically.
+
+<table>
+  <thead>
+    <tr><th>Source</th><th>Behavior</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>ax</code></td><td>The accessibility tree. This is the default.</td></tr>
+    <tr><td><code>apc</code></td><td>The APC tree rendered in the same line format. Actionable nodes get <code>@eN</code> refs through their backend node ids, so <code>click</code>, <code>fill</code>, and the other ref commands work unchanged. Radio and checkbox names come from their <code>&lt;label&gt;</code> nodes. Nodes with no box are not listed. Each iframe is listed with its own ref, so <code>frame @eN</code> works. Controls in same-origin frames get APC refs. Frames in another process (cross-origin or opaque) cannot be reached with APC node ids, so their content comes from the accessibility tree of that frame, nested under the iframe line, with refs routed to the frame.</td></tr>
+  </tbody>
+</table>
+
+`--viewport` keeps only nodes whose visible box intersects the viewport and requires `--source apc`. With `--selector`, `apc` reads the accessibility tree instead. After `frame @eN`, `apc` reads the accessibility tree of that frame and a `# note:` line says so.
+
+### Fallback to ax
+
+The decoder is checked against the Chrome version it was verified with. A version outside that range still tries apc, with stricter checks. The snapshot falls back to the accessibility tree and prints one `# warning:` line that names the reason and the Chrome version when any of these happen:
+
+- `Page.getAnnotatedPageContent` is missing or fails.
+- The payload cannot be decoded, or its structure is not the expected one.
+- The payload has no actionable nodes while the page has interactive elements.
+- A sample of the node ids in the payload does not resolve in the page.
+
+Unknown fields alone do not trigger a fallback, since the format is allowed to grow. Set `AGENT_BROWSER_DEBUG` to log how many payload fields the decoder did not read.
+
+APC has no computed accessible names beyond labels, no heading levels, and no ARIA state on custom widgets, so prefer the default source unless a page needs what APC adds.
 
 ## Output format
 
