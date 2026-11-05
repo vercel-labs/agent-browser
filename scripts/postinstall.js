@@ -25,10 +25,12 @@ function isMusl() {
   if (platform() !== 'linux') return false;
   try {
     const result = execSync('ldd --version 2>&1 || true', { encoding: 'utf8' });
-    return result.toLowerCase().includes('musl');
+    if (result.toLowerCase().includes('musl')) return true;
+    if (/glibc|gnu libc/i.test(result)) return false;
   } catch {
-    return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
+    // Fall back to the loader when ldd cannot identify the runtime.
   }
+  return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
 }
 
 // Platform detection
