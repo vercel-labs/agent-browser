@@ -3,7 +3,7 @@
     "/commands": [
       {
         "from": "--auto-connect           # Auto-discover and connect to running Chrome",
-        "to": "--auto-connect           # Auto-discover and connect to running Chrome\n--no-auto-connect        # Return the session to a local launch (overrides AGENT_BROWSER_AUTO_CONNECT)"
+        "to": "--auto-connect           # Auto-discover and connect to running Chrome\n--no-auto-connect        # Return an --auto-connect session to a local launch (overrides AGENT_BROWSER_AUTO_CONNECT)"
       },
       {
         "from": "# Trust a CA for locally launched Chromium on Linux",

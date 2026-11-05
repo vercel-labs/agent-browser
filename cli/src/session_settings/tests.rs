@@ -928,6 +928,16 @@ fn plan_table_running_by_patch() {
             relaunch: true,
         },
         Case {
+            name: "a reset of a key another target already displaced is reported once",
+            running: vec![(Key::AutoConnect, json!(true))],
+            patch: vec![
+                is(Key::Cdp, json!("9447")),
+                (Key::AutoConnect, Requested::Default),
+            ],
+            changed: vec![Key::Cdp, Key::AutoConnect],
+            relaunch: true,
+        },
+        Case {
             name: "an auto-connect reset of a local session is free",
             running: vec![],
             patch: vec![(Key::AutoConnect, Requested::Default)],

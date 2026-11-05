@@ -213,9 +213,12 @@ impl Running {
                     }
                 }
                 Requested::Default => {
-                    let Some(current) = self.get(key) else {
+                    // Read `next`: a target set earlier in this patch may have
+                    // displaced the key already, and that change is recorded.
+                    let Some(current) = next.get(key).cloned() else {
                         continue;
                     };
+                    let current = &current;
                     if default_value(key).as_ref() == Some(current) {
                         continue;
                     }
