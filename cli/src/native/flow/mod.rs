@@ -6737,6 +6737,61 @@ mod tests {
     }
 
     #[test]
+    fn a_replay_that_answered_with_a_changed_shape_is_drift_not_a_soft_stop() {
+        let mut req = signed_request("s1r1");
+        req.expect.signature = signature(&json!({ "ok": true }));
+        let http = denied_attempt(&req, Tier::Http, 401);
+        let page = denied_attempt(&req, Tier::Page, 401);
+        let replay = tier_result(
+            &req,
+            Tier::Replay,
+            Instant::now(),
+            Ok((200, r#"{"moved":1}"#.to_string())),
+        );
+        assert!(replay.shape_changed, "{:?}", replay.reason);
+        let results = [http, page, replay];
+        assert_eq!(RunOutcome::stopped(&results), None);
+        let flow = flow_of(json!({}));
+        assert!(matches!(
+            RunOutcome::failed(&results, &flow),
+            RunOutcome::Drift {
+                shape_changed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_transport_error_does_not_move_the_preferred_tier() {
+        let mut flow = flow_with_request(None, false);
+        let transport = TierResult {
+            transport: true,
+            ..result(Tier::Http, false, None, false, None)
+        };
+        let page = result(Tier::Page, true, Some(200), false, None);
+        finish_run(
+            &mut flow,
+            &[transport.clone(), page.clone()],
+            "now",
+            1,
+            &Shape::default(),
+        );
+        assert_eq!(flow.steps[0].requests[0].tier, None);
+        // A failure that says the site changed does move it.
+        let drifted = result(Tier::Http, false, Some(200), true, None);
+        finish_run(&mut flow, &[drifted, page], "now", 1, &Shape::default());
+        assert_eq!(flow.steps[0].requests[0].tier, Some(Tier::Page));
+        // A transport error on the preferred tier keeps that preference.
+        let replay = result(Tier::Replay, true, Some(200), false, None);
+        let transport = TierResult {
+            transport: true,
+            ..result(Tier::Page, false, None, false, None)
+        };
+        finish_run(&mut flow, &[transport, replay], "now", 1, &Shape::default());
+        assert_eq!(flow.steps[0].requests[0].tier, Some(Tier::Page));
+    }
+
+    #[test]
     fn a_replay_denial_ignores_the_recorded_credential_and_signature_headers() {
         let mut req = signed_request("s1r1");
         req.expect.stripped_auth = true;

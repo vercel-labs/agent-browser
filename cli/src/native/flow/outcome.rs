@@ -545,9 +545,9 @@ pub(crate) fn with_retry_after(mut result: TierResult, retry_after: Option<Strin
 }
 
 /// The last failed attempt, when every way of sending that request was
-/// refused with a 401 or 403.
+/// refused with a 401 or 403. A last answer whose shape changed is drift.
 pub fn denied_everywhere(results: &[TierResult]) -> Option<&TierResult> {
-    let last = results.last().filter(|r| !r.ok)?;
+    let last = results.last().filter(|r| !r.ok && !r.shape_changed)?;
     let attempts: Vec<&TierResult> = results.iter().filter(|r| r.id == last.id).collect();
     (attempts.iter().all(|r| !r.ok) && attempts.iter().any(|r| matches!(r.status, Some(401 | 403))))
         .then_some(last)
@@ -586,7 +586,19 @@ pub fn finish_run(
         flow.verified_at = None;
     }
     // Remember the tier that worked, so the next run starts there.
+    // A transport error is not a sign the tier stopped working.
     for r in last.iter().filter(|r| r.ok) {
+        let only_transport = {
+            let before: Vec<&TierResult> = attempts
+                .iter()
+                .take_while(|a| !std::ptr::eq(*a, *r))
+                .filter(|a| a.id == r.id)
+                .collect();
+            !before.is_empty() && before.iter().all(|a| a.transport)
+        };
+        if only_transport {
+            continue;
+        }
         for req in flow
             .steps
             .iter_mut()

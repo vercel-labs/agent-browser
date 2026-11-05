@@ -15258,7 +15258,14 @@ async fn flow_fixture() -> FlowFixture {
                     .await
                 }
                 ("GET", "/api/flaky") => {
-                    reply(&mut stream, "401 Unauthorized", "application/json", "", "{}").await
+                    reply(
+                        &mut stream,
+                        "401 Unauthorized",
+                        "application/json",
+                        "",
+                        "{}",
+                    )
+                    .await
                 }
                 ("GET", "/api/session") if signed_in => {
                     reply(
