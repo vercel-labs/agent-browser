@@ -3744,6 +3744,19 @@ mod tests {
     }
 
     #[test]
+    fn the_page_tier_without_a_tab_on_the_site_is_skipped() {
+        let flow = flow_of(json!({
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }]
+        }));
+        let req = prepare_all(&flow, &[]).unwrap().remove(0);
+        let mut browser = SilentBrowser;
+        let result = block_on(page::send(&flow, &mut browser, &req));
+        assert!(!result.ok);
+        assert!(result.skipped, "{:?}", result.reason);
+        assert!(result.drift);
+    }
+
+    #[test]
     fn a_write_the_replay_may_have_sent_without_a_captured_answer_is_unknown() {
         let flow = flow_of(json!({
             "output": "s1r1",
