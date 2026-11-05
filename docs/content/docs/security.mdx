@@ -170,6 +170,8 @@ agent-browser --confirm-actions plugin:stealth:launch.mutate open https://exampl
 
 ## Content Boundary Markers
 
+MCP applies `contentBoundaries` and `maxOutput` to the text it sends to the model for snapshots, page reads and other page-content tools. The `structuredContent.response` field retains the original CLI JSON for programmatic consumers.
+
 When `--content-boundaries` is enabled, all page-sourced output is wrapped in structural markers so LLMs can distinguish tool output from untrusted page content:
 
 ```
