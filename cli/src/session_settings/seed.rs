@@ -40,6 +40,10 @@ impl Running {
     pub(super) fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Running {
         let mut r = Running::defaults();
 
+        // Cdp, CdpHeaders, AutoConnect and Provider are not seeded: the CLI
+        // resends them on every command, so an attach commits them on success
+        // and a failed attach rolls back instead of becoming the session's target.
+
         let strings = [
             (Key::ExecutablePath, "AGENT_BROWSER_EXECUTABLE_PATH"),
             (Key::Proxy, "AGENT_BROWSER_PROXY"),
@@ -52,9 +56,6 @@ impl Running {
             (Key::ColorScheme, "AGENT_BROWSER_COLOR_SCHEME"),
             (Key::DownloadPath, "AGENT_BROWSER_DOWNLOAD_PATH"),
             (Key::Engine, "AGENT_BROWSER_ENGINE"),
-            (Key::Cdp, "AGENT_BROWSER_CDP"),
-            (Key::CdpHeaders, "AGENT_BROWSER_CDP_HEADERS"),
-            (Key::Provider, "AGENT_BROWSER_PROVIDER"),
             (Key::IdleTimeout, "AGENT_BROWSER_IDLE_TIMEOUT_MS"),
             (Key::RestoreKey, "AGENT_BROWSER_SESSION_NAME"),
             (Key::RestoreSave, "AGENT_BROWSER_RESTORE_SAVE"),
@@ -112,11 +113,6 @@ impl Running {
         if let Some(v) = lookup("AGENT_BROWSER_HIDE_SCROLLBARS") {
             let off = matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "");
             r.set(Key::HideScrollbars, Value::Bool(!off));
-        }
-
-        // Presence alone turns auto-connect on, whatever the value.
-        if lookup("AGENT_BROWSER_AUTO_CONNECT").is_some() {
-            r.set(Key::AutoConnect, Value::Bool(true));
         }
 
         if let Some(v) = lookup("AGENT_BROWSER_DEFAULT_TIMEOUT").and_then(|s| s.parse::<u64>().ok())

@@ -4624,10 +4624,9 @@ async fn auto_launch_inner(
         return Ok(json!({}));
     }
 
-    // Cloud provider: when AGENT_BROWSER_PROVIDER is set, connect via the
-    // provider API instead of launching a local Chrome instance.  This mirrors
-    // the logic in handle_launch() so that auto_launch (triggered by any
-    // command arriving before an explicit "launch") honours the provider env.
+    // Cloud provider: when the session's settings name a provider, connect via
+    // the provider API instead of launching a local Chrome instance, so a
+    // command that arrives before an explicit "launch" uses it too.
     if let Some(provider) = provider {
         let p = provider.to_lowercase();
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
@@ -16103,8 +16102,8 @@ mod tests {
 
     #[test]
     fn test_policy_actions_use_command_plugins_for_provider_auto_launch() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_PROVIDER"]);
-        guard.set("AGENT_BROWSER_PROVIDER", "browserbox");
+        let mut settings = Running::from_env();
+        settings.set(Key::Provider, json!("browserbox"));
         let cmd = json!({
             "action": "navigate",
             "id": "policy-plugin-2",
@@ -16123,8 +16122,7 @@ mod tests {
             ]
         });
 
-        let actions =
-            policy_actions_for_command(&cmd, "navigate", true, None, &Running::from_env());
+        let actions = policy_actions_for_command(&cmd, "navigate", true, None, &settings);
 
         assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
         assert!(!actions.contains(&"plugin:stealth:launch.mutate".to_string()));
@@ -17020,11 +17018,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             "AGENT_BROWSER_PROXY_PASSWORD",
         ]);
         guard.remove("BROWSER_USE_API_KEY");
-        guard.set("AGENT_BROWSER_PROVIDER", "browser-use");
+        guard.remove("AGENT_BROWSER_PROVIDER");
         guard.set("AGENT_BROWSER_PROXY_USERNAME", "new-user");
         guard.set("AGENT_BROWSER_PROXY_PASSWORD", "new-password");
         for explicit in [true, false] {
             let mut state = DaemonState::new();
+            state.settings.set(Key::Provider, json!("browser-use"));
             let credentials = Some(("old-user".to_string(), "old-password".to_string()));
             *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
             *state.proxy_credentials.write().await = credentials.clone();
@@ -19261,8 +19260,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     #[tokio::test]
     async fn test_execute_command_reports_cdp_connection_context() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_CDP"]);
-        guard.set("AGENT_BROWSER_CDP", "invalid-cdp-target");
+        guard.remove("AGENT_BROWSER_CDP");
         let mut state = DaemonState::new();
+        state.settings.set(Key::Cdp, json!("invalid-cdp-target"));
         let cmd = json!({ "action": "snapshot", "id": "cdp-error-context" });
 
         let result = execute_command(&cmd, &mut state).await;
@@ -20758,6 +20758,102 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         );
         assert!(state.browser.is_none(), "the failed launch is closed");
     }
+    #[tokio::test]
+    async fn test_failed_attach_from_the_spawn_env_does_not_stick() {
+        let cases = [
+            ("AGENT_BROWSER_CDP", "invalid-cdp-target", "cdp"),
+            (
+                "AGENT_BROWSER_PROVIDER",
+                "not-a-provider-for-test",
+                "provider",
+            ),
+        ];
+        for (var, value, key) in cases {
+            let names = [
+                "AGENT_BROWSER_CDP",
+                "AGENT_BROWSER_CDP_HEADERS",
+                "AGENT_BROWSER_AUTO_CONNECT",
+                "AGENT_BROWSER_PROVIDER",
+                "AGENT_BROWSER_EXECUTABLE_PATH",
+                "AGENT_BROWSER_ENGINE",
+                "AGENT_BROWSER_PROFILE",
+                "AGENT_BROWSER_STATE",
+                "AGENT_BROWSER_SESSION_NAME",
+                "AGENT_BROWSER_SOCKET_DIR",
+            ];
+            let guard = EnvGuard::new(&names);
+            for name in names {
+                guard.remove(name);
+            }
+            let dir = tempfile::tempdir().unwrap();
+            guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+            guard.set(var, value);
+            guard.set("AGENT_BROWSER_EXECUTABLE_PATH", "/nonexistent/chrome");
+            let mut state = DaemonState::new();
+
+            let first = json!({
+                "id": "1",
+                "action": "navigate",
+                "url": "about:blank",
+                "settings": { key: value }
+            });
+            let resp = execute_command(&first, &mut state).await;
+            assert_eq!(resp["success"], false, "{resp}");
+            assert_eq!(state.settings.connection(), Connection::Local, "{resp}");
+
+            let plain = json!({ "id": "2", "action": "navigate", "url": "about:blank" });
+            let resp = execute_command(&plain, &mut state).await;
+            let error = resp["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("Auto-launch failed") || error.contains("nonexistent"),
+                "{var}: a plain command must launch locally: {resp}"
+            );
+            assert!(!error.contains("CDP connection failed"), "{var}: {resp}");
+            assert!(!error.contains("not-a-provider-for-test"), "{var}: {resp}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resetting_auto_connect_returns_the_session_to_a_local_launch() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::AutoConnect, json!(true));
+        state.attached_target = Some(AttachedTarget::AutoConnect);
+        let patch = patch_with(vec![(Key::AutoConnect, Requested::Default)]);
+
+        let outcome = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+
+        assert_eq!(state.settings.connection(), Connection::Local);
+        assert_eq!(state.attached_target, None);
+        assert!(outcome.pending.is_some(), "the local launch is pending");
+        assert_eq!(outcome.changes.len(), 1);
+        assert_eq!(outcome.changes[0]["option"], "auto-connect");
+        assert_eq!(outcome.changes[0]["requested"], Value::Null);
+        assert_eq!(outcome.changes[0]["running"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_failed_local_launch_after_an_auto_connect_reset_restores_the_target() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::AutoConnect, json!(true));
+        state.attached_target = Some(AttachedTarget::AutoConnect);
+        let cmd = json!({
+            "id": "1",
+            "action": "navigate",
+            "url": "about:blank",
+            "settings": { "auto-connect": null, "executable-path": "/nonexistent/chrome" }
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(state.settings.connection(), Connection::AutoConnect);
+        assert_eq!(state.attached_target, Some(AttachedTarget::AutoConnect));
+    }
+
     #[tokio::test]
     async fn test_resetting_to_a_local_launch_gates_the_launch_mutators() {
         let dir = tempfile::tempdir().unwrap();

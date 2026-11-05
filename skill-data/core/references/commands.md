@@ -536,6 +536,7 @@ agent-browser --use-system-ca         # OS trust store for CLI requests (read, i
 agent-browser --hide-scrollbars false # Keep native scrollbars visible in headless Chromium screenshots
 agent-browser --engine <name> ...     # chrome (default), lightpanda, obscura (experimental)
 agent-browser --auto-connect ...      # Connect to an already-running Chrome
+agent-browser --no-auto-connect ...   # Return to a local launch (overrides AGENT_BROWSER_AUTO_CONNECT)
 agent-browser --profile <name|path>   # Use a Chrome profile (login state survives)
 agent-browser --state <path> ...      # Load saved auth state from JSON
 agent-browser --restore [name] ...    # Auto-save and restore session state; defaults to --session
