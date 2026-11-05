@@ -4471,11 +4471,20 @@ fn tool_text(
                     .into_iter()
                     .collect()
             };
-            let mut text = response_text(&primary).unwrap_or_else(|| {
-                serde_json::to_string_pretty(&primary).unwrap_or_else(|_| stdout.trim().to_string())
-            });
+            let output_policy = opts.max_output.is_some() || opts.content_boundaries;
+            let mut text = if let Some(results) = primary
+                .as_array()
+                .filter(|_| name == TOOL_BATCH && output_policy)
+            {
+                batch_text(results, opts)
+            } else {
+                response_text(&primary).unwrap_or_else(|| {
+                    serde_json::to_string_pretty(&primary)
+                        .unwrap_or_else(|_| stdout.trim().to_string())
+                })
+            };
             // Keep warnings, stderr and other CLI diagnostics outside the page boundary.
-            if (opts.max_output.is_some() || opts.content_boundaries)
+            if output_policy
                 && primary.get("success").and_then(Value::as_bool) != Some(false)
                 && matches!(
                     name,
@@ -4489,7 +4498,6 @@ fn tool_text(
                         | TOOL_WEBMCP_LIST
                         | TOOL_WEBMCP_INVOKE
                         | TOOL_WEBMCP_RESULT
-                        | TOOL_BATCH
                 )
             {
                 let origin = primary.get("data").and_then(crate::output::boundary_origin);
@@ -4523,6 +4531,37 @@ fn tool_text(
     } else {
         text
     }
+}
+
+/// Limit each batch result without hiding command identity, errors or warnings.
+fn batch_text(results: &[Value], opts: &OutputOptions) -> String {
+    results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| {
+            let mut metadata = result.clone();
+            let data = metadata
+                .as_object_mut()
+                .and_then(|record| record.remove("result"));
+            let mut text = format!(
+                "Batch result {}:\n{}",
+                index + 1,
+                serde_json::to_string_pretty(&metadata).unwrap_or_default()
+            );
+            if let Some(data) = data.filter(|value| !value.is_null()) {
+                let response = json!({"data": data});
+                let content = response_text(&response)
+                    .unwrap_or_else(|| serde_json::to_string_pretty(&data).unwrap_or_default());
+                let origin = crate::output::boundary_origin(&data);
+                text.push('\n');
+                text.push_str(&crate::output::format_with_boundaries(
+                    &content, origin, opts,
+                ));
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn take_webmcp_context(data: &mut Value, opts: &OutputOptions) -> Option<String> {
@@ -4681,6 +4720,65 @@ mod tests {
             tool_text(Some(&path), "", "", TOOL_SCREENSHOT, &opts),
             "image.png"
         );
+    }
+
+    #[test]
+    fn mcp_batch_output_limits_preserve_each_commands_diagnostics() {
+        let opts = OutputOptions {
+            content_boundaries: true,
+            max_output: Some(3),
+            ..Default::default()
+        };
+        for omit_command in [false, true] {
+            let mut response = json!([
+                {"command": ["snapshot"], "success": true,
+                 "result": {"snapshot": "αβγδε", "origin": "https://example.org"},
+                 "warning": "page replaced"},
+                {"command": ["click", "#missing"], "success": false,
+                 "result": {"targetId": "gone"}, "error": "bound tab is gone",
+                 "code": "tab_gone"},
+                {"command": ["unknown"], "success": false, "error": "Unknown command"}
+            ]);
+            if omit_command {
+                for (index, item) in response.as_array_mut().unwrap().iter_mut().enumerate() {
+                    item.as_object_mut().unwrap().remove("command");
+                    item["index"] = json!(index);
+                }
+            }
+            let mut result = cli_result_from_run(CliRun {
+                exit_code: Some(1),
+                stdout: response.to_string(),
+                stderr: "diagnostic".into(),
+            });
+            render_cli_tool_text(&mut result, TOOL_BATCH, &opts);
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert!(
+                text.contains("αβγ\n[truncated: showing 3 of 5 chars"),
+                "{text}"
+            );
+            for diagnostic in [
+                "page replaced",
+                "bound tab is gone",
+                "tab_gone",
+                "Unknown command",
+            ] {
+                assert!(text.contains(diagnostic), "{text}");
+                assert_eq!(text.matches(diagnostic).count(), 1, "{text}");
+                let preceding = &text[..text.find(diagnostic).unwrap()];
+                assert_eq!(
+                    preceding.matches("--- AGENT_BROWSER_PAGE_CONTENT").count(),
+                    preceding
+                        .matches("--- END_AGENT_BROWSER_PAGE_CONTENT")
+                        .count(),
+                    "diagnostic must be outside page boundaries: {text}"
+                );
+            }
+            assert!(text.ends_with("stderr:\ndiagnostic"));
+            assert_eq!(text.contains("\"command\""), !omit_command);
+            assert_eq!(text.contains("\"index\""), omit_command);
+            assert_eq!(result["structuredContent"]["response"], response);
+            assert_eq!(result["isError"], true);
+        }
     }
 
     #[test]
