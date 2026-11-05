@@ -210,6 +210,308 @@ fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<
     }
 }
 
+/// Quote a value for a POSIX shell. Recorded param values come from the
+/// site, so a suggested command must never let them run as shell syntax.
+pub(crate) fn shell_quote(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:@%+=,".contains(c));
+    if plain {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+/// Saved flows announced after navigating to a site that has them.
+pub(crate) fn format_flow_hint(data: &serde_json::Value) -> Option<String> {
+    let flows = data.get("flows")?.as_array()?;
+    if flows.is_empty() {
+        return None;
+    }
+    let declared = data["webmcp"]["toolCount"].as_u64().unwrap_or(0) > 0
+        || data["webmcp"]["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty());
+    let mut lines = vec![if declared {
+        format!(
+            "Saved flows for this site ({}), observed by agent-browser. Prefer a WebMCP tool above when one covers the task; otherwise calling a flow is faster than driving the page:",
+            flows.len()
+        )
+    } else {
+        format!(
+            "Saved flows for this site ({}). Calling one is faster than driving the page:",
+            flows.len()
+        )
+    }];
+    for f in flows {
+        let params: Vec<String> = f["examples"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| {
+                        format!(
+                            "--param {}",
+                            shell_quote(&format!("{}={}", k, v.as_str().unwrap_or("")))
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        lines.push(format!(
+            "  agent-browser flow run {} {}{}",
+            f["name"].as_str().unwrap_or(""),
+            params.join(" "),
+            if f["verifiedAt"].is_null() {
+                "  (unverified)"
+            } else {
+                ""
+            }
+        ));
+        if let Some(page) = f["recordedOn"].as_str() {
+            lines.push(format!("    recorded on {}", page));
+        }
+        if let Some(sources) = f["paramSources"].as_object() {
+            for (name, source) in sources {
+                let list = source
+                    .as_str()
+                    .unwrap_or("")
+                    .split_once(' ')
+                    .map(|(_, l)| l);
+                if let Some(list) = list {
+                    lines.push(format!("    {}: one of the site's {} values", name, list));
+                }
+            }
+        }
+        if let Some(fields) = f["itemFields"].as_array().filter(|a| !a.is_empty()) {
+            let names: Vec<&str> = fields.iter().filter_map(|x| x.as_str()).collect();
+            lines.push(format!("    item fields: {}", names.join(", ")));
+        }
+    }
+    lines.push("Param values above are the recorded ones; keep or replace them with values of the same kind. Add --where field=value, --fields a,b and --limit n to return only what the task needs.".to_string());
+    Some(lines.join("\n"))
+}
+
+pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    let str_list = |v: &serde_json::Value| {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+    };
+    match action {
+        Some("flow_steps") => {
+            let steps = data.get("steps")?.as_array()?;
+            if steps.is_empty() {
+                return Some("No steps recorded yet.".to_string());
+            }
+            let mut out = String::new();
+            for s in steps {
+                out.push_str(&format!(
+                    "{:>3} {} {}  {}  requests: {}{}\n",
+                    s["seq"].as_u64().unwrap_or(0),
+                    if s["ok"] == true { "ok    " } else { "FAILED" },
+                    s["command"].as_str().unwrap_or(""),
+                    s["url"].as_str().unwrap_or("-"),
+                    s["requests"].as_u64().unwrap_or(0),
+                    if s["saved"] == true { "  (saved)" } else { "" }
+                ));
+            }
+            out.push_str(&format!(
+                "Last save covered step {}; {} step(s) not saved.",
+                data["lastSave"].as_u64().unwrap_or(0),
+                data["unsaved"].as_u64().unwrap_or(0)
+            ));
+            Some(out)
+        }
+        Some("flow_save") => {
+            let mut out = format!(
+                "Saved flow '{}' for {} to {}\n",
+                data.get("name")?.as_str()?,
+                data.get("origin")?.as_str()?,
+                data.get("path")?.as_str()?
+            );
+            let output = data.get("output").and_then(|v| v.as_str()).unwrap_or("");
+            for r in data.get("requests")?.as_array()? {
+                let id = r["id"].as_str().unwrap_or("");
+                out.push_str(&format!(
+                    "  {} {} {} {} ({} bytes)\n",
+                    if id == output { "*" } else { " " },
+                    id,
+                    r["method"].as_str().unwrap_or(""),
+                    r["url"].as_str().unwrap_or(""),
+                    r["bytes"].as_u64().unwrap_or(0)
+                ));
+            }
+            out.push_str(
+                "  * = output. Change it with `flow save --output <id>`.
+",
+            );
+            let params = str_list(&data["params"]);
+            out.push_str(&format!(
+                "Params: {}\n",
+                if params.is_empty() {
+                    "none".to_string()
+                } else {
+                    params
+                }
+            ));
+            if let Some(gaps) = data
+                .get("gaps")
+                .and_then(|g| g.as_array())
+                .filter(|g| !g.is_empty())
+            {
+                out.push_str("Not captured:\n");
+                for g in gaps {
+                    out.push_str(&format!(
+                        "  step {} `{}`: {}\n",
+                        g["step"],
+                        g["command"].as_str().unwrap_or(""),
+                        g["reason"].as_str().unwrap_or("")
+                    ));
+                }
+            }
+            if let Some(writes) = data
+                .get("writes")
+                .and_then(|w| w.as_array())
+                .filter(|w| !w.is_empty())
+            {
+                out.push_str("Writes (a run needs `--allow-write all` or the ids, or asks to confirm each):\n");
+                for w in writes {
+                    out.push_str(&format!(
+                        "  {} {} {} {}\n",
+                        w["id"].as_str().unwrap_or(""),
+                        w["method"].as_str().unwrap_or(""),
+                        w["url"].as_str().unwrap_or(""),
+                        w["kind"].as_str().unwrap_or("")
+                    ));
+                }
+            }
+            let dropped = str_list(&data["droppedHeaders"]);
+            if !dropped.is_empty() {
+                out.push_str(&format!(
+                    "Not saved (taken from the live session at run time): {}\n",
+                    dropped
+                ));
+            }
+            out.push_str("Unverified until the first successful `flow run`.");
+            Some(out)
+        }
+        Some("flow_run") => {
+            let steps: Vec<String> = data
+                .get("steps")?
+                .as_array()?
+                .iter()
+                .map(|s| format!("{} in {}ms", s["id"].as_str().unwrap_or(""), s["ms"]))
+                .collect();
+            let body = data.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            let status = match data.get("drift") {
+                Some(d) => format!(
+                    "unverified: {}",
+                    d["reason"].as_str().unwrap_or("response changed")
+                ),
+                None if data.get("empty") == Some(&serde_json::Value::Bool(true)) => {
+                    "no results, so the flow's verified state is unchanged".to_string()
+                }
+                None => "verified".to_string(),
+            };
+            Some(format!(
+                "Flow '{}' ran in {}ms ({}), {}\n{}",
+                data.get("name")?.as_str()?,
+                data.get("ms")?,
+                steps.join(", "),
+                status,
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            ))
+        }
+        Some("flow_list") => {
+            let flows = data.get("flows")?.as_array()?;
+            if flows.is_empty() {
+                return Some("No saved flows. Open a session with `--capture flow`, do the task, then run `flow save <name>`.".to_string());
+            }
+            Some(
+                flows
+                    .iter()
+                    .map(|f| {
+                        let params = str_list(&f["params"]);
+                        format!(
+                            "{} ({}) params: {} {}",
+                            f["name"].as_str().unwrap_or(""),
+                            f["origin"].as_str().unwrap_or(""),
+                            if params.is_empty() {
+                                "none".to_string()
+                            } else {
+                                params
+                            },
+                            if f["verifiedAt"].is_null() {
+                                "unverified"
+                            } else {
+                                "verified"
+                            }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Saved flows for the page's site, listed after the tools the page declares
+/// and in the same shape: name, description and input schema.
+fn format_observed_flows(data: &serde_json::Value) -> Option<String> {
+    let flows = data.get("observed")?.as_array().filter(|f| !f.is_empty())?;
+    let mut lines =
+        vec!["Observed by agent-browser (saved flows, not declared by the page):".to_string()];
+    for f in flows {
+        let name = f["name"].as_str().unwrap_or("");
+        let props = f["inputSchema"]["properties"].as_object();
+        let inputs: Vec<String> = props
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| {
+                format!(
+                    "{} ({}): {}",
+                    k,
+                    v["type"].as_str().unwrap_or("string"),
+                    v["description"].as_str().unwrap_or("")
+                )
+            })
+            .collect();
+        let example: Vec<String> = props
+            .into_iter()
+            .flatten()
+            .map(|(k, _)| format!("--param {}", shell_quote(&format!("{}=<value>", k))))
+            .collect();
+        lines.push(format!(
+            "{} [{}]\n  {}",
+            name,
+            if f["verifiedAt"].is_null() {
+                "unverified"
+            } else {
+                "verified"
+            },
+            f["description"].as_str().unwrap_or("")
+        ));
+        for input in &inputs {
+            lines.push(format!("  input {}", input));
+        }
+        lines.push(format!(
+            "  run: agent-browser flow run {}{}{}",
+            name,
+            if example.is_empty() { "" } else { " " },
+            example.join(" ")
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
 fn format_webmcp_tool_text(tool: &serde_json::Value) -> String {
     let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
     let description = tool
@@ -508,8 +810,86 @@ fn recording_fps_suffix(data: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
+/// One line per setting the daemon changed for this command, from
+/// `lifecycle.settings` in the response. A setting that only takes effect at
+/// the next launch is in the JSON but not worth a line.
+pub fn settings_notices(data: &serde_json::Value) -> Vec<String> {
+    let lifecycle = &data["lifecycle"];
+    let settings = &lifecycle["settings"];
+    let show = |value: &serde_json::Value| match value {
+        serde_json::Value::Null => "default".to_string(),
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| item.as_str().map_or_else(|| item.to_string(), String::from))
+            .collect::<Vec<_>>()
+            .join(","),
+        other => other.to_string(),
+    };
+    let mut lines: Vec<String> = settings["changes"]
+        .as_array()
+        .map(|changes| {
+            changes
+                .iter()
+                .filter(|change| change["applied"] == true)
+                .map(|change| {
+                    let option = change["option"].as_str().unwrap_or("setting");
+                    let flag = crate::session_settings::spec_by_name(option)
+                        .map(|spec| spec.flag)
+                        .filter(|flag| !flag.is_empty())
+                        .map(|flag| format!(" ({flag})"))
+                        .unwrap_or_default();
+                    let effect = if change["effect"] == "relaunch" {
+                        "relaunched browser"
+                    } else {
+                        "applied"
+                    };
+                    format!(
+                        "{} {}: {} \u{2192} {}{}, {}",
+                        color::warning_indicator(),
+                        option,
+                        show(&change["running"]),
+                        show(&change["requested"]),
+                        flag,
+                        effect
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if settings["forcedRelaunch"] == true && lifecycle["relaunchedBrowser"] == true {
+        lines.push(format!(
+            "{} browser: relaunched (--relaunch)",
+            color::warning_indicator()
+        ));
+    }
+    lines
+}
+
+/// True when the lifecycle report names a setting change or `--relaunch` as the
+/// reason for a relaunch, and the notices therefore printed it.
+fn settings_notices_explain_relaunch(lifecycle: &serde_json::Value) -> bool {
+    let settings = &lifecycle["settings"];
+    settings["forcedRelaunch"] == true
+        || settings["changes"].as_array().is_some_and(|changes| {
+            changes
+                .iter()
+                .any(|c| c["effect"] == "relaunch" && c["applied"] == true)
+        })
+}
+
+fn print_settings_notices(resp: &Response) {
+    if let Some(data) = resp.data.as_ref() {
+        for line in settings_notices(data) {
+            eprintln!("{line}");
+        }
+    }
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
+    print_settings_notices(resp);
     print_primary_response(resp, action, opts);
+    // Tools the page declares come first; saved flows are the fallback.
     if !opts.json {
         if let Some(context) = resp
             .data
@@ -517,6 +897,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             .and_then(|data| format_webmcp_context(data, opts))
         {
             println!("{context}");
+        }
+    }
+    if !opts.json && action != Some("flow_list") {
+        if let Some(hint) = resp.data.as_ref().and_then(format_flow_hint) {
+            println!("{hint}");
         }
     }
 }
@@ -607,14 +992,20 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             };
             if tools.is_empty() {
                 println!("No WebMCP tools registered on the current page");
-                return;
             }
             for tool in tools {
                 print_with_boundaries(&format_webmcp_tool_text(tool), boundary_origin(tool), opts);
             }
+            if let Some(observed) = format_observed_flows(data) {
+                println!("{}", observed);
+            }
             return;
         }
         if let Some(output) = format_webmcp_text(action, data) {
+            print_with_boundaries(&output, boundary_origin(data), opts);
+            return;
+        }
+        if let Some(output) = format_flow_text(action, data) {
             print_with_boundaries(&output, boundary_origin(data), opts);
             return;
         }
@@ -1110,6 +1501,9 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 _ => "Browser closed",
             };
             println!("{} {}", color::success_indicator(), label);
+            if let Some(steps) = data["unsaved"]["steps"].as_u64() {
+                println!("  {} recorded step(s) were not saved to a flow", steps);
+            }
             return;
         }
         // Started actions (profiling, HAR, recording)
@@ -1589,7 +1983,10 @@ fn print_lifecycle_note(data: &serde_json::Value) {
         .unwrap_or(false);
 
     if relaunched {
-        parts.push("relaunched browser".to_string());
+        // A settings notice already said why the browser was relaunched.
+        if !settings_notices_explain_relaunch(lifecycle) {
+            parts.push("relaunched browser".to_string());
+        }
     } else if launched && !reused {
         parts.push("launched browser".to_string());
     }
@@ -4059,6 +4456,14 @@ WebMCP (experimental):
   webmcp cancel <id>         Cancel an active invocation
   Brief untrusted summaries appear only on discovery or change; no schemas
 
+Saved flows (experimental, open the session with --capture flow):
+  flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed
+  flow save <name>           Save the steps since the last open as a flow; accepts --from <seq>,
+                             --to <seq>, --param k=v, --output <id>, and --description <text>
+  flow run <name>            Send over HTTP; accepts --param k=v, --where f=v, --fields a,b, --limit n,
+                             --origin <host>, and --allow-write <all|id,...>
+  flow list [--origin <host>] Saved flows with params and verified state
+
 React (requires `open --enable react-devtools`):
   react tree                 Full React component tree (enable with open --enable react-devtools)
   react inspect <id>         Inspect one fiber (props, hooks, state, source)
@@ -4210,6 +4615,8 @@ Options:
   --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
   --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
                              (or AGENT_BROWSER_NO_WEBMCP env)
+  --no-auto-connect          Return a session attached with --auto-connect to a local launch
+                             (or --auto-connect false; overrides AGENT_BROWSER_AUTO_CONNECT)
   --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
   --cdp-headers <json>       Headers for --cdp discovery and handshake, e.g. Authorization
                              (or AGENT_BROWSER_CDP_HEADERS env)
@@ -4224,6 +4631,8 @@ Options:
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
                              Invalid values warn and leave the existing output limit unchanged.
   --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --capture <list>           Record the session as it runs; only flow is supported (or AGENT_BROWSER_CAPTURE)
+                             On a running session without capture, passing it relaunches with capture on
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
@@ -4241,6 +4650,7 @@ Options:
                              environment values are not reused when bypass is cleared.
                              Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
+  --relaunch                 Relaunch the session's browser even when no setting changed
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
   -q, --quiet                Show only AI text responses (hide tool calls)
@@ -4860,6 +5270,19 @@ hydration: -  phases: 0  hydratedComponents: 0"
     }
 
     #[test]
+    fn test_flow_hint_quotes_recorded_values_for_the_shell() {
+        let data = json!({ "flows": [{
+            "name": "search",
+            "examples": { "q": "kettle; rm -rf ~", "id": "401" },
+            "verifiedAt": "now",
+        }] });
+        let hint = super::format_flow_hint(&data).unwrap();
+        assert!(hint.contains("--param 'q=kettle; rm -rf ~'"));
+        assert!(hint.contains("--param id=401"));
+        assert_eq!(super::shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
     fn test_webmcp_list_tools_keep_their_own_origin() {
         let first = json!({
             "name": "search",
@@ -4927,5 +5350,129 @@ hydration: -  phases: 0  hydratedComponents: 0"
             format_webmcp_context(&json!({"webmcp": {"status": "unavailable"}}), &opts).unwrap();
         assert!(unavailable.contains("do not reuse tools"));
         assert!(!unavailable.contains(": 0"));
+    }
+    // === Settings notices ===
+    use super::{settings_notices, settings_notices_explain_relaunch};
+
+    fn notice_data(
+        changes: serde_json::Value,
+        forced: bool,
+        relaunched: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "lifecycle": {
+                "relaunchedBrowser": relaunched,
+                "settings": { "changes": changes, "forcedRelaunch": forced },
+            }
+        })
+    }
+
+    #[test]
+    fn test_settings_notice_names_the_change_flag_and_effect() {
+        let data = notice_data(
+            serde_json::json!([{
+                "option": "profile", "requested": "/b", "running": "/a",
+                "effect": "relaunch", "applied": true,
+            }]),
+            false,
+            true,
+        );
+        let lines = settings_notices(&data);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].ends_with("profile: /a \u{2192} /b (--profile), relaunched browser"),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].contains('\u{26a0}'), "{}", lines[0]);
+    }
+
+    #[test]
+    fn test_settings_notice_for_a_live_change_and_defaults() {
+        let data = notice_data(
+            serde_json::json!([
+                {"option": "default-timeout", "requested": 9000, "running": null,
+                 "effect": "live", "applied": true},
+                {"option": "proxy-bypass", "requested": null, "running": "localhost",
+                 "effect": "relaunch", "applied": true},
+                {"option": "args", "requested": ["--a", "--b"], "running": ["--a"],
+                 "effect": "relaunch", "applied": true},
+            ]),
+            false,
+            true,
+        );
+        let lines = settings_notices(&data);
+        assert!(lines[0]
+            .ends_with("default-timeout: default \u{2192} 9000 (--default-timeout), applied"));
+        assert!(lines[1].ends_with(
+            "proxy-bypass: localhost \u{2192} default (--proxy-bypass), relaunched browser"
+        ));
+        assert!(lines[2].ends_with("args: --a \u{2192} --a,--b (--args), relaunched browser"));
+    }
+
+    #[test]
+    fn test_settings_notice_skips_changes_that_wait_for_the_next_launch() {
+        let data = notice_data(
+            serde_json::json!([{
+                "option": "profile", "requested": "/b", "running": null,
+                "effect": "relaunch", "applied": false,
+            }]),
+            false,
+            false,
+        );
+        assert!(settings_notices(&data).is_empty());
+    }
+
+    #[test]
+    fn test_settings_notice_for_a_forced_relaunch() {
+        let lines = settings_notices(&notice_data(serde_json::json!([]), true, true));
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].ends_with("browser: relaunched (--relaunch)"),
+            "{}",
+            lines[0]
+        );
+        assert!(settings_notices(&notice_data(serde_json::json!([]), true, false)).is_empty());
+    }
+
+    #[test]
+    fn test_a_settings_notice_replaces_the_generic_relaunch_note() {
+        let explained = notice_data(
+            serde_json::json!([{
+                "option": "profile", "requested": "/b", "running": "/a",
+                "effect": "relaunch", "applied": true,
+            }]),
+            false,
+            true,
+        );
+        assert!(settings_notices_explain_relaunch(&explained["lifecycle"]));
+        assert!(settings_notices_explain_relaunch(
+            &notice_data(serde_json::json!([]), true, true)["lifecycle"]
+        ));
+        let unexplained = notice_data(serde_json::json!([]), false, true);
+        assert!(!settings_notices_explain_relaunch(
+            &unexplained["lifecycle"]
+        ));
+    }
+
+    #[test]
+    fn test_settings_notice_never_prints_url_secrets() {
+        let data = notice_data(
+            serde_json::json!([{
+                "option": "cdp",
+                "requested": "wss://host.example/cdp?<redacted>",
+                "running": null, "effect": "relaunch", "applied": true,
+            }]),
+            false,
+            true,
+        );
+        let lines = settings_notices(&data).join("\n");
+        assert!(lines.contains("cdp?<redacted>") && !lines.contains("SECRET"));
+    }
+
+    #[test]
+    fn test_settings_notice_needs_a_settings_report() {
+        assert!(settings_notices(&serde_json::json!({"lifecycle": {}})).is_empty());
+        assert!(settings_notices(&serde_json::json!({"url": "x"})).is_empty());
     }
 }
