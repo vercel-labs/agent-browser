@@ -692,6 +692,8 @@ pub struct DaemonState {
     active_provider_connection: bool,
     /// Browser product already checked for an outdated build, so each product is checked once even when the fetch fails.
     browser_security_checked: Option<String>,
+    /// CDP URL whose browser product was already read, so later commands skip the version round trip.
+    browser_security_checked_url: Option<String>,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
     /// Strict session-to-tab binding (`--pin-tab` / AGENT_BROWSER_PIN_TAB).
@@ -824,6 +826,7 @@ impl DaemonState {
             active_provider_session: None,
             active_provider_connection: false,
             browser_security_checked: None,
+            browser_security_checked_url: None,
             confirmed_policy_actions: HashSet::new(),
             pin_tab,
             last_persisted_binding: None,
@@ -2832,6 +2835,9 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
     let Some(mgr) = state.browser.as_ref() else {
         return;
     };
+    if state.browser_security_checked_url.as_deref() == Some(mgr.get_cdp_url()) {
+        return;
+    }
     let Ok(Ok(version)) = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         mgr.client
@@ -2841,6 +2847,7 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
     else {
         return;
     };
+    state.browser_security_checked_url = Some(mgr.get_cdp_url().to_string());
     let Some(product) = version.get("product").and_then(|v| v.as_str()) else {
         return;
     };
