@@ -826,7 +826,7 @@ mod tests {
         let mut receiver = server.frame_tx.subscribe();
         *server.cdp_session_id.write().await = Some("unchanged".into());
         server.broadcast_frame(r#"{"type":"frame","data":"unchanged"}"#);
-        let tabs = vec![json!({"tabId":"t1", "targetId":"ctx", "label":null,
+        let tabs = [json!({"tabId":"t1", "targetId":"ctx", "label":null,
             "title":"Page", "url":"https://example.test/", "type":"page", "active":true})];
 
         for expected in [&tabs[..], &[][..]] {
