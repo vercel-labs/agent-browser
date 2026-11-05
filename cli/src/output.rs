@@ -1367,7 +1367,7 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         // Errors
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
             for err in errors {
-                let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let msg = err.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 println!("{} {}", color::error_indicator(), msg);
             }
             return;
