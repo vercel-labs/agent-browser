@@ -4,11 +4,12 @@
 //   bun run snapshot-source/validate-public.ts [task-id ...]
 
 import { publicTasks } from "./public-tasks.ts";
+import { cliEnv } from "./guard";
 
 const bin = process.env.AGENT_BROWSER_BIN ?? `${import.meta.dir}/../../cli/target/ci/agent-browser`;
 const session = "abv3-validate";
 async function ab(...args: string[]) {
-  const p = Bun.spawn([bin, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, AGENT_BROWSER_SESSION: session, NO_COLOR: "1" } });
+  const p = Bun.spawn([bin, ...args], { stdout: "pipe", stderr: "pipe", env: cliEnv({ AGENT_BROWSER_SESSION: session }) });
   const [o, e] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
   await p.exited;
   return (o + e).trim();

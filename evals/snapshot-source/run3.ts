@@ -12,6 +12,7 @@ import { fileURLToPath } from "url";
 import { startFixtureServer } from "./fixtures.ts";
 import { tasks as localTasks, type Task } from "./tasks.ts";
 import { publicTasks, type PublicTask } from "./public-tasks.ts";
+import { cliEnv, guardCommand } from "./guard";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../..");
@@ -100,7 +101,7 @@ function shellSplit(line: string): string[] {
 }
 
 async function exec(bin: string, args: string[], session: string, variant: Variant, timeoutMs = 60_000): Promise<{ out: string; code: number }> {
-  const env: Record<string, string> = { ...(process.env as Record<string, string>), AGENT_BROWSER_SESSION: session, NO_COLOR: "1" };
+  const env = cliEnv({ AGENT_BROWSER_SESSION: session });
   if (variant === "ax-deep") env.AGENT_BROWSER_AX_DEEP = "1";
   else delete env.AGENT_BROWSER_AX_DEEP;
   // hybrid is not a public source; the CLI accepts it only with this variable.
@@ -346,8 +347,9 @@ async function runOne(args: Args, server: ReturnType<typeof startFixtureServer>,
         result.steps++;
         let output: string;
         let isError = false;
-        if (cmd.length === 0 || ["install", "upgrade", "skills", "dashboard", "chat", "close"].includes(cmd[0])) {
-          output = "Command not available in this eval.";
+        const guarded = guardCommand(cmd);
+        if (!guarded.ok) {
+          output = `Not available in this eval: ${guarded.reason}.`;
           isError = true;
         } else {
           const r = await x(cmd);

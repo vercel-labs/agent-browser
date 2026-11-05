@@ -14,6 +14,7 @@ import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { startFixtureServer } from "./fixtures.ts";
 import { tasks, type Task } from "./tasks.ts";
+import { cliEnv, guardCommand } from "./guard";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../..");
@@ -102,7 +103,7 @@ async function exec(bin: string, args: string[], session: string, timeoutMs = 60
   const proc = Bun.spawn([bin, ...args], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...(process.env as Record<string, string>), AGENT_BROWSER_SESSION: session, AGENT_BROWSER_SNAPSHOT_HYBRID: "1", NO_COLOR: "1" },
+    env: cliEnv({ AGENT_BROWSER_SESSION: session, AGENT_BROWSER_SNAPSHOT_HYBRID: "1" }),
   });
   const timer = setTimeout(() => proc.kill(), timeoutMs);
   const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
@@ -273,8 +274,9 @@ async function runOne(args: Args, server: ReturnType<typeof startFixtureServer>,
         result.steps++;
         let output: string;
         let isError = false;
-        if (cmd.length === 0 || ["install", "upgrade", "skills", "dashboard", "chat", "close"].includes(cmd[0])) {
-          output = "Command not available in this eval.";
+        const guarded = guardCommand(cmd);
+        if (!guarded.ok) {
+          output = `Not available in this eval: ${guarded.reason}.`;
           isError = true;
         } else {
           const r = await exec(args.bin, cmd, session);
