@@ -214,6 +214,8 @@ Supports exact match (`github.com`) and wildcard prefix (`*.example.com`, which 
 
 > **Note:** WebSocket and EventSource blocking is best-effort because it overrides browser constructors via an init script. If the `eval` action category is allowed, page scripts could theoretically restore those original constructors. The WebRTC replacement is installed as a non-configurable constructor, with the Chrome UDP policy providing defense in depth for local launches. For maximum protection, deny the `eval` category via `--action-policy` and enforce operating-system egress policy when using `--allowed-domains`.
 
+The allowlist, the action policy and the confirm categories persist with the session. They are stored in an owner-only `<session>.settings` file in the socket directory and are applied again when the daemon restarts, so a crash, idle expiry or `kill` does not remove containment for the next command. A new value replaces the stored one, and `close` removes the file. If the file is unreadable, corrupt or (on Unix) accessible by other users, the daemon refuses to start and prints the file name; run `agent-browser --session <name> close` to clear it. While a stored allowlist is active, `--state` and `state load` stay rejected.
+
 Config file:
 
 ```json
