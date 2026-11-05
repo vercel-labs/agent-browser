@@ -20,8 +20,15 @@ use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
 use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
-use crate::session_settings::{IdleTimeout, Running, DEFAULT_IDLE_TIMEOUT_MS};
+use crate::session_settings::{FsStore, Running, Store, DEFAULT_IDLE_TIMEOUT_MS};
 use crate::validation::{is_valid_session_name, session_name_error};
+
+/// What the daemon starts a session with: its settings and where the security
+/// part of them is kept.
+pub(super) struct Startup {
+    pub settings: Running,
+    pub store: Arc<dyn Store>,
+}
 
 pub async fn run_daemon(session: &str) {
     if !is_valid_session_name(session) {
@@ -33,6 +40,18 @@ pub async fn run_daemon(session: &str) {
     if !socket_dir.exists() {
         let _ = fs::create_dir_all(&socket_dir);
     }
+
+    // Settings are read before stderr goes away and before any file marks this
+    // daemon as running: a stored security setting that cannot be used must
+    // stop the start with a message the parent can show.
+    let store: Arc<dyn Store> = Arc::new(FsStore::new(&socket_dir, session));
+    let settings = match Running::boot(store.as_ref(), session) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("{}", e);
+            process::exit(1);
+        }
+    };
 
     // When debug mode is on, redirect stderr to a log file so daemon
     // output can be inspected (the daemon normally has stderr piped to its
@@ -132,12 +151,6 @@ pub async fn run_daemon(session: &str) {
         }
     }
 
-    // Auto-shutdown the daemon after this many ms of inactivity (no commands
-    // or dashboard input received). Applies a default when
-    // AGENT_BROWSER_IDLE_TIMEOUT_MS is unset; an explicit 0 disables idle
-    // shutdown entirely.
-    let idle_timeout = Running::from_env().idle_timeout();
-
     let autosave_interval_ms = autosave_interval_ms_from_env();
 
     let result = run_socket_server(
@@ -146,8 +159,8 @@ pub async fn run_daemon(session: &str) {
         stream_client,
         stream_server_instance,
         idle_activity,
-        idle_timeout,
         autosave_interval_ms,
+        Startup { settings, store },
     )
     .await;
 
@@ -192,11 +205,16 @@ async fn run_socket_server(
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_activity: Arc<IdleActivity>,
-    idle_timeout: Option<IdleTimeout>,
     autosave_interval_ms: u64,
+    startup: Startup,
 ) -> Result<(), String> {
     use tokio::net::UnixListener;
 
+    // Auto-shutdown the daemon after this many ms of inactivity (no commands
+    // or dashboard input received). Applies a default when
+    // AGENT_BROWSER_IDLE_TIMEOUT_MS is unset; an explicit 0 disables idle
+    // shutdown entirely.
+    let idle_timeout = startup.settings.idle_timeout();
     idle_activity.set_timeout(idle_timeout);
     let idle_timeout_ms = idle_timeout.map(|t| t.ms);
 
@@ -205,6 +223,8 @@ async fn run_socket_server(
 
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
+            startup.settings,
+            startup.store,
             stream_client,
             stream_server,
             idle_activity.clone(),
@@ -332,11 +352,16 @@ async fn run_socket_server(
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_activity: Arc<IdleActivity>,
-    idle_timeout: Option<IdleTimeout>,
     autosave_interval_ms: u64,
+    startup: Startup,
 ) -> Result<(), String> {
     use tokio::net::TcpListener;
 
+    // Auto-shutdown the daemon after this many ms of inactivity (no commands
+    // or dashboard input received). Applies a default when
+    // AGENT_BROWSER_IDLE_TIMEOUT_MS is unset; an explicit 0 disables idle
+    // shutdown entirely.
+    let idle_timeout = startup.settings.idle_timeout();
     idle_activity.set_timeout(idle_timeout);
     let idle_timeout_ms = idle_timeout.map(|t| t.ms);
 
@@ -360,6 +385,8 @@ async fn run_socket_server(
 
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
+            startup.settings,
+            startup.store,
             stream_client,
             stream_server,
             idle_activity.clone(),
@@ -710,7 +737,7 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-    use crate::session_settings::resolve_idle_timeout;
+    use crate::session_settings::{resolve_idle_timeout, IdleTimeout};
 
     #[test]
     fn test_resolve_idle_timeout_unset_applies_default() {

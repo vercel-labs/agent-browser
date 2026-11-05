@@ -1236,6 +1236,15 @@ fn run_dashboard_stop(json_mode: bool) {
     }
 }
 
+/// Forgets what a session keeps once it is closed: its saved TLS selection and
+/// its stored security settings. Done here as well as in the daemon so a
+/// session whose daemon cannot start (a settings file it refuses) can still be
+/// cleared with `close`.
+fn clear_closed_session(session: &str) {
+    tls::clear_session(session);
+    session_settings::clear_file(session);
+}
+
 fn run_close_all(flags: &Flags) {
     // walk_daemons auto-cleans stale .pid / .sock / .stream sidecar files and
     // separates out the standalone dashboard. We only want to send `close` to
@@ -1275,7 +1284,7 @@ fn run_close_all(flags: &Flags) {
         });
         match result {
             Ok(resp) if resp.success => {
-                tls::clear_session(session);
+                clear_closed_session(session);
                 closed.push(session.clone());
             }
             Ok(resp) => {
@@ -1301,6 +1310,7 @@ fn run_close_all(flags: &Flags) {
                     }
                 }
                 cleanup_stale_files(session);
+                clear_closed_session(session);
                 closed.push(session.clone());
             }
         }
@@ -1602,7 +1612,7 @@ fn main() {
     }
     match cmd.get("action").and_then(|v| v.as_str()) {
         Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
-        Some("close") => tls::clear_session(&flags.session),
+        Some("close") => clear_closed_session(&flags.session),
         _ => {}
     }
     // Handle --password-stdin for auth save
@@ -2001,7 +2011,7 @@ fn run_batch(
         attach_input_mode(&mut parsed, flags);
         match parsed.get("action").and_then(|v| v.as_str()) {
             Some("read") => parsed["tls"] = json!(tls::session_options(flags, &flags.session)),
-            Some("close") => tls::clear_session(&flags.session),
+            Some("close") => clear_closed_session(&flags.session),
             _ => {}
         }
 
