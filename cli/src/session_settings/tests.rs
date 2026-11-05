@@ -852,6 +852,26 @@ fn changed_keys(plan: &super::plan::Plan) -> Vec<Key> {
 }
 
 #[test]
+fn headers_sent_with_a_provider_or_auto_connect_are_free_on_the_next_command() {
+    // Env or config `cdpHeaders` ride on every command, whatever the target.
+    for target in [
+        is(Key::Provider, json!("browserbox")),
+        is(Key::AutoConnect, json!(true)),
+    ] {
+        let patch = patch_of(&[target.clone(), is(Key::CdpHeaders, json!(r#"{"A":"b"}"#))]);
+        let first = connected(&[]).plan(&patch);
+        assert!(first.relaunch, "{:?}", target.0);
+        let second = first.next.plan(&patch);
+        assert!(
+            second.changes.is_empty() && !second.relaunch,
+            "{:?}: {:?}",
+            target.0,
+            second.changes.iter().map(|c| c.key).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
 fn plan_table_running_by_patch() {
     struct Case {
         name: &'static str,

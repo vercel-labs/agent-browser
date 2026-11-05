@@ -2824,6 +2824,28 @@ mod tests {
     }
 
     #[test]
+    fn test_auto_connect_env_is_on_only_for_a_truthy_value() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        for (value, on) in [
+            ("1", true),
+            ("true", true),
+            ("0", false),
+            ("false", false),
+            ("no", false),
+            ("", false),
+        ] {
+            guard.set("AGENT_BROWSER_AUTO_CONNECT", value);
+            let patch = crate::session_settings::Patch::from_flags(&parse_flags(&args("open")));
+            let expected = on.then_some(serde_json::Value::Bool(true));
+            assert_eq!(
+                patch.value(crate::session_settings::Key::AutoConnect),
+                expected.as_ref(),
+                "AGENT_BROWSER_AUTO_CONNECT={value:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_no_auto_connect_beats_config_auto_connect() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
         guard.remove("AGENT_BROWSER_AUTO_CONNECT");
