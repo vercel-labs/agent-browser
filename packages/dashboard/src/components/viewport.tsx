@@ -40,6 +40,7 @@ import {
   screencastingAtom,
   recordingAtom,
   streamEngineAtom,
+  streamTabsAtom,
   activeUrlAtom,
   sendInputAtom,
 } from "@/store/stream";
@@ -157,6 +158,7 @@ export function Viewport() {
   const recording = useAtomValue(recordingAtom);
   const engine = useAtomValue(streamEngineAtom);
   const url = useAtomValue(activeUrlAtom);
+  const activeTabId = useAtomValue(streamTabsAtom).find((tab) => tab.active)?.tabId;
   const sessionName = useAtomValue(activeSessionNameAtom);
   const streamPort = useAtomValue(activePortAtom);
   const sendInput = useSetAtom(sendInputAtom);
@@ -280,7 +282,7 @@ export function Viewport() {
     if (!autoFit || !browserConnected || !streamPort || !sessionName) return;
     const timer = setTimeout(handleFit, 150);
     return () => clearTimeout(timer);
-  }, [autoFit, browserConnected, streamPort, sessionName, handleFit]);
+  }, [autoFit, activeTabId, browserConnected, streamPort, sessionName, handleFit]);
 
   const handlePreset = useCallback(
     (ratio: [number, number]) => {
