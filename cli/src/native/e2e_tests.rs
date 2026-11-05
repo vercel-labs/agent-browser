@@ -14419,6 +14419,11 @@ fn firefox_serve(
                     "",
                     include_str!("test_fixtures/firefox_forms_frame.html").to_string(),
                 ),
+                "/html5_drag_probe.html" => (
+                    "text/html; charset=utf-8",
+                    "",
+                    include_str!("test_fixtures/html5_drag_probe.html").to_string(),
+                ),
                 "/api" => ("text/plain", "", "real".to_string()),
                 "/download.txt" => (
                     "text/plain",
@@ -14921,6 +14926,38 @@ async fn e2e_firefox_core_flow_and_ref_stability() {
     firefox_close(&mut state).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(!firefox_processes_using(tmp.path()));
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_html5_drag_drops_payload() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &format!("{}html5_drag_probe.html", fixture.url)).await;
+
+    let drag = firefox_command(
+        &mut state,
+        json!({ "id": "drag", "action": "drag", "source": "#source", "target": "#dest" }),
+    )
+    .await;
+    assert_success(&drag);
+
+    let events = firefox_eval(&mut state, "window.__html5DragProbe.events").await;
+    let events = events
+        .as_array()
+        .expect("html5 drag probe should expose events");
+    assert!(events
+        .iter()
+        .any(|event| event["type"] == "dragover" && event["target"] == "dest"));
+    assert!(events.iter().any(|event| {
+        event["type"] == "drop" && event["target"] == "dest" && event["dropped"] == "probe"
+    }));
+
+    firefox_close(&mut state).await;
 }
 
 #[tokio::test]
