@@ -36,7 +36,7 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
     format!(
         "(async () => {{ const u = {url}, i = {init}; \
          {send} \
-         return {{ status: r.type === 'opaqueredirect' ? 302 : r.status, retryAfter: r.headers.get('retry-after'), text: await r.text() }}; }})()",
+         return {{ status: r.type === 'opaqueredirect' ? 302 : r.status, url: r.url, retryAfter: r.headers.get('retry-after'), text: await r.text() }}; }})()",
         url = json!(req.url),
         init = init,
         send = send
@@ -44,6 +44,7 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
 }
 
 pub fn page_result(
+    policy: &HostPolicy,
     req: &PreparedRequest,
     started: Instant,
     value: Result<Value, String>,
@@ -53,7 +54,30 @@ pub fn page_result(
         .ok()
         .and_then(|v| v["retryAfter"].as_str())
         .map(String::from);
+    // A read follows redirects; the page it ended on must be on the site, as
+    // in the HTTP tier. An opaque redirect has no URL.
+    let landed = value
+        .as_ref()
+        .ok()
+        .and_then(|v| v["url"].as_str())
+        .filter(|u| !u.is_empty())
+        .and_then(|u| policy.check(u).err().map(|_| u.to_string()));
     let outcome = match value {
+        Ok(v) if landed.is_some() => {
+            let to = landed.unwrap_or_default();
+            if req.write {
+                Err(Failure::unknown_outcome(format!(
+                    "the in-page write was sent and ended at {}, outside the flow's site",
+                    to
+                )))
+            } else {
+                Err(Failure::new(
+                    false,
+                    v["status"].as_u64().map(|s| s as u16),
+                    format!("the redirect to {} was not followed", to),
+                ))
+            }
+        }
         Ok(v) => match (v["status"].as_u64(), v["text"].as_str()) {
             (Some(status), Some(text)) => Ok((status as u16, text.to_string())),
             _ if req.write => Err(Failure::unknown_outcome(
@@ -97,5 +121,5 @@ pub async fn send(flow: &Flow, browser: &mut dyn Browser, req: &PreparedRequest)
         return TierResult::fail(req, Tier::Page, started, Failure::skipped(reason));
     }
     let value = browser.eval(&page_fetch_script(req)).await;
-    page_result(req, started, value)
+    page_result(&HostPolicy::of(flow), req, started, value)
 }

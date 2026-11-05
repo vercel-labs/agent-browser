@@ -3753,7 +3753,7 @@ mod tests {
             Err("Execution context was destroyed".to_string()),
             Ok(json!({})),
         ] {
-            let r = page::page_result(&req, Instant::now(), value);
+            let r = page::page_result(&HostPolicy::of(&flow), &req, Instant::now(), value);
             assert!(
                 r.transport && !r.drift && r.stop.is_none(),
                 "{:?}",
@@ -3766,7 +3766,7 @@ mod tests {
             ..req
         };
         for value in [Err("gone".to_string()), Ok(json!({}))] {
-            let r = page::page_result(&write, Instant::now(), value);
+            let r = page::page_result(&HostPolicy::of(&flow), &write, Instant::now(), value);
             assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
         }
     }
@@ -7081,6 +7081,7 @@ mod tests {
         replies: Vec<Value>,
         entries: Vec<HarEntry>,
         ran: Vec<Value>,
+        page: Result<Value, String>,
     }
 
     impl ScriptBrowser {
@@ -7090,7 +7091,13 @@ mod tests {
                 replies,
                 entries,
                 ran: Vec::new(),
+                page: Err("no page".to_string()),
             }
+        }
+
+        fn answering_in_page(mut self, page: Value) -> ScriptBrowser {
+            self.page = Ok(page);
+            self
         }
     }
 
@@ -7106,7 +7113,7 @@ mod tests {
             self.tab.clone()
         }
         async fn eval(&mut self, _: &str) -> Result<Value, String> {
-            Err("no page".to_string())
+            self.page.clone()
         }
         async fn ensure_browser(&mut self) -> Result<(), String> {
             Ok(())
@@ -7248,6 +7255,40 @@ mod tests {
             .unwrap();
             assert!(run.failure.is_none(), "{:?}", run.failure);
             assert_eq!(browser.ran.len(), 4);
+        }
+
+        #[test]
+        fn an_in_page_read_redirected_off_the_site_is_refused() {
+            let flow = click_flow();
+            let req = PreparedRequest {
+                url: "https://a.test/items".to_string(),
+                ..prepared("s1r1")
+            };
+            let answer = |url: &str| {
+                let mut browser = ScriptBrowser::new(Vec::new(), Vec::new()).answering_in_page(
+                    json!({ "status": 200, "text": r#"{"data":[{"id":1}]}"#, "url": url }),
+                );
+                block_on(page::send(&flow, &mut browser, &req))
+            };
+            for off in ["https://evil.test/x", "not a url"] {
+                let r = answer(off);
+                assert!(
+                    !r.ok && !r.drift && r.stop.is_none(),
+                    "{off}: {:?}",
+                    r.reason
+                );
+                assert_eq!(r.status, Some(200));
+                assert!(
+                    r.reason.as_deref().unwrap_or("").contains(off),
+                    "{:?}",
+                    r.reason
+                );
+            }
+            // The site's own hosts, and no URL at all (an opaque redirect), pass.
+            for ok in ["https://a.test/items", "https://api.a.test/v2/items", ""] {
+                let r = answer(ok);
+                assert!(r.ok, "{ok}: {:?}", r.reason);
+            }
         }
 
         #[test]
