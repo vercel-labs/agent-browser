@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readdirSync } from "node:fs";
 import test from "node:test";
 
 // Since eve 0.25, extension config is bound in a scope-keyed registry instead of
@@ -10,8 +11,27 @@ globalThis[Symbol.for("eve.ext-config-scope")] = "@agent-browser/eve.test";
 
 const { default: extension } = await import("../dist/index.mjs");
 const tools = await import("../dist/tools/index.mjs");
+const { AGENT_BROWSER_SANDBOX_VERSION } = await import("@agent-browser/sandbox");
+const { default: catalog } = await import("@agent-browser/sandbox/mcp-tools.json", {
+  with: { type: "json" },
+});
 
-const OK = (data) => JSON.stringify({ success: true, data, error: null });
+/** A `mcp call` result line carrying a CLI response whose `data` is `data`. */
+const OK = (data, version = AGENT_BROWSER_SANDBOX_VERSION) =>
+  JSON.stringify({
+    _meta: { agentBrowserVersion: version },
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
+    structuredContent: { exitCode: 0, response: { success: true, data, error: null } },
+  });
+
+const FAILED = (text) =>
+  JSON.stringify({
+    _meta: { agentBrowserVersion: AGENT_BROWSER_SANDBOX_VERSION },
+    content: [{ type: "text", text }],
+    isError: true,
+    structuredContent: { exitCode: 1, response: null },
+  });
 
 function fakeSandbox({ respond } = {}) {
   const commands = [];
@@ -19,8 +39,8 @@ function fakeSandbox({ respond } = {}) {
     commands,
     async run({ command }) {
       commands.push(command);
-      if (command.startsWith("command -v ")) {
-        return { exitCode: 0, stdout: "", stderr: "" };
+      if (command.endsWith(" --version 2>/dev/null")) {
+        return { exitCode: 0, stdout: `agent-browser ${AGENT_BROWSER_SANDBOX_VERSION}\n`, stderr: "" };
       }
       const result = respond?.(command);
       return { exitCode: 0, stdout: OK({}), stderr: "", ...result };
@@ -36,71 +56,124 @@ function resetConfig(overrides = {}) {
   extension(overrides);
 }
 
-test("exports the full tool set", () => {
-  const expected = [
-    "click",
-    "close",
-    "console",
-    "drag",
-    "evaluate",
-    "fill",
-    "find",
-    "get",
-    "hover",
-    "navigate",
-    "network_requests",
-    "press_key",
-    "read",
-    "screenshot",
-    "scroll",
-    "select_option",
-    "set_checked",
-    "snapshot",
-    "tabs",
-    "upload",
-    "wait_for",
-  ];
-  for (const name of expected) {
-    assert.ok(name in tools, `missing tool export: ${name}`);
+/** Splits `[ENV=...] agent-browser mcp call <tool> '<json>'` into its tool and arguments. */
+function parseCall(command) {
+  const match = /mcp call (\S+) '(.*)'$/.exec(command);
+  assert.ok(match, command);
+  return { tool: match[1], args: JSON.parse(match[2].replaceAll("'\\''", "'")) };
+}
+
+test("ships one tool file per catalog tool it exposes", () => {
+  const files = readdirSync(new URL("../extension/tools", import.meta.url)).map((file) =>
+    file.replace(/\.ts$/, ""),
+  );
+  const names = new Set(catalog.tools.map((tool) => tool.name.replace(/^agent_browser_/, "")));
+  assert.deepEqual(Object.keys(tools).sort(), files.sort());
+  for (const name of files) assert.ok(names.has(name), `${name} is not in the MCP catalog`);
+  for (const name of ["open", "snapshot", "click", "fill", "screenshot", "drag", "upload", "find"]) {
+    assert.ok(name in tools, `missing tool: ${name}`);
   }
 });
 
-test("navigate builds an open command with the default session", async () => {
+test("close cannot reach other sessions", async () => {
+  assert.ok(!("all" in tools.close.inputSchema.properties));
+  resetConfig();
+  const sandbox = fakeSandbox();
+  await tools.close.execute({ all: true }, fakeCtx(sandbox));
+  assert.equal(parseCall(sandbox.commands.at(-1)).args.all, undefined);
+});
+
+test("instructions name only tools the extension ships", async () => {
+  const { readFileSync } = await import("node:fs");
+  const text = readFileSync(new URL("../extension/instructions.md", import.meta.url), "utf8");
+  for (const [, name] of text.matchAll(/`([a-z_]+)`/g)) {
+    if (name === "networkidle" || name === "eve__search" || name.endsWith("_")) continue;
+    assert.ok(name in tools, `instructions mention missing tool ${name}`);
+  }
+});
+
+test("lists core-profile tools and defers the rest", () => {
+  for (const tool of catalog.tools) {
+    const name = tool.name.replace(/^agent_browser_/, "");
+    if (!(name in tools)) continue;
+    assert.equal(tools[name].deferred === true, !tool.profiles.includes("core"), name);
+  }
+});
+
+test("takes descriptions and schemas from the catalog, minus app-owned arguments", () => {
+  const source = catalog.tools.find((tool) => tool.name === "agent_browser_click");
+  assert.equal(tools.click.description, source.description);
+  const properties = Object.keys(tools.click.inputSchema.properties);
+  assert.ok(properties.includes("selector"));
+  for (const hidden of ["session", "allowedDomains", "caCert", "namespace", "restore", "extraArgs"]) {
+    assert.ok(!properties.includes(hidden), `${hidden} reached the model`);
+  }
+});
+
+test("runs one mcp call per tool call with the default session", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
     respond: () => ({ stdout: OK({ title: "Example", url: "https://example.com/" }) }),
   });
-  const result = await tools.navigate.execute(
-    { action: "goto", url: "https://example.com" },
-    fakeCtx(sandbox),
-  );
+  const result = await tools.open.execute({ url: "https://example.com" }, fakeCtx(sandbox));
   assert.deepEqual(result, { title: "Example", url: "https://example.com/" });
   const command = sandbox.commands.at(-1);
-  assert.equal(command, "agent-browser --session eve-default open https://example.com --json");
-});
-
-test("navigate requires a url for goto", async () => {
-  resetConfig();
-  await assert.rejects(
-    () => tools.navigate.execute({ action: "goto" }, fakeCtx(fakeSandbox())),
-    /requires a url/,
-  );
+  assert.ok(command.startsWith("agent-browser mcp call agent_browser_open "), command);
+  assert.deepEqual(parseCall(command).args, { url: "https://example.com", session: "eve-default" });
 });
 
 test("auto-installs when the binary is missing", async () => {
   resetConfig({ installSystemDependencies: false });
+  const sandbox = versionSandbox([undefined, AGENT_BROWSER_SANDBOX_VERSION]);
+  await tools.close.execute({}, fakeCtx(sandbox));
+  assert.ok(sandbox.commands.some((command) => command.includes("npm install -g agent-browser@")));
+  resetConfig();
+});
+
+test("reinstalls when the sandbox has another agent-browser minor", async () => {
+  resetConfig({ installSystemDependencies: false });
+  const sandbox = versionSandbox(["0.1.0", AGENT_BROWSER_SANDBOX_VERSION]);
+  await tools.close.execute({}, fakeCtx(sandbox));
+  assert.ok(sandbox.commands.some((command) => command.includes("npm install -g agent-browser@")));
+  resetConfig();
+});
+
+function versionSandbox(versions) {
   const commands = [];
-  const sandbox = {
+  return {
+    commands,
     async run({ command }) {
       commands.push(command);
-      if (command.startsWith("command -v ")) {
-        return { exitCode: 1, stdout: "", stderr: "" };
+      if (command.endsWith(" --version 2>/dev/null")) {
+        const version = versions.shift();
+        return version === undefined
+          ? { exitCode: 127, stdout: "", stderr: "" }
+          : { exitCode: 0, stdout: `agent-browser ${version}\n`, stderr: "" };
       }
       return { exitCode: 0, stdout: OK({}), stderr: "" };
     },
   };
-  await tools.close.execute({}, fakeCtx(sandbox));
-  assert.ok(commands.some((command) => command.includes("npm install -g agent-browser@")));
+}
+
+test("fails with a config error when the install still has another minor", async () => {
+  resetConfig({ installSystemDependencies: false });
+  const sandbox = versionSandbox(["0.1.0", "0.1.0"]);
+  await assert.rejects(
+    () => tools.close.execute({}, fakeCtx(sandbox)),
+    /agent-browser 0\.1\.0 in the sandbox does not match/,
+  );
+  assert.ok(!sandbox.commands.some((command) => command.includes(" mcp call ")));
+  resetConfig();
+});
+
+test("does not reinstall a custom installSpec on a version mismatch", async () => {
+  resetConfig({ installSpec: "agent-browser@0.1.0", installSystemDependencies: false });
+  const sandbox = versionSandbox(["0.1.0"]);
+  await assert.rejects(
+    () => tools.close.execute({}, fakeCtx(sandbox)),
+    /agent-browser 0\.1\.0 in the sandbox does not match/,
+  );
+  assert.ok(!sandbox.commands.some((command) => command.includes("npm install -g")));
   resetConfig();
 });
 
@@ -108,27 +181,41 @@ test("skips the install probe when autoInstall is false", async () => {
   resetConfig({ autoInstall: false });
   const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
-  assert.ok(!sandbox.commands.some((command) => command.startsWith("command -v ")));
+  assert.ok(!sandbox.commands.some((command) => command.endsWith(" --version 2>/dev/null")));
   resetConfig();
 });
 
-test("applies config-level safety flags to every command", async () => {
+test("passes access config as arguments and server settings as environment", async () => {
   resetConfig({
     allowedDomains: ["example.com", "*.example.com"],
     caCert: "/etc/ssl/certs/proxy-ca.pem",
-    clearCaCert: false,
-    useSystemCa: true,
+    contentBoundaries: true,
     maxOutputChars: 5000,
     proxy: "http://proxy.example.com:8080",
+    useSystemCa: true,
   });
   const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
   const command = sandbox.commands.at(-1);
-  assert.ok(command.includes("--allowed-domains 'example.com,*.example.com'"), command);
-  assert.ok(command.includes("--ca-cert /etc/ssl/certs/proxy-ca.pem"), command);
-  assert.ok(command.includes("--use-system-ca true"), command);
-  assert.ok(command.includes("--max-output 5000"), command);
-  assert.ok(command.includes("--proxy http://proxy.example.com:8080"), command);
+  assert.ok(command.startsWith("AGENT_BROWSER_PROXY=http://proxy.example.com:8080 "), command);
+  assert.ok(command.includes("AGENT_BROWSER_CONTENT_BOUNDARIES=1 "), command);
+  assert.ok(command.includes("AGENT_BROWSER_MAX_OUTPUT=5000 "), command);
+  assert.deepEqual(parseCall(command).args, {
+    session: "eve-default",
+    allowedDomains: ["example.com", "*.example.com"],
+    caCert: "/etc/ssl/certs/proxy-ca.pem",
+    useSystemCa: true,
+  });
+  resetConfig();
+});
+
+test("model input cannot override app-owned arguments", async () => {
+  resetConfig({ session: "shared" });
+  const sandbox = fakeSandbox();
+  await tools.close.execute({ session: "other", allowedDomains: [] }, fakeCtx(sandbox));
+  const { args } = parseCall(sandbox.commands.at(-1));
+  assert.equal(args.session, "shared");
+  assert.equal(args.allowedDomains, undefined);
   resetConfig();
 });
 
@@ -136,50 +223,77 @@ test("can explicitly clear retained CA trust", async () => {
   resetConfig({ clearCaCert: true });
   const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
-  assert.ok(sandbox.commands.at(-1).includes("--no-ca-cert"));
+  assert.equal(parseCall(sandbox.commands.at(-1)).args.clearCaCert, true);
   resetConfig();
 });
 
 test("rejects config CA selection with a simultaneous clear", async () => {
   resetConfig({ caCert: "/etc/ssl/certs/proxy-ca.pem", clearCaCert: true });
-  const sandbox = fakeSandbox();
   await assert.rejects(
-    tools.close.execute({}, fakeCtx(sandbox)),
+    tools.close.execute({}, fakeCtx(fakeSandbox())),
     /Cannot use caCert with clearCaCert/,
   );
   resetConfig();
 });
 
-test("probes for agent-browser on every call and skips install when present", async () => {
+test("quotes arguments for the shell", async () => {
   resetConfig();
   const sandbox = fakeSandbox();
-  const ctx = fakeCtx(sandbox);
-  await tools.navigate.execute({ action: "goto", url: "https://example.com" }, ctx);
-  await tools.navigate.execute({ action: "goto", url: "https://example.com" }, ctx);
-  const probes = sandbox.commands.filter((command) => command.startsWith("command -v "));
-  assert.equal(probes.length, 2);
-  assert.ok(!sandbox.commands.some((command) => command.includes("npm install")));
+  await tools.fill.execute({ selector: "#q", text: "it's $HOME" }, fakeCtx(sandbox));
+  assert.equal(parseCall(sandbox.commands.at(-1)).args.text, "it's $HOME");
 });
 
-test("uses a fixed session name when configured", async () => {
-  resetConfig({ session: "shared" });
-  const sandbox = fakeSandbox();
-  await tools.close.execute({}, fakeCtx(sandbox));
-  assert.ok(sandbox.commands.at(-1).startsWith("agent-browser --session shared "));
+test("surfaces tool errors from the CLI", async () => {
   resetConfig();
+  const sandbox = fakeSandbox({ respond: () => ({ exitCode: 1, stdout: FAILED("Element not found") }) });
+  await assert.rejects(
+    () => tools.click.execute({ selector: "#nope" }, fakeCtx(sandbox)),
+    /agent_browser_click failed: Element not found/,
+  );
 });
 
-test("surfaces envelope errors even when the exit code is zero", async () => {
+test("surfaces invalid calls from the CLI", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({
+    respond: () => ({ exitCode: 2, stdout: JSON.stringify({ error: { code: -32602, message: "bad" } }) }),
+  });
+  await assert.rejects(() => tools.close.execute({}, fakeCtx(sandbox)), /failed: bad/);
+});
+
+test("fails loudly when the sandbox runs another agent-browser minor", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({ respond: () => ({ stdout: OK({}, "9.9.0") }) });
+  await assert.rejects(
+    () => tools.close.execute({}, fakeCtx(sandbox)),
+    /agent-browser 9\.9\.0 in the sandbox does not match @agent-browser\/eve/,
+  );
+});
+
+test("shows the install hint when another minor rejects the call", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
     respond: () => ({
-      exitCode: 0,
-      stdout: JSON.stringify({ success: false, data: null, error: "Element not found" }),
+      exitCode: 2,
+      stdout: JSON.stringify({
+        _meta: { agentBrowserVersion: "9.9.0" },
+        error: { code: -32602, message: "Unknown tool: agent_browser_close" },
+      }),
     }),
   });
   await assert.rejects(
-    () => tools.click.execute({ selector: "#nope", doubleClick: false, newTab: false }, fakeCtx(sandbox)),
-    /Element not found/,
+    () => tools.close.execute({}, fakeCtx(sandbox)),
+    /agent-browser 9\.9\.0 in the sandbox does not match[\s\S]*Install agent-browser@/,
+  );
+});
+
+test("explains when the sandbox CLI predates mcp call", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({
+    respond: () => ({ exitCode: 1, stdout: "", stderr: "Unknown mcp option: call" }),
+  });
+  await assert.rejects(
+    () => tools.close.execute({}, fakeCtx(sandbox)),
+    /does not support `mcp call`[\s\S]*Unknown mcp option: call/,
   );
 });
 
@@ -191,222 +305,43 @@ test("throws a helpful error when no sandbox is available", async () => {
   );
 });
 
-test("wait_for requires at least one condition", async () => {
-  resetConfig();
-  const ctx = fakeCtx(fakeSandbox());
-  await assert.rejects(() => tools.wait_for.execute({}, ctx), /at least one/);
-});
-
-test("wait_for runs combined conditions sequentially, load state first", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox();
-  await tools.wait_for.execute(
-    { loadState: "networkidle", selector: "#app", timeMs: 100 },
-    fakeCtx(sandbox),
-  );
-  const waits = sandbox.commands.filter((command) => command.includes(" wait "));
-  assert.equal(waits.length, 3);
-  assert.ok(waits[0].includes("wait --load networkidle"), waits[0]);
-  assert.ok(waits[1].includes("wait '#app'"), waits[1]);
-  assert.ok(waits[2].includes("wait 100"), waits[2]);
-});
-
-test("wait_for builds each condition variant", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox();
-  const ctx = fakeCtx(sandbox);
-  await tools.wait_for.execute({ selector: "#spinner" }, ctx);
-  await tools.wait_for.execute({ text: "Welcome" }, ctx);
-  await tools.wait_for.execute({ urlPattern: "**/dash" }, ctx);
-  await tools.wait_for.execute({ loadState: "networkidle" }, ctx);
-  await tools.wait_for.execute({ timeMs: 250 }, ctx);
-  const waits = sandbox.commands.filter((command) => command.includes(" wait "));
-  assert.ok(waits[0].includes("wait '#spinner'"), waits[0]);
-  assert.ok(waits[1].includes("wait --text Welcome"), waits[1]);
-  assert.ok(waits[2].includes("wait --url '**/dash'"), waits[2]);
-  assert.ok(waits[3].includes("wait --load networkidle"), waits[3]);
-  assert.ok(waits[4].includes("wait 250"), waits[4]);
-});
-
-test("wait_for caps every condition with a timeout and reports outcomes", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox();
-  const outcome = await tools.wait_for.execute({ selector: "#app" }, fakeCtx(sandbox));
-  assert.ok(sandbox.commands.at(-1).includes("wait '#app' --timeout 10000"), sandbox.commands.at(-1));
-  assert.equal(outcome.satisfied, true);
-  assert.equal(outcome.condition, "element #app");
-});
-
-test("wait_for treats a timeout as an outcome, not an error", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox({
-    respond: () => ({
-      exitCode: 1,
-      stdout: JSON.stringify({
-        success: false,
-        data: null,
-        error: "Wait timed out after 10000ms",
-      }),
-    }),
-  });
-  const outcome = await tools.wait_for.execute(
-    { loadState: "networkidle", timeoutMs: 10_000 },
-    fakeCtx(sandbox),
-  );
-  assert.deepEqual(outcome, {
-    condition: "load state networkidle",
-    satisfied: false,
-    timedOut: true,
-  });
-});
-
-test("get validates selector and attribute requirements", async () => {
-  resetConfig();
-  const ctx = fakeCtx(fakeSandbox());
-  await assert.rejects(() => tools.get.execute({ property: "text" }, ctx), /requires a selector/);
-  await assert.rejects(
-    () => tools.get.execute({ property: "attr", selector: "#x" }, ctx),
-    /requires an attribute/,
-  );
-});
-
-test("find requires a value for fill and type", async () => {
-  resetConfig();
-  const ctx = fakeCtx(fakeSandbox());
-  await assert.rejects(
-    () => tools.find.execute({ action: "fill", by: "label", exact: false, query: "Email" }, ctx),
-    /requires a value/,
-  );
-});
-
-test("tabs builds each action variant", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox();
-  const ctx = fakeCtx(sandbox);
-  await tools.tabs.execute({ action: "list" }, ctx);
-  await tools.tabs.execute({ action: "new", label: "docs", url: "https://docs.example.com" }, ctx);
-  await tools.tabs.execute({ action: "switch", target: "docs" }, ctx);
-  await tools.tabs.execute({ action: "close" }, ctx);
-  const commands = sandbox.commands.filter((command) => command.includes(" tab"));
-  assert.ok(commands[0].includes(" tab --json"), commands[0]);
-  assert.ok(commands[1].includes(" tab new --label docs https://docs.example.com"), commands[1]);
-  assert.ok(commands[2].includes(" tab docs"), commands[2]);
-  assert.ok(commands[3].includes(" tab close"), commands[3]);
-});
-
-test("scroll picks scrollintoview when only a selector is given", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox();
-  const ctx = fakeCtx(sandbox);
-  await tools.scroll.execute({ selector: "#footer" }, ctx);
-  await tools.scroll.execute({ direction: "down", pixels: 300 }, ctx);
-  const commands = sandbox.commands.filter((command) => command.includes("scroll"));
-  assert.ok(commands[0].includes("scrollintoview '#footer'"), commands[0]);
-  assert.ok(commands[1].includes("scroll down 300"), commands[1]);
-});
-
 test("snapshot retries once on a transient CDP error", async () => {
   resetConfig();
-  let attempts = 0;
+  let calls = 0;
   const sandbox = fakeSandbox({
     respond: () => {
-      attempts += 1;
-      if (attempts === 1) {
-        return {
-          stdout: JSON.stringify({
-            success: false,
-            data: null,
-            error: "CDP error (DOM.describeNode): Object id doesn't reference a Node",
-          }),
-        };
-      }
-      return { stdout: OK({ origin: "https://example.com/", snapshot: "- heading" }) };
+      calls += 1;
+      return calls === 1
+        ? { exitCode: 1, stdout: FAILED("CDP error: No node with given id found") }
+        : { stdout: OK({ snapshot: "- button [ref=e1]" }) };
     },
   });
-  const result = await tools.snapshot.execute(
-    { compact: true, includeUrls: false, interactiveOnly: false },
-    fakeCtx(sandbox),
-  );
-  assert.equal(attempts, 2);
-  assert.deepEqual(result, { origin: "https://example.com/", snapshot: "- heading" });
-});
-
-test("snapshot drops ref selectors instead of failing", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox({
-    respond: () => ({ stdout: OK({ origin: "https://example.com/", snapshot: "- page" }) }),
-  });
-  const ctx = fakeCtx(sandbox);
-  await tools.snapshot.execute(
-    { compact: false, includeUrls: false, interactiveOnly: false, selector: "@e1" },
-    ctx,
-  );
-  await tools.snapshot.execute(
-    { compact: false, includeUrls: false, interactiveOnly: false, selector: "#main" },
-    ctx,
-  );
-  const snapshots = sandbox.commands.filter((command) => command.includes("snapshot"));
-  assert.ok(!snapshots[0].includes("--selector"), snapshots[0]);
-  assert.ok(snapshots[1].includes("--selector '#main'"), snapshots[1]);
-});
-
-test("snapshot falls back to a whole-page snapshot when the scoped one fails", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox({
-    respond: (command) =>
-      command.includes("--selector")
-        ? {
-            exitCode: 1,
-            stdout: JSON.stringify({
-              success: false,
-              data: null,
-              error: "Invalid selector 'text=Contact': not a valid selector",
-            }),
-          }
-        : { stdout: OK({ origin: "https://example.com/", snapshot: "- page" }) },
-  });
-  const result = await tools.snapshot.execute(
-    { compact: false, includeUrls: false, interactiveOnly: false, selector: "text=Contact" },
-    fakeCtx(sandbox),
-  );
-  assert.deepEqual(result, { origin: "https://example.com/", snapshot: "- page" });
-  const snapshots = sandbox.commands.filter((command) => command.includes("snapshot"));
-  assert.ok(snapshots.at(0).includes("--selector"), snapshots[0]);
-  assert.ok(!snapshots.at(-1).includes("--selector"), snapshots.at(-1));
+  const output = await tools.snapshot.execute({}, fakeCtx(sandbox));
+  assert.equal(output.snapshot, "- button [ref=e1]");
+  assert.equal(calls, 2);
 });
 
 test("snapshot does not retry non-CDP errors", async () => {
   resetConfig();
-  let attempts = 0;
+  let calls = 0;
   const sandbox = fakeSandbox({
     respond: () => {
-      attempts += 1;
-      return {
-        stdout: JSON.stringify({ success: false, data: null, error: "No browser session" }),
-      };
+      calls += 1;
+      return { exitCode: 1, stdout: FAILED("Browser not launched") };
     },
   });
-  await assert.rejects(
-    () =>
-      tools.snapshot.execute({ compact: true, includeUrls: false, interactiveOnly: false }, fakeCtx(sandbox)),
-    /No browser session/,
-  );
-  assert.equal(attempts, 1);
+  await assert.rejects(() => tools.snapshot.execute({}, fakeCtx(sandbox)), /Browser not launched/);
+  assert.equal(calls, 1);
 });
 
 test("screenshot inlines the image and hides it from the model", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({
-    respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }),
-  });
+  const sandbox = fakeSandbox({ respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }) });
   sandbox.readBinaryFile = async ({ path }) => {
     assert.equal(path, "/workspace/shot.png");
     return new Uint8Array([137, 80, 78, 71]);
   };
-  const output = await tools.screenshot.execute(
-    { annotate: false, fullPage: false },
-    fakeCtx(sandbox),
-  );
+  const output = await tools.screenshot.execute({}, fakeCtx(sandbox));
   assert.equal(output.path, "/workspace/shot.png");
   assert.ok(output.imageDataUrl.startsWith("data:image/png;base64,"), output.imageDataUrl);
   const modelOutput = await tools.screenshot.toModelOutput(output);
@@ -420,13 +355,8 @@ test("screenshot inlines the image and hides it from the model", async () => {
 
 test("screenshot still works when the sandbox cannot read files back", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({
-    respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }),
-  });
-  const output = await tools.screenshot.execute(
-    { annotate: false, fullPage: false },
-    fakeCtx(sandbox),
-  );
+  const sandbox = fakeSandbox({ respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }) });
+  const output = await tools.screenshot.execute({}, fakeCtx(sandbox));
   assert.equal(output.path, "/workspace/shot.png");
   assert.equal(output.imageDataUrl, undefined);
   // Without an inline image the user has no other way to locate the file,
@@ -437,14 +367,9 @@ test("screenshot still works when the sandbox cannot read files back", async () 
 
 test("screenshot skips inlining when disabled in config", async () => {
   resetConfig({ inlineScreenshots: false });
-  const sandbox = fakeSandbox({
-    respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }),
-  });
+  const sandbox = fakeSandbox({ respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }) });
   sandbox.readBinaryFile = async () => new Uint8Array([1]);
-  const output = await tools.screenshot.execute(
-    { annotate: false, fullPage: false },
-    fakeCtx(sandbox),
-  );
+  const output = await tools.screenshot.execute({}, fakeCtx(sandbox));
   assert.equal(output.imageDataUrl, undefined);
   resetConfig();
 });
@@ -475,58 +400,6 @@ test("errors instead of hanging when the install probe stops responding", async 
   await new Promise((resolve) => setImmediate(resolve));
   t.mock.timers.tick(180_001);
   await rejection;
-});
-
-test("wait_for schema drops empty-string conditions", () => {
-  const parsed = tools.wait_for.inputSchema.parse({
-    jsCondition: "",
-    loadState: "",
-    selector: "",
-    text: "Welcome",
-    urlPattern: " ",
-  });
-  assert.equal(parsed.jsCondition, undefined);
-  assert.equal(parsed.loadState, undefined);
-  assert.equal(parsed.selector, undefined);
-  assert.equal(parsed.urlPattern, undefined);
-  assert.equal(parsed.text, "Welcome");
-});
-
-test("wait_for runs only the conditions that are actually set", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox();
-  const input = tools.wait_for.inputSchema.parse({ selector: "", text: "Welcome", urlPattern: "" });
-  const result = await tools.wait_for.execute(input, fakeCtx(sandbox));
-  assert.deepEqual(result, { condition: 'text "Welcome"', satisfied: true, result: {} });
-  const waits = sandbox.commands.filter((command) => command.includes(" wait "));
-  assert.equal(waits.length, 1);
-  assert.ok(waits[0].includes("--text Welcome"));
-});
-
-test("wait_for reports load-state timeout as unsatisfied instead of throwing", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox({
-    respond: (command) =>
-      command.includes("--load")
-        ? {
-            exitCode: 1,
-            stdout: JSON.stringify({
-              success: false,
-              data: null,
-              error: "Timeout waiting for load state: networkidle",
-            }),
-          }
-        : {},
-  });
-  const result = await tools.wait_for.execute(
-    { loadState: "networkidle", timeoutMs: 1000 },
-    fakeCtx(sandbox),
-  );
-  assert.deepEqual(result, {
-    condition: "load state networkidle",
-    satisfied: false,
-    timedOut: true,
-  });
 });
 
 test("mount factory validates config", () => {

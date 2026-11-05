@@ -720,7 +720,7 @@ async fn test_domain_filter_sanitize() {
 #[tokio::test]
 async fn test_state_find_auto_returns_none_for_nonexistent() {
     use super::state;
-    let result = state::find_auto_state_file("nonexistent-session-xyz");
+    let result = state::find_auto_state_file("nonexistent-session-xyz").unwrap();
     assert!(result.is_none());
 }
 

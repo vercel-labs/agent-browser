@@ -4,6 +4,18 @@ use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agent-browser");
 
+/// Winsock fails to initialize (os error 10106) without SystemRoot, so a
+/// cleared environment keeps the variables Windows needs to open sockets.
+fn windows_runtime_env() -> Vec<(String, std::ffi::OsString)> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    ["SystemRoot", "windir", "TEMP", "TMP"]
+        .into_iter()
+        .filter_map(|key| std::env::var_os(key).map(|value| (key.to_string(), value)))
+        .collect()
+}
+
 struct Session {
     dir: TempDir,
 }
@@ -23,6 +35,7 @@ impl Session {
             .env("HOME", self.dir.path())
             .env("AGENT_BROWSER_SOCKET_DIR", self.dir.path())
             .env("NO_COLOR", "1")
+            .envs(windows_runtime_env())
             .current_dir(self.dir.path())
             .args(["--config", "config.json", "--session", "o", "--json"])
             .stdin(Stdio::null());

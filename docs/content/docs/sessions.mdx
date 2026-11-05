@@ -39,6 +39,33 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Changing settings on a running session
+
+Each command carries the settings you set for it, whether from a flag, an environment variable, or the config file. The daemon compares them with what the session is running and acts on the difference:
+
+- A setting you omit keeps its running value.
+- A setting equal to the running value does nothing, so repeating `--profile ./work` on every command never relaunches the browser.
+- Timeouts, `--action-policy`, `--confirm-actions`, `--no-auto-dialog`, and restore and pin settings apply in place.
+- Launch settings such as `--profile`, `--args`, `--headed`, `--proxy`, `--state`, and `--allowed-domains` relaunch the browser. The daemon keeps running.
+
+Each change that takes effect is printed on stderr, one line each, and every change is listed in `lifecycle.settings.changes` of the `--json` response with `applied: true` or `applied: false`. A launch setting changed while no browser is running is `applied: false` and has no stderr line, since it takes effect at the next launch. Secrets are redacted in both places: passwords and CDP headers are hidden, and CDP URLs lose their credentials and query string.
+
+A command that never launches a browser, such as `get cdp-url` or `session info`, applies only live settings. `get cdp-url` sends no launch settings at all. For the others, launch settings are not applied and not kept; a command that launches carries them again. A launch setting is kept only after the launch that uses it succeeds; if the launch fails, the session keeps its previous launch settings, except `--allowed-domains`, which stays installed after a failed launch so containment is never widened. A command that is denied by policy or waits for confirmation changes no launch settings and leaves the browser running.
+
+Settings that describe a browser agent-browser starts itself (`--profile`, `--args`, `--executable-path`, `--extension`, `--proxy`, `--user-agent`, `--state`, and similar) are ignored for a session attached over `--cdp`, `--auto-connect` or a provider. They never relaunch it or start a new cloud session, and they appear in `lifecycle.settings.changes` with `effect: "ignored"`. Values of the sensitive ones (`--state`, `--profile`, `--extension`, `--proxy` and its credentials, `--executable-path`, `--args`) inherited from before the switch are dropped, so a state file or proxy credentials from a local launch are never applied to an external browser. An empty `--provider` resets a provider session to a local launch, and `--no-auto-connect` does the same for a session attached with `--auto-connect`. Setting `--state` replaces an inherited `--profile` or `--extension`, and setting `--profile` or `--extension` replaces an inherited `--state`.
+
+With `--relaunch` in a batch, the browser is relaunched once, for the first command.
+
+The first command of a session still seeds its settings from the environment the daemon was spawned with, except the connection target (`--cdp`, `--auto-connect`, `--provider`): that one is kept only after an attach succeeds, so a failed attach never sticks.
+
+```bash
+agent-browser --profile ./a open https://example.com
+agent-browser --profile ./b get url
+# ⚠ profile: ./a → ./b (--profile), relaunched browser
+```
+
+`--state <path>` loads the file when the browser launches. Passing the same path again does not reload it; pass `--relaunch` to relaunch the browser and load it again.
+
 ## Tab pinning in a shared browser
 
 Full isolation applies when each session launches its own browser. When sessions instead share one Chrome over `--cdp`, only the tab selection separates them. Each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts), so a restarted daemon reattaches to the session's own tab instead of adopting the most recently active one.
@@ -51,6 +78,8 @@ agent-browser --session agent2 --cdp 9222 --pin-tab open https://site-b.com
 ```
 
 With `--pin-tab`, a session whose bound tab was closed gets a `tab_gone` error instead of silently acting on another session's tab; run `tab new <url>` or pick a tab from `tab list` to recover. JSON output includes <code>"code": "tab_gone"</code>, <code>data.targetId</code>, and optional sanitized <code>data.lastUrl</code>. Batch output uses <code>result</code> for the same recovery object. The flag is sticky per session; pass `--no-pin-tab` to turn it off again. See [CDP Mode](/cdp-mode) for details.
+
+Another session cannot take a pinned tab with `tab <ref>` while the pinning session is running (`tab_locked`), and an explicit `close` releases the pin.
 
 ## Chrome profile reuse
 
@@ -142,6 +171,8 @@ agent-browser state load ./my-auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
+Saved localStorage and sessionStorage are written through Chrome DevTools, not page JavaScript, and only while the page is on the saved origin. If an origin redirects elsewhere or fails to load, its storage is skipped, the rest still loads, and `state load` lists it under `skippedOrigins`. For `--state` and `--restore` at launch, `session info` lists it under `restoreSkippedOrigins`.
+
 Combine with `--session <id> --restore` so the imported auth auto-persists across restarts:
 
 ```bash
@@ -168,13 +199,26 @@ agent-browser --session "$SESSION" --restore click "#login"
 agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open twitter.com
 ```
 
-State files are stored in `~/.agent-browser/sessions/` as `<name>.<session-id>.json` and automatically loaded before navigation. With the default `--restore-save auto` policy, failed restore or failed validation skips auto-save.
+Automatically saved state files are stored in `~/.agent-browser/sessions/` as `v2@.<restore-key>.<session-id>.json` and automatically loaded before navigation. With the default `--restore-save auto` policy, failed restore or failed validation skips auto-save. Encrypted files use the `.json.enc` suffix. A namespace uses its own sessions directory instead.
 
 When `--restore` or another restore key is configured, state is saved when the browser closes (explicit `close`, idle timeout, or daemon shutdown) and also periodically while the browser is open, so a browser window you close by hand still leaves a recent save behind. A session ID by itself only isolates the daemon and does not enable persistence; without a restore key, shutdown discards transient browser state and open tabs. Periodic autosave waits for commands to settle, then saves at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (default 30000; set to `0` to save only on close). Idle sessions with configured persistence keep saving on the same interval, so changes the page makes on its own (token refreshes, background requests) are captured too. The daemon exits after one hour without commands or dashboard input by default; `--idle-timeout <time>` or `AGENT_BROWSER_IDLE_TIMEOUT_MS` tunes this, and `0` disables it. Headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default timeout; provider-owned cloud browsers are not. State saving respects the `--restore-save` policy.
 
+### Ambiguous legacy state files
+
+Some legacy filenames can belong to more than one restore key. For example, `auth-worker-one.json` could belong to `auth` or `auth-worker`. When a matching file has multiple plausible owners, automatic restore and `state clear <name>` fail before changing any saved state files. This also applies to encrypted files and `.previous` backups, even if an unambiguous state file exists for the key. Ambiguity also blocks automatic saves, including with `--restore-save always`.
+
+1. Preserve the files, including any backups. The error identifies an ambiguous path; with a namespace, that path is in the namespace's sessions directory. Avoid cleanup commands while you determine ownership.
+2. Verify each file's owner from your own records. If you cannot confirm ownership, keep the file preserved and do not load it.
+3. Move each reported ambiguous file to a secure location outside the managed sessions directory. Keep its filename and suffix, including `.json.enc` or `.json.enc.previous` for encrypted files. If another ambiguous file is reported, preserve and move it too.
+4. After confirming ownership, use `agent-browser state load <path>` to load the preserved file into the intended browser session. Specify `--session <id>` and the namespace when needed. Encrypted files require the original `AGENT_BROWSER_ENCRYPTION_KEY` in the daemon's environment.
+
+If automatic restore already failed, retry it after moving the ambiguous files. An explicit load alone does not clear the earlier ownership failure for automatic saving.
+
 ### Restore key rules
 
-Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use `agent-browser session id` to generate a valid key:
+Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, `café-東京_7` is valid, while `my session` is rejected because it contains a space.
+
+Use `agent-browser session id` to generate a valid key:
 
 ```bash
 # Valid generated key
@@ -223,12 +267,12 @@ agent-browser state clean --older-than 7
 agent-browser state list
 
 # Show state summary (cookies, origins, domains)
-agent-browser state show my-session.default.json
+agent-browser state show ~/.agent-browser/sessions/v2@.my-session.default.json
 
 # Rename a state file
 agent-browser state rename old-name new-name
 
-# Clear states for a specific session name
+# Clear states for a specific restore key
 agent-browser state clear my-session
 
 # Clear all saved states

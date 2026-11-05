@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Feature request
+    url: https://github.com/vercel-labs/agent-browser/discussions/new?category=ideas
+    about: Suggest new features and improvements in Discussions.
+  - name: Ask a question
+    url: https://github.com/vercel-labs/agent-browser/discussions/new?category=help
+    about: Get help using agent-browser in Discussions.
