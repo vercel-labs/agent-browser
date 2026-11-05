@@ -284,7 +284,11 @@ impl FirefoxSession {
     pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> Vec<Value> {
         let mut drained = Vec::new();
         while let Ok(e) = self.events.try_recv() {
-            if e["method"] == "browsingContext.contextDestroyed"
+            if e["method"] == "browsingContext.contextCreated"
+                && e["params"]["originalOpener"].is_string()
+            {
+                self.top_context = e["params"]["context"].as_str().unwrap_or_default().into();
+            } else if e["method"] == "browsingContext.contextDestroyed"
                 && e["params"]["context"] == self.top_context
             {
                 self.top_context.clear();
