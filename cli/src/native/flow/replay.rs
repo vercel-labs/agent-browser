@@ -320,7 +320,12 @@ pub fn replay_result(
     started: Instant,
     entry: Option<&HarEntry>,
 ) -> TierResult {
+    // A write the replay may have sent is never drift: without a readable
+    // answer its outcome is unknown, and the agent must not repeat it.
     let outcome = match entry {
+        None if req.write => Err(Failure::unknown_outcome(
+            "the replay may have sent the write, but it was not captured".to_string(),
+        )),
         None => Err(Failure::new(
             true,
             None,
@@ -330,13 +335,13 @@ pub fn replay_result(
             (Some(status), Some(body)) if !e.response_body_base64 => {
                 Ok((status as u16, body.to_string()))
             }
+            _ if req.write => Err(Failure::unknown_outcome(
+                "the replayed write has no readable answer".to_string(),
+            )),
             (Some(status), _) => Err(Failure::new(
                 true,
                 Some(status as u16),
                 "the replayed request has no readable body".to_string(),
-            )),
-            _ if req.write => Err(Failure::unknown_outcome(
-                "the replayed write got no response".to_string(),
             )),
             _ => Err(Failure::new(
                 true,
@@ -415,17 +420,28 @@ pub async fn send(
     let Some(captured) = run.as_ref() else {
         return fail(Failure::drift("the replay did not run".to_string()));
     };
+    // The replay ran the commands that send a write, even when a later
+    // command failed: the capture answers it, and no capture does not say
+    // the write was not sent.
+    if req.write {
+        return match replay_lookup(&captured.entries, req) {
+            Ok(entry) => replay_result(req, started, Some(entry)),
+            Err(reason) => fail(Failure::unknown_outcome(format!(
+                "the replay may have sent the write, but no answer for it was captured: {}{}",
+                reason,
+                captured
+                    .failure
+                    .as_deref()
+                    .map(|f| format!(" ({})", f))
+                    .unwrap_or_default()
+            ))),
+        };
+    }
     if let Some(reason) = captured.failure.clone() {
         return fail(Failure::drift(reason));
     }
     match replay_lookup(&captured.entries, req) {
         Ok(entry) => replay_result(req, started, Some(entry)),
-        // The replay ran the commands that send a write; no captured answer
-        // does not say the write was not sent.
-        Err(reason) if req.write => fail(Failure::unknown_outcome(format!(
-            "the replay may have sent the write, but no answer for it was captured: {}",
-            reason
-        ))),
         Err(reason) => fail(Failure::drift(reason)),
     }
 }

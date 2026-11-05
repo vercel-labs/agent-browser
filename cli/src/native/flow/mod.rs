@@ -7073,4 +7073,174 @@ mod tests {
         assert!(unverify_on_shape_change(&mut flow, &[http, limited]));
         assert_eq!(flow.verified_at, None);
     }
+
+    /// A browser that answers each replayed command from a script and
+    /// reports a fixed capture.
+    struct ScriptBrowser {
+        tab: Option<String>,
+        replies: Vec<Value>,
+        entries: Vec<HarEntry>,
+        ran: Vec<Value>,
+    }
+
+    impl ScriptBrowser {
+        fn new(replies: Vec<Value>, entries: Vec<HarEntry>) -> ScriptBrowser {
+            ScriptBrowser {
+                tab: Some("https://a.test/".to_string()),
+                replies,
+                entries,
+                ran: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Browser for ScriptBrowser {
+        async fn cookie_header(&mut self, _: &str) -> Option<String> {
+            None
+        }
+        async fn routed_response(&mut self, _: &str) -> Option<RoutedResponse> {
+            None
+        }
+        async fn tab_url(&mut self) -> Option<String> {
+            self.tab.clone()
+        }
+        async fn eval(&mut self, _: &str) -> Result<Value, String> {
+            Err("no page".to_string())
+        }
+        async fn ensure_browser(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn begin_capture(&mut self) -> Result<usize, String> {
+            Ok(0)
+        }
+        async fn run(&mut self, cmd: &Value) -> Value {
+            let reply = self
+                .replies
+                .get(self.ran.len())
+                .cloned()
+                .unwrap_or_else(|| json!({ "success": true }));
+            self.ran.push(cmd.clone());
+            reply
+        }
+        async fn captured_since(&mut self, _: usize) -> Vec<HarEntry> {
+            self.entries.clone()
+        }
+        async fn end_capture(&mut self) {}
+        fn write_approved(&self, _: &Write) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn finished(mut e: HarEntry) -> HarEntry {
+        e.loading_finished_timestamp = Some(1.0);
+        e
+    }
+
+    mod repro {
+        use super::*;
+
+        /// Two steps: the first click sends a POST, the second click fails.
+        fn cart_flow() -> Flow {
+            flow_of(json!({
+                "output": "s1r1",
+                "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+                "steps": [
+                    { "command": { "action": "click", "selector": "#add" }, "requests": [
+                        { "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "body": "{}",
+                          "expect": { "signature": signature(&json!({ "ok": true })) } }] },
+                    { "command": { "action": "click", "selector": "#next" } }
+                ]
+            }))
+        }
+
+        fn posted(body: Option<&str>, status: i64) -> HarEntry {
+            let mut e = finished(entry(
+                "w",
+                "https://a.test/cart",
+                "Fetch",
+                "application/json",
+                body.unwrap_or(""),
+            ));
+            e.method = "POST".to_string();
+            e.post_data = Some("{}".to_string());
+            e.status = Some(status);
+            e.response_body = body.map(String::from);
+            e
+        }
+
+        /// navigate (start), click #add, click #next.
+        fn failing_last_command() -> Vec<Value> {
+            vec![
+                json!({ "success": true }),
+                json!({ "success": true }),
+                json!({ "success": false, "error": "element is not clickable" }),
+            ]
+        }
+
+        fn send_write(flow: &Flow, browser: &mut ScriptBrowser) -> TierResult {
+            let req = prepare_all(flow, &[]).unwrap().remove(0);
+            let ledger = WriteLedger::default();
+            let ctx = SendCtx {
+                ledger: &ledger,
+                wanted: &[],
+            };
+            let mut run = None;
+            block_on(replay::send(flow, &[], browser, &mut run, &req, &ctx))
+        }
+
+        #[test]
+        fn a_write_answer_captured_before_a_failing_command_is_drift() {
+            let flow = cart_flow();
+            let mut browser = ScriptBrowser::new(
+                failing_last_command(),
+                vec![posted(Some(r#"{"ok":true}"#), 200)],
+            );
+            let result = send_write(&flow, &mut browser);
+            assert!(
+                result.ok && !result.drift,
+                "drift={} stop={:?} {:?}",
+                result.drift,
+                result.stop,
+                result.reason
+            );
+        }
+
+        #[test]
+        fn a_write_after_a_failing_command_without_a_capture_is_unknown() {
+            let flow = cart_flow();
+            let mut browser = ScriptBrowser::new(failing_last_command(), Vec::new());
+            let result = send_write(&flow, &mut browser);
+            assert_eq!(
+                result.stop,
+                Some(Stop::OutcomeUnknown),
+                "{:?}",
+                result.reason
+            );
+            assert!(!result.drift);
+        }
+
+        #[test]
+        fn a_write_without_a_captured_body_is_drift() {
+            let flow = cart_flow();
+            let req = prepare_all(&flow, &[]).unwrap().remove(0);
+            // A 2xx with no body, a status 0, and a binary body: the site
+            // may have applied the write, so none is drift.
+            let mut binary = posted(Some("AAAA"), 200);
+            binary.response_body_base64 = true;
+            for e in [posted(None, 200), posted(None, 0), binary] {
+                let r = replay::replay_result(&req, Instant::now(), Some(&e));
+                assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
+                assert!(!r.drift && !r.ok);
+            }
+            // A read with no body is still drift.
+            let read = PreparedRequest {
+                write: false,
+                method: "GET".to_string(),
+                ..req
+            };
+            let r = replay::replay_result(&read, Instant::now(), Some(&posted(None, 200)));
+            assert!(r.drift && r.stop.is_none());
+        }
+    }
 }
