@@ -1277,6 +1277,158 @@
     {
       "annotations": {
         "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List tasks saved with flow save, with their params and whether their last run verified.",
+      "inputSchema": {
+        "properties": {
+          "origin": {
+            "description": "Only flows for this host's site.",
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_flow_list",
+      "profiles": [
+        "core"
+      ],
+      "title": "List saved flows"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Run a saved task directly over HTTP, without driving the page. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed.",
+      "inputSchema": {
+        "properties": {
+          "allowWrite": {
+            "description": "Writes the run may send without asking: `all`, or comma-separated write ids from flow save. Any other write needs confirmation.",
+            "type": "string"
+          },
+          "fields": {
+            "description": "Comma-separated fields to return per item, dotted paths allowed.",
+            "type": "string"
+          },
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "where": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Keep list items whose field contains the value, case-insensitive.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_flow_run",
+      "profiles": [
+        "core"
+      ],
+      "title": "Run saved flow"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Save recorded steps as a flow so later runs can skip the browser. The session must be opened with capture flow. By default the flow starts at the last navigation after the previous save. params maps a param name to the value you typed, so later runs can change it.",
+      "inputSchema": {
+        "properties": {
+          "description": {
+            "description": "One line saying what the flow does.",
+            "type": "string"
+          },
+          "from": {
+            "description": "First step number; defaults to the last navigation after the previous save.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "output": {
+            "description": "Request id whose response the flow returns.",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "to": {
+            "description": "Last step; defaults to the latest.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_flow_save",
+      "profiles": [
+        "core"
+      ],
+      "title": "Save flow"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List the steps a session opened with capture flow has recorded: number, command, URL, tagged request count, and whether it succeeded. Use the numbers with flow save from and to.",
+      "inputSchema": {
+        "properties": {
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_flow_steps",
+      "profiles": [
+        "core"
+      ],
+      "title": "List captured steps"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
         "readOnlyHint": false
       },
       "description": "Focus an element.",
@@ -2247,6 +2399,16 @@
           "allowedDomains": {
             "description": "Restrict browser and read traffic to these domain patterns.",
             "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. On a running session without capture it relaunches the browser with capture on.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
               "type": "string"
             },
             "type": "array"
@@ -4056,6 +4218,16 @@
           "allowedDomains": {
             "description": "Restrict browser and read traffic to these domain patterns.",
             "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. On a running session without capture it relaunches the browser with capture on.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
               "type": "string"
             },
             "type": "array"

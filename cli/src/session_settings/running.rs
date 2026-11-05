@@ -308,6 +308,12 @@ impl Running {
         self.list(Key::Enable).unwrap_or_default()
     }
 
+    /// Whether the session records flows (`--capture flow`).
+    pub fn captures_flow(&self) -> bool {
+        self.list(Key::Capture)
+            .is_some_and(|modes| modes.iter().any(|m| m == "flow"))
+    }
+
     /// User-provided init script paths.
     pub fn init_scripts(&self) -> Vec<String> {
         self.list(Key::InitScripts).unwrap_or_default()
