@@ -285,7 +285,9 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
         let (tx, ty) = prepare(ff, &target, target_selector, true).await?;
         let target_origin = Origin::Viewport { x: tx, y: ty };
         release_at = target_origin.clone();
-        if perform(ff, &source_target.context, pointer_hover(&target_origin)).await? {
+        let mut move_to_target = pointer_hover(&target_origin);
+        move_to_target[0]["actions"][0]["duration"] = json!(250);
+        if perform(ff, &source_target.context, move_to_target).await? {
             return Ok(());
         }
         perform(
