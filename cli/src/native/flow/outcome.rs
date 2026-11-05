@@ -552,13 +552,22 @@ pub fn tier_result_of(
                 f.drift = false;
                 f.reason = format!("{}: the write may have been applied", f.reason);
             }
-            // A write the site accepted was applied, whatever shape its answer
-            // has: no tier repeats it, and the agent must not either.
+            // A write the site answered with a 2xx JSON body of another shape
+            // was applied. Any other accepted-looking answer (a redirect to a
+            // login, an HTML page) does not say it was.
             if sent && req.write && f.stop.is_none() && is_accepted(f.status) {
-                f.stop = Some(Stop::WriteApplied);
-                f.shape_changed = f.drift;
-                f.drift = false;
-                f.reason = format!("{}: the write was applied", f.reason);
+                if f.shape_changed && matches!(f.status, Some(200..=299)) {
+                    f.stop = Some(Stop::WriteApplied);
+                    f.drift = false;
+                    f.reason = format!("{}: the write was applied", f.reason);
+                } else {
+                    f.stop = Some(Stop::OutcomeUnknown);
+                    f.drift = false;
+                    f.reason = format!(
+                        "{}: the write was sent, but the answer does not say it was applied",
+                        f.reason
+                    );
+                }
             }
             // The recording sent credentials or a signature a run cannot
             // copy, so a 401 or 403 may only mean this tier lacks them; the

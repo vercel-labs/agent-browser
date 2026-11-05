@@ -7416,6 +7416,63 @@ mod tests {
         }
 
         #[test]
+        fn a_write_answered_with_a_redirect_or_a_page_is_unknown_not_applied() {
+            let (flow, requests) = cart_write("http");
+            let req = &requests[0];
+            let policy = HostPolicy::of(&flow);
+            let login = "<html><body>Sign in</body></html>";
+            let mut redirected = posted(Some(""), 302);
+            redirected.post_data = None;
+            let mut page = posted(Some(login), 200);
+            page.post_data = None;
+            let by_tier = [
+                (
+                    "http 302",
+                    tier_result(req, Tier::Http, Instant::now(), Ok((302, String::new()))),
+                ),
+                (
+                    "http html",
+                    tier_result(
+                        req,
+                        Tier::Http,
+                        Instant::now(),
+                        Ok((200, login.to_string())),
+                    ),
+                ),
+                (
+                    "page 302",
+                    page::page_result(
+                        &policy,
+                        req,
+                        Instant::now(),
+                        Ok(json!({ "status": 302, "text": "" })),
+                    ),
+                ),
+                (
+                    "page html",
+                    page::page_result(
+                        &policy,
+                        req,
+                        Instant::now(),
+                        Ok(json!({ "status": 200, "text": login })),
+                    ),
+                ),
+                (
+                    "replay 302",
+                    replay::replay_result(req, Instant::now(), Some(&redirected)),
+                ),
+                (
+                    "replay html",
+                    replay::replay_result(req, Instant::now(), Some(&page)),
+                ),
+            ];
+            for (name, r) in &by_tier {
+                assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{name}: {:?}", r.reason);
+                assert!(!r.drift && !r.ok, "{name}");
+            }
+        }
+
+        #[test]
         fn a_write_answer_captured_before_a_failing_command_is_drift() {
             let flow = cart_flow();
             let mut browser = ScriptBrowser::new(
