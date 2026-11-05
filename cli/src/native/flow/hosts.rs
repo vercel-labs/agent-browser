@@ -54,6 +54,8 @@ pub struct HostPolicy {
     base: Vec<String>,
     narrowed: Vec<String>,
     reach: Reach,
+    /// Proxy hosts from the environment: never a request target.
+    proxy_hosts: Vec<String>,
 }
 
 impl HostPolicy {
@@ -65,6 +67,7 @@ impl HostPolicy {
                 .unwrap_or_default(),
             narrowed: Vec::new(),
             reach: Reach::of_start(start_url),
+            proxy_hosts: super::net::proxy_hosts(|k| std::env::var(k).ok()),
         }
     }
 
@@ -74,6 +77,11 @@ impl HostPolicy {
             narrowed: flow.allowed_hosts.clone(),
             ..HostPolicy::from_start(&flow.start_url)
         }
+    }
+
+    pub fn with_proxy_hosts(mut self, hosts: Vec<String>) -> HostPolicy {
+        self.proxy_hosts = hosts;
+        self
     }
 
     /// The base domains, as `allowedHosts` records them.
@@ -100,6 +108,16 @@ impl HostPolicy {
         let host = parsed
             .host_str()
             .ok_or_else(|| format!("'{}' has no host", url))?;
+        if self
+            .proxy_hosts
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(host.trim_end_matches('.')))
+        {
+            return Err(format!(
+                "{} is a configured proxy host; flow run does not send requests there",
+                host.to_ascii_lowercase()
+            ));
+        }
         if self.allows_host(host) {
             // IP literals never reach the resolver, so they are checked here.
             return check_literal(url, self.reach);
@@ -113,5 +131,28 @@ impl HostPolicy {
                 self.base.join(", ")
             }
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_literal_check_backs_up_the_host_list() {
+        // A host list that admits a literal the flow's class does not.
+        let p = HostPolicy {
+            base: vec!["10.0.0.5".to_string()],
+            narrowed: Vec::new(),
+            reach: Reach::Public,
+            proxy_hosts: Vec::new(),
+        };
+        let err = p.check("http://10.0.0.5/").unwrap_err();
+        assert!(err.contains("non-public address"), "{err}");
+        let local = HostPolicy {
+            reach: Reach::Local,
+            ..p
+        };
+        assert!(local.check("http://10.0.0.5/").is_ok());
     }
 }

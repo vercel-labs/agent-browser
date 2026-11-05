@@ -95,6 +95,19 @@ fn non_public_v6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return non_public_v4(v4);
     }
+    // ::ffff:0:a.b.c.d (SIIT)
+    if s[..4] == [0; 4] && s[4] == 0xffff && s[5] == 0 {
+        return non_public_v4(Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            s[6] as u8,
+            (s[7] >> 8) as u8,
+            s[7] as u8,
+        ));
+    }
+    // 64:ff9b:1::/48 local-use NAT64 (RFC 8215), 100::/64 discard
+    if (s[..3] == [0x64, 0xff9b, 1]) || (s[0] == 0x100 && s[1..4] == [0; 3]) {
+        return true;
+    }
     if s[..6] == [0; 6] {
         return non_public_v4(Ipv4Addr::new(
             (s[6] >> 8) as u8,
@@ -337,6 +350,13 @@ mod tests {
             "64:ff9b::7f00:1",
             "64:ff9b::a9fe:a9fe",
             "2002:7f00:1::1",
+            "64:ff9b:1::1",
+            "64:ff9b:1:ffff::808:808",
+            "::ffff:0:127.0.0.1",
+            "::ffff:0:10.0.0.5",
+            "::ffff:0:169.254.169.254",
+            "100::",
+            "100::1",
             "2002:0a00:0001::",
         ];
         for s in non_public {
@@ -358,6 +378,9 @@ mod tests {
             "2001:4860:4860::8888",
             "::ffff:8.8.8.8",
             "64:ff9b::808:808",
+            "::ffff:0:8.8.8.8",
+            "100:0:0:1::1",
+            "101::1",
             "2002:0808:0808::1",
         ];
         for s in public {
@@ -533,7 +556,7 @@ mod tests {
             non_public,
             trusted: vec![],
         };
-        http_client_with(None, &flow, Arc::new(resolver), vec![]).unwrap()
+        http_client_with(None, &flow, Arc::new(resolver), vec![], vec![]).unwrap()
     }
 
     const OK: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
@@ -633,7 +656,7 @@ mod tests {
             non_public: loopback_is_public,
             trusted: vec![],
         };
-        let client = http_client_with(None, &flow, Arc::new(resolver), vec![]).unwrap();
+        let client = http_client_with(None, &flow, Arc::new(resolver), vec![], vec![]).unwrap();
         let res = run_http(
             &client,
             &request(&format!("http://ok.example.com:{port}/")),
@@ -727,9 +750,14 @@ mod tests {
             trusted,
         };
         let proxy = reqwest::Proxy::all(format!("http://proxy.corp:{port}")).unwrap();
-        let client =
-            crate::native::flow::http_client_with(None, &flow, Arc::new(resolver), vec![proxy])
-                .unwrap();
+        let client = crate::native::flow::http_client_with(
+            None,
+            &flow,
+            Arc::new(resolver),
+            vec![proxy],
+            vec![],
+        )
+        .unwrap();
         let res = run_http(&client, &request("http://app.example.com/"), None, None).await;
         (res, hits.load(std::sync::atomic::Ordering::SeqCst))
     }
@@ -749,5 +777,45 @@ mod tests {
         let (res, hits) = through_proxy(vec!["proxy.corp".to_string()]).await;
         assert!(!res.reason.unwrap_or_default().contains("resolved to"));
         assert_eq!(hits, 1, "the request went to the proxy");
+    }
+
+    #[tokio::test]
+    async fn a_target_named_like_a_proxy_is_refused_before_sending() {
+        let (port, hits) = serve(OK.to_string()).await;
+        let flow = flow_of(json!({ "startUrl": "https://example.com/", "origin": "example.com" }));
+        let resolver = ReachResolver {
+            inner: Arc::new(Fixed(vec![SocketAddr::new(ip("127.0.0.1"), port)])),
+            reach: Reach::Public,
+            non_public: is_non_public,
+            trusted: vec!["proxy.example.com".to_string()],
+        };
+        let client = http_client_with(
+            None,
+            &flow,
+            Arc::new(resolver),
+            vec![],
+            vec!["proxy.example.com".to_string()],
+        )
+        .unwrap();
+        let res = run_http(
+            &client,
+            &request(&format!("http://proxy.example.com:{port}/")),
+            None,
+            None,
+        )
+        .await;
+        assert!(!res.ok);
+        assert!(res.reason.unwrap().contains("configured proxy"));
+        assert!(res.stop.is_none() && !res.drift);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn host_policy_refuses_a_proxy_host_as_target() {
+        let p = crate::native::flow::HostPolicy::from_start("https://example.com/")
+            .with_proxy_hosts(vec!["proxy.example.com".to_string()]);
+        let err = p.check("https://proxy.example.com/x").unwrap_err();
+        assert!(err.contains("configured proxy"), "{err}");
+        assert!(p.check("https://api.example.com/x").is_ok());
     }
 }

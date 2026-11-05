@@ -21,6 +21,9 @@ pub async fn run_http(
     routed: Option<RoutedResponse>,
 ) -> RequestResult {
     let started = Instant::now();
+    if let Err(e) = clients.hosts.check(&req.url) {
+        return request_result(req, started, Err(Failure::new(false, None, e)));
+    }
     if let Some(r) = routed {
         let outcome = if r.abort {
             Err(Failure::new(
@@ -124,6 +127,7 @@ pub async fn run_http(
 /// The clients of a run: reads follow same-site redirects, writes never
 /// follow any.
 pub struct HttpClients {
+    hosts: HostPolicy,
     reads: reqwest::Client,
     writes: reqwest::Client,
 }
@@ -143,7 +147,8 @@ pub fn http_client(
     flow: &Flow,
 ) -> Result<HttpClients, String> {
     let resolver = ReachResolver::system(Reach::of_start(&flow.start_url));
-    http_client_with(filter, flow, Arc::new(resolver), Vec::new())
+    let proxy_hosts = resolver.trusted.clone();
+    http_client_with(filter, flow, Arc::new(resolver), Vec::new(), proxy_hosts)
 }
 
 /// `http_client` with the resolver given, so a test can make a name resolve
@@ -153,6 +158,7 @@ pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
     flow: &Flow,
     resolver: Arc<R>,
     proxies: Vec<reqwest::Proxy>,
+    proxy_hosts: Vec<String>,
 ) -> Result<HttpClients, String> {
     let build = |policy| {
         let mut builder = reqwest::Client::builder();
@@ -166,8 +172,10 @@ pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))
     };
+    let hosts = HostPolicy::of(flow).with_proxy_hosts(proxy_hosts);
     Ok(HttpClients {
-        reads: build(read_redirects(filter, flow))?,
+        reads: build(read_redirects(filter, hosts.clone()))?,
+        hosts,
         // The 3xx comes back as the answer, so a write that was sent is
         // not sent again by a 307 or 308.
         writes: build(reqwest::redirect::Policy::none())?,
@@ -178,9 +186,8 @@ pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
 /// the same rule browser requests follow.
 fn read_redirects(
     filter: Option<crate::native::network::DomainFilter>,
-    flow: &Flow,
+    hosts: HostPolicy,
 ) -> reqwest::redirect::Policy {
-    let hosts = HostPolicy::of(flow);
     reqwest::redirect::Policy::custom(move |attempt| {
         let blocked = hosts.check(attempt.url().as_str()).err().or_else(|| {
             filter
