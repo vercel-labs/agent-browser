@@ -56,9 +56,10 @@ pub fn page_result(
     let outcome = match value {
         Ok(v) => match (v["status"].as_u64(), v["text"].as_str()) {
             (Some(status), Some(text)) => Ok((status as u16, text.to_string())),
-            _ => Err(Failure::new(
-                true,
-                None,
+            _ if req.write => Err(Failure::unknown_outcome(
+                "the in-page write returned no response and may have been sent".to_string(),
+            )),
+            _ => Err(Failure::transport(
                 "in-page fetch returned no response".to_string(),
             )),
         },
@@ -66,11 +67,7 @@ pub fn page_result(
             "the in-page write may have been sent: {}",
             e
         ))),
-        Err(e) => Err(Failure::new(
-            true,
-            None,
-            format!("in-page fetch failed: {}", e),
-        )),
+        Err(e) => Err(Failure::transport(format!("in-page fetch failed: {}", e))),
     };
     with_retry_after(tier_result(req, Tier::Page, started, outcome), retry_after)
 }

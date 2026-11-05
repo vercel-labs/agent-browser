@@ -3744,6 +3744,34 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_in_page_read_is_transport_and_keeps_the_tier() {
+        let flow = flow_of(json!({
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }]
+        }));
+        let req = prepare_all(&flow, &[]).unwrap().remove(0);
+        for value in [
+            Err("Execution context was destroyed".to_string()),
+            Ok(json!({})),
+        ] {
+            let r = page::page_result(&req, Instant::now(), value);
+            assert!(
+                r.transport && !r.drift && r.stop.is_none(),
+                "{:?}",
+                r.reason
+            );
+        }
+        let write = PreparedRequest {
+            write: true,
+            method: "POST".to_string(),
+            ..req
+        };
+        for value in [Err("gone".to_string()), Ok(json!({}))] {
+            let r = page::page_result(&write, Instant::now(), value);
+            assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
+        }
+    }
+
+    #[test]
     fn the_page_tier_without_a_tab_on_the_site_is_skipped() {
         let flow = flow_of(json!({
             "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }]
