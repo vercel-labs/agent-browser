@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use super::apc::{self, SnapshotSource};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
@@ -184,6 +185,10 @@ pub struct SnapshotOptions {
     pub compact: bool,
     pub depth: Option<usize>,
     pub urls: bool,
+    /// Where the tree comes from. `Ax` is the default; `Apc` is experimental.
+    pub source: SnapshotSource,
+    /// With `Apc`, keep only nodes whose visible box intersects the viewport.
+    pub viewport: bool,
 }
 
 struct TreeNode {
@@ -327,6 +332,39 @@ pub async fn take_snapshot(
     client
         .send_command_no_params("DOM.enable", Some(session_id))
         .await?;
+
+    // The experimental APC source only reads the main frame. Any failure falls back to the AX tree
+    // with a one-line warning.
+    let mut apc_warning: Option<String> = None;
+    if options.source != SnapshotSource::Ax && frame_id.is_none() {
+        let chrome = browser_product(client).await;
+        let attempt = if options.selector.is_some() {
+            Err("--selector is not supported with --source apc".to_string())
+        } else {
+            fetch_apc(client, session_id, chrome.as_deref()).await
+        };
+        match attempt {
+            Ok(doc) => {
+                return render_apc_snapshot(
+                    client,
+                    session_id,
+                    options,
+                    ref_map,
+                    &doc,
+                    iframe_sessions,
+                )
+                .await;
+            }
+            Err(reason) => {
+                apc_warning = Some(apc::fallback_warning(
+                    options.source,
+                    chrome.as_deref().unwrap_or("unknown Chrome version"),
+                    &reason,
+                ));
+            }
+        }
+    }
+
     client
         .send_command_no_params("Accessibility.enable", Some(session_id))
         .await?;
@@ -488,22 +526,7 @@ pub async fn take_snapshot(
 
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
-        let mut should_ref =
-            if INTERACTIVE_ROLES.contains(&role) || TABLE_CELL_ROLES.contains(&role) {
-                true
-            } else if CONTENT_ROLES.contains(&role) {
-                !node.name.is_empty()
-            } else {
-                false
-            };
-
-        if node
-            .backend_node_id
-            .is_some_and(|bid| cursor_elements.contains_key(&bid))
-        {
-            // ref elements that are cursor-interactive
-            should_ref = true;
-        }
+        let should_ref = wants_ref(node, &cursor_elements);
 
         if should_ref {
             let nth = tracker.track(role, &node.name, idx);
@@ -640,9 +663,10 @@ pub async fn take_snapshot(
 
     // Recurse into child iframes: for each Iframe node with a backend_node_id,
     // resolve the child frame ID and take a snapshot of its content.
-    // We only recurse from the main frame (frame_id == None) to avoid
-    // unbounded depth; nested iframes within iframes are not expanded.
-    if frame_id.is_none() {
+    // The ax source only recurses from the main frame (frame_id == None); nested iframes
+    // within iframes are not expanded. The apc source expands them, so a frame the APC tree
+    // cannot act on still gets AX refs below it.
+    if frame_id.is_none() || options.source != SnapshotSource::Ax {
         let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
         for node in tree_nodes.iter() {
             if node.role != "Iframe" || !node.has_ref {
@@ -652,7 +676,8 @@ pub async fn take_snapshot(
                 continue;
             };
             let ref_id = node.ref_id.as_deref().unwrap_or("");
-            if let Ok(child_fid) = resolve_iframe_frame_id(client, session_id, bid).await {
+            if let Ok(child_fid) = resolve_iframe_frame_id(client, effective_session_id, bid).await
+            {
                 // Snapshot the child frame; errors are silently ignored
                 // (e.g. cross-origin iframes)
                 if let Ok(child_text) = Box::pin(take_snapshot(
@@ -715,11 +740,333 @@ pub async fn take_snapshot(
 
     if trimmed.is_empty() {
         if options.interactive {
-            return Ok("(no interactive elements)".to_string());
+            return Ok(with_warning(
+                apc_warning,
+                "(no interactive elements)".to_string(),
+            ));
         }
-        return Ok("(empty page)".to_string());
+        return Ok(with_warning(apc_warning, "(empty page)".to_string()));
     }
 
+    Ok(with_warning(apc_warning, trimmed))
+}
+
+fn with_warning(warning: Option<String>, body: String) -> String {
+    match warning {
+        Some(w) => format!("{w}\n{body}"),
+        None => body,
+    }
+}
+
+/// True when the AX node should receive an `@eN` ref.
+fn wants_ref(node: &TreeNode, cursor_elements: &HashMap<i64, CursorElementInfo>) -> bool {
+    let role = node.role.as_str();
+    if node
+        .backend_node_id
+        .is_some_and(|bid| cursor_elements.contains_key(&bid))
+    {
+        // ref elements that are cursor-interactive
+        return true;
+    }
+    if INTERACTIVE_ROLES.contains(&role) || TABLE_CELL_ROLES.contains(&role) {
+        true
+    } else if CONTENT_ROLES.contains(&role) {
+        !node.name.is_empty()
+    } else {
+        false
+    }
+}
+
+/// Product string from `Browser.getVersion`, for example `Chrome/157.0.8103.39`.
+async fn browser_product(client: &CdpClient) -> Option<String> {
+    client
+        .send_command_no_params("Browser.getVersion", None)
+        .await
+        .ok()
+        .and_then(|v| v.get("product").and_then(Value::as_str).map(String::from))
+}
+
+/// Count DOM elements an agent could act on. A failed query counts as none, so it never causes
+/// a fallback by itself.
+async fn count_dom_interactive(client: &CdpClient, session_id: &str) -> usize {
+    let Ok(document) = client
+        .send_command(
+            "DOM.getDocument",
+            Some(serde_json::json!({ "depth": 0 })),
+            Some(session_id),
+        )
+        .await
+    else {
+        return 0;
+    };
+    let Some(root) = document["root"]["nodeId"].as_i64() else {
+        return 0;
+    };
+    client
+        .send_command(
+            "DOM.querySelectorAll",
+            Some(serde_json::json!({ "nodeId": root, "selector": apc::INTERACTIVE_SELECTOR })),
+            Some(session_id),
+        )
+        .await
+        .ok()
+        .and_then(|r| r["nodeIds"].as_array().map(Vec::len))
+        .unwrap_or(0)
+}
+
+/// Count sampled backend node ids that `DOM.describeNode` cannot resolve.
+async fn count_unresolved(client: &CdpClient, session_id: &str, ids: &[i64]) -> usize {
+    let checks = ids.iter().map(|&id| async move {
+        client
+            .send_command(
+                "DOM.describeNode",
+                Some(serde_json::json!({ "backendNodeId": id })),
+                Some(session_id),
+            )
+            .await
+            .is_err()
+    });
+    futures_util::future::join_all(checks)
+        .await
+        .into_iter()
+        .filter(|failed| *failed)
+        .count()
+}
+
+/// Fetch Annotated Page Content for the main frame of `session_id`, decode it and check it
+/// against the live page. An error means the caller falls back to the ax tree.
+async fn fetch_apc(
+    client: &CdpClient,
+    session_id: &str,
+    chrome: Option<&str>,
+) -> Result<apc::Doc, String> {
+    let result = client
+        .send_command(
+            "Page.getAnnotatedPageContent",
+            Some(serde_json::json!({ "includeActionableInformation": true })),
+            Some(session_id),
+        )
+        .await
+        .map_err(|e| format!("Page.getAnnotatedPageContent failed: {e}"))?;
+    let content = result
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Page.getAnnotatedPageContent returned no content".to_string())?;
+    let strict = !chrome.is_some_and(apc::is_verified_version);
+    let vetted = apc::Vetted::from_base64(content, strict)?;
+    if std::env::var_os("AGENT_BROWSER_DEBUG").is_some() {
+        eprintln!(
+            "[apc] {} unread payload fields, strict={strict}, chrome={}",
+            vetted.unread_fields(),
+            chrome.unwrap_or("unknown")
+        );
+    }
+    let facts = apc::PageFacts {
+        dom_interactive: count_dom_interactive(client, session_id).await,
+        unresolved: count_unresolved(client, session_id, vetted.sample_ids()).await,
+    };
+    vetted.accept(facts)
+}
+
+/// Allocate refs for APC items, reusing durable refs for known documents like the AX path does.
+fn assign_item_refs(
+    items: &mut [apc::Item],
+    ref_map: &mut RefMap,
+    session_id: &str,
+    frame_id: Option<&str>,
+    document_is_known: bool,
+    next_ref: &mut usize,
+    use_nth: bool,
+) {
+    let mut tracker = RoleNameTracker::new();
+    let mut nth_of: Vec<Option<usize>> = vec![None; items.len()];
+    for (idx, item) in items.iter().enumerate() {
+        if item.target.is_some() {
+            nth_of[idx] = Some(tracker.track(&item.ref_role, &item.name, idx));
+        }
+    }
+    let duplicates = tracker.get_duplicates();
+    for (idx, item) in items.iter_mut().enumerate() {
+        let Some(backend_node_id) = item.target else {
+            continue;
+        };
+        let key = format!("{}:{}", item.ref_role, item.name);
+        let nth = if use_nth && duplicates.contains_key(&key) {
+            nth_of[idx]
+        } else {
+            None
+        };
+        let ref_id = match ref_map
+            .durable_ref(session_id, frame_id, backend_node_id)
+            .filter(|_| document_is_known)
+        {
+            Some(existing) => existing.to_string(),
+            None => {
+                let allocated = format!("e{}", *next_ref);
+                *next_ref += 1;
+                if document_is_known {
+                    ref_map.remember_durable_ref(session_id, frame_id, backend_node_id, &allocated);
+                }
+                allocated
+            }
+        };
+        ref_map.add_with_frame(
+            ref_id.clone(),
+            Some(backend_node_id),
+            &item.ref_role,
+            &item.name,
+            nth,
+            frame_id,
+        );
+        item.ref_id = Some(ref_id);
+    }
+}
+
+/// Resolve an iframe element to its frame id and whether its content document is reachable from
+/// the page session. DOM.describeNode only returns `contentDocument` for frames in the page's
+/// own process, which is the condition for APC node ids to be usable there.
+async fn describe_iframe(
+    client: &CdpClient,
+    session_id: &str,
+    backend_node_id: i64,
+) -> Result<(String, bool), String> {
+    let describe: Value = client
+        .send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "backendNodeId": backend_node_id, "depth": 1 })),
+            Some(session_id),
+        )
+        .await?;
+    let node = describe.get("node").ok_or("no node")?;
+    let content = node.get("contentDocument").filter(|d| !d.is_null());
+    let frame_id = content
+        .and_then(|d| d.get("frameId"))
+        .or_else(|| node.get("frameId"))
+        .and_then(Value::as_str)
+        .ok_or("Could not resolve iframe frame ID")?;
+    Ok((frame_id.to_string(), content.is_some()))
+}
+
+fn is_empty_snapshot(text: &str) -> bool {
+    let t = text.trim();
+    t.is_empty() || t == "(empty page)" || t == "(no interactive elements)"
+}
+
+/// Render the APC document as the snapshot, mapping actionable nodes to refs.
+///
+/// Iframes whose content lives in the page's process keep their APC refs. Any other iframe (an
+/// out-of-process frame, or one whose content document is not reachable from the page session)
+/// has its subtree replaced by the AX snapshot of that frame, so its controls get refs routed to
+/// the right frame session.
+async fn render_apc_snapshot(
+    client: &CdpClient,
+    session_id: &str,
+    options: &SnapshotOptions,
+    ref_map: &mut RefMap,
+    doc: &apc::Doc,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<String, String> {
+    let mut items = apc::render_items(
+        doc,
+        &apc::RenderOptions {
+            interactive: options.interactive,
+            viewport: options.viewport,
+            depth: options.depth,
+            urls: options.urls,
+        },
+    );
+
+    // Decide which top-level iframes need the AX fallback.
+    let mut fallback: Vec<(usize, String)> = Vec::new();
+    for idx in 0..items.len() {
+        let Some(info) = items[idx].frame.filter(|f| f.top) else {
+            continue;
+        };
+        let Some(bid) = items[idx].target else {
+            continue;
+        };
+        match describe_iframe(client, session_id, bid).await {
+            Ok((frame_id, in_process)) if !info.same_origin || !in_process => {
+                fallback.push((idx, frame_id));
+            }
+            Ok(_) => {}
+            Err(_) if !info.same_origin => {}
+            Err(_) => {
+                // Cannot prove the frame is in this process: treat its content as read-only.
+                for i in apc::frame_span(&items, idx) {
+                    items[i].target = None;
+                    items[i].attrs.push("read-only".into());
+                }
+            }
+        }
+    }
+    for (idx, _) in &fallback {
+        for i in apc::frame_span(&items, *idx) {
+            items[i].target = None;
+            if !items[i].attrs.iter().any(|a| a == "read-only") {
+                items[i].attrs.push("read-only".into());
+            }
+        }
+    }
+
+    let frame_tree = client
+        .send_command_no_params("Page.getFrameTree", Some(session_id))
+        .await
+        .ok();
+    let loader = frame_tree
+        .as_ref()
+        .and_then(|tree| frame_loader(&tree["frameTree"], None));
+    let document_is_known = ref_map.observe_document(session_id, None, session_id, loader);
+    let mut next_ref = ref_map.next_ref_num();
+    assign_item_refs(
+        &mut items,
+        ref_map,
+        session_id,
+        None,
+        document_is_known,
+        &mut next_ref,
+        true,
+    );
+    ref_map.set_next_ref_num(next_ref);
+
+    // AX snapshots of the fallback frames, after the main document is observed so the frame
+    // documents keep their refs.
+    let mut replaced: Vec<(usize, String)> = Vec::new();
+    for (idx, frame_id) in &fallback {
+        if let Ok(text) = Box::pin(take_snapshot(
+            client,
+            session_id,
+            options,
+            ref_map,
+            Some(frame_id),
+            iframe_sessions,
+        ))
+        .await
+        {
+            if !is_empty_snapshot(&text) {
+                replaced.push((*idx, text));
+            }
+        }
+    }
+    for (idx, text) in replaced.into_iter().rev() {
+        let span = apc::frame_span(&items, idx);
+        items.drain(span);
+        items[idx].attrs.retain(|a| a != "read-only");
+        items[idx].nested = Some(text);
+    }
+
+    let mut output = apc::format_items(&items);
+    if options.compact {
+        output = compact_tree(&output, options.interactive);
+    }
+    let trimmed = output.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(if options.interactive {
+            "(no interactive elements)".to_string()
+        } else {
+            "(empty page)".to_string()
+        });
+    }
     Ok(trimmed)
 }
 

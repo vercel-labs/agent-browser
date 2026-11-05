@@ -1014,9 +1014,38 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         obj.insert("full".to_string(), json!(true));
                         obj.insert("delta".to_string(), json!(true));
                     }
+                    "--source" => {
+                        let usage = "snapshot --source <ax|apc>";
+                        let value = rest.get(i + 1).ok_or(ParseError::MissingArguments {
+                            context: "snapshot --source".to_string(),
+                            usage,
+                        })?;
+                        let allowed = crate::native::apc::SnapshotSource::parse(value).is_some();
+                        if !allowed {
+                            return Err(ParseError::InvalidValue {
+                                message: format!(
+                                    "Unknown snapshot source '{value}'. Use ax or apc"
+                                ),
+                                usage,
+                            });
+                        }
+                        obj.insert("source".to_string(), json!(value));
+                        i += 1;
+                    }
+                    "--viewport" => {
+                        obj.insert("viewport".to_string(), json!(true));
+                    }
                     _ => {}
                 }
                 i += 1;
+            }
+            if obj.get("viewport").is_some()
+                && obj.get("source").and_then(|v| v.as_str()) != Some("apc")
+            {
+                return Err(ParseError::InvalidValue {
+                    message: "--viewport requires --source apc".to_string(),
+                    usage: "snapshot --source apc --viewport",
+                });
             }
             Ok(cmd)
         }
@@ -5190,6 +5219,36 @@ mod tests {
         let cmd = parse_command(&args("snapshot -d 3"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["maxDepth"], 3);
+    }
+
+    #[test]
+    fn test_snapshot_source_and_viewport() {
+        let cmd = parse_command(
+            &args("snapshot -i --source apc --viewport"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["interactive"], true);
+        assert_eq!(cmd["source"], "apc");
+        assert_eq!(cmd["viewport"], true);
+        let cmd = parse_command(&args("snapshot --source ax"), &default_flags()).unwrap();
+        assert_eq!(cmd["source"], "ax");
+        assert!(cmd.get("viewport").is_none());
+        let cmd = parse_command(&args("snapshot -i"), &default_flags()).unwrap();
+        assert!(cmd.get("source").is_none(), "default source stays ax");
+    }
+
+    #[test]
+    fn test_snapshot_source_rejects_bad_input() {
+        assert!(parse_command(&args("snapshot --source dom"), &default_flags()).is_err());
+        assert!(
+            parse_command(&args("snapshot --source hybrid"), &default_flags()).is_err(),
+            "hybrid is not a snapshot source"
+        );
+        assert!(parse_command(&args("snapshot --source"), &default_flags()).is_err());
+        assert!(parse_command(&args("snapshot --viewport"), &default_flags()).is_err());
+        assert!(parse_command(&args("snapshot --source ax --viewport"), &default_flags()).is_err());
     }
 
     #[test]
