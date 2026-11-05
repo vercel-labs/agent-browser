@@ -5506,6 +5506,8 @@ mod tests {
             empty: false,
             tier,
             stop: kind,
+            soft_stop: None,
+            transport: false,
             retry_after: None,
         }
     }
@@ -6649,5 +6651,195 @@ mod tests {
             ..want
         };
         assert!(replay_lookup(&[sent], &filled).is_err());
+    }
+
+    fn signed_request(id: &str) -> PreparedRequest {
+        let mut req = prepared(id);
+        req.headers
+            .push(("X-Ts".to_string(), "1730000000".to_string()));
+        req
+    }
+
+    fn denied_attempt(req: &PreparedRequest, tier: Tier, status: u16) -> TierResult {
+        tier_result(req, tier, Instant::now(), Ok((status, "{}".to_string())))
+    }
+
+    #[test]
+    fn a_signed_request_denied_on_http_or_page_falls_to_the_next_tier() {
+        let req = signed_request("s1r1");
+        for tier in [Tier::Http, Tier::Page] {
+            let r = denied_attempt(&req, tier, 401);
+            assert_eq!(r.stop, None, "{tier:?}");
+            assert!(r.drift, "{tier:?}");
+        }
+        let http = denied_attempt(&req, Tier::Http, 403);
+        let page = denied_attempt(&req, Tier::Page, 403);
+        // No replay available: the run reports the signature.
+        let outcome = RunOutcome::stopped(&[http.clone(), page.clone()]).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Stopped {
+                    stop: Stop::RequestSigned,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        // The replay got a real 401 with the site's own signing: signed out.
+        let replay = denied_attempt(&req, Tier::Replay, 401);
+        assert_eq!(replay.stop, Some(Stop::AuthExpired));
+        let outcome = RunOutcome::stopped(&[http, page, replay]).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Stopped {
+                    stop: Stop::AuthExpired,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_replay_denial_ignores_the_recorded_credential_and_signature_headers() {
+        let mut req = signed_request("s1r1");
+        req.expect.stripped_auth = true;
+        for status in [401, 403] {
+            let r = denied_attempt(&req, Tier::Replay, status);
+            assert_eq!(r.stop, Some(Stop::AuthExpired), "{status}");
+        }
+    }
+
+    #[test]
+    fn the_run_loop_lets_the_replay_answer_a_signed_request() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
+            "output": "s1r1", "writes": [],
+            "steps": [{ "command": {}, "requests": [{
+                "id": "s1r1", "method": "GET", "url": "https://a.test/x",
+                "headers": { "X-Ts": "1730000000" }, "expect": ok_expect() }] }]
+        }));
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::json(401, "{}"))
+            .answer(Tier::Page, "s1r1", Scripted::json(401, "{}"))
+            .answer(Tier::Replay, "s1r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert!(results.last().unwrap().ok);
+        assert_eq!(RunOutcome::stopped(&results), None);
+        assert_eq!(senders.times("s1r1"), 3);
+    }
+
+    #[test]
+    fn a_failure_is_judged_by_its_own_request() {
+        let flow = flow_of(json!({ "params": [{ "name": "q", "example": "kettle" }] }));
+        let mut r1_http = attempt_result(Tier::Http, Some(200), "shape", true, None, None);
+        r1_http.shape_changed = true;
+        let r1_page = result(Tier::Page, true, Some(200), false, None);
+        let mut r2_http = attempt_result(Tier::Http, Some(404), "HTTP 404", false, None, None);
+        r2_http.id = "s1r2".to_string();
+        let outcome = RunOutcome::failed(&[r1_http, r1_page, r2_http], &flow);
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Failed {
+                    examples: Some(_),
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_falls_through_after_drift_a_transport_error_or_a_5xx_after_drift() {
+        use Tier::*;
+        let flow = flow_with_request(None, false);
+        let req = prepared("s1r1");
+        let transport = TierResult {
+            transport: true,
+            ..result(Http, false, None, false, None)
+        };
+        let cases: Vec<(Vec<TierResult>, Option<Tier>)> = vec![
+            (vec![transport.clone()], Some(Page)),
+            (
+                vec![
+                    result(Http, false, Some(200), true, None),
+                    result(Page, false, Some(500), false, None),
+                ],
+                Some(Replay),
+            ),
+            (vec![result(Http, false, Some(500), false, None)], None),
+            (vec![result(Http, false, Some(404), false, None)], None),
+            (
+                vec![
+                    result(Http, false, Some(200), true, None),
+                    result(Page, false, Some(404), false, None),
+                ],
+                None,
+            ),
+        ];
+        for (i, (attempts, want)) in cases.into_iter().enumerate() {
+            let got = next_tier(&flow, &req, &attempts, &WriteLedger::default());
+            assert_eq!(got, want, "case {i}");
+        }
+    }
+
+    #[test]
+    fn a_write_that_may_have_been_sent_is_not_retried_after_a_transport_error() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
+            "output": "s1r1",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] }]
+        }));
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::unknown())
+            .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert_eq!(senders.times("s1r1"), 1);
+        assert_eq!(results.last().unwrap().stop, Some(Stop::OutcomeUnknown));
+    }
+
+    #[test]
+    fn the_run_loop_reads_through_a_transport_error() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
+            "output": "s1r1", "writes": [],
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x", "expect": ok_expect() }] }]
+        }));
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::transport())
+            .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert!(results.last().unwrap().ok);
+        assert_eq!(senders.times("s1r1"), 2);
+    }
+
+    #[test]
+    fn a_run_that_stops_after_a_shape_change_marks_the_flow_unverified() {
+        let mut flow = flow_of(json!({
+            "name": "f", "origin": "site.example", "output": "s1r1",
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
+        }));
+        flow.verified_at = Some("then".to_string());
+        let mut http = attempt_result(Tier::Http, Some(200), "shape", true, None, None);
+        http.shape_changed = true;
+        let limited = attempt_result(
+            Tier::Page,
+            Some(429),
+            "HTTP 429",
+            false,
+            Some(Stop::RateLimited),
+            None,
+        );
+        assert!(!unverify_on_shape_change(
+            &mut flow,
+            std::slice::from_ref(&limited)
+        ));
+        assert!(flow.verified_at.is_some());
+        assert!(unverify_on_shape_change(&mut flow, &[http, limited]));
+        assert_eq!(flow.verified_at, None);
     }
 }

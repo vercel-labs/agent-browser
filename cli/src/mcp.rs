@@ -869,7 +869,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FLOW_RUN,
             "Run saved flow",
-            "Run a saved task directly over HTTP, without driving the page. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed.",
+            "Run a saved task by sending its requests directly, falling back to the page when needed. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed.",
             json!({
                 "name": { "type": "string" },
                 "params": { "type": "object", "additionalProperties": { "type": "string" } },

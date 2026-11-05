@@ -66,8 +66,14 @@ pub fn next_tier(
     }
     // A rejected input fails the same way on every tier, except a write the
     // site did not accept: its tokens may be stale and the page can send it once.
+    // A read also goes on after a transport error, and after a 5xx once an
+    // earlier tier saw the site change.
     if !last.drift && !req.write {
-        return None;
+        let server_error = matches!(last.status, Some(500..=599));
+        let saw_drift = attempts.iter().any(|a| a.drift);
+        if !(last.transport || (server_error && saw_drift)) {
+            return None;
+        }
     }
     let at = order.iter().position(|t| *t == last.tier)?;
     order.get(at + 1).copied()

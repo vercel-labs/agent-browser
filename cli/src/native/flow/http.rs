@@ -97,6 +97,7 @@ pub async fn run_http(
                         drift: false,
                         shape_changed: false,
                         stop: None,
+                        transport: false,
                     }),
                 );
             }
@@ -109,7 +110,7 @@ pub async fn run_http(
             "the write was sent but no response came back: {}",
             e
         ))),
-        Err(e) => Err(Failure::new(false, None, format!("request failed: {}", e))),
+        Err(e) => Err(Failure::transport(format!("request failed: {}", e))),
     };
     with_retry_after(tier_result(req, Tier::Http, started, outcome), retry_after)
 }

@@ -15,6 +15,7 @@ pub struct Scripted {
     pub text: String,
     pub stop: Option<Stop>,
     pub drift: bool,
+    pub transport: bool,
 }
 
 impl Scripted {
@@ -24,6 +25,17 @@ impl Scripted {
             text: text.to_string(),
             stop: None,
             drift: false,
+            transport: false,
+        }
+    }
+
+    pub fn transport() -> Scripted {
+        Scripted {
+            status: None,
+            text: String::new(),
+            stop: None,
+            drift: false,
+            transport: true,
         }
     }
 
@@ -33,6 +45,7 @@ impl Scripted {
             text: String::new(),
             stop: Some(Stop::OutcomeUnknown),
             drift: false,
+            transport: false,
         }
     }
 }
@@ -73,6 +86,14 @@ impl Senders for MemorySenders {
                 Err(Failure::new(true, None, "no scripted answer".to_string())),
             );
         };
+        if answer.transport {
+            return tier_result(
+                req,
+                tier,
+                started,
+                Err(Failure::transport("request failed".to_string())),
+            );
+        }
         if let Some(stop) = answer.stop {
             return tier_result(
                 req,
@@ -84,6 +105,7 @@ impl Senders for MemorySenders {
                     drift: answer.drift,
                     shape_changed: false,
                     stop: Some(stop),
+                    transport: false,
                 }),
             );
         }

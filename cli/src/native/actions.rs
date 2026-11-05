@@ -12417,6 +12417,9 @@ async fn handle_flow_run_inner(
     };
 
     if let Some(outcome) = super::flow::RunOutcome::stopped(&results) {
+        if super::flow::unverify_on_shape_change(&mut flow, &results) {
+            super::flow::write_flow(&flow)?;
+        }
         state.flow_stop = outcome.data(name);
         return Err(outcome.message(name));
     }
