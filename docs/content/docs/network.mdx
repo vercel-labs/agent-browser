@@ -100,3 +100,169 @@ agent-browser batch \
 ```
 
 Launching with `open` and no URL leaves the browser on `about:blank`, which gives routes time to register before the first real navigation.
+
+## Saved flows
+
+Saved flows are experimental. Open a session with `--capture flow`, do a browser task once, and agent-browser keeps the requests behind it. Later runs send those requests over HTTP and return only the data the task needs, without driving the page. Running a flow through the page or by replaying the recorded commands is not part of this feature yet.
+
+```bash
+agent-browser --capture flow open "https://shop.example.com/search?q=kettle"
+agent-browser flow steps
+agent-browser flow save search
+agent-browser close
+
+agent-browser flow run search --param q="toaster" --fields title,price --limit 3
+```
+
+### Capturing
+
+`--capture flow` is a launch setting, like `--allowed-domains`. It records every command with the requests it caused until `close`. Passing it to a session that is already running without it relaunches the browser, as any changed launch setting does, and capture starts from that page. Later commands that repeat it or omit it do not relaunch. `flow` is the only supported value; any other value fails and lists the supported ones.
+
+Every recorded command returns `recorded: {seq}` in its JSON response. Failed commands stay in the recording with `ok: false`, because a failed click may still have sent requests, but the saved file keeps only the requests. `close` reports `unsaved: {steps: N}` when steps after the last save exist.
+
+`har start` and `har stop` are not available while capture owns the recorder. `har stop` fails with a message to use `flow save`.
+
+### Steps and saving
+
+`flow steps` lists the recorded steps.
+
+<table>
+  <thead>
+    <tr><th>Column</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>seq</code></td><td>Step number, the same one returned as <code>recorded.seq</code></td></tr>
+    <tr><td><code>command</code></td><td>The command and its main argument</td></tr>
+    <tr><td><code>url</code></td><td>The page URL after the command</td></tr>
+    <tr><td><code>requests</code></td><td>Requests the command caused</td></tr>
+    <tr><td><code>ok</code></td><td>Whether the command succeeded</td></tr>
+  </tbody>
+</table>
+
+`flow steps --json` returns the same data.
+
+```bash
+agent-browser flow save <name> [--from <seq>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]
+```
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--from</code></td><td>First step number. Defaults to the last navigation after the previous save</td></tr>
+    <tr><td><code>--to</code></td><td>Last step. Defaults to the latest</td></tr>
+    <tr><td><code>--param</code></td><td>A value you typed during the task, so later runs can change it</td></tr>
+    <tr><td><code>--output</code></td><td>Request id whose response the flow returns: an id from the saved flow (<code>s1r1</code>, numbered within the saved range) or the capture id <code>s&lt;step&gt;r&lt;n&gt;</code> using the step numbers of <code>flow steps</code>. An id that names a different request in each form is refused</td></tr>
+    <tr><td><code>--description</code></td><td>One line saying what the flow does, shown in flow lists</td></tr>
+  </tbody>
+</table>
+
+Saving does not stop or reset the capture, so one session can save several flows. A flow can also start on a page that is already open, such as one where you are signed in.
+
+`flow save` keeps:
+
+- first-party JSON responses
+- JSON that server-rendered pages embed in their HTML: `<script type="application/json">`, `__NEXT_DATA__`, JSON-LD and `window.x = {...}` state
+
+It never saves cookies, `authorization`, or token and CSRF headers. Each run reads cookies from the live session.
+
+The save report lists the requests it kept, the params, and any step it could not turn into a request, with the reason. When the recording stops at a sign-in form, the report says so.
+
+Flow files are `version: 1`. A file with an unknown field, or any other version, fails to load with the reason.
+
+### Params
+
+Every value typed with `fill`, `type`, `keyboard type` or `inserttext` is either a param or redacted, and a step never stores it as a literal. A value typed into an ordinary field becomes a param named after the field, with `source: typed`; requests that carried it keep a `{{name}}` placeholder and the file keeps no copy of the value, so a run must pass `--param name=value`. A `--param` you give at save time names the value and keeps it as the recorded example. Values shorter than three characters are still params but are not replaced inside request URLs and bodies, to avoid rewriting unrelated text; secret fields are redacted whatever their length. Pass `flow save --param name=value` to choose the name. `flow save` also finds params on its own:
+
+- a query value of the page URL that the requests also sent, such as `?q=` (`source: query`)
+- a value the task picked from a list in an earlier response, such as an id from a list of stores (`source: response`)
+- a value copied from a single field of an earlier response, such as a session key, which is filled from that response on every run
+
+### Redaction
+
+A value typed into a secret field is redacted in `flow steps`; the saved file never holds it. Keys sent with `press` or `keydown` while a secret field has focus are gathered into one secret and redacted the same way, and the password `auth login` fills from the vault is treated as a secret too. Only a bare key or Shift plus a key adds to that secret; a paste chord (`Control+v`, `Meta+v`, `Shift+Insert`) or `clipboard paste` into a secret field redacts the step, and the field's value is read once the paste finishes and treated as a secret in full, so a later request that sends it is not saved. When the page exposes no readable value (a contenteditable field, a cross-origin frame), the requests tagged to the paste step are dropped instead. The text of `clipboard write` is redacted and treated as a secret. Commands that are not recorded, such as `auth login`, tag no requests to a step. Any request that carried the value, as is or form-encoded, percent-encoded or JSON-escaped, is dropped from the flow, and the report names it by method and path (no query). When it was the only request, `flow save` fails with that name; fill a non-secret field or use a declared tool to make a reusable flow. agent-browser reads the field itself, or the focused element for `keyboard type` and `inserttext`, not only the command, so an unlabeled field is covered. A field is secret when:
+
+<table>
+  <thead>
+    <tr><th>Signal</th><th>Matches</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>type</code></td><td><code>password</code></td></tr>
+    <tr><td><code>autocomplete</code></td><td><code>current-password</code>, <code>new-password</code>, <code>one-time-code</code>, or any <code>cc-*</code> token</td></tr>
+    <tr><td>Name, id, label, placeholder, aria-label or selector</td><td>Contains <code>pass</code>, <code>secret</code>, <code>token</code>, <code>otp</code>, <code>pin</code>, <code>cvv</code> or <code>card</code></td></tr>
+  </tbody>
+</table>
+
+```bash
+agent-browser flow list   # Params, recorded values, item fields and verified state
+```
+
+### Running
+
+```bash
+agent-browser flow run <name> [--param k=v]... [--where field=value] [--fields a,b.c] [--limit n]
+```
+
+`--where` keeps items whose field contains the value, case-insensitively. `--fields` returns only those fields. Use them to keep large responses out of the agent's context. Unknown field names fail with the list of valid ones.
+
+A run sends each request over direct HTTP, with cookies from the live session, in the order they were recorded; a later request can take a value from an earlier response.
+
+Each request must stay on the flow's site, whatever `--allowed-domains` says. `flow save` records the base domain of the start URL, as defined by the public suffix list, so `a.vercel.app` does not allow `b.vercel.app`, and a run rejects any request or redirect to a host outside it. A flow whose origin directory does not match its start URL fails to load with a message to save it again.
+
+Every response is checked against the shape that was recorded. If the shape changed, the run fails with `drifted`, the flow is marked unverified, and the agent continues in the page and saves the flow again. The message names the recorded key that is missing and, when a list appeared elsewhere, where. The path of the main list is saved with each request, so a list nested deeper than the shape is checked too. A recorded list that is missing from the response, or no longer a list, is drift, even when the answer looks empty, because a missed drift returns a silently wrong empty answer. A list that is present and empty is an empty result, and a response that only lacks the counts of an empty list leaves the verified state as it was.
+
+Some responses end the run. Except `drifted`, they do not mark the flow unverified, and the run adds no throttle or retry of its own.
+
+<table>
+  <thead>
+    <tr><th>Response</th><th>Error code</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>401 or 403</td><td><code>auth_expired</code></td><td>The session is signed out or lacks access. Sign in again in the browser, then rerun</td></tr>
+    <tr><td>401 or 403 on a request recorded with a credential header</td><td><code>credential_not_sendable</code></td><td>The recording sent <code>authorization</code> or a token or CSRF header, which a flow never saves, so a run cannot send what the request needs and signing in again does not help. Use the page UI for this task. The request is marked <code>strippedAuth</code> in the file</td></tr>
+    <tr><td>401 or 403 on a request that carries a recorded signature or timestamp header</td><td><code>request_signed</code></td><td>A header whose name has the word <code>ts</code>, <code>timestamp</code>, <code>sig</code>, <code>signature</code>, <code>hmac</code> or <code>nonce</code> was recorded with a value that looks computed per request: an epoch in seconds or milliseconds (a fraction is fine) or an ISO-8601 date and time for a timestamp name; for a signature name, 16 or more hex characters or 20 or more base64 characters with a digit, or a <code>t=...,v1=...</code> list with such a part. A value made of plain words (<code>SignatureVersion2</code>, <code>RSASSA-PSS-SHA256</code>), or recorded identically on two or more requests of the flow, is static. It expires and cannot be replayed. Use the page for this task. The message names the headers. A header with such a name and a static value does not count: the run reports <code>auth_expired</code> and names the header</td></tr>
+    <tr><td>A recorded key is missing or retyped</td><td><code>drifted</code></td><td>The response no longer has the recorded shape. The flow is marked unverified; use the page for this task and save the flow again. A list that is present and empty is not drift</td></tr>
+    <tr><td>429</td><td><code>rate_limited</code></td><td>The site is rate limiting the session. <code>data.retryAfter</code> carries the <code>Retry-After</code> value when the site sent one</td></tr>
+    <tr><td>A write with no answer</td><td><code>outcome_unknown</code></td><td>The write was sent but no response came back. It is not sent again; check the site before rerunning</td></tr>
+    <tr><td>A bot challenge page</td><td><code>blocked</code></td><td>The site served a challenge instead of data. Continue in the UI or let the user clear it</td></tr>
+  </tbody>
+</table>
+
+A bot challenge is recognized only in HTML responses, never in JSON. A write is sent once: if the request fails without an answer, the result is `outcome_unknown`, because the server may have applied it, and it is never retried. A write never follows a redirect, including a 307 or 308: the 3xx is its answer and the run stops with it. A read follows redirects only within the flow's site. The code is in the JSON response as `code`, with `data.status`, `data.step` and `data.httpStatus`.
+
+### Writes
+
+`flow save` lists every write among the saved requests in the flow's `writes`, each with an id, a method, a URL and a kind. The report prints them.
+
+<table>
+  <thead>
+    <tr><th>Kind</th><th>What it is</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>explicit</code></td><td>Any request other than GET, HEAD or OPTIONS, except GraphQL queries</td></tr>
+    <tr><td><code>suspected</code></td><td>A GET whose path has a whole segment of <code>logout</code>, <code>signout</code>, <code>unsubscribe</code>, <code>delete</code> or <code>remove</code>. <code>/address</code> does not match</td></tr>
+  </tbody>
+</table>
+
+```bash
+agent-browser flow run <name> --allow-write <all|id,id,...>
+```
+
+`--allow-write` takes `all` or comma-separated write ids. A run only sends the writes among the requests its output needs, and a write `--allow-write` does not cover is never sent silently: the run stops with a confirmation request, and `confirm` approves one write at a time. Each write is a policy action named `flow_write:<id>`, so `--action-policy` can deny or require confirmation for it and `--confirm-actions flow_write:<id>` asks even when `--allow-write` covers it. 
+
+A body is read as a form when its content type says so or when it has the shape `k=v&k=v`, whatever its content type. A value that could break the structure of a header, a plain text body or a multipart body, such as a line break or the multipart boundary, is refused before anything is sent. A value is encoded for where it lands: a URL query or path segment, a form body, or a JSON string. Placeholders are filled in one pass, so a value that contains placeholder text is inserted as data. A flow with no `output` sends every request, and every write among them is gated like any other. A param never fills the text of a GraphQL operation; it fills `variables` and the other fields. An operation with a placeholder in its text counts as a write, and a run refuses, before sending anything, a request that becomes a write once its values are filled in but is not in `writes`.
+
+### Discovery
+
+After `open`, `back`, `forward`, `reload` or a tab switch, the response lists the saved flows for that site once per session, with their params, the recorded values and the item fields. A capturing session hides only the flows it saved itself. When the page also declares WebMCP tools, those come first and the hint suggests them when one covers the task.
+
+Saved flows use the shape of a WebMCP tool: a name, a description and an `inputSchema` built from the params. `flow list --json` returns that shape, and `webmcp list` shows saved flows in it, after the tools the page declares. Run them with `flow run`; `webmcp invoke` only calls the page's own tools.
+
+The MCP server exposes `agent_browser_flow_list`, `agent_browser_flow_run`, `agent_browser_flow_steps` and `agent_browser_flow_save` in the core profile. The common `capture` argument opens a session with `--capture flow`.
+
+### Storage
+
+Flows live in `~/.agent-browser/flows/<origin>/<name>.json`. Set `AGENT_BROWSER_FLOWS_DIR` to use another directory. `<origin>` is validated as a hostname when a flow is written, so it cannot contain a path.
+
+On macOS and Linux the directories are created with mode `0700` and the files with `0600`. On Windows flows are written under the user profile and inherit its per-user permissions; agent-browser does not set an explicit ACL, so a directory set with `AGENT_BROWSER_FLOWS_DIR` is only as private as its location.

@@ -1212,6 +1212,50 @@ pub async fn get_element_attribute(
     Ok(result.result.value.unwrap_or(Value::Null))
 }
 
+/// What a field says about itself, so a recording can tell a credential
+/// from other input even when the field has no label.
+pub async fn get_field_traits(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Value, String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: "function() { \
+                    const label = (this.labels && this.labels[0] && this.labels[0].innerText) || ''; \
+                    const attr = (n) => this.getAttribute && this.getAttribute(n) || ''; \
+                    return { \
+                        type: this.type || '', \
+                        autocomplete: attr('autocomplete'), \
+                        hint: [attr('name'), this.id, attr('aria-label'), attr('placeholder'), label] \
+                            .filter(Boolean).join(' ') \
+                    }; }"
+                    .to_string(),
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    Ok(result.result.value.unwrap_or(Value::Null))
+}
+
 pub async fn is_element_visible(
     client: &CdpClient,
     session_id: &str,
