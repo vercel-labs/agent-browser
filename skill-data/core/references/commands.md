@@ -53,6 +53,8 @@ With `--json`, `--omit-command` replaces each `command` array with a stable zero
 
 ## Snapshot (page analysis)
 
+On CDP-backed browsers, interactive snapshots include clickable elements inside open shadow roots, including nested components. Use their refs with the same interaction commands as other elements.
+
 ```bash
 agent-browser snapshot            # Full accessibility tree
 agent-browser snapshot -i         # Interactive elements only (recommended)
