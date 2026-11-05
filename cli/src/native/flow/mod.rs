@@ -6827,6 +6827,47 @@ mod tests {
     }
 
     #[test]
+    fn a_skipped_tier_is_not_drift_for_unverify_or_the_outcome() {
+        let skipped = TierResult {
+            skipped: true,
+            reason: Some("not on the site".to_string()),
+            ..result(Tier::Page, false, None, true, None)
+        };
+        let http = TierResult {
+            reason: Some("HTTP 500".to_string()),
+            ..result(Tier::Http, false, Some(500), false, None)
+        };
+        let replay = TierResult {
+            transport: true,
+            reason: Some("request failed".to_string()),
+            ..result(Tier::Replay, false, None, false, None)
+        };
+        let attempts = [http, skipped.clone(), replay];
+        let mut flow = flow_with_request(None, false);
+        flow.verified_at = Some("then".to_string());
+        finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
+        assert_eq!(flow.verified_at.as_deref(), Some("then"));
+        let outcome = RunOutcome::failed(&attempts, &flow);
+        assert!(
+            matches!(&outcome, RunOutcome::Failed { reason, .. } if reason == "request failed"),
+            "{outcome:?}"
+        );
+        // A shape change before the skipped tier still unverifies.
+        let mut shape = result(Tier::Http, false, Some(200), true, None);
+        shape.shape_changed = true;
+        let replay = result(Tier::Replay, true, Some(200), false, None);
+        flow.verified_at = Some("then".to_string());
+        finish_run(
+            &mut flow,
+            &[shape, skipped, replay],
+            "now",
+            1,
+            &Shape::default(),
+        );
+        assert_eq!(flow.verified_at, None);
+    }
+
+    #[test]
     fn a_routed_write_answered_with_a_5xx_is_not_an_unknown_outcome() {
         let mut req = prepared("s1r1");
         req.write = true;

@@ -610,7 +610,9 @@ pub fn finish_run(
     if all_ok && shape_changed.is_none() && any_empty {
     } else if all_ok && shape_changed.is_none() {
         flow.verified_at = Some(now.to_string());
-    } else if shape_changed.is_some() || (!all_ok && attempts.iter().any(|r| !r.ok && r.drift)) {
+    } else if shape_changed.is_some()
+        || (!all_ok && attempts.iter().any(|r| !r.ok && r.drift && !r.skipped))
+    {
         flow.verified_at = None;
     }
     // Remember the tier that worked, so the next run starts there. A transport
@@ -764,11 +766,16 @@ impl RunOutcome {
 
     /// Why a run that finished without data failed.
     pub fn failed(results: &[TierResult], flow: &Flow) -> RunOutcome {
-        let failure = results.iter().rev().find(|r| !r.ok);
+        // A skipped tier was never tried, so the last real failure is the one to report.
+        let failure = results
+            .iter()
+            .rev()
+            .find(|r| !r.ok && !r.skipped)
+            .or_else(|| results.iter().rev().find(|r| !r.ok));
         let step = failure.map(|r| r.step).unwrap_or(0);
         // Only the failing request's own attempts say what went wrong.
         let own = |r: &&TierResult| failure.is_some_and(|f| r.id == f.id);
-        if results.iter().filter(own).any(|r| r.drift) {
+        if results.iter().filter(own).any(|r| r.drift && !r.skipped) {
             let tried = results
                 .iter()
                 .filter(own)
