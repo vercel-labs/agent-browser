@@ -15844,3 +15844,32 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
     redirect_server.abort();
     hook_server.abort();
 }
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_read_active_page() {
+    required_firefox_binary();
+    let home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    _env.set("HOME", home.path().to_str().unwrap());
+    _env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "document.body.innerHTML = '<h1>Active page read marker</h1>'",
+    )
+    .await;
+    let resp = firefox_command(&mut state, json!({ "id": "read", "action": "read" })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["finalUrl"], fixture.url);
+    assert_eq!(get_data(&resp)["source"], "active-tab-html");
+    assert!(get_data(&resp)["content"]
+        .as_str()
+        .unwrap()
+        .contains("Active page read marker"));
+    firefox_close(&mut state).await;
+}
