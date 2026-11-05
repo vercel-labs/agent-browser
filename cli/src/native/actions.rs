@@ -12308,6 +12308,23 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             .unwrap_or(false),
         None => false,
     };
+    // A request the last step started may still be loading; let it finish so
+    // its response body is on the entry. Bounded by the command timeout.
+    let from = cmd.get("from").and_then(|v| v.as_u64());
+    let to = cmd.get("to").and_then(|v| v.as_u64());
+    let deadline =
+        tokio::time::Instant::now() + tokio::time::Duration::from_millis(state.timeout_ms(cmd));
+    loop {
+        state.drain_cdp_events_background().await?;
+        if !state
+            .flow
+            .has_unfinished_requests(from, to, &state.har_entries)
+            || tokio::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    }
     let entries = state.har_entries.clone();
     state.flow.save(super::flow::SaveArgs {
         name: &name,

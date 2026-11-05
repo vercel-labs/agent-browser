@@ -15072,6 +15072,7 @@ const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
 <button id="gql" onclick="gql()">Gql</button>
 <button id="add" onclick="add()">Add</button>
 <button id="cartadd" onclick="fetch('/cart/remove?id=7')">CartAdd</button>
+<button id="slow" onclick="fetch('/api/slow?q=stove')">Slow</button>
 <script>
 let csrf = ''; let user = '';
 async function login() { await fetch('/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: document.getElementById('email').value, pw: document.getElementById('pw').value }) }); }
@@ -15262,6 +15263,18 @@ async fn flow_fixture() -> FlowFixture {
                         "application/json",
                         "",
                         r#"{"items":[{"id":1,"name":"kettle"},{"id":2,"name":"toaster"}]}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/slow") => {
+                    // The request is in flight when the click returns.
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"items":[{"id":1,"name":"stove"}]}"#,
                     )
                     .await
                 }
@@ -15625,6 +15638,56 @@ async fn e2e_flow_capture_save_run_and_guards() {
     let closed = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
     assert_success(&closed);
     assert!(closed["data"].get("unsaved").is_none(), "{closed}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_includes_requests_still_in_flight() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    assert_success(
+        &exec(
+            &json!({ "id": "1", "action": "launch", "headless": true, "capture": ["flow"] }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &exec(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/", fx.site) }),
+            &mut state,
+        )
+        .await,
+    );
+    // Save as soon as the server has the request, before its response is read.
+    for i in 0..3 {
+        let before = fx.hits("GET /api/slow");
+        assert_success(
+            &exec(
+                &json!({ "id": format!("c{i}"), "action": "click", "selector": "#slow" }),
+                &mut state,
+            )
+            .await,
+        );
+        fx.wait_until(|| fx.hits("GET /api/slow") > before).await;
+        let saved = exec(
+            &json!({ "id": format!("s{i}"), "action": "flow_save", "name": format!("stoves{i}") }),
+            &mut state,
+        )
+        .await;
+        assert_success(&saved);
+        assert_eq!(
+            saved["data"]["requests"].as_array().unwrap().len(),
+            1,
+            "{saved}"
+        );
+    }
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 
 #[tokio::test]

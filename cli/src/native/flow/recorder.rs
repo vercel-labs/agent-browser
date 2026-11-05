@@ -421,6 +421,26 @@ impl FlowRecorder {
         Ok((from, to))
     }
 
+    /// Whether a request tagged to a step in the range has not finished
+    /// loading, so its response body is not on the entry yet.
+    pub fn has_unfinished_requests(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+    ) -> bool {
+        let Ok((first, last)) = self.resolve_range(from, to) else {
+            return false;
+        };
+        entries.iter().any(|e| {
+            e.loading_finished_timestamp.is_none()
+                && self
+                    .request_tags
+                    .get(&e.request_id)
+                    .is_some_and(|seq| *seq >= first && *seq <= last)
+        })
+    }
+
     /// A command that is not recorded starts: requests it sends belong to no
     /// step, so a later save does not keep them.
     pub(super) fn untag_current(&mut self) {
