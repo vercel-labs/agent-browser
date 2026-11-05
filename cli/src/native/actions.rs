@@ -12675,14 +12675,17 @@ impl super::flow::Browser for FlowWiring<'_> {
         self.started_har = !self.state.har_recording;
         if self.started_har {
             handle_har_start(&json!({}), self.state).await?;
-        } else if self.state.har_content_mode == HarContentMode::None {
+        }
+        // Earlier tiers' responses may still be queued; they are not the
+        // replay's, and they are drained before the mode changes so they
+        // gain no bodies.
+        let _ = self.state.drain_cdp_events_background().await;
+        if !self.started_har && self.state.har_content_mode == HarContentMode::None {
             // The replay reads its answers from bodies, so it keeps them for
             // its own requests even when the session's HAR does not.
             self.restore_content = Some(HarContentMode::None);
             self.state.har_content_mode = HarContentMode::Text;
         }
-        // Earlier tiers' responses may still be queued; they are not the replay's.
-        let _ = self.state.drain_cdp_events_background().await;
         self.mark = self.state.har_entries.len();
         Ok(self.mark)
     }
@@ -12699,6 +12702,14 @@ impl super::flow::Browser for FlowWiring<'_> {
     async fn end_capture(&mut self) {
         let _ = self.state.drain_cdp_events_background().await;
         if let Some(mode) = self.restore_content.take() {
+            // Entries from before the replay keep the no-body mode they had.
+            let keep = self.mark.min(self.state.har_entries.len());
+            for e in &mut self.state.har_entries[..keep] {
+                let size = e.response_body.take().map_or(0, |b| b.len());
+                e.response_body_base64 = false;
+                self.state.har_body_total_bytes =
+                    self.state.har_body_total_bytes.saturating_sub(size);
+            }
             self.state.har_content_mode = mode;
         }
         if self.started_har {
@@ -15286,6 +15297,48 @@ mod tests {
         wiring.end_capture().await;
         assert_eq!(state.har_content_mode, HarContentMode::None);
         assert!(state.har_recording, "the user's HAR keeps running");
+    }
+
+    #[tokio::test]
+    async fn a_replay_leaves_no_bodies_on_the_entries_a_content_none_har_held_before_it() {
+        use crate::native::flow::Browser;
+        let entry = |id: &str, body: Option<&str>| HarEntry {
+            request_id: id.to_string(),
+            wall_time: 0.0,
+            method: "GET".to_string(),
+            url: "https://example.com/".to_string(),
+            request_headers: Vec::new(),
+            post_data: None,
+            request_body_size: 0,
+            resource_type: "Fetch".to_string(),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/2.0".to_string(),
+            response_headers: Vec::new(),
+            mime_type: "application/json".to_string(),
+            redirect_url: String::new(),
+            response_body_size: 2,
+            cdp_timing: None,
+            loading_finished_timestamp: Some(1.0),
+            response_body: body.map(String::from),
+            response_body_base64: false,
+        };
+        let mut state = DaemonState::new();
+        state.har_recording = true;
+        state.har_content_mode = HarContentMode::None;
+        state.har_entries.push(entry("before", None));
+        let allow = crate::native::flow::AllowWrite::default();
+        let mut wiring = FlowWiring::new(&mut state, &allow);
+        let mark = wiring.begin_capture().await.unwrap();
+        // A body fetched while the replay ran, for a request that began earlier.
+        wiring.state.har_entries[0].response_body = Some("{}".to_string());
+        wiring.state.har_body_total_bytes = 2;
+        wiring.state.har_entries.push(entry("during", Some("{}")));
+        assert_eq!(mark, 1);
+        wiring.end_capture().await;
+        assert_eq!(state.har_entries.len(), 1);
+        assert_eq!(state.har_entries[0].response_body, None);
+        assert_eq!(state.har_body_total_bytes, 0);
     }
 
     #[test]
