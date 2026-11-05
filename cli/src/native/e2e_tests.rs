@@ -13883,7 +13883,7 @@ async fn attach_pinned_session(
             "id": format!("{}-launch", session),
             "action": "launch",
             "cdpUrl": ws_url,
-            "pinTab": true
+            "settings": { "pin-tab": true }
         }),
         &mut state,
     )

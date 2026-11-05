@@ -737,7 +737,7 @@ impl DaemonState {
     pub fn new() -> Self {
         let session_id =
             env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
-        let settings = Running::from_env();
+        let mut settings = Running::from_env();
         let security = settings.security();
         let restore = settings.restore();
         // A corrupt binding file is surfaced later, on attach; it does not
@@ -747,6 +747,9 @@ impl DaemonState {
                 .ok()
                 .flatten()
                 .is_some_and(|b| b.pinned);
+        if pin_tab {
+            settings.set(Key::PinTab, Value::Bool(true));
+        }
         Self {
             browser: None,
             appium: None,
@@ -3072,7 +3075,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         let mut broadcast_cmd;
         let has_internal_fields = cmd.get("plugins").is_some()
             || cmd.get("settings").is_some()
-            || cmd.get("pinTab").is_some()
             || cmd.get("restoreKey").is_some()
             || cmd.get("restoreSave").is_some()
             || cmd.get("restoreCheckUrl").is_some()
@@ -3083,7 +3085,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             if let Some(obj) = broadcast_cmd.as_object_mut() {
                 obj.remove("plugins");
                 obj.remove("settings");
-                obj.remove("pinTab");
                 obj.remove("restoreKey");
                 obj.remove("restoreSave");
                 obj.remove("restoreCheckUrl");
@@ -3108,55 +3109,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // Keep element resolution in sync with the `frame` selection (see
     // element::set_active_frame for why this is mirrored).
     super::element::set_active_frame(state.active_frame_id.as_deref());
-
-    // `--pin-tab` from the client enables strict tab binding even when the
-    // daemon was started without the flag, and `--no-pin-tab` (pinTab: false)
-    // disables a sticky pin restored from disk or enabled earlier. Both are
-    // persisted with the binding so the setting survives daemon restarts;
-    // absence of the field leaves the current state untouched.
-    match cmd.get("pinTab").and_then(|v| v.as_bool()) {
-        Some(pin) if pin != state.pin_tab => {
-            // Persist the pinned state before committing it to live state, so a
-            // load/save failure leaves the daemon exactly as it was instead of
-            // reporting an error while the isolation mode already flipped.
-            match tab_binding::load(&state.session_id) {
-                Ok(Some(mut binding)) => {
-                    if binding.pinned != pin {
-                        binding.pinned = pin;
-                        if let Err(e) = tab_binding::save(&state.session_id, &binding) {
-                            return error_response(
-                                &id,
-                                &format!(
-                                    "cannot persist the pin-tab setting: {} — the change was \
-                                     not applied",
-                                    e
-                                ),
-                            );
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    return error_response(
-                        &id,
-                        &format!(
-                            "cannot read the session tab binding to update the pin state: {} \
-                             — delete the binding file to reset the session",
-                            e
-                        ),
-                    );
-                }
-            }
-            // Persistence succeeded (or there was nothing to write): commit the
-            // live state, and force a re-persist from the snapshot next time.
-            state.pin_tab = pin;
-            if let Some(ref mut mgr) = state.browser {
-                mgr.set_pin_tab(pin);
-            }
-            state.last_persisted_binding = None;
-        }
-        _ => {}
-    }
 
     // The settings this invocation set ride on the command. Live settings
     // apply now, before the policy checks, so a changed policy governs this
@@ -3882,6 +3834,7 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
     })?;
     if binding.as_ref().is_some_and(|b| b.pinned) {
         state.pin_tab = true;
+        state.settings.set(Key::PinTab, Value::Bool(true));
     }
     let pin = state.pin_tab;
     if state.browser.is_none() {
@@ -5754,6 +5707,27 @@ fn adjust_ca_patch(state: &mut DaemonState, patch: &mut Patch) -> Result<(), Str
     Ok(())
 }
 
+/// Writes `pin` into the session's tab binding, when one exists.
+fn persist_pin_tab(session_id: &str, pin: bool) -> Result<(), String> {
+    match tab_binding::load(session_id) {
+        Ok(Some(mut binding)) if binding.pinned != pin => {
+            binding.pinned = pin;
+            tab_binding::save(session_id, &binding).map_err(|e| {
+                format!(
+                    "cannot persist the pin-tab setting: {} — the change was not applied",
+                    e
+                )
+            })
+        }
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!(
+            "cannot read the session tab binding to update the pin state: {} — delete the \
+             binding file to reset the session",
+            e
+        )),
+    }
+}
+
 /// Plans `patch` against the session's settings and applies the plan. Live
 /// settings change in place. Launch settings close the running browser so the
 /// launch that follows uses them, and they are committed for good only once
@@ -5803,6 +5777,12 @@ async fn apply_settings_patch(
     } else {
         None
     };
+
+    // Persist the pinned state before anything changes, so a failure leaves
+    // the daemon as it was.
+    if changed(Key::PinTab) {
+        persist_pin_tab(&state.session_id, plan.next.pin_tab())?;
+    }
 
     let had_browser = has_active_browser_session(state);
     let relaunched_browser = plan.relaunch && had_browser;
@@ -5894,6 +5874,15 @@ async fn apply_settings_patch(
     }
     if let Some(ca_cert) = ca_cert {
         state.effective_ca_cert = ca_cert;
+    }
+    if was(Key::PinTab) {
+        let pin = next.pin_tab();
+        state.pin_tab = pin;
+        if let Some(ref mut mgr) = state.browser {
+            mgr.set_pin_tab(pin);
+        }
+        // Force a re-persist from the snapshot next time.
+        state.last_persisted_binding = None;
     }
     if was(Key::Cdp) || was(Key::CdpHeaders) {
         // The requested headers win over any cached for the endpoint, and
@@ -15660,6 +15649,36 @@ mod tests {
             rgba: vec![0, 0, 0, 255],
         };
         assert_eq!(changed_pixel_ratio(&previous, 2, 1, &[0; 8]), 1.0);
+    }
+
+    #[tokio::test]
+    async fn pin_tab_false_disables_a_pin_read_from_disk_on_attach() {
+        use super::super::tab_binding::{load, save, TabBinding};
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("XDG_RUNTIME_DIR");
+        let mut state = DaemonState::new();
+        assert!(!state.pin_tab);
+        let session = state.session_id.clone();
+        // A binding written after boot, read back on attach.
+        save(
+            &session,
+            &TabBinding {
+                target_id: "ABCDEF0123456789".to_string(),
+                url: "https://example.com".to_string(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+        apply_tab_binding_on_attach(&mut state).await.unwrap();
+        assert!(state.pin_tab);
+
+        let off = json!({ "action": "state_list", "id": "off", "settings": { "pin-tab": false } });
+        let resp = execute_command(&off, &mut state).await;
+        assert_eq!(resp["success"], true);
+        assert!(!state.pin_tab);
+        assert!(!load(&session).unwrap().unwrap().pinned);
     }
 
     /// A binding-recovery failure must tear the connection down: the attach
