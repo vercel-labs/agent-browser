@@ -15378,7 +15378,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
     );
     assert_success(&exec(&launch, &mut state).await);
     assert!(state.flow.active());
-    // Turning capture on for a session that has none is an error.
+    // Turning capture on for a session that has none relaunches it with capture.
     let mut plain = DaemonState::new();
     assert_success(
         &exec(
@@ -15387,18 +15387,18 @@ async fn e2e_flow_capture_save_run_and_guards() {
         )
         .await,
     );
+    assert!(!plain.flow.active());
     let late = exec(
         &json!({ "id": "p2", "action": "launch", "headless": true, "capture": ["flow"] }),
         &mut plain,
     )
     .await;
-    assert!(
-        late["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("close it and reopen"),
+    assert_success(&late);
+    assert_eq!(
+        late["data"]["lifecycle"]["relaunchedBrowser"], true,
         "{late}"
     );
+    assert!(plain.flow.active());
     let _ = exec(&json!({ "id": "p3", "action": "close" }), &mut plain).await;
 
     let first = exec(

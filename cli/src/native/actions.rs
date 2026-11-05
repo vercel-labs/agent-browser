@@ -5986,6 +5986,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .map(String::from)
         .or_else(|| state.settings.engine());
     let patch = launch_envelope_patch(cmd, engine.as_deref());
+    check_capture_setting(&patch)?;
     let had_browser_before_launch = has_active_browser_session(state);
 
     let mut outcome = apply_settings_patch(state, &patch, true).await?;
@@ -12283,7 +12284,7 @@ fn handle_flow_steps(_cmd: &Value, state: &DaemonState) -> Result<Value, String>
 }
 
 const NOT_CAPTURING: &str =
-    "this session is not capturing flows; close it and reopen with `--capture flow`";
+    "this session is not capturing flows; pass `--capture flow` on the next command and the session relaunches with capture on";
 
 async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if !state.flow.active() {
@@ -20293,12 +20294,20 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(handle_flow_steps(&json!({}), &state).is_err());
     }
 
-    #[test]
-    fn capture_is_a_launch_setting_that_only_relaunches_when_it_changes() {
+    #[tokio::test]
+    async fn capture_is_a_launch_setting_that_only_relaunches_when_it_changes() {
         let flow = Patch::from_entries([(Key::Capture, Requested::Set(json!(["flow"])))]);
         assert!(check_capture_setting(&flow).is_ok());
         let bad = Patch::from_entries([(Key::Capture, Requested::Set(json!(["har"])))]);
         let err = check_capture_setting(&bad).unwrap_err();
+        assert!(err.contains("Supported: flow"), "{err}");
+        let mut state = DaemonState::new();
+        let err = handle_launch_inner(
+            &json!({ "action": "launch", "capture": ["har"] }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("Supported: flow"), "{err}");
         assert!(launch_envelope_patch(&json!({ "capture": ["flow"] }), None)
             .value(Key::Capture)
