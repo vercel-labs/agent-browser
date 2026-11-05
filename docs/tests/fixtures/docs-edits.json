@@ -256,6 +256,24 @@
         "to": "pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit close releases it so other sessions can take the tab, and the next pinned command pins again."
       }
     ],
+    "/engines/chrome": [
+      {
+        "from": "When no `--executable-path` is provided, agent-browser searches for Chrome in this order:",
+        "to": "When no `--executable-path` is provided, agent-browser checks the Chrome it downloaded with `agent-browser install` first, then searches the platform locations in this order:"
+      },
+      {
+        "from": "When no --executable-path is provided, agent-browser searches for Chrome in this order:",
+        "to": "When no --executable-path is provided, agent-browser checks the Chrome it downloaded with agent-browser install first, then searches the platform locations in this order:"
+      },
+      {
+        "from": "        <code>/Applications/Google Chrome.app</code>,\n        <code>/Applications/Google Chrome Canary.app</code>,\n        <code>/Applications/Chromium.app</code>,\n        <code>/Applications/Brave Browser.app</code>,\n        Puppeteer cache (<code>~/.cache/puppeteer/chrome/</code> or <code>PUPPETEER_CACHE_DIR</code>),\n        Chrome for Testing cache",
+        "to": "        <code>/Applications/Google Chrome.app</code>,\n        <code>/Applications/Google Chrome Canary.app</code>,\n        <code>/Applications/Chromium.app</code>,\n        <code>/Applications/Brave Browser.app</code>,\n        the same apps in <code>~/Applications</code>,\n        Puppeteer cache (<code>~/.cache/puppeteer/chrome/</code> or <code>PUPPETEER_CACHE_DIR</code>),\n        Playwright cache (<code>~/.cache/ms-playwright</code> or <code>PLAYWRIGHT_BROWSERS_PATH</code>)"
+      },
+      {
+        "from": "/Applications/Google Chrome.app, /Applications/Google Chrome Canary.app, /Applications/Chromium.app, /Applications/Brave Browser.app, Puppeteer cache (~/.cache/puppeteer/chrome/ or PUPPETEER_CACHE_DIR), Chrome for Testing cache",
+        "to": "/Applications/Google Chrome.app, /Applications/Google Chrome Canary.app, /Applications/Chromium.app, /Applications/Brave Browser.app, the same apps in ~/Applications, Puppeteer cache (~/.cache/puppeteer/chrome/ or PUPPETEER_CACHE_DIR), Playwright cache (~/.cache/ms-playwright or PLAYWRIGHT_BROWSERS_PATH)"
+      }
+    ],
     "/engines/obscura": [
       {
         "from": "MCP tools use the same provider through `extraArgs`: `[\"--engine\", \"obscura\", \"--executable-path\", \"/path/to/obscura\"]`.",
