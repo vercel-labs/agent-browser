@@ -7343,6 +7343,78 @@ mod tests {
             assert!(text.starts_with("Runs the task recorded on"), "{text}");
         }
 
+        const CHANGED: &str = r#"{"done":1}"#;
+
+        fn cart_write(tier: &str) -> (Flow, Vec<PreparedRequest>) {
+            run_flow(json!({
+                "output": "s1r1",
+                "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+                "steps": [{ "command": {}, "requests": [
+                    { "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "tier": tier, "expect": ok_expect() }] }]
+            }))
+        }
+
+        #[test]
+        fn an_accepted_write_with_a_changed_shape_ends_as_applied_on_every_tier() {
+            use memory::{MemorySenders, Scripted};
+            let (flow, requests) = cart_write("http");
+            let req = &requests[0];
+            // Each tier's own answer path.
+            let policy = HostPolicy::of(&flow);
+            let entry = {
+                let mut e = posted(Some(CHANGED), 200);
+                e.post_data = None;
+                e
+            };
+            let by_tier = [
+                (
+                    "http",
+                    tier_result(
+                        req,
+                        Tier::Http,
+                        Instant::now(),
+                        Ok((200, CHANGED.to_string())),
+                    ),
+                ),
+                (
+                    "page",
+                    page::page_result(
+                        &policy,
+                        req,
+                        Instant::now(),
+                        Ok(json!({ "status": 200, "text": CHANGED })),
+                    ),
+                ),
+                (
+                    "replay",
+                    replay::replay_result(req, Instant::now(), Some(&entry)),
+                ),
+            ];
+            for (tier, r) in &by_tier {
+                assert_eq!(r.stop, Some(Stop::WriteApplied), "{tier}: {:?}", r.reason);
+                assert!(r.shape_changed && !r.drift && !r.ok, "{tier}");
+            }
+            // A run ends there: no other tier sends it, the flow is
+            // unverified, and the message says not to repeat it.
+            for tier in [Tier::Http, Tier::Page, Tier::Replay] {
+                let (mut flow, requests) = cart_write(tier.name());
+                let mut senders =
+                    MemorySenders::default().answer(tier, "s1r1", Scripted::json(200, CHANGED));
+                flow.verified_at = Some("t".to_string());
+                let results =
+                    block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+                assert_eq!(senders.times("s1r1"), 1, "{tier:?}");
+                assert!(unverify_on_shape_change(&mut flow, &results));
+                assert_eq!(flow.verified_at, None);
+                let message = RunOutcome::stopped(&results).unwrap().message("f");
+                assert!(
+                    message.contains("write_applied") && message.contains("do not repeat"),
+                    "{message}"
+                );
+                assert!(!message.contains("drive the browser"), "{message}");
+            }
+        }
+
         #[test]
         fn a_write_answer_captured_before_a_failing_command_is_drift() {
             let flow = cart_flow();

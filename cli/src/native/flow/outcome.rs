@@ -17,6 +17,8 @@ pub enum Stop {
     Blocked,
     /// A write was sent and no answer came back.
     OutcomeUnknown,
+    /// A write was accepted but its answer is not the recorded one.
+    WriteApplied,
 }
 
 impl Stop {
@@ -29,6 +31,7 @@ impl Stop {
             Stop::RateLimited => "rate_limited",
             Stop::Blocked => "blocked",
             Stop::OutcomeUnknown => "outcome_unknown",
+            Stop::WriteApplied => "write_applied",
         }
     }
 
@@ -43,6 +46,9 @@ impl Stop {
             }
             Stop::RateLimited => "Wait before rerunning",
             Stop::OutcomeUnknown => "Check the site before rerunning; the write is not sent again",
+            Stop::WriteApplied => {
+                "The site accepted the write, so it was applied; do not repeat it. Check the site for the result"
+            }
             Stop::Blocked => "Continue in the UI or let the user clear the challenge",
         }
     }
@@ -545,6 +551,14 @@ pub fn tier_result_of(
                 f.stop = Some(Stop::OutcomeUnknown);
                 f.drift = false;
                 f.reason = format!("{}: the write may have been applied", f.reason);
+            }
+            // A write the site accepted was applied, whatever shape its answer
+            // has: no tier repeats it, and the agent must not either.
+            if sent && req.write && f.stop.is_none() && is_accepted(f.status) {
+                f.stop = Some(Stop::WriteApplied);
+                f.shape_changed = f.drift;
+                f.drift = false;
+                f.reason = format!("{}: the write was applied", f.reason);
             }
             // The recording sent credentials or a signature a run cannot
             // copy, so a 401 or 403 may only mean this tier lacks them; the
