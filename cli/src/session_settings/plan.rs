@@ -148,13 +148,27 @@ impl Running {
     /// - a key the patch does not name never produces a change;
     /// - a value equal to the running one (or to the default when nothing is
     ///   running) is free: no change, no notice, no relaunch;
-    /// - setting one connection target displaces the other targets.
+    /// - setting one connection target displaces the other targets;
+    /// - an ambient connection entry applies only to a session with no target.
     pub fn plan(&self, patch: &Patch) -> Plan {
         let mut next = self.clone();
         let mut changes: Vec<Change> = Vec::new();
         let mut ignored: Vec<Change> = Vec::new();
 
-        for (key, requested) in patch.iter() {
+        // Connection entries from the environment or config are session
+        // defaults: they apply after the explicit ones, and only to a session
+        // that has no target by then.
+        let mut ambient_open: Option<bool> = None;
+        let ordered = patch
+            .iter()
+            .filter(|(key, _)| !patch.is_ambient(*key))
+            .chain(patch.iter().filter(|(key, _)| patch.is_ambient(*key)));
+        for (key, requested) in ordered {
+            if patch.is_ambient(key)
+                && !*ambient_open.get_or_insert_with(|| next.connection() == Connection::Local)
+            {
+                continue;
+            }
             match requested {
                 Requested::Set(value) if key == Key::ClearCaCert => {
                     // A one-shot: drops the CA trust that is in effect.

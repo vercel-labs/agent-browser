@@ -1356,7 +1356,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 || endpoint.starts_with("https://")
             {
                 let mut cmd = json!({ "id": id, "action": "launch", "cdpUrl": endpoint });
-                if let Some(ref raw) = flags.cdp_headers {
+                if let Some(raw) = flags.cdp_headers.as_ref().filter(|_| flags.cli_cdp_headers) {
                     cmd["cdpHeaders"] =
                         parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
                             message,
@@ -1394,7 +1394,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                 };
                 let mut cmd = json!({ "id": id, "action": "launch", "cdpPort": port });
-                if let Some(ref raw) = flags.cdp_headers {
+                if let Some(raw) = flags.cdp_headers.as_ref().filter(|_| flags.cli_cdp_headers) {
                     cmd["cdpHeaders"] =
                         parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
                             message,
@@ -3919,6 +3919,9 @@ mod tests {
             cli_webgpu: false,
             cli_no_webmcp: false,
             cli_auto_connect: false,
+            cli_cdp: false,
+            cli_cdp_headers: false,
+            cli_provider: false,
             no_auto_connect: false,
             cli_restore: false,
             cli_pin_tab: false,
@@ -6395,6 +6398,7 @@ mod tests {
     #[test]
     fn test_connect_with_cdp_headers() {
         let mut flags = default_flags();
+        flags.cli_cdp_headers = true;
         flags.cdp_headers = Some(r#"{"Authorization":"Bearer t"}"#.to_string());
         let cmd = parse_command(&args("connect wss://example.com/cdp"), &flags).unwrap();
         assert_eq!(cmd["action"], "launch");
@@ -6405,10 +6409,21 @@ mod tests {
     #[test]
     fn test_connect_port_with_cdp_headers() {
         let mut flags = default_flags();
+        flags.cli_cdp_headers = true;
         flags.cdp_headers = Some(r#"{"Authorization":"Bearer t"}"#.to_string());
         let cmd = parse_command(&args("connect 9222"), &flags).unwrap();
         assert_eq!(cmd["cdpPort"], 9222);
         assert_eq!(cmd["cdpHeaders"]["Authorization"], "Bearer t");
+    }
+
+    #[test]
+    fn test_connect_ignores_ambient_cdp_headers() {
+        let mut flags = default_flags();
+        flags.cdp_headers = Some(r#"{"Authorization":"Bearer env"}"#.to_string());
+        for target in ["connect wss://example.com/cdp", "connect 9222"] {
+            let cmd = parse_command(&args(target), &flags).unwrap();
+            assert!(cmd.get("cdpHeaders").is_none(), "{target}: {cmd}");
+        }
     }
 
     #[test]

@@ -45,6 +45,8 @@ The `--cdp` flag accepts either:
 
 Use `--cdp-headers` (or `AGENT_BROWSER_CDP_HEADERS`) when the service authenticates the WebSocket handshake instead of the URL. It takes a JSON object with string values and is sent on HTTP discovery (`/json/version`, `/json/list`) and on the WebSocket handshake, for URLs and port numbers alike. It is separate from `--headers`, which sets HTTP headers on page requests.
 
+`connect <port|url>` takes only headers passed with `--cdp-headers` on that command, never `AGENT_BROWSER_CDP_HEADERS` or config headers. An `AGENT_BROWSER_CDP` set in the environment or config is a session default: it does not replace a browser that `connect` attached the session to.
+
 For an `https://` CDP URL, discovery keeps the encryption of the input: requests go over `https://`/`wss://`, so credentials are never sent in plaintext, and there is no fallback to an unencrypted scheme. Only pass `--cdp-headers` with `http://`/`ws://` targets on networks you trust.
 
 Root WebSocket endpoints accept query strings with or without an explicit slash, so both `wss://browser-service.com?token=...` and `wss://browser-service.com/?token=...` work.

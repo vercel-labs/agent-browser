@@ -118,16 +118,26 @@ fn command_is_cdp_url_metadata(cmd: &serde_json::Value) -> bool {
     }
 }
 
+/// Whether the command attaches to an endpoint it names itself (`connect`).
+fn command_names_target(cmd: &serde_json::Value) -> bool {
+    cmd.get("action").and_then(|v| v.as_str()) == Some("launch")
+        && (cmd.get("cdpPort").is_some() || cmd.get("cdpUrl").is_some())
+}
+
 /// The settings patch one command carries. A browserless command never
 /// launches a browser, so CA trust does not apply to it.
 fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings::Patch {
-    let patch = session_settings::Patch::from_flags(flags);
+    let mut patch = session_settings::Patch::from_flags(flags);
+    // `connect` names its endpoint in the launch envelope, so an environment
+    // or config target must not ride along and replace it.
+    if command_names_target(cmd) {
+        patch = patch.without_ambient_connection();
+    }
     // Asking for a running browser's CDP URL never launches or relaunches one,
     // so launch settings do not apply to it.
     if command_is_cdp_url_metadata(cmd) {
         return patch.without_launch_settings();
     }
-    let mut patch = patch;
     if command_is_browserless(cmd) {
         patch.remove(session_settings::Key::CaCert);
         patch.remove(session_settings::Key::ClearCaCert);
@@ -2200,6 +2210,47 @@ mod tests {
             .to_wire()
             .unwrap_or(serde_json::Value::Null);
         (command, wire)
+    }
+
+    fn settings_with_env_target(args: &[&str]) -> serde_json::Value {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let mut flags = crate::flags::parse_flags(&args);
+        flags.cdp = Some("ws://env.example/cdp".to_string());
+        flags.cdp_headers = Some(r#"{"A":"env"}"#.to_string());
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        command_settings(&flags, &command)
+            .to_wire()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    #[test]
+    fn connect_does_not_carry_an_environment_target() {
+        for target in ["wss://x.example/cdp", "9222"] {
+            let wire = settings_with_env_target(&["connect", target]);
+            assert!(wire.get("cdp").is_none(), "{target}: {wire}");
+            assert!(wire.get("cdp-headers").is_none(), "{target}: {wire}");
+            assert!(wire.get("ambient").is_none(), "{target}: {wire}");
+        }
+    }
+
+    #[test]
+    fn other_commands_carry_the_environment_target_as_ambient() {
+        let wire = settings_with_env_target(&["snapshot"]);
+        assert_eq!(wire["cdp"], "ws://env.example/cdp");
+        assert_eq!(wire["ambient"], serde_json::json!(["cdp", "cdp-headers"]));
+    }
+
+    #[test]
+    fn batch_items_keep_the_environment_target_ambient() {
+        let args: Vec<String> = vec!["snapshot".to_string()];
+        let mut flags = crate::flags::parse_flags(&args);
+        flags.cdp = Some("ws://env.example/cdp".to_string());
+        let command = serde_json::json!({"id": "1", "action": "launch"});
+        let wire = batch_item_settings(&flags, &command, false)
+            .to_wire()
+            .unwrap();
+        assert_eq!(wire["ambient"], serde_json::json!(["cdp"]));
     }
 
     #[test]

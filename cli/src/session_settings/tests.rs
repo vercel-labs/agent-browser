@@ -36,7 +36,9 @@ pub(crate) fn full_flags() -> Flags {
     f.debug = true;
     f.executable_path = Some("/bin/chrome".to_string());
     f.cdp = Some("ws://127.0.0.1:9333/devtools".to_string());
+    f.cli_cdp = true;
     f.cdp_headers = Some(r#"{"Authorization":"Bearer x"}"#.to_string());
+    f.cli_cdp_headers = true;
     f.extensions = vec!["/ext/a".to_string(), "/ext/b".to_string()];
     f.init_scripts = vec!["/init/a.js".to_string()];
     f.enable = vec!["react-devtools".to_string()];
@@ -47,6 +49,7 @@ pub(crate) fn full_flags() -> Flags {
     f.args = Some("--no-first-run,--window-size=1280,720".to_string());
     f.user_agent = Some("ua/1".to_string());
     f.provider = Some("browserless".to_string());
+    f.cli_provider = true;
     f.ignore_https_errors = true;
     f.ca_cert = Some("/ca.pem".to_string());
     f.clear_ca_cert = true;
@@ -60,6 +63,7 @@ pub(crate) fn full_flags() -> Flags {
     f.no_xvfb = true;
     f.device = Some("iPhone 15".to_string());
     f.auto_connect = true;
+    f.cli_auto_connect = true;
     f.pin_tab = true;
     f.cli_pin_tab = true;
     f.restore = Some("work".to_string());
@@ -1418,4 +1422,124 @@ fn an_empty_provider_resets_the_session_to_local() {
     let plan = running.plan(&patch_of(&[is(Key::Provider, json!(""))]));
     assert_eq!(plan.next.connection(), Connection::Local);
     assert!(plan.relaunch);
+}
+
+// ---- ambient connection entries ----
+
+fn ambient_flags(cdp: Option<&str>, provider: Option<&str>, headers: Option<&str>) -> Flags {
+    let mut f = blank_flags();
+    f.cdp = cdp.map(str::to_string);
+    f.provider = provider.map(str::to_string);
+    f.cdp_headers = headers.map(str::to_string);
+    f
+}
+
+#[test]
+fn environment_connection_values_are_ambient_and_flags_are_explicit() {
+    let p = Patch::from_flags(&ambient_flags(Some("9222"), None, None));
+    assert!(p.is_ambient(Key::Cdp));
+
+    let mut f = ambient_flags(Some("9222"), Some("ios"), Some(r#"{"A":"b"}"#));
+    f.cli_cdp = true;
+    f.cli_cdp_headers = true;
+    f.cli_provider = true;
+    let p = Patch::from_flags(&f);
+    for key in [Key::Cdp, Key::Provider, Key::CdpHeaders] {
+        assert!(!p.is_ambient(key), "{key:?}");
+        assert!(p.get(key).is_some(), "{key:?}");
+    }
+}
+
+#[test]
+fn an_ambient_target_does_not_replace_the_session_target() {
+    let running = running_with(&[(Key::Cdp, json!("ws://a.example/cdp"))]);
+    let patch = Patch::from_flags(&ambient_flags(Some("ws://b.example/cdp"), None, None));
+    let plan = running.plan(&patch);
+    assert!(plan.changes.is_empty() && !plan.relaunch);
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://a.example/cdp".to_string())
+    );
+
+    let provider = Patch::from_flags(&ambient_flags(None, Some("ios"), None));
+    let plan = running.plan(&provider);
+    assert!(plan.changes.is_empty() && !plan.relaunch);
+}
+
+#[test]
+fn an_ambient_target_applies_to_a_session_without_one() {
+    let patch = Patch::from_flags(&ambient_flags(Some("ws://b.example/cdp"), None, None));
+    let plan = Running::defaults().plan(&patch);
+    assert_eq!(changed_keys(&plan), vec![Key::Cdp]);
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://b.example/cdp".to_string())
+    );
+}
+
+#[test]
+fn an_explicit_target_replaces_the_session_target_and_beats_an_ambient_one() {
+    let running = running_with(&[(Key::Cdp, json!("ws://a.example/cdp"))]);
+    let mut f = ambient_flags(Some("ws://env.example/cdp"), Some("ios"), None);
+    f.cli_provider = true;
+    let plan = running.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Provider("ios".to_string())
+    );
+}
+
+#[test]
+fn ambient_headers_follow_only_an_ambient_target() {
+    let headers = Some(r#"{"A":"b"}"#);
+    let p = Patch::from_flags(&ambient_flags(None, None, headers));
+    assert!(p.get(Key::CdpHeaders).is_none());
+
+    let p = Patch::from_flags(&ambient_flags(Some("9222"), None, headers));
+    assert!(p.is_ambient(Key::CdpHeaders));
+
+    let running = running_with(&[(Key::Cdp, json!("ws://a.example/cdp"))]);
+    let plan = running.plan(&p);
+    assert!(plan.changes.is_empty() && !plan.relaunch);
+    assert_eq!(plan.next.cdp_headers(), None);
+}
+
+#[test]
+fn blank_ambient_values_name_nothing_and_one_ambient_target_wins() {
+    let p = Patch::from_flags(&ambient_flags(Some("  "), None, None));
+    assert!(p.get(Key::Cdp).is_none());
+
+    let p = Patch::from_flags(&ambient_flags(Some("9222"), Some("ios"), None));
+    assert!(p.get(Key::Cdp).is_some());
+    assert!(p.get(Key::Provider).is_none());
+}
+
+#[test]
+fn ambient_marks_survive_the_wire_and_reject_unknown_names() {
+    let patch = Patch::from_flags(&ambient_flags(Some("9222"), None, Some(r#"{"A":"b"}"#)));
+    let wire = patch.to_wire().unwrap();
+    assert_eq!(wire["ambient"], json!(["cdp", "cdp-headers"]));
+    let back = Patch::from_wire(Some(&wire)).unwrap();
+    assert_eq!(back, patch);
+    assert!(back.is_ambient(Key::Cdp));
+
+    // No field: everything is explicit.
+    let plain = json!({"cdp": "9222"});
+    assert!(!Patch::from_wire(Some(&plain)).unwrap().is_ambient(Key::Cdp));
+
+    for bad in [json!("cdp"), json!(["headed"]), json!([1]), json!(["nope"])] {
+        let wire = json!({"cdp": "9222", "ambient": bad});
+        assert!(Patch::from_wire(Some(&wire)).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn without_ambient_connection_keeps_explicit_entries() {
+    let mut f = ambient_flags(Some("9222"), None, None);
+    f.headed = true;
+    f.cli_headed = true;
+    let p = Patch::from_flags(&f).without_ambient_connection();
+    assert!(p.get(Key::Cdp).is_none());
+    assert!(p.get(Key::Headed).is_some());
+    assert!(p.to_wire().unwrap().get("ambient").is_none());
 }

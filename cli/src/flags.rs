@@ -577,6 +577,12 @@ pub struct Flags {
     pub cli_no_webmcp: bool,
     /// True when `--auto-connect` was passed on the command line.
     pub cli_auto_connect: bool,
+    /// True when `--cdp`, `--cdp-headers` or `--provider` was passed on the
+    /// command line. Without it the value came from the environment or config
+    /// and is only a session default.
+    pub cli_cdp: bool,
+    pub cli_cdp_headers: bool,
+    pub cli_provider: bool,
     /// True when `--no-auto-connect` (or `--auto-connect false`) was passed:
     /// the session returns to a local launch, whatever env or config say.
     pub no_auto_connect: bool,
@@ -843,6 +849,9 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         cli_webgpu: false,
         cli_no_webmcp: false,
         cli_auto_connect: false,
+        cli_cdp: false,
+        cli_cdp_headers: false,
+        cli_provider: false,
         no_auto_connect: false,
         cli_restore: false,
         cli_pin_tab: false,
@@ -1023,12 +1032,14 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             "--cdp" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.cdp = Some(s.clone());
+                    flags.cli_cdp = true;
                     i += 1;
                 }
             }
             "--cdp-headers" => {
                 if let Some(h) = args.get(i + 1) {
                     flags.cdp_headers = Some(h.clone());
+                    flags.cli_cdp_headers = true;
                     i += 1;
                 }
             }
@@ -1079,6 +1090,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             "-p" | "--provider" => {
                 if let Some(p) = args.get(i + 1) {
                     flags.provider = Some(p.clone());
+                    flags.cli_provider = true;
                     i += 1;
                 }
             }
