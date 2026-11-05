@@ -394,11 +394,17 @@ pub fn check_response(
         });
     }
     if let Err(reason) = signature_matches(&req.expect.signature, &current) {
-        // Counts that went missing with an empty list read as no results. A
+        // Counts that went missing are allowed; the result is empty only when the list is. A
         // missing list is drift: a false drift sends the agent back to the
         // page, a missed one returns a silently wrong empty answer.
         if matches_without_counts(&req.expect.signature, &current) {
-            return Ok((parsed, true));
+            let empty = match req.expect.list.as_deref() {
+                Some(path) => lookup(&parsed, path)
+                    .and_then(|v| v.as_array())
+                    .is_none_or(|a| a.is_empty()),
+                None => main_list(&parsed).is_none_or(|(_, items)| items.is_empty()),
+            };
+            return Ok((parsed, empty));
         }
         let found = match moved_list(&req.expect.signature, &parsed) {
             Some(path) => format!("; a list now appears at '{}'", path),

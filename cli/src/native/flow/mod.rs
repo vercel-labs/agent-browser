@@ -3225,6 +3225,24 @@ mod tests {
     }
 
     #[test]
+    fn missing_counts_with_a_populated_list_are_not_empty() {
+        let req = PreparedRequest {
+            expect: expect_of(json!({
+                "list": "items",
+                "signature": signature(&json!({ "items": [{ "id": 1 }], "total": 1 })),
+            })),
+            ..prepared("s1r1")
+        };
+        let (body, empty) = check_response(&req, 200, r#"{"items":[{"id":1},{"id":2}]}"#).unwrap();
+        assert!(!empty);
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
+        let (_, empty) = check_response(&req, 200, r#"{"items":[]}"#).unwrap();
+        assert!(empty);
+        let gone = check_response(&req, 200, r#"{"other":[{"id":1}]}"#).unwrap_err();
+        assert!(gone.shape_changed);
+    }
+
+    #[test]
     fn a_response_without_its_list_is_drift_and_without_its_counts_is_empty() {
         let req = PreparedRequest {
             expect: expect_of(
