@@ -2935,7 +2935,13 @@ fn append_launch_policy_actions(
     }
 }
 
+/// The command future is large; boxing it keeps it off the caller's stack,
+/// which a debug-build test thread would otherwise overflow.
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    Box::pin(execute_command_flow(cmd, state)).await
+}
+
+async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
     let outer = state.flow.enter();
     let mut resp = execute_command_inner(cmd, state).await;
     if let Some(seq) = state.flow.exit(outer) {
