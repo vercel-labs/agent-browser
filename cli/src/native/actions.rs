@@ -6031,7 +6031,10 @@ async fn navigate_active_page(
     Ok(result)
 }
 
-async fn handle_url(state: &DaemonState) -> Result<Value, String> {
+async fn handle_url(state: &mut DaemonState) -> Result<Value, String> {
+    if state.firefox.is_some() {
+        return firefox::page::url(state).await;
+    }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let url = wb.get_url().await?;
@@ -6043,7 +6046,7 @@ async fn handle_url(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "url": url }))
 }
 
-async fn handle_read(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_read(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mut options = crate::read::options_from_command(cmd)?;
     if let Some(allowed_domains) = {
         let df = state.domain_filter.read().await;
@@ -6143,7 +6146,10 @@ async fn handle_title(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "title": title }))
 }
 
-async fn handle_content(state: &DaemonState) -> Result<Value, String> {
+async fn handle_content(state: &mut DaemonState) -> Result<Value, String> {
+    if state.firefox.is_some() {
+        return firefox::page::content(state).await;
+    }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let html = wb.get_content().await?;
