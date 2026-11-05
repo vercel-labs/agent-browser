@@ -12620,6 +12620,9 @@ struct FlowWiring<'a> {
     state: &'a mut DaemonState,
     allow: &'a super::flow::AllowWrite,
     started_har: bool,
+    /// The session's HAR content mode, to put back after a replay that
+    /// needed bodies the mode would not keep.
+    restore_content: Option<HarContentMode>,
     mark: usize,
 }
 
@@ -12629,6 +12632,7 @@ impl<'a> FlowWiring<'a> {
             state,
             allow,
             started_har: false,
+            restore_content: None,
             mark: 0,
         }
     }
@@ -12671,6 +12675,11 @@ impl super::flow::Browser for FlowWiring<'_> {
         self.started_har = !self.state.har_recording;
         if self.started_har {
             handle_har_start(&json!({}), self.state).await?;
+        } else if self.state.har_content_mode == HarContentMode::None {
+            // The replay reads its answers from bodies, so it keeps them for
+            // its own requests even when the session's HAR does not.
+            self.restore_content = Some(HarContentMode::None);
+            self.state.har_content_mode = HarContentMode::Text;
         }
         // Earlier tiers' responses may still be queued; they are not the replay's.
         let _ = self.state.drain_cdp_events_background().await;
@@ -12689,6 +12698,9 @@ impl super::flow::Browser for FlowWiring<'_> {
 
     async fn end_capture(&mut self) {
         let _ = self.state.drain_cdp_events_background().await;
+        if let Some(mode) = self.restore_content.take() {
+            self.state.har_content_mode = mode;
+        }
         if self.started_har {
             self.state.har_recording = false;
             self.state.har_entries.clear();
@@ -15255,6 +15267,25 @@ mod tests {
         assert_eq!(response["success"], false);
         assert_eq!(response["error"], "Browser not launched");
         assert!(state.browser.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_replay_over_a_har_without_content_captures_bodies_and_restores_the_mode() {
+        use crate::native::flow::Browser;
+        let mut state = DaemonState::new();
+        state.har_recording = true;
+        state.har_content_mode = HarContentMode::None;
+        let allow = crate::native::flow::AllowWrite::default();
+        let mut wiring = FlowWiring::new(&mut state, &allow);
+        wiring.begin_capture().await.unwrap();
+        assert_eq!(
+            wiring.state.har_content_mode,
+            HarContentMode::Text,
+            "the replay needs bodies to read its answers"
+        );
+        wiring.end_capture().await;
+        assert_eq!(state.har_content_mode, HarContentMode::None);
+        assert!(state.har_recording, "the user's HAR keeps running");
     }
 
     #[test]
