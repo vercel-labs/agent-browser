@@ -424,8 +424,7 @@ impl FlowRecorder {
     /// The requests that could become flow requests, tagged to a step in the
     /// range, that have not finished loading, so their response body is not on
     /// the entry yet, as `METHOD /path`. Third-party, telemetry and streaming
-    /// requests never count, and neither does a redirect hop: a later entry
-    /// with the same request id carries the request on.
+    /// requests never count.
     pub fn unfinished_requests(
         &self,
         from: Option<u64>,
@@ -447,19 +446,15 @@ impl FlowRecorder {
         let policy = HostPolicy::from_start(&start);
         entries
             .iter()
-            .enumerate()
-            .filter(|(i, e)| {
+            .filter(|e| {
                 e.loading_finished_timestamp.is_none()
                     && self
                         .request_tags
                         .get(&e.request_id)
                         .is_some_and(|seq| *seq >= first && *seq <= last)
-                    && !entries[i + 1..]
-                        .iter()
-                        .any(|n| n.request_id == e.request_id)
                     && may_become_candidate(e, &policy)
             })
-            .map(|(_, e)| {
+            .map(|e| {
                 let path = url::Url::parse(&e.url)
                     .map(|u| u.path().to_string())
                     .unwrap_or_else(|_| e.url.clone());
