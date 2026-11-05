@@ -703,8 +703,6 @@ pub struct DaemonState {
     active_provider_connection: bool,
     /// Browser product already checked for an outdated build, so each product is checked once even when the fetch fails.
     browser_security_checked: Option<String>,
-    /// CDP URL whose browser product was already read, so later commands skip the version round trip.
-    browser_security_checked_url: Option<String>,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
     /// Strict session-to-tab binding (`--pin-tab` / AGENT_BROWSER_PIN_TAB).
@@ -841,7 +839,6 @@ impl DaemonState {
             active_provider_session: None,
             active_provider_connection: false,
             browser_security_checked: None,
-            browser_security_checked_url: None,
             confirmed_policy_actions: HashSet::new(),
             pin_tab,
             last_persisted_binding: None,
@@ -2991,10 +2988,10 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
     if state.active_provider_connection || disabled {
         return;
     }
-    let Some(mgr) = state.browser.as_ref() else {
+    let Some(mgr) = state.browser.as_mut() else {
         return;
     };
-    if state.browser_security_checked_url.as_deref() == Some(mgr.get_cdp_url()) {
+    if mgr.product_checked() {
         return;
     }
     let Ok(Ok(version)) = tokio::time::timeout(
@@ -3006,7 +3003,7 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
     else {
         return;
     };
-    state.browser_security_checked_url = Some(mgr.get_cdp_url().to_string());
+    mgr.mark_product_checked();
     let Some(product) = version.get("product").and_then(|v| v.as_str()) else {
         return;
     };
@@ -15063,6 +15060,67 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    /// Serves `Browser.getVersion` on one fixed `ws://` address for any number
+    /// of connections and counts the calls.
+    async fn version_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = calls.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let calls = served.clone();
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let request: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        if request["method"] == "Browser.getVersion" {
+                            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        let reply = serde_json::json!({
+                            "id": request["id"],
+                            "result": { "product": "Chrome/1.0.0.0" },
+                        });
+                        if ws
+                            .send(Message::Text(reply.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (url, calls)
+    }
+
+    #[tokio::test]
+    async fn outdated_check_reads_the_product_once_per_connection() {
+        let (url, calls) = version_server().await;
+        let mut state = super::DaemonState::new();
+        let mut response = serde_json::json!({});
+
+        let client = crate::native::cdp::client::CdpClient::connect(&url)
+            .await
+            .unwrap();
+        state.browser = Some(super::BrowserManager::for_test(client, url.clone()));
+        super::warn_if_browser_outdated(&mut state, &mut response).await;
+        super::warn_if_browser_outdated(&mut state, &mut response).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let client = crate::native::cdp::client::CdpClient::connect(&url)
+            .await
+            .unwrap();
+        state.browser = Some(super::BrowserManager::for_test(client, url.clone()));
+        super::warn_if_browser_outdated(&mut state, &mut response).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn cdp_url_without_browser_does_not_launch() {
         let mut state = super::DaemonState::new();
