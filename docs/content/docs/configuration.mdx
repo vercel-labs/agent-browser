@@ -103,7 +103,7 @@ Global options can be set in a trusted config file using their camelCase equival
     <tr><td><code>contentBoundaries</code></td><td><code>--content-boundaries</code></td><td>boolean</td></tr>
     <tr><td><code>maxOutput</code></td><td><code>--max-output</code></td><td>number</td></tr>
     <tr><td><code>allowedDomains</code></td><td><code>--allowed-domains</code></td><td>string[]; also disables WebRTC in supported Chromium sessions and requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins</td></tr>
-    <tr><td><code>capture</code></td><td><code>--capture</code></td><td>string[]; only <code>flow</code> is supported. Applies when the session opens, so close and reopen to change it. Ignored in project config</td></tr>
+    <tr><td><code>capture</code></td><td><code>--capture</code></td><td>string[]; only <code>flow</code> is supported. A launch setting: passing it to a running session without it relaunches the browser with capture on. Ignored in project config</td></tr>
     <tr><td><code>actionPolicy</code></td><td><code>--action-policy</code></td><td>string</td></tr>
     <tr><td><code>confirmActions</code></td><td><code>--confirm-actions</code></td><td>string</td></tr>
     <tr><td><code>confirmInteractive</code></td><td><code>--confirm-interactive</code></td><td>boolean</td></tr>

@@ -62,6 +62,7 @@ impl Running {
             (Key::RestoreCheckText, "AGENT_BROWSER_RESTORE_CHECK_TEXT"),
             (Key::RestoreCheckFn, "AGENT_BROWSER_RESTORE_CHECK_FN"),
             (Key::ConfirmActions, "AGENT_BROWSER_CONFIRM_ACTIONS"),
+            (Key::Device, "AGENT_BROWSER_IOS_DEVICE"),
         ];
         for (key, name) in strings {
             if let Some(v) = lookup(name) {
@@ -88,6 +89,7 @@ impl Running {
             (Key::IgnoreHttpsErrors, "AGENT_BROWSER_IGNORE_HTTPS_ERRORS"),
             (Key::Webgpu, "AGENT_BROWSER_WEBGPU"),
             (Key::NoXvfb, "AGENT_BROWSER_NO_XVFB"),
+            (Key::Debug, "AGENT_BROWSER_DEBUG"),
         ];
         for (key, name) in flags {
             if let Some(v) = lookup(name) {
@@ -120,6 +122,14 @@ impl Running {
         if let Some(v) = lookup("AGENT_BROWSER_DEFAULT_TIMEOUT").and_then(|s| s.parse::<u64>().ok())
         {
             r.set(Key::DefaultTimeout, Value::from(v));
+        }
+
+        // The plugin registry the CLI handed the daemon; an empty one sets nothing.
+        if let Some(plugins) = lookup("AGENT_BROWSER_PLUGINS")
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+        {
+            r.set(Key::Plugins, plugins);
         }
 
         if let Some(v) = lookup("AGENT_BROWSER_ARGS") {

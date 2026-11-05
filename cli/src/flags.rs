@@ -435,6 +435,9 @@ pub(crate) fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     ];
     let mut i = 0;
     while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
         if args[i] == "--config" {
             return Some(args.get(i + 1).cloned());
         }
@@ -519,6 +522,8 @@ pub struct Flags {
     /// Env-only (AGENT_BROWSER_NO_XVFB): disable automatic Xvfb for headed
     /// launches on displayless Linux hosts.
     pub no_xvfb: bool,
+    /// AGENT_BROWSER_NO_XVFB is set, to any value, so an off value can be sent.
+    pub no_xvfb_set: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
     pub pin_tab: bool,
@@ -540,6 +545,8 @@ pub struct Flags {
     pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
     pub default_timeout: Option<u64>, // AGENT_BROWSER_DEFAULT_TIMEOUT in ms
     pub no_auto_dialog: bool,
+    /// `--relaunch`: relaunch the session's browser even when no setting changed.
+    pub relaunch: bool,
     pub model: Option<String>,
     pub plugins: Vec<PluginConfig>,
     pub verbose: bool,
@@ -741,6 +748,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         no_webmcp: env_var_is_truthy("AGENT_BROWSER_NO_WEBMCP")
             || config.no_webmcp.unwrap_or(false),
         no_xvfb: env_var_is_truthy("AGENT_BROWSER_NO_XVFB"),
+        no_xvfb_set: env::var_os("AGENT_BROWSER_NO_XVFB").is_some(),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
@@ -804,6 +812,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             .and_then(|s| s.parse::<u64>().ok()),
         no_auto_dialog: env_var_is_truthy("AGENT_BROWSER_NO_AUTO_DIALOG")
             || config.no_auto_dialog.unwrap_or(false),
+        relaunch: false,
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
         plugins,
         verbose: false,
@@ -838,6 +847,9 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
     let mut wait_command_seen = false;
     while i < args.len() {
         let arg = args[i].as_str();
+        if arg == "--" {
+            break;
+        }
         if !arg.starts_with('-') && looks_like_command(arg) {
             if !seen_command {
                 wait_command_seen = arg == "wait";
@@ -1284,6 +1296,13 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                     i += 1;
                 }
             }
+            "--relaunch" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.relaunch = val;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--model" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.model = Some(s.clone());
@@ -1311,6 +1330,14 @@ fn looks_like_command(value: &str) -> bool {
     crate::commands::is_top_level_command(value)
 }
 
+/// Return arguments before the end-of-options marker.
+pub fn before_end_of_options(args: &[String]) -> &[String] {
+    &args[..args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len())]
+}
+
 pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
@@ -1334,6 +1361,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--content-boundaries",
         "--confirm-interactive",
         "--no-auto-dialog",
+        "--relaunch",
         "-v",
         "--verbose",
         "-q",
@@ -1395,6 +1423,10 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             skip_next = false;
             i += 1;
             continue;
+        }
+        if arg == "--" {
+            result.extend_from_slice(&args[i..]);
+            break;
         }
         if arg.starts_with("--restore=") {
             i += 1;
@@ -2234,6 +2266,28 @@ mod tests {
     #[test]
     fn test_extract_config_path_skips_flag_values() {
         assert_eq!(extract_config_path(&args("--args --config open")), None);
+    }
+
+    #[test]
+    fn test_end_of_options_stops_global_and_config_parsing() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_CONFIG"]);
+        env.remove("AGENT_BROWSER_CONFIG");
+        let input = args("fill #field -- --config /missing --json --session literal");
+        let baseline = try_parse_flags(&args("fill #field")).unwrap();
+        let flags = try_parse_flags(&input).unwrap();
+
+        assert_eq!(flags.json, baseline.json);
+        assert_eq!(flags.session, baseline.session);
+        assert_eq!(extract_config_path(&input), None);
+        assert_eq!(
+            clean_args(&input),
+            args("fill #field -- --config /missing --json --session literal")
+        );
+
+        let help_args = args("fill #field --help -- --version");
+        assert_eq!(before_end_of_options(&help_args), &help_args[..3]);
+        let version_args = args("fill #field --version -- --help");
+        assert_eq!(before_end_of_options(&version_args), &version_args[..3]);
     }
 
     #[test]

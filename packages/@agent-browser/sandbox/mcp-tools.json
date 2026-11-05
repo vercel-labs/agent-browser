@@ -223,7 +223,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run multiple commands sequentially. A batch containing only get cdp-url commands never launches a browser.",
+      "description": "Run multiple commands sequentially. Unknown commands and subcommands return errors. A batch containing only get cdp-url commands never launches a browser.",
       "inputSchema": {
         "properties": {
           "bail": {
@@ -1057,7 +1057,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Click an element and save the download.",
+      "description": "Click an element and save the download. Only works with a browser agent-browser launched; rejected over --cdp, --auto-connect, or a provider.",
       "inputSchema": {
         "properties": {
           "path": {
@@ -2100,7 +2100,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Move the mouse. Interpolation starts at the last pointer or element interaction.",
+      "description": "Move the mouse using finite coordinates, including fractional CSS pixels. Interpolation starts at the last pointer or element interaction.",
       "inputSchema": {
         "properties": {
           "durationMs": {
@@ -2182,7 +2182,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Scroll with the mouse wheel at the current pointer, initially (0,0). Call agent_browser_mouse_move first to target another location.",
+      "description": "Scroll with finite wheel deltas, including fractional CSS pixels, at the current pointer, initially (0,0). Call agent_browser_mouse_move first to target another location.",
       "inputSchema": {
         "properties": {
           "dx": {
@@ -2393,7 +2393,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
+      "description": "Launch the browser and optionally navigate to a URL. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
       "inputSchema": {
         "properties": {
           "allowedDomains": {
@@ -2404,7 +2404,7 @@
             "type": "array"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. On a running session without capture it relaunches the browser with capture on.",
             "items": {
               "enum": [
                 "flow"
@@ -2422,6 +2422,10 @@
           },
           "headed": {
             "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults.",
+            "type": "boolean"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
             "type": "boolean"
           },
           "restore": {
@@ -4219,7 +4223,7 @@
             "type": "array"
           },
           "capture": {
-            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. On a running session without capture it relaunches the browser with capture on.",
             "items": {
               "enum": [
                 "flow"
@@ -4239,6 +4243,10 @@
             "description": "Starts with an ASCII letter, then ASCII letters, digits, `-`, or `_`; `t<N>` and `T<N>` forms are reserved for tab IDs.",
             "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key.",
@@ -4558,7 +4566,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Wait for a browser download.",
+      "description": "Wait for a browser download. A path is rejected over --cdp, --auto-connect, or a provider.",
       "inputSchema": {
         "properties": {
           "path": {

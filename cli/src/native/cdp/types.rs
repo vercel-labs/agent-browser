@@ -406,8 +406,6 @@ pub struct BoxModel {
     pub padding: Vec<f64>,
     pub border: Vec<f64>,
     pub margin: Vec<f64>,
-    pub width: i64,
-    pub height: i64,
 }
 
 #[derive(Debug, Serialize)]

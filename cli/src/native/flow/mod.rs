@@ -74,6 +74,10 @@ fn classify_header(name: &str) -> HeaderClass {
             HeaderClass::BrowserSet
         }
         _ if lower.starts_with("sec-") => HeaderClass::BrowserSet,
+        // Per-request tracing and client identity: not part of what a flow replays.
+        "x-client-ip" | "x-forwarded-for" | "x-real-ip" | "forwarded" | "traceparent"
+        | "tracestate" | "x-request-id" | "request-id" | "x-amzn-trace-id" | "sentry-trace"
+        | "baggage" | "cf-connecting-ip" | "true-client-ip" => HeaderClass::Dropped,
         _ => HeaderClass::Kept,
     }
 }
@@ -155,38 +159,96 @@ pub fn signature_matches(recorded: &Value, current: &Value) -> Result<(), String
     matches_at(recorded, current, "", false)
 }
 
-/// Like `signature_matches`, but a recorded list, and any count, may be
-/// missing: many APIs drop an empty list and its totals instead of sending `[]`.
-fn matches_without_lists(recorded: &Value, current: &Value) -> bool {
+/// Like `signature_matches`, but a recorded count may be missing: many APIs
+/// drop the totals when a list is empty. A missing list is never accepted.
+fn matches_without_counts(recorded: &Value, current: &Value) -> bool {
     matches_at(recorded, current, "", true).is_ok()
 }
 
-/// Paths of lists in `current` that the recording did not have.
-fn new_lists(recorded: &Value, current: &Value, path: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(cur) = current.get("object").and_then(|v| v.as_object()) {
-        let rec = recorded.get("object").and_then(|v| v.as_object());
-        for (key, sig) in cur {
-            let child = if path.is_empty() {
-                key.clone()
-            } else {
-                format!("{}.{}", path, key)
-            };
-            match rec.and_then(|r| r.get(key)) {
-                None if signature_type(sig) == "array" => out.push(child),
-                None => {}
-                Some(rec_sig) => out.extend(new_lists(rec_sig, sig, &child)),
-            }
+/// A non-empty list in `body` under a key the recording did not have, to name
+/// as where a missing recorded list went. A list whose elements are the same
+/// type as the missing one's comes first.
+pub(crate) fn moved_list(recorded: &Value, body: &Value) -> Option<String> {
+    let current = signature_at(body, 8);
+    let mut lost = Vec::new();
+    missing_lists(recorded, &current, "", &mut lost);
+    let mut found = Vec::new();
+    appeared_lists(recorded, &current, "", &mut found);
+    let same_type = |elem: &Value| {
+        lost.iter()
+            .any(|l| signature_type(l) == signature_type(elem))
+    };
+    found
+        .iter()
+        .find(|(_, elem)| same_type(elem))
+        .or(found.first())
+        .map(|(p, _)| p.clone())
+}
+
+/// Element shapes of the recorded lists that `current` no longer has.
+fn missing_lists(recorded: &Value, current: &Value, path: &str, out: &mut Vec<Value>) {
+    let Some(rec) = recorded.get("object").and_then(|v| v.as_object()) else {
+        return;
+    };
+    let cur = current.get("object").and_then(|v| v.as_object());
+    for (key, sig) in rec {
+        let child = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{}.{}", path, key)
+        };
+        match cur.and_then(|c| c.get(key)) {
+            Some(cur_sig) => missing_lists(sig, cur_sig, &child, out),
+            None => lists_within(sig, &child, &mut |_, elem| out.push(elem.clone())),
         }
     }
-    out
+}
+
+/// Non-empty lists in `current` under keys the recording did not have, with their element shape.
+fn appeared_lists(recorded: &Value, current: &Value, path: &str, out: &mut Vec<(String, Value)>) {
+    let Some(cur) = current.get("object").and_then(|v| v.as_object()) else {
+        return;
+    };
+    let rec = recorded.get("object").and_then(|v| v.as_object());
+    for (key, sig) in cur {
+        let child = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{}.{}", path, key)
+        };
+        match rec.and_then(|r| r.get(key)) {
+            None => lists_within(sig, &child, &mut |p, elem| {
+                if !elem.is_null() {
+                    out.push((p.to_string(), elem.clone()))
+                }
+            }),
+            Some(rec_sig) => appeared_lists(rec_sig, sig, &child, out),
+        }
+    }
+}
+
+/// Calls `f` with the path and element shape of each list at or under `sig`.
+/// A recorded list that was cut off by the signature depth has no element shape.
+fn lists_within(sig: &Value, path: &str, f: &mut dyn FnMut(&str, &Value)) {
+    if signature_type(sig) == "array" {
+        f(path, sig.get("array").unwrap_or(&Value::Null));
+    } else if let Some(map) = sig.get("object").and_then(|v| v.as_object()) {
+        for (k, v) in map {
+            let child = if path.is_empty() {
+                k.clone()
+            } else {
+                format!("{}.{}", path, k)
+            };
+            lists_within(v, &child, f);
+        }
+    }
 }
 
 fn matches_at(
     recorded: &Value,
     current: &Value,
     path: &str,
-    lists_optional: bool,
+    counts_optional: bool,
 ) -> Result<(), String> {
     let (rec_ty, cur_ty) = (signature_type(recorded), signature_type(current));
     if rec_ty == "null" || cur_ty == "null" {
@@ -211,16 +273,16 @@ fn matches_at(
                 format!("{}.{}", path, key)
             };
             match cur.get(key) {
-                // Counts and totals often go with the list.
-                None if lists_optional && matches!(signature_type(sig), "array" | "number") => {}
+                // Counts and totals often go with an empty list.
+                None if counts_optional && signature_type(sig) == "number" => {}
                 None => return Err(format!("key '{}' is missing", child)),
-                Some(cur_sig) => matches_at(sig, cur_sig, &child, lists_optional)?,
+                Some(cur_sig) => matches_at(sig, cur_sig, &child, counts_optional)?,
             }
         }
     }
     if let (Some(rec), Some(cur)) = (recorded.get("array"), current.get("array")) {
         if !rec.is_null() && !cur.is_null() {
-            matches_at(rec, cur, &format!("{}[]", path), lists_optional)?;
+            matches_at(rec, cur, &format!("{}[]", path), counts_optional)?;
         }
     }
     Ok(())
@@ -298,22 +360,59 @@ pub fn describe_command(cmd: &Value) -> String {
     }
 }
 
+/// How a dropped request is named: its path without the query, with any
+/// segment that holds a secret hidden. When the secret is unknown, only the host.
+fn dropped_name(e: &HarEntry, secrets: &[String], known: bool) -> String {
+    let Ok(url) = url::Url::parse(&e.url) else {
+        return format!("{} ?", e.method);
+    };
+    if !known {
+        return format!("{} {}", e.method, url.host_str().unwrap_or("?"));
+    }
+    let path: Vec<String> = url
+        .path()
+        .split('/')
+        .map(|seg| {
+            let decoded = urlencoding::decode(seg).map(|d| d.into_owned());
+            let hit = secrets.iter().any(|s| {
+                let escaped = serde_json::to_string(s).unwrap_or_default();
+                seg.contains(s.as_str())
+                    || seg.contains(urlencoding::encode(s).as_ref())
+                    || seg.contains(escaped.trim_matches('"'))
+                    || decoded.as_ref().is_ok_and(|d| d.contains(s.as_str()))
+            });
+            if hit { "<redacted>" } else { seg }.to_string()
+        })
+        .collect();
+    let path = path.join("/");
+    if holds_secret(&path, secrets) {
+        return format!("{} {}", e.method, url.host_str().unwrap_or("?"));
+    }
+    format!("{} {}", e.method, path)
+}
+
 fn carries_secret(e: &HarEntry, secrets: &[String]) -> bool {
+    holds_secret(&e.url, secrets)
+        || e.post_data
+            .as_deref()
+            .is_some_and(|t| holds_secret(t, secrets))
+        || e.request_headers
+            .iter()
+            .any(|(_, v)| holds_secret(v, secrets))
+}
+
+/// Whether `text` holds a secret as is, form-encoded, percent-encoded or JSON-escaped.
+fn holds_secret(text: &str, secrets: &[String]) -> bool {
     secrets.iter().any(|secret| {
         let encoded = urlencoding::encode(secret);
         let escaped = serde_json::to_string(secret).unwrap_or_default();
         let escaped = escaped.trim_matches('"');
-        let found = |text: &str| {
-            text.contains(secret.as_str())
-                || text.contains(encoded.as_ref())
-                || text.contains(escaped)
-                || decoded_forms(text)
-                    .iter()
-                    .any(|d| d.contains(secret.as_str()))
-        };
-        found(&e.url)
-            || e.post_data.as_deref().is_some_and(found)
-            || e.request_headers.iter().any(|(_, v)| found(v))
+        text.contains(secret.as_str())
+            || text.contains(encoded.as_ref())
+            || text.contains(escaped)
+            || decoded_forms(text)
+                .iter()
+                .any(|d| d.contains(secret.as_str()))
     })
 }
 
@@ -558,7 +657,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             .filter(|(_, v)| v.chars().count() >= 3)
             .cloned(),
     );
-    let given = with_page_query_params(&start, &policy, &explicit_and_typed, input.entries);
+    let mut given = with_page_query_params(&start, &policy, &explicit_and_typed, input.entries);
 
     let mut steps: Vec<Step> = Vec::new();
     let mut gaps = Vec::new();
@@ -566,7 +665,14 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     let mut request_ids: Vec<String> = Vec::new();
     let mut bodies: Vec<(String, Value)> = Vec::new();
     let mut secret_requests: Vec<String> = Vec::new();
+    let mut secret_dropped: Vec<String> = Vec::new();
     let mut har_ids: HashMap<String, String> = HashMap::new();
+    // The id each request had in the capture (`s<seq>r<n>`), which `flow
+    // steps` numbering gives, next to its id in the saved range.
+    let mut capture_ids: Vec<(String, String)> = Vec::new();
+    // Recorded Referer values, to restore if a page-query param turns out to
+    // be carried by the Referer alone.
+    let mut referers: Vec<(String, String, String)> = Vec::new();
 
     for (index, (seq, cmd)) in commands.iter().enumerate() {
         let tagged: Vec<&HarEntry> = input
@@ -577,15 +683,20 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         let mut requests: Vec<Request> = Vec::new();
         let mut seen = Vec::new();
         for (e, parsed, extract) in candidates(&tagged, &policy) {
-            if carries_secret(e, &input.recorder.secrets)
-                || input.recorder.unknown_secret_seqs.contains(seq)
-            {
+            let known = carries_secret(e, &input.recorder.secrets);
+            if known || input.recorder.unknown_secret_seqs.contains(seq) {
                 if !secret_requests.contains(&e.request_id) {
                     secret_requests.push(e.request_id.clone());
+                    let what = dropped_name(e, &input.recorder.secrets, known);
+                    let verb = if known { "carried" } else { "may carry" };
+                    secret_dropped.push(format!("{} {}", what, verb));
                     gaps.push(json!({
                         "step": index + 1,
                         "command": describe_command(cmd),
-                        "reason": "a request may carry a value typed or pasted into a secret field, so it was not saved",
+                        "reason": format!(
+                            "{} {} a value typed or pasted into a secret field, so it was not saved; fill a non-secret field or use a declared tool for a reusable flow",
+                            what, verb
+                        ),
                     }));
                 }
                 continue;
@@ -619,6 +730,13 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                     }
                     continue;
                 }
+                if lower == "referer" {
+                    referers.push((
+                        format!("s{}r{}", index + 1, requests.len() + 1),
+                        k.clone(),
+                        v.clone(),
+                    ));
+                }
                 headers.insert(k.clone(), template::templatize(v, &given, Slot::Raw));
             }
             let item_fields = item_fields(&parsed);
@@ -628,6 +746,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                 bodies.push((id.clone(), parsed.clone()));
             }
             request_ids.push(id.clone());
+            capture_ids.push((format!("s{}r{}", seq, requests.len() + 1), id.clone()));
             har_ids.insert(id.clone(), e.request_id.clone());
             requests.push(Request {
                 id,
@@ -646,6 +765,10 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                     bytes: body_len as u64,
                     item_fields,
                     extract,
+                    // A key with a dot in it cannot be told from a nested path.
+                    list: main_list(&parsed)
+                        .and_then(|(path, _)| path)
+                        .filter(|path| !list_gone(path, &parsed)),
                     stripped_auth,
                 },
             });
@@ -687,11 +810,49 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         });
     }
 
+    if request_ids.is_empty() && !secret_dropped.is_empty() {
+        return Err(format!(
+            "no first-party JSON requests could be saved for {}: {} a value typed into a secret field, so not saved. To make a reusable flow, fill a non-secret field or use a declared tool",
+            base,
+            secret_dropped.join(" and ")
+        ));
+    }
     if request_ids.is_empty() {
         return Err(format!(
             "no first-party JSON requests were recorded for {}; this flow has nothing to replay over HTTP",
             base
         ));
+    }
+    // A page-query value that only a Referer carries is the page's address,
+    // not an input of the requests: keep the recorded Referer.
+    let unused: Vec<String> = given
+        .iter()
+        .filter(|(k, _)| {
+            !input.params.iter().any(|(n, _)| n == k) && !typed.iter().any(|(n, _)| n == k)
+        })
+        .map(|(k, _)| k.clone())
+        .filter(|k| {
+            let placeholder = format!("{{{{{}}}}}", k);
+            let used = steps.iter().flat_map(|s| s.requests.iter()).any(|r| {
+                r.url.contains(&placeholder)
+                    || r.body.as_deref().is_some_and(|b| b.contains(&placeholder))
+                    || r.headers.iter().any(|(h, v)| {
+                        !h.eq_ignore_ascii_case("referer") && v.contains(&placeholder)
+                    })
+            });
+            !used
+        })
+        .collect();
+    if !unused.is_empty() {
+        given.retain(|(k, _)| !unused.contains(k));
+        for req in steps.iter_mut().flat_map(|s| s.requests.iter_mut()) {
+            for (id, key, original) in &referers {
+                if *id == req.id {
+                    let kept = template::templatize(original, &given, Slot::Raw);
+                    req.headers.insert(key.clone(), kept);
+                }
+            }
+        }
     }
     let page_segments: Vec<String> = url::Url::parse(&start)
         .ok()
@@ -740,8 +901,43 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     }
     params.extend(links.params);
     let output = match input.output {
-        Some(id) if request_ids.iter().any(|r| r == id) => id.to_string(),
-        Some(id) => return Err(format!("unknown request id '{}' for --output", id)),
+        Some(id) if request_ids.iter().any(|r| r == id) => {
+            let url_of = |saved: &str| {
+                steps
+                    .iter()
+                    .flat_map(|s| s.requests.iter())
+                    .find(|r| r.id == saved)
+                    .map(|r| r.url.clone())
+                    .unwrap_or_default()
+            };
+            match capture_ids.iter().find(|(c, saved)| c == id && saved != id) {
+                Some((_, other)) => {
+                    return Err(format!(
+                        "{id} is ambiguous: saved {id} ({}) or capture {id}, saved as {other} ({}); \
+                         use --output with one of them after renumbering the range, or save from step 1",
+                        url_of(id),
+                        url_of(other)
+                    ));
+                }
+                None => id.to_string(),
+            }
+        }
+        Some(id) => match capture_ids.iter().find(|(c, _)| c == id) {
+            Some((_, saved)) => saved.clone(),
+            None => {
+                let mut valid: Vec<String> = request_ids.clone();
+                for (c, s) in &capture_ids {
+                    if c != s {
+                        valid.push(c.clone());
+                    }
+                }
+                return Err(format!(
+                    "unknown request id '{}' for --output; valid ids: {}",
+                    id,
+                    valid.join(", ")
+                ));
+            }
+        },
         None => default_output(&steps),
     };
 
@@ -927,6 +1123,19 @@ fn link_requests(
         references: Vec::new(),
     };
     let given_values: Vec<&str> = given.iter().map(|(_, v)| v.as_str()).collect();
+    // Path segments of each request, to tell a response value that is the
+    // site's own structure (`api`, `v10`) from one the run chooses.
+    let segments: HashMap<String, Vec<String>> = steps
+        .iter()
+        .flat_map(|s| s.requests.iter())
+        .map(|r| {
+            let segs = url::Url::parse(&r.url)
+                .ok()
+                .and_then(|u| u.path_segments().map(|p| p.map(String::from).collect()))
+                .unwrap_or_default();
+            (r.id.clone(), segs)
+        })
+        .collect();
     // Position of every request, writes included, so a write can take a value
     // from any response that came before it.
     let rank: HashMap<String, usize> = steps
@@ -954,16 +1163,38 @@ fn link_requests(
                 let same_response = |from: &str| {
                     har_ids.get(from).is_some() && har_ids.get(from) == har_ids.get(&id)
                 };
-                let Some((from, path, in_list)) = earlier
+                // The latest response that holds the value supplies it, except
+                // an echo: a response whose own request path already has the
+                // value just repeats it. A list is preferred over a single field.
+                let sources: Vec<(String, String, bool)> = earlier
                     .iter()
                     .rev()
                     .filter(|(from, _)| !same_response(from))
-                    .find_map(|(from, body)| {
+                    .filter(|(from, _)| {
+                        !segments.get(from).is_some_and(|segs| segs.contains(&value))
+                    })
+                    .filter_map(|(from, body)| {
                         find_value(body, &value, "").map(|(p, l)| (from.clone(), p, l))
                     })
+                    .collect();
+                let Some((from, path, in_list)) = sources
+                    .iter()
+                    .find(|(_, _, l)| *l)
+                    .or(sources.first())
+                    .cloned()
                 else {
                     continue;
                 };
+                // A value in the path of a request sent before that response
+                // could have supplied it, or of the request it came from, is
+                // structure rather than data from that response.
+                let own_rank = rank.get(&from).copied().unwrap_or(0);
+                let structural = segments.iter().any(|(rid, segs)| {
+                    rank.get(rid).is_some_and(|r| *r <= own_rank) && segs.contains(&value)
+                });
+                if structural {
+                    continue;
+                }
                 // Words and codes like "es-AR" or "public" repeat across a site's
                 // responses; only generated values (ids, keys) are worth chaining.
                 if !in_list && !looks_generated(&value) {
@@ -1190,6 +1421,12 @@ fn collect_lists<'a>(v: &'a Value, path: &str, best: &mut Option<(String, &'a Ve
             _ => {}
         }
     }
+}
+
+/// Whether the list at the recorded path in `body` is gone: absent or no
+/// longer an array. A list that is present and empty is not gone.
+pub(crate) fn list_gone(path: &str, body: &Value) -> bool {
+    !lookup(body, path).is_some_and(|v| v.is_array())
 }
 
 /// Field names used in `--where` or `--fields` that no item has.
@@ -1534,6 +1771,9 @@ pub struct PreparedRequest {
     /// The templates the text above was bound from; references stay
     /// unbound until the run has the responses.
     pub parts: Option<Parts>,
+    /// Headers (lowercase name, value) that the flow records identically on two
+    /// or more requests: those do not change per request.
+    pub repeated_headers: Vec<(String, String)>,
 }
 
 /// Requests to send for a run: the one the flow answers with, and the ones
@@ -1575,6 +1815,18 @@ pub fn prepare_all(
         params.insert(k.clone(), v.clone());
     }
 
+    let mut seen: HashMap<(String, String), usize> = HashMap::new();
+    for r in flow.requests() {
+        for (k, v) in &r.headers {
+            *seen.entry((k.to_ascii_lowercase(), v.clone())).or_default() += 1;
+        }
+    }
+    let repeated: Vec<(String, String)> = seen
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|(kv, _)| kv)
+        .collect();
+
     let mut out = Vec::new();
     for (index, step) in flow.steps.iter().enumerate() {
         for r in &step.requests {
@@ -1612,6 +1864,7 @@ pub fn prepare_all(
                 expect: r.expect.clone(),
                 write,
                 parts: Some(Parts { url, body }),
+                repeated_headers: repeated.clone(),
             });
         }
     }
@@ -1833,7 +2086,6 @@ fn is_graphql_query(body: Option<&str>) -> bool {
 }
 
 /// A flow from a partial fixture: the required fields are filled in.
-
 #[cfg(test)]
 pub(crate) fn flow_of(mut v: Value) -> Flow {
     let o = v.as_object_mut().unwrap();
@@ -1962,6 +2214,7 @@ mod tests {
         assert!(req["headers"].get("Cookie").is_none());
         assert!(req["headers"].get("X-CSRF-Token").is_none());
         assert_eq!(req["expect"]["strippedAuth"], true);
+        assert_eq!(req["expect"]["list"], "movies");
         assert_eq!(flow["steps"][0]["requests"].as_array().unwrap().len(), 1);
         assert_eq!(flow["output"], "s1r1");
         assert_eq!(flow["verifiedAt"], Value::Null);
@@ -2097,6 +2350,7 @@ mod tests {
             expect: expect_of(json!({ "signature": signature(&json!({ "data": [{ "id": 1 }] })) })),
             write: false,
             parts: None,
+            repeated_headers: Vec::new(),
         }
     }
 
@@ -2150,6 +2404,195 @@ mod tests {
         assert_eq!(out["verified"], false);
         assert_eq!(out["drift"]["tier"], "http");
         assert_eq!(flow.verified_at, None);
+    }
+
+    fn catalog_request() -> PreparedRequest {
+        let mut req = prepared("s1r1");
+        req.expect = expect_of(json!({
+            "signature": signature(&json!({ "items": [{ "name": "x", "price": 1 }], "total": 1 })),
+        }));
+        req
+    }
+
+    #[test]
+    fn a_list_that_moved_is_drift_not_an_empty_result() {
+        let moved =
+            r#"{"data":{"products":[{"title":"x","amount":{"value":1,"currency":"USD"}}]}}"#;
+        let result = tier_result(
+            &catalog_request(),
+            Tier::Http,
+            Instant::now(),
+            Ok((200, moved.to_string())),
+        );
+        assert!(!result.ok, "{:?}", result.reason);
+        assert!(result.shape_changed);
+        let reason = result.reason.clone().unwrap();
+        assert!(
+            reason.contains("'items'") && reason.contains("data.products"),
+            "{reason}"
+        );
+        let outcome = RunOutcome::failed(&[result], &flow_of(json!({})));
+        let message = outcome.message("catalog");
+        assert!(message.starts_with("drifted: "), "{message}");
+        assert!(message.contains("save the flow again"), "{message}");
+        assert_eq!(outcome.data("catalog").unwrap()["status"], "drifted");
+    }
+
+    fn drift_of(rec: Value, body: &str) -> TierResult {
+        let mut req = prepared("s1r1");
+        req.expect = expect_of(json!({ "signature": signature(&rec) }));
+        tier_result(
+            &req,
+            Tier::Http,
+            Instant::now(),
+            Ok((200, body.to_string())),
+        )
+    }
+
+    #[test]
+    fn a_missing_recorded_list_is_drift_and_an_empty_one_is_not() {
+        let flat = json!({ "items": [{ "name": "x", "price": 1 }], "total": 1 });
+        let nested =
+            json!({ "data": { "search": { "items": [{ "id": 1, "name": "a" }], "total": 1 } } });
+        // (recorded, body, drifted, what the message must name)
+        let cases = [
+            (
+                &nested,
+                r#"{"data":{"search":{"products":[{"id":1,"name":"a"}]}}}"#,
+                true,
+                "data.search.items",
+            ),
+            (
+                &nested,
+                r#"{"data":{"search":{"products":[{"id":1,"name":"a"}]}}}"#,
+                true,
+                "a list now appears at 'data.search.products'",
+            ),
+            (
+                &flat,
+                r#"{"data":{"products":[{"title":"x"}]}}"#,
+                true,
+                "a list now appears at 'data.products'",
+            ),
+            (
+                &flat,
+                r#"{"facets":{"brand":[]}}"#,
+                true,
+                "key 'items' is missing",
+            ),
+            (
+                &flat,
+                r#"{"meta":{"links":[{"href":"/p2"}]}}"#,
+                true,
+                "key 'items' is missing",
+            ),
+            (&flat, "{}", true, "key 'items' is missing"),
+            (
+                &flat,
+                r#"{"items":[],"meta":{"links":[{"href":"/p2"}]}}"#,
+                false,
+                "",
+            ),
+            (&flat, r#"{"items":[]}"#, false, ""),
+            (&flat, r#"{"items":[],"total":0}"#, false, ""),
+            (
+                &nested,
+                r#"{"data":{"search":{"items":[]}},"extensions":{"warnings":[]}}"#,
+                false,
+                "",
+            ),
+        ];
+        for (rec, body, drifted, named) in cases {
+            let r = drift_of(rec.clone(), body);
+            assert_eq!(r.shape_changed, drifted, "{body}: {:?}", r.reason);
+            assert_eq!(r.ok, !drifted, "{body}");
+            if drifted {
+                assert!(
+                    r.reason.as_deref().unwrap().contains(named),
+                    "{body}: {:?}",
+                    r.reason
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_main_list_deeper_than_the_signature_is_still_checked() {
+        let rec = json!({ "data": { "search": { "page": { "items": [{ "id": 1, "name": "a" }], "n": 1 } } } });
+        let mut req = prepared("s1r1");
+        req.expect = expect_of(json!({
+            "signature": signature(&rec),
+            "list": "data.search.page.items",
+        }));
+        let judge = |body: &str| check_response(&req, 200, body);
+        // Dropped, retyped and renamed.
+        for body in [
+            r#"{"data":{"search":{"page":{"n":0}}}}"#,
+            r#"{"data":{"search":{"page":{"items":{"a":1},"n":1}}}}"#,
+            r#"{"data":{"search":{"page":{"items":"none"}}}}"#,
+            r#"{"data":{"search":{"page":{"products":[{"id":1,"name":"a"}],"n":1}}}}"#,
+            r#"{"data":{"search":{"page":null}}}"#,
+        ] {
+            let f = judge(body).unwrap_err();
+            assert!(f.shape_changed, "{body}");
+            assert!(f.reason.contains("data.search.page.items"), "{}", f.reason);
+        }
+        // Present, empty or not, is fine.
+        for body in [
+            r#"{"data":{"search":{"page":{"items":[],"n":0}}}}"#,
+            r#"{"data":{"search":{"page":{"items":[{"id":2,"name":"b"}],"n":1}}}}"#,
+        ] {
+            assert!(judge(body).is_ok(), "{body}");
+        }
+        let f = judge(r#"{"data":{"search":{"page":{"products":[{"id":1}]}}}}"#).unwrap_err();
+        assert!(f.reason.contains("a list now appears at"), "{}", f.reason);
+    }
+
+    #[test]
+    fn a_main_list_under_a_dotted_key_is_not_saved_as_a_path() {
+        let rec = recorder();
+        let body = r#"{"results.v2":[{"id":1}],"total":1}"#;
+        let entries = vec![entry(
+            "api",
+            "https://api.example.com.ar/movies",
+            "Fetch",
+            "application/json",
+            body,
+        )];
+        let (flow, _) = build_flow_value(SaveInput {
+            name: "dotted",
+            recorder: &rec,
+            commands: &rec.commands,
+            description: None,
+            entries: &entries,
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let saved: Request =
+            serde_json::from_value(flow["steps"][0]["requests"][0].clone()).unwrap();
+        let mut req = prepared("s1r1");
+        req.expect = saved.expect;
+        assert!(check_response(&req, 200, body).is_ok());
+    }
+
+    #[test]
+    fn an_empty_list_with_the_same_shape_is_not_drift() {
+        for body in [r#"{"items":[],"total":0}"#, r#"{"items":[],"page":1}"#] {
+            let result = tier_result(
+                &catalog_request(),
+                Tier::Http,
+                Instant::now(),
+                Ok((200, body.to_string())),
+            );
+            assert!(
+                result.ok && !result.shape_changed,
+                "{body}: {:?}",
+                result.reason
+            );
+        }
     }
 
     #[test]
@@ -2273,6 +2716,511 @@ mod tests {
             "https://api.example.com.ar/seats?theater=402&key=k%202"
         );
         assert!(reqs[1].resolve(&HashMap::new()).is_err());
+    }
+
+    fn flow_of_entries(
+        r: &FlowRecorder,
+        entries: &[HarEntry],
+        output: Option<&str>,
+    ) -> Result<(Value, Value), String> {
+        build_flow_value(SaveInput {
+            name: "t",
+            recorder: r,
+            commands: &r.commands,
+            description: None,
+            entries,
+            params: &[],
+            output,
+            created_at: String::new(),
+            login_wall: false,
+        })
+    }
+
+    #[test]
+    fn a_response_value_equal_to_a_path_segment_other_requests_share_is_not_a_param() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/" }),
+            None,
+            None,
+        );
+        r.tag_now("projects");
+        r.tag_now("env");
+        let entries = vec![
+            entry(
+                "projects",
+                "https://app.example/api/v9/projects",
+                "Fetch",
+                "application/json",
+                r#"{"projects":[{"id":"prj_x","meta":{"gitRootDirectory":"api"}}]}"#,
+            ),
+            entry(
+                "env",
+                "https://app.example/api/v10/projects/prj_x/env",
+                "Fetch",
+                "application/json",
+                r#"{"envs":[]}"#,
+            ),
+        ];
+        let (flow, report) = flow_of_entries(&r, &entries, None).unwrap();
+        let url = flow["steps"][0]["requests"][1]["url"].as_str().unwrap();
+        assert_eq!(url, "https://app.example/api/v10/projects/{{id}}/env");
+        assert_eq!(report["params"], json!(["id"]));
+    }
+
+    #[test]
+    fn output_accepts_the_capture_id_of_a_renumbered_request_and_errors_list_valid_ids() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/a" }),
+            None,
+            None,
+        );
+        r.tag_now("one");
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/b" }),
+            None,
+            None,
+        );
+        r.tag_now("two");
+        let entries = vec![
+            entry(
+                "one",
+                "https://app.example/api/one",
+                "Fetch",
+                "application/json",
+                r#"{"a":1}"#,
+            ),
+            entry(
+                "two",
+                "https://app.example/api/two",
+                "Fetch",
+                "application/json",
+                r#"{"b":2}"#,
+            ),
+        ];
+        // Save only the second step: its saved id is s1r1, its capture id s2r1.
+        let second = &r.commands[1..];
+        let save = |output: Option<&str>| {
+            build_flow_value(SaveInput {
+                name: "t",
+                recorder: &r,
+                commands: second,
+                description: None,
+                entries: &entries,
+                params: &[],
+                output,
+                created_at: String::new(),
+                login_wall: false,
+            })
+        };
+        let (flow, _) = save(Some("s2r1")).unwrap();
+        assert_eq!(flow["output"], "s1r1");
+        assert_eq!(save(Some("s1r1")).unwrap().0["output"], "s1r1");
+        let err = save(Some("s9r9")).unwrap_err();
+        assert!(err.contains("s1r1") && err.contains("s2r1"), "{err}");
+    }
+
+    #[test]
+    fn identifying_and_tracing_headers_are_not_saved_in_any_case() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/" }),
+            None,
+            None,
+        );
+        r.tag_now("api");
+        let mut api = entry(
+            "api",
+            "https://app.example/api/x",
+            "Fetch",
+            "application/json",
+            r#"{"a":1}"#,
+        );
+        let dropped = [
+            "X-Client-IP",
+            "x-forwarded-for",
+            "X-Real-IP",
+            "Forwarded",
+            "traceparent",
+            "TraceState",
+            "X-Request-Id",
+            "Request-Id",
+            "X-Amzn-Trace-Id",
+            "Sentry-Trace",
+            "Baggage",
+            "CF-Connecting-IP",
+            "True-Client-IP",
+        ];
+        for name in dropped {
+            api.request_headers
+                .push((name.to_string(), "2001:db8::1".to_string()));
+        }
+        api.request_headers
+            .push(("X-App-Version".to_string(), "7".to_string()));
+        let (flow, report) = flow_of_entries(&r, &[api], None).unwrap();
+        let headers = flow["steps"][0]["requests"][0]["headers"]
+            .as_object()
+            .unwrap();
+        let kept: Vec<&String> = headers.keys().collect();
+        assert_eq!(kept, ["Accept", "X-App-Version"]);
+        for name in dropped {
+            assert!(report["droppedHeaders"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(name.to_ascii_lowercase())));
+        }
+    }
+
+    #[test]
+    fn a_page_query_value_only_the_referer_carries_is_not_a_param() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/env?create=true" }),
+            None,
+            None,
+        );
+        r.tag_now("api");
+        // The page document is outside the saved requests.
+        let doc = entry(
+            "doc",
+            "https://app.example/env?create=true",
+            "Document",
+            "text/html",
+            r#"<script id="d" type="application/json">{"a":1}</script>"#,
+        );
+        let mut api = entry(
+            "api",
+            "https://app.example/api/env",
+            "Fetch",
+            "application/json",
+            r#"{"envs":[]}"#,
+        );
+        api.request_headers.push((
+            "Referer".to_string(),
+            "https://app.example/env?create=true".to_string(),
+        ));
+        let (flow, report) = flow_of_entries(&r, &[doc, api], None).unwrap();
+        assert_eq!(report["params"], json!([]));
+        assert_eq!(
+            flow["steps"][0]["requests"][0]["headers"]["Referer"],
+            "https://app.example/env?create=true"
+        );
+    }
+
+    #[test]
+    fn an_id_two_later_paths_share_is_still_a_param() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/" }),
+            None,
+            None,
+        );
+        for id in ["projects", "env", "domains"] {
+            r.tag_now(id);
+        }
+        let entries = vec![
+            entry(
+                "projects",
+                "https://app.example/api/v9/projects",
+                "Fetch",
+                "application/json",
+                r#"{"projects":[{"id":"prj_Ab12cd"},{"id":"prj_Zz99yy"}]}"#,
+            ),
+            entry(
+                "env",
+                "https://app.example/api/v10/projects/prj_Ab12cd/env",
+                "Fetch",
+                "application/json",
+                r#"{"envs":[1]}"#,
+            ),
+            entry(
+                "domains",
+                "https://app.example/api/v9/projects/prj_Ab12cd/domains",
+                "Fetch",
+                "application/json",
+                r#"{"domains":[1,2]}"#,
+            ),
+        ];
+        let (flow, _) = flow_of_entries(&r, &entries, None).unwrap();
+        let reqs = &flow["steps"][0]["requests"];
+        assert_eq!(
+            reqs[1]["url"],
+            "https://app.example/api/v10/projects/{{id}}/env"
+        );
+        assert_eq!(
+            reqs[2]["url"],
+            "https://app.example/api/v9/projects/{{id}}/domains"
+        );
+    }
+
+    #[test]
+    fn a_detail_response_that_echoes_the_id_does_not_make_it_structure() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/" }),
+            None,
+            None,
+        );
+        for id in ["list", "detail", "env"] {
+            r.tag_now(id);
+        }
+        let entries = vec![
+            entry(
+                "list",
+                "https://app.example/api/projects",
+                "Fetch",
+                "application/json",
+                r#"{"projects":[{"id":"prj_Ab12cd"},{"id":"prj_Zz99yy"}]}"#,
+            ),
+            entry(
+                "detail",
+                "https://app.example/api/projects/prj_Ab12cd",
+                "Fetch",
+                "application/json",
+                r#"{"id":"prj_Ab12cd","name":"a"}"#,
+            ),
+            entry(
+                "env",
+                "https://app.example/api/projects/prj_Ab12cd/env",
+                "Fetch",
+                "application/json",
+                r#"{"envs":[1]}"#,
+            ),
+        ];
+        let (flow, _) = flow_of_entries(&r, &entries, None).unwrap();
+        let reqs = &flow["steps"][0]["requests"];
+        assert_eq!(reqs[0]["url"], "https://app.example/api/projects");
+        assert_eq!(reqs[1]["url"], "https://app.example/api/projects/{{id}}");
+        assert_eq!(
+            reqs[2]["url"],
+            "https://app.example/api/projects/{{id}}/env"
+        );
+        let parsed: Flow = serde_json::from_value(flow).unwrap();
+        let run = prepare_all(&parsed, &[("id".to_string(), "prj_Zz99yy".to_string())]).unwrap();
+        assert_eq!(run[1].url, "https://app.example/api/projects/prj_Zz99yy");
+        assert_eq!(
+            run[2].url,
+            "https://app.example/api/projects/prj_Zz99yy/env"
+        );
+    }
+
+    fn bootstrap_then_projects(first: &str) -> Value {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/" }),
+            None,
+            None,
+        );
+        for id in ["boot", "list", "detail", "env"] {
+            r.tag_now(id);
+        }
+        let entries = vec![
+            entry(
+                "boot",
+                "https://app.example/api/me",
+                "Fetch",
+                "application/json",
+                first,
+            ),
+            entry(
+                "list",
+                "https://app.example/api/projects",
+                "Fetch",
+                "application/json",
+                r#"{"projects":[{"id":"prj_Ab12cd"},{"id":"prj_Zz99yy"}]}"#,
+            ),
+            entry(
+                "detail",
+                "https://app.example/api/projects/prj_Ab12cd",
+                "Fetch",
+                "application/json",
+                r#"{"id":"prj_Ab12cd","name":"a"}"#,
+            ),
+            entry(
+                "env",
+                "https://app.example/api/projects/prj_Ab12cd/env",
+                "Fetch",
+                "application/json",
+                r#"{"envs":[1]}"#,
+            ),
+        ];
+        flow_of_entries(&r, &entries, None).unwrap().0
+    }
+
+    #[test]
+    fn a_coincidental_bootstrap_value_does_not_replace_the_list_as_source() {
+        for first in [
+            r#"{"user":{"id":"usr_9xA2"},"lastProjectId":"prj_Ab12cd"}"#,
+            r#"{"flags":{"exp_a":"prj_Ab12cd"}}"#,
+            r#"{"recent":[{"id":"prj_Ab12cd"}]}"#,
+        ] {
+            let flow = bootstrap_then_projects(first);
+            let reqs = &flow["steps"][0]["requests"];
+            assert_eq!(
+                reqs[2]["url"], "https://app.example/api/projects/{{id}}",
+                "{first}"
+            );
+            assert_eq!(
+                reqs[3]["url"], "https://app.example/api/projects/{{id}}/env",
+                "{first}"
+            );
+            let params = flow["params"].as_array().unwrap();
+            assert_eq!(params.len(), 1, "{first}: {params:?}");
+            assert_eq!(params[0]["from"]["request"], "s1r2", "{first}");
+            assert_eq!(params[0]["from"]["list"], "projects[].id", "{first}");
+        }
+    }
+
+    #[test]
+    fn a_single_value_two_later_paths_share_is_a_reference() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/" }),
+            None,
+            None,
+        );
+        for id in ["user", "members", "billing"] {
+            r.tag_now(id);
+        }
+        let entries = vec![
+            entry(
+                "user",
+                "https://app.example/api/user",
+                "Fetch",
+                "application/json",
+                r#"{"user":{"teamId":"team_Q8x7"}}"#,
+            ),
+            entry(
+                "members",
+                "https://app.example/teams/team_Q8x7/members",
+                "Fetch",
+                "application/json",
+                r#"{"m":[1]}"#,
+            ),
+            entry(
+                "billing",
+                "https://app.example/teams/team_Q8x7/billing",
+                "Fetch",
+                "application/json",
+                r#"{"b":[1,2]}"#,
+            ),
+        ];
+        let (flow, _) = flow_of_entries(&r, &entries, None).unwrap();
+        let reqs = &flow["steps"][0]["requests"];
+        for i in [1, 2] {
+            assert!(reqs[i]["url"]
+                .as_str()
+                .unwrap()
+                .contains("{{@s1r1.user.teamId}}"));
+        }
+        assert_eq!(
+            dependencies(&flow_of(flow.clone()), "s1r2"),
+            vec!["s1r1", "s1r2"]
+        );
+    }
+
+    #[test]
+    fn an_output_id_that_means_two_requests_is_refused_with_both() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        for (page, id) in [("a", "one"), ("b", "two"), ("c", "three")] {
+            r.begin_command(
+                "navigate",
+                &json!({ "action": "navigate", "url": format!("https://app.example/{page}") }),
+                None,
+                None,
+            );
+            r.tag_now(id);
+        }
+        let entries: Vec<HarEntry> = ["one", "two", "three"]
+            .iter()
+            .map(|n| {
+                entry(
+                    n,
+                    &format!("https://app.example/api/{n}"),
+                    "Fetch",
+                    "application/json",
+                    r#"{"a":1}"#,
+                )
+            })
+            .collect();
+        let range = &r.commands[1..];
+        let save = |output: &str| {
+            build_flow_value(SaveInput {
+                name: "t",
+                recorder: &r,
+                commands: range,
+                description: None,
+                entries: &entries,
+                params: &[],
+                output: Some(output),
+                created_at: String::new(),
+                login_wall: false,
+            })
+        };
+        let err = save("s2r1").unwrap_err();
+        assert!(
+            err.contains("s2r1 is ambiguous: saved s2r1 (https://app.example/api/three)")
+                && err.contains("saved as s1r1 (https://app.example/api/two)"),
+            "{err}"
+        );
+        assert_eq!(save("s1r1").unwrap().0["output"], "s1r1");
+        assert_eq!(save("s3r1").unwrap().0["output"], "s2r1");
+    }
+
+    #[test]
+    fn a_referer_keeps_the_placeholders_of_params_that_stay() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://app.example/search?q=tea&tab=recent" }),
+            None,
+            None,
+        );
+        r.tag_now("api");
+        let doc = entry(
+            "doc",
+            "https://app.example/search?q=tea&tab=recent",
+            "Document",
+            "text/html",
+            r#"<script id="d" type="application/json">{"a":1}</script>"#,
+        );
+        let mut api = entry(
+            "api",
+            "https://app.example/api/search?q=tea",
+            "Fetch",
+            "application/json",
+            r#"{"r":[]}"#,
+        );
+        api.request_headers.push((
+            "Referer".to_string(),
+            "https://app.example/search?q=tea&tab=recent".to_string(),
+        ));
+        let (flow, report) = flow_of_entries(&r, &[doc, api], None).unwrap();
+        assert_eq!(report["params"], json!(["q"]));
+        assert_eq!(
+            flow["steps"][0]["requests"][0]["headers"]["Referer"],
+            "https://app.example/search?q={{q}}&tab=recent"
+        );
     }
 
     #[test]
@@ -2430,14 +3378,34 @@ mod tests {
     }
 
     #[test]
-    fn a_response_without_its_lists_is_empty_not_drift() {
+    fn missing_counts_with_a_populated_list_are_not_empty() {
+        let req = PreparedRequest {
+            expect: expect_of(json!({
+                "list": "items",
+                "signature": signature(&json!({ "items": [{ "id": 1 }], "total": 1 })),
+            })),
+            ..prepared("s1r1")
+        };
+        let (body, empty) = check_response(&req, 200, r#"{"items":[{"id":1},{"id":2}]}"#).unwrap();
+        assert!(!empty);
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
+        let (_, empty) = check_response(&req, 200, r#"{"items":[]}"#).unwrap();
+        assert!(empty);
+        let gone = check_response(&req, 200, r#"{"other":[{"id":1}]}"#).unwrap_err();
+        assert!(gone.shape_changed);
+    }
+
+    #[test]
+    fn a_response_without_its_list_is_drift_and_without_its_counts_is_empty() {
         let req = PreparedRequest {
             expect: expect_of(
                 json!({ "signature": signature(&json!({ "payload": { "results": [{ "id": 1 }], "total": 1 } })) }),
             ),
             ..prepared("s1r1")
         };
-        let (_, empty) = check_response(&req, 200, r#"{"payload":{}}"#).unwrap();
+        let missing = check_response(&req, 200, r#"{"payload":{}}"#).unwrap_err();
+        assert!(missing.shape_changed);
+        let (_, empty) = check_response(&req, 200, r#"{"payload":{"results":[]}}"#).unwrap();
         assert!(empty);
         let moved = check_response(&req, 200, r#"{"payload":{"items":[]}}"#).unwrap_err();
         assert!(moved.shape_changed);
@@ -2450,7 +3418,7 @@ mod tests {
             &req,
             Tier::Http,
             Instant::now(),
-            Ok((200, r#"{"payload":{"total":0}}"#.to_string())),
+            Ok((200, r#"{"payload":{"results":[]}}"#.to_string())),
         )];
         let out = finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
         assert_eq!(out["ok"], true);
@@ -3414,7 +4382,7 @@ mod tests {
             json!({ "action": "click", "script": "fetch('/x')" }),
         ] {
             assert!(
-                check_replay_commands(&flow, &[bad.clone()]).is_err(),
+                check_replay_commands(&flow, std::slice::from_ref(&bad)).is_err(),
                 "{bad}"
             );
         }
@@ -3733,6 +4701,225 @@ mod tests {
             "the login request is dropped"
         );
         assert_eq!(flow["steps"][1]["command"]["key"], REDACTED);
+    }
+
+    fn secret_fill_recording() -> (FlowRecorder, HarEntry) {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/vault" }),
+            None,
+            None,
+        );
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "@e1", "value": "tk-91ab-77" }),
+            None,
+            Some(&traits("text", "", "secret value")),
+        );
+        r.tag_now("save");
+        let mut save = entry(
+            "save",
+            "https://api.example.com.ar/api/vault/items?v=2",
+            "Fetch",
+            "application/json",
+            r#"{"ok":true}"#,
+        );
+        save.method = "POST".to_string();
+        save.post_data = Some(r#"{"label":"a","value":"tk-91ab-77"}"#.to_string());
+        (r, save)
+    }
+
+    #[test]
+    fn a_save_that_drops_the_only_request_for_a_secret_names_it() {
+        let (r, save) = secret_fill_recording();
+        let err = build_flow_value(SaveInput {
+            name: "vault",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[save],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap_err();
+        assert!(err.contains("POST /api/vault/items"), "{err}");
+        assert!(err.contains("typed into a secret field"), "{err}");
+        assert!(err.contains("non-secret field"), "{err}");
+        assert!(!err.contains("tk-91ab-77") && !err.contains("v=2"), "{err}");
+    }
+
+    #[test]
+    fn a_dropped_secret_request_is_named_in_the_not_captured_line() {
+        let (r, save) = secret_fill_recording();
+        let mut r = r;
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+            None,
+        );
+        r.tag_now("home");
+        let home = entry(
+            "home",
+            "https://api.example.com.ar/home",
+            "Fetch",
+            "application/json",
+            r#"{"items":[1]}"#,
+        );
+        let (_, report) = build_flow_value(SaveInput {
+            name: "vault",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[save, home],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let reasons: Vec<String> = report["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|g| g["reason"].as_str().map(String::from))
+            .collect();
+        assert!(
+            reasons
+                .iter()
+                .any(|m| m.contains("POST /api/vault/items") && m.contains("secret field")),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn a_secret_in_the_path_of_a_dropped_request_is_not_printed() {
+        for url in [
+            "https://api.example.com.ar/api/vault/tk-91ab-77?v=2",
+            "https://api.example.com.ar/api/vault/tk%2D91ab%2D77/items",
+        ] {
+            let (r, mut save) = secret_fill_recording();
+            save.url = url.to_string();
+            save.post_data = Some(r#"{"label":"a"}"#.to_string());
+            let err = build_flow_value(SaveInput {
+                name: "vault",
+                recorder: &r,
+                commands: &r.commands,
+                description: None,
+                entries: &[save.clone()],
+                params: &[],
+                output: None,
+                created_at: String::new(),
+                login_wall: false,
+            })
+            .unwrap_err();
+            assert!(!err.contains("91ab"), "{err}");
+            assert!(err.contains("POST /api/vault/<redacted>"), "{err}");
+            let mut r = r;
+            r.begin_command(
+                "navigate",
+                &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+                None,
+                None,
+            );
+            r.tag_now("home");
+            let home = entry(
+                "home",
+                "https://api.example.com.ar/home",
+                "Fetch",
+                "application/json",
+                r#"{"items":[1]}"#,
+            );
+            let (_, mut report) = build_flow_value(SaveInput {
+                name: "vault",
+                recorder: &r,
+                commands: &r.commands,
+                description: None,
+                entries: &[save, home],
+                params: &[],
+                output: None,
+                created_at: String::new(),
+                login_wall: false,
+            })
+            .unwrap();
+            assert!(!report["gaps"].to_string().contains("91ab"), "{report}");
+            report["path"] = json!("/tmp/x.json");
+            let text =
+                crate::output::format_flow_text(Some("flow_save"), &report).unwrap_or_default();
+            assert!(!text.contains("91ab"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_secret_that_spans_path_segments_is_not_printed() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "@e1", "value": "ab12/cd34" }),
+            None,
+            Some(&traits("text", "", "secret value")),
+        );
+        r.tag_now("save");
+        let mut save = entry(
+            "save",
+            "https://api.example.com.ar/api/vault/ab12/cd34/items",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        save.method = "POST".to_string();
+        let err = build_flow_value(SaveInput {
+            name: "vault",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[save],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap_err();
+        assert!(!err.contains("ab12") && !err.contains("cd34"), "{err}");
+        assert!(err.contains("POST api.example.com.ar carried"), "{err}");
+    }
+
+    #[test]
+    fn an_unreadable_paste_names_only_the_host_of_the_dropped_request() {
+        let mut r = recorded(&[]);
+        let secret = traits("password", "", "");
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "Control+v" }),
+            None,
+            Some(&secret),
+        );
+        r.tag_now("save");
+        let mut save = entry(
+            "save",
+            "https://api.example.com.ar/api/vault/pasted-9z/items?v=2",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        save.method = "POST".to_string();
+        let err = build_flow_value(SaveInput {
+            name: "vault",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[save],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap_err();
+        assert!(err.contains("POST api.example.com.ar may carry"), "{err}");
+        assert!(!err.contains("pasted-9z"), "{err}");
     }
 
     #[test]
@@ -4724,6 +5911,149 @@ mod tests {
         // Other statuses are judged the same either way.
         let f = check_response(&req, 429, "{}").unwrap_err();
         assert_eq!(f.stop, Some(Stop::RateLimited));
+    }
+
+    #[test]
+    fn a_denied_request_with_a_recorded_signature_is_not_an_expired_session() {
+        let mut req = prepared("s1r1");
+        req.headers
+            .push(("X-Ts".to_string(), "1730000000".to_string()));
+        req.headers.push((
+            "X-Sig".to_string(),
+            "9f2c41d8a7b3e6f05c1d2a9b8e7f6a43".to_string(),
+        ));
+        for status in [401, 403] {
+            let f = check_response(&req, status, "{}").unwrap_err();
+            assert_eq!(f.stop, Some(Stop::RequestSigned), "{status}");
+            assert!(
+                f.reason.contains("X-Ts") && f.reason.contains("X-Sig"),
+                "{}",
+                f.reason
+            );
+        }
+        assert_eq!(Stop::RequestSigned.code(), "request_signed");
+        // A credential the file cannot hold is the more basic problem.
+        req.expect.stripped_auth = true;
+        let f = check_response(&req, 401, "{}").unwrap_err();
+        assert_eq!(f.stop, Some(Stop::CredentialNotSendable));
+        // Ordinary headers, including ones that only contain these letters, are not signatures.
+        let mut plain = prepared("s1r1");
+        plain
+            .headers
+            .push(("Accepts-Language".to_string(), "en".to_string()));
+        plain
+            .headers
+            .push(("X-Requested-With".to_string(), "fetch".to_string()));
+        let f = check_response(&plain, 401, "{}").unwrap_err();
+        assert_eq!(f.stop, Some(Stop::AuthExpired));
+        // A signature header does not change how other statuses are judged.
+        assert!(check_response(&req, 200, r#"{"data":[{"id":1}]}"#).is_ok());
+    }
+
+    #[test]
+    fn a_header_named_like_a_signature_needs_a_value_that_looks_per_request() {
+        let sig = "9f2c41d8a7b3e6f05c1d2a9b8e7f6a43";
+        let names = |pairs: &[(&str, &str)]| {
+            let headers: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            signature_headers(&headers)
+        };
+        // Per-request values.
+        for (name, value) in [
+            ("X-Ts", "1730000000"),
+            ("x_timestamp", "1730000000123"),
+            ("XSig", sig),
+            ("HMACSignature", sig),
+            ("X-Request-Nonce", sig),
+            ("x-hmac", "aGVsbG8gd29ybGQgdGhpcyBpcyBhIHNpZw=="),
+            ("X-Ts", "1730000000.123"),
+            ("X-Timestamp", "2026-11-04T10:15:30Z"),
+            ("X-Timestamp", "2026-11-04T10:15:30.123+00:00"),
+            ("X-Signature", "qZkWvbRtYhGnMcLpXdSfUaJe7"),
+            ("X-Nonce", "123e4567-e89b-12d3-a456-426614174000"),
+            ("X-Signature", "mQ2vN8xLr4TzKcWb9YdHf3JsPa6UeGo1VtXi5BnRq7A"),
+            (
+                "X-Sig",
+                "9f2c41d8a7b3e6f05c1d2a9b8e7f6a439f2c41d8a7b3e6f05c1d2a9b8e7f6a43",
+            ),
+            (
+                "Stripe-Signature",
+                "t=1730000000,v1=5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e56ff536d0ce8e108d8bd",
+            ),
+        ] {
+            assert_eq!(names(&[(name, value)]), vec![name.to_string()], "{name}");
+        }
+        // Names that share a word with a signature, or a static value.
+        for (name, value) in [
+            ("x-ts", "web"),
+            ("X-Signed-In", "true"),
+            ("x-user-signed-in", "1"),
+            ("X-Timestamp-Format", "iso"),
+            ("X-TS-Env", "prod"),
+            ("x-sig-version", "2"),
+            ("X-Client-Nonce-Mode", "strict"),
+            ("Accept-Signature", "sig1"),
+            ("Accepts-Language", "en"),
+            ("X-Timestamp", "iso"),
+            ("X-Timestamp", "1730000000x"),
+            ("X-Signature", "signatureversion"),
+            ("X-Signature", "SignatureVersion"),
+            ("X-Signature-Version", "SignatureVersion2"),
+            ("X-Sig-Alg", "RSASSA-PSS-SHA256"),
+            ("X-Signature-Alg", "ECDSA-P256-SHA256"),
+            ("X-Signature-Type", "AwsSignatureV4Hmac"),
+            ("X-Signature-Key-Id", "AppKeyProduction01"),
+            ("X-Nonce-Source", "BrowserCryptoApi"),
+            ("X-Signature", "qZkWvbRtYhGnMcLpXdSfUaJe"),
+            ("X-Signature", "t=1,v=2"),
+            ("X-Signature", "version=2,alg=sha256"),
+        ] {
+            assert!(names(&[(name, value)]).is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_header_value_repeated_across_requests_is_static() {
+        let flow = flow_of(json!({
+            "name": "f", "origin": "site.example", "output": "s1r2",
+            "steps": [{ "requests": [
+                { "id": "s1r1", "method": "GET", "url": "https://a.test/x",
+                  "headers": { "X-Sig": "9f2c41d8a7b3e6f05c1d2a9b8e7f6a43", "X-Ts": "1730000000" } },
+                { "id": "s1r2", "method": "GET", "url": "https://a.test/y",
+                  "headers": { "X-Sig": "9f2c41d8a7b3e6f05c1d2a9b8e7f6a43", "X-Ts": "1730000099" } },
+            ] }],
+        }));
+        let reqs = prepare_all(&flow, &[]).unwrap();
+        let f = check_response(&reqs[1], 401, "{}").unwrap_err();
+        // X-Sig repeats, so it is static; X-Ts differs, so it is per request.
+        assert_eq!(f.stop, Some(Stop::RequestSigned));
+        assert!(
+            f.reason.contains("X-Ts") && !f.reason.contains("X-Sig"),
+            "{}",
+            f.reason
+        );
+        let mut only_sig = reqs[1].clone();
+        only_sig.headers.retain(|(k, _)| k == "X-Sig");
+        let f = check_response(&only_sig, 401, "{}").unwrap_err();
+        assert_eq!(f.stop, Some(Stop::AuthExpired));
+        assert!(f.reason.contains("X-Sig"), "{}", f.reason);
+    }
+
+    #[test]
+    fn a_static_timestamp_style_header_does_not_hide_an_expired_session() {
+        let mut req = prepared("s1r1");
+        req.headers.push(("x-ts".to_string(), "web".to_string()));
+        let f = check_response(&req, 401, "{}").unwrap_err();
+        assert_eq!(f.stop, Some(Stop::AuthExpired));
+        assert!(f.reason.contains("x-ts"), "{}", f.reason);
+        let mut plain = prepared("s1r1");
+        plain
+            .headers
+            .push(("X-Signed-In".to_string(), "true".to_string()));
+        let f = check_response(&plain, 401, "{}").unwrap_err();
+        assert_eq!(f.stop, Some(Stop::AuthExpired));
     }
 
     #[test]

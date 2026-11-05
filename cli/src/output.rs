@@ -834,7 +834,84 @@ fn recording_fps_suffix(data: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
+/// One line per setting the daemon changed for this command, from
+/// `lifecycle.settings` in the response. A setting that only takes effect at
+/// the next launch is in the JSON but not worth a line.
+pub fn settings_notices(data: &serde_json::Value) -> Vec<String> {
+    let lifecycle = &data["lifecycle"];
+    let settings = &lifecycle["settings"];
+    let show = |value: &serde_json::Value| match value {
+        serde_json::Value::Null => "default".to_string(),
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| item.as_str().map_or_else(|| item.to_string(), String::from))
+            .collect::<Vec<_>>()
+            .join(","),
+        other => other.to_string(),
+    };
+    let mut lines: Vec<String> = settings["changes"]
+        .as_array()
+        .map(|changes| {
+            changes
+                .iter()
+                .filter(|change| change["applied"] == true)
+                .map(|change| {
+                    let option = change["option"].as_str().unwrap_or("setting");
+                    let flag = crate::session_settings::spec_by_name(option)
+                        .map(|spec| spec.flag)
+                        .filter(|flag| !flag.is_empty())
+                        .map(|flag| format!(" ({flag})"))
+                        .unwrap_or_default();
+                    let effect = if change["effect"] == "relaunch" {
+                        "relaunched browser"
+                    } else {
+                        "applied"
+                    };
+                    format!(
+                        "{} {}: {} \u{2192} {}{}, {}",
+                        color::warning_indicator(),
+                        option,
+                        show(&change["running"]),
+                        show(&change["requested"]),
+                        flag,
+                        effect
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if settings["forcedRelaunch"] == true && lifecycle["relaunchedBrowser"] == true {
+        lines.push(format!(
+            "{} browser: relaunched (--relaunch)",
+            color::warning_indicator()
+        ));
+    }
+    lines
+}
+
+/// True when the lifecycle report names a setting change or `--relaunch` as the
+/// reason for a relaunch, and the notices therefore printed it.
+fn settings_notices_explain_relaunch(lifecycle: &serde_json::Value) -> bool {
+    let settings = &lifecycle["settings"];
+    settings["forcedRelaunch"] == true
+        || settings["changes"].as_array().is_some_and(|changes| {
+            changes
+                .iter()
+                .any(|c| c["effect"] == "relaunch" && c["applied"] == true)
+        })
+}
+
+fn print_settings_notices(resp: &Response) {
+    if let Some(data) = resp.data.as_ref() {
+        for line in settings_notices(data) {
+            eprintln!("{line}");
+        }
+    }
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
+    print_settings_notices(resp);
     print_primary_response(resp, action, opts);
     // Tools the page declares come first; saved flows are the fallback.
     if !opts.json {
@@ -1930,7 +2007,10 @@ fn print_lifecycle_note(data: &serde_json::Value) {
         .unwrap_or(false);
 
     if relaunched {
-        parts.push("relaunched browser".to_string());
+        // A settings notice already said why the browser was relaunched.
+        if !settings_notices_explain_relaunch(lifecycle) {
+            parts.push("relaunched browser".to_string());
+        }
     } else if launched && !reused {
         parts.push("launched browser".to_string());
     }
@@ -1958,7 +2038,7 @@ fn print_warning(resp: &Response) {
     }
 }
 
-/// Print command-specific help. Returns true if help was printed, false if command unknown.
+/// Print command-specific help. Returns false if no help page exists for the command.
 pub fn print_command_help(command: &str) -> bool {
     let help = match command {
         // === Navigation ===
@@ -2163,10 +2243,11 @@ Examples:
             r##"
 agent-browser fill - Clear and fill an input field
 
-Usage: agent-browser fill <selector> <text>
+Usage: agent-browser fill <selector> [--] <text>
 
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
+Put flags before --. Text after -- is literal, including values that look like flags.
 
 Global Options:
   --json               Output as JSON
@@ -2176,16 +2257,18 @@ Examples:
   agent-browser fill "#email" "user@example.com"
   agent-browser fill @e3 "Hello World"
   agent-browser fill "input[name='search']" "query"
+  agent-browser fill "#search" -- --json
 "##
         }
         "type" => {
             r##"
 agent-browser type - Type text into an element
 
-Usage: agent-browser type <selector> <text>
+Usage: agent-browser type <selector> [--clear] [--delay <ms>] [--] <text>
 
 Types text into the specified element character by character.
-Unlike fill, this does not clear existing content first.
+Use --clear to clear existing content first. Use --delay to set the delay between keystrokes in milliseconds.
+Use -- before text that looks like a flag to pass it literally. Put options before --.
 
 Global Options:
   --json               Output as JSON
@@ -2194,6 +2277,7 @@ Global Options:
 Examples:
   agent-browser type "#search" "hello"
   agent-browser type @e2 "additional text"
+  agent-browser --json type "#search" --clear --delay 10 -- --clear
 
 See Also:
   For typing into contenteditable editors (Lexical, ProseMirror, etc.)
@@ -2331,6 +2415,8 @@ agent-browser download - Download a file by clicking an element
 Usage: agent-browser download <selector> <path>
 
 Clicks an element that triggers a download and saves the file to the specified path.
+Only works with a browser agent-browser launched; rejected over --cdp,
+--auto-connect, or a provider because the remote endpoint names the saved file.
 
 Arguments:
   selector             Element to click (CSS selector or @ref)
@@ -2858,6 +2944,10 @@ Usage: agent-browser mouse <subcommand> [args]
 
 Performs low-level mouse operations for precise control.
 
+Coordinates and wheel deltas accept finite numbers, including decimals.
+Invalid values return an error. Omitted wheel deltas default to 100 vertically
+and 0 horizontally. Explicit zero values remain zero.
+
 Subcommands:
   move <x> <y>         Move mouse to coordinates
   down [button]        Press mouse button (left, right, middle)
@@ -3018,6 +3108,8 @@ Operations:
   get                                Get all cookies (default)
   set <name> <value> [options]       Set a cookie with optional properties
   clear                              Clear all cookies
+
+Unknown operations return an error.
 
 Cookie Set Options:
   --url <url>                        URL for the cookie (allows setting before page load)
@@ -4078,6 +4170,10 @@ Pass the arguments as a JSON object, or - to read them from stdin. Every tool
 is available unless --tools limits the call. Exit code: 0 on success, 1 when
 the tool reports an error, 2 for an unknown tool or invalid arguments.
 
+For tool calls that run the CLI, structuredContent.response contains parsed
+CLI JSON. stdout is included only when the output cannot be parsed as JSON;
+exitCode and stderr are always included.
+
 Pass --config <trusted-path> to agent-browser mcp or agent-browser mcp call to
 select one trusted config file. MCP tool child processes load only that file,
 replacing default user/project discovery. Put required safety policy in it.
@@ -4270,6 +4366,8 @@ pub fn print_help() {
 agent-browser - fast browser automation CLI for AI agents
 
 Usage: agent-browser <command> [args] [options]
+
+Unknown commands exit with status 1, including when help is requested.
 
 Start here (for AI agents):
   agent-browser skills get core
@@ -4516,6 +4614,7 @@ Options:
   --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY)
                              When launching Chrome, agent-browser accepts a proxy URL with a trailing slash.
                              Supports authenticated proxies: --proxy "http://user:pass@127.0.0.1:7890"
+                             Credentials are percent-decoded, so encode reserved characters (p@ss as p%40ss).
   --proxy-bypass <hosts>     Bypass proxy for these hosts (or AGENT_BROWSER_PROXY_BYPASS, NO_PROXY)
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
@@ -4555,7 +4654,7 @@ Options:
                              Invalid values warn and leave the existing output limit unchanged.
   --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --capture <list>           Record the session as it runs; only flow is supported (or AGENT_BROWSER_CAPTURE)
-                             Set when the session opens; close and reopen to change it
+                             On a running session without capture, passing it relaunches with capture on
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
@@ -4573,6 +4672,7 @@ Options:
                              environment values are not reused when bypass is cleared.
                              Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
+  --relaunch                 Relaunch the session's browser even when no setting changed
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
   -q, --quiet                Show only AI text responses (hide tool calls)
@@ -5272,5 +5372,129 @@ hydration: -  phases: 0  hydratedComponents: 0"
             format_webmcp_context(&json!({"webmcp": {"status": "unavailable"}}), &opts).unwrap();
         assert!(unavailable.contains("do not reuse tools"));
         assert!(!unavailable.contains(": 0"));
+    }
+    // === Settings notices ===
+    use super::{settings_notices, settings_notices_explain_relaunch};
+
+    fn notice_data(
+        changes: serde_json::Value,
+        forced: bool,
+        relaunched: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "lifecycle": {
+                "relaunchedBrowser": relaunched,
+                "settings": { "changes": changes, "forcedRelaunch": forced },
+            }
+        })
+    }
+
+    #[test]
+    fn test_settings_notice_names_the_change_flag_and_effect() {
+        let data = notice_data(
+            serde_json::json!([{
+                "option": "profile", "requested": "/b", "running": "/a",
+                "effect": "relaunch", "applied": true,
+            }]),
+            false,
+            true,
+        );
+        let lines = settings_notices(&data);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].ends_with("profile: /a \u{2192} /b (--profile), relaunched browser"),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].contains('\u{26a0}'), "{}", lines[0]);
+    }
+
+    #[test]
+    fn test_settings_notice_for_a_live_change_and_defaults() {
+        let data = notice_data(
+            serde_json::json!([
+                {"option": "default-timeout", "requested": 9000, "running": null,
+                 "effect": "live", "applied": true},
+                {"option": "proxy-bypass", "requested": null, "running": "localhost",
+                 "effect": "relaunch", "applied": true},
+                {"option": "args", "requested": ["--a", "--b"], "running": ["--a"],
+                 "effect": "relaunch", "applied": true},
+            ]),
+            false,
+            true,
+        );
+        let lines = settings_notices(&data);
+        assert!(lines[0]
+            .ends_with("default-timeout: default \u{2192} 9000 (--default-timeout), applied"));
+        assert!(lines[1].ends_with(
+            "proxy-bypass: localhost \u{2192} default (--proxy-bypass), relaunched browser"
+        ));
+        assert!(lines[2].ends_with("args: --a \u{2192} --a,--b (--args), relaunched browser"));
+    }
+
+    #[test]
+    fn test_settings_notice_skips_changes_that_wait_for_the_next_launch() {
+        let data = notice_data(
+            serde_json::json!([{
+                "option": "profile", "requested": "/b", "running": null,
+                "effect": "relaunch", "applied": false,
+            }]),
+            false,
+            false,
+        );
+        assert!(settings_notices(&data).is_empty());
+    }
+
+    #[test]
+    fn test_settings_notice_for_a_forced_relaunch() {
+        let lines = settings_notices(&notice_data(serde_json::json!([]), true, true));
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].ends_with("browser: relaunched (--relaunch)"),
+            "{}",
+            lines[0]
+        );
+        assert!(settings_notices(&notice_data(serde_json::json!([]), true, false)).is_empty());
+    }
+
+    #[test]
+    fn test_a_settings_notice_replaces_the_generic_relaunch_note() {
+        let explained = notice_data(
+            serde_json::json!([{
+                "option": "profile", "requested": "/b", "running": "/a",
+                "effect": "relaunch", "applied": true,
+            }]),
+            false,
+            true,
+        );
+        assert!(settings_notices_explain_relaunch(&explained["lifecycle"]));
+        assert!(settings_notices_explain_relaunch(
+            &notice_data(serde_json::json!([]), true, true)["lifecycle"]
+        ));
+        let unexplained = notice_data(serde_json::json!([]), false, true);
+        assert!(!settings_notices_explain_relaunch(
+            &unexplained["lifecycle"]
+        ));
+    }
+
+    #[test]
+    fn test_settings_notice_never_prints_url_secrets() {
+        let data = notice_data(
+            serde_json::json!([{
+                "option": "cdp",
+                "requested": "wss://host.example/cdp?<redacted>",
+                "running": null, "effect": "relaunch", "applied": true,
+            }]),
+            false,
+            true,
+        );
+        let lines = settings_notices(&data).join("\n");
+        assert!(lines.contains("cdp?<redacted>") && !lines.contains("SECRET"));
+    }
+
+    #[test]
+    fn test_settings_notice_needs_a_settings_report() {
+        assert!(settings_notices(&serde_json::json!({"lifecycle": {}})).is_empty());
+        assert!(settings_notices(&serde_json::json!({"url": "x"})).is_empty());
     }
 }
