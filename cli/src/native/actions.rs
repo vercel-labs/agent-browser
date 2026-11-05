@@ -578,11 +578,9 @@ pub struct DaemonState {
     pub restore_skipped_origins: Vec<String>,
     pub restore_loaded_path: Option<String>,
     pub restore_load_failed: bool,
-    restore_ownership_error: Option<String>,
     pub restore_validation_pending: bool,
     pub restore_save_status: String,
     pub restore_saved_path: Option<String>,
-    restore_save_ownership_error: bool,
     /// When the most recent browser-touching command finished. Periodic
     /// autosaves wait for a quiet period after this so a multi-second save
     /// never lands in the middle of an active command burst.
@@ -775,11 +773,9 @@ impl DaemonState {
             restore_skipped_origins: Vec::new(),
             restore_loaded_path: None,
             restore_load_failed: false,
-            restore_ownership_error: None,
             restore_validation_pending: false,
             restore_save_status: "not_attempted".to_string(),
             restore_saved_path: None,
-            restore_save_ownership_error: false,
             last_command_finished: None,
             last_autosave_attempt: None,
             session_id,
@@ -2377,11 +2373,9 @@ fn reset_restore_runtime_state(state: &mut DaemonState) {
     state.restore_skipped_origins.clear();
     state.restore_loaded_path = None;
     state.restore_load_failed = false;
-    state.restore_ownership_error = None;
     state.restore_validation_pending = false;
     state.restore_save_status = "not_attempted".to_string();
     state.restore_saved_path = None;
-    state.restore_save_ownership_error = false;
 }
 
 fn command_restore_check_fields(
@@ -2532,7 +2526,7 @@ async fn apply_restore_config_after_confirmation(
     let had_browser = has_active_browser_session(state);
 
     if restore_key_changed && had_browser {
-        auto_save_before_relaunch(state).await?;
+        let _ = auto_save_restore_state(state).await;
         close_before_implicit_relaunch(state).await?;
     }
 
@@ -3368,12 +3362,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 || state.browser.is_some()
                 || state.active_provider_session.is_some();
             if state.browser.is_some() || state.active_provider_session.is_some() {
-                if let Err(e) = auto_save_before_relaunch(state).await {
-                    rollback_launch_settings(state, &mut settings_outcome, &e).await;
-                    let mut resp = error_response(&id, &e);
-                    attach_settings_outcome(&mut resp, &settings_outcome);
-                    return resp;
-                }
+                let _ = auto_save_restore_state(state).await;
             }
             let strict_state = launch_patch
                 .as_ref()
@@ -4791,7 +4780,7 @@ async fn auto_launch_inner(
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-        try_auto_restore_state(state).await?;
+        try_auto_restore_state(state).await;
         load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
         return Ok(json!({}));
     }
@@ -4823,7 +4812,7 @@ async fn auto_launch_inner(
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-        try_auto_restore_state(state).await?;
+        try_auto_restore_state(state).await;
         load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
         return Ok(json!({}));
     }
@@ -4897,7 +4886,7 @@ async fn auto_launch_inner(
                     write_provider_file(&state.session_id, &p);
                     install_network_controls_or_close(state, has_proxy_auth).await?;
                     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-                    try_auto_restore_state(state).await?;
+                    try_auto_restore_state(state).await;
                     load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
                     state.effective_ca_cert = effective_ca_cert;
                     let mut extras = json!({ "provider": provider });
@@ -4966,7 +4955,7 @@ async fn auto_launch_inner(
     install_network_controls_or_close(state, has_proxy_auth).await?;
 
     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-    try_auto_restore_state(state).await?;
+    try_auto_restore_state(state).await;
     load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
     Ok(json!({}))
 }
@@ -5090,7 +5079,7 @@ async fn apply_launch_mutator_plugins(
     Ok(())
 }
 
-async fn try_auto_restore_state(state: &mut DaemonState) -> Result<(), String> {
+async fn try_auto_restore_state(state: &mut DaemonState) {
     state.restore_skipped_origins.clear();
     let session_name = match state.session_name.as_deref() {
         Some(n) if !n.is_empty() => n.to_string(),
@@ -5099,33 +5088,11 @@ async fn try_auto_restore_state(state: &mut DaemonState) -> Result<(), String> {
             state.restore_status_detail = None;
             state.restore_loaded_path = None;
             state.restore_load_failed = false;
-            state.restore_ownership_error = None;
             state.restore_validation_pending = false;
-            return Ok(());
+            return;
         }
     };
-    let path = match state::find_auto_state_file(&session_name) {
-        Ok(path) => {
-            state.restore_ownership_error = None;
-            path
-        }
-        Err(err) => {
-            state.restore_status = "load_failed".to_string();
-            state.restore_status_detail = Some(err.clone());
-            state.restore_loaded_path = None;
-            state.restore_load_failed = true;
-            state.restore_ownership_error = Some(err.clone());
-            state.restore_validation_pending = false;
-            return Err(match rollback_failed_launch(state).await {
-                Ok(()) => err,
-                Err(close_err) => format!(
-                    "{} (also failed to roll back browser after launch: {})",
-                    err, close_err
-                ),
-            });
-        }
-    };
-    if let Some(path) = path {
+    if let Some(path) = state::find_auto_state_file(&session_name) {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 match state::load_state(&mgr.client, session_id, &path).await {
@@ -5149,6 +5116,15 @@ async fn try_auto_restore_state(state: &mut DaemonState) -> Result<(), String> {
                 }
             }
         }
+    } else if let Some(path) = state::find_ambiguous_auto_state_file(&session_name) {
+        state.restore_status = "skipped_ambiguous".to_string();
+        state.restore_status_detail = Some(format!(
+            "Skipped legacy state file {} with ambiguous ownership; use `agent-browser state load <path>` after confirming its owner.",
+            path
+        ));
+        state.restore_loaded_path = None;
+        state.restore_load_failed = false;
+        state.restore_validation_pending = false;
     } else {
         state.restore_status = "missing".to_string();
         state.restore_status_detail = None;
@@ -5156,7 +5132,6 @@ async fn try_auto_restore_state(state: &mut DaemonState) -> Result<(), String> {
         state.restore_load_failed = false;
         state.restore_validation_pending = false;
     }
-    Ok(())
 }
 
 async fn validate_restore_if_pending(state: &mut DaemonState) {
@@ -5281,7 +5256,6 @@ pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interv
 pub(crate) async fn auto_save_restore_state(
     state: &mut DaemonState,
 ) -> Result<Option<String>, String> {
-    state.restore_save_ownership_error = false;
     validate_restore_if_pending(state).await;
 
     let Some(session_name) = state.session_name.clone() else {
@@ -5296,6 +5270,11 @@ pub(crate) async fn auto_save_restore_state(
             state.restore_saved_path = None;
             return Ok(None);
         }
+        "auto" if state.restore_load_failed => {
+            state.restore_save_status = "skipped_restore_failed".to_string();
+            state.restore_saved_path = None;
+            return Ok(None);
+        }
         "auto" | "always" => {}
         other => {
             state.restore_save_status = "invalid_policy".to_string();
@@ -5305,23 +5284,6 @@ pub(crate) async fn auto_save_restore_state(
                 other
             ));
         }
-    }
-
-    let ownership = match state.restore_ownership_error.as_ref() {
-        Some(err) => Err(err.clone()),
-        None => state::find_auto_state_file(&session_name).map(|_| ()),
-    };
-    if let Err(err) = ownership {
-        state.restore_save_status = "error".to_string();
-        state.restore_saved_path = None;
-        state.restore_save_ownership_error = true;
-        return Err(err);
-    }
-
-    if state.restore_save == "auto" && state.restore_load_failed {
-        state.restore_save_status = "skipped_restore_failed".to_string();
-        state.restore_saved_path = None;
-        return Ok(None);
     }
 
     let Some(ref mgr) = state.browser else {
@@ -5353,13 +5315,6 @@ pub(crate) async fn auto_save_restore_state(
             state.restore_saved_path = None;
             Err(err)
         }
-    }
-}
-
-async fn auto_save_before_relaunch(state: &mut DaemonState) -> Result<(), String> {
-    match auto_save_restore_state(state).await {
-        Err(err) if state.restore_save_ownership_error => Err(err),
-        _ => Ok(()),
     }
 }
 
@@ -5905,10 +5860,6 @@ async fn apply_settings_patch(
     };
     let (next, relaunch) = (plan.next, plan.relaunch);
 
-    if relaunch && had_browser {
-        auto_save_before_relaunch(state).await?;
-    }
-
     if was(Key::DefaultTimeout) {
         state.default_timeout_ms = next.default_timeout_ms();
         // Later commands that omit the flag size their wait from the stored
@@ -5970,6 +5921,7 @@ async fn apply_settings_patch(
     state.settings = next;
 
     if relaunch && had_browser {
+        let _ = auto_save_restore_state(state).await;
         close_all_browser_backends(state).await?;
         state.ref_map.invalidate_all_documents();
     }
@@ -6481,11 +6433,6 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
-    if state.restore_save_ownership_error && has_active_browser_session(state) {
-        if let Err(err) = save_result {
-            return Err(err);
-        }
-    }
     close_all_browser_backends(state).await?;
     state.attached_target = None;
 
@@ -16566,7 +16513,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[tokio::test]
-    async fn test_autosave_preflights_ownership_after_explicit_state_load() {
+    async fn test_auto_restore_skips_ambiguous_file_without_blocking_autosave() {
         let guard = EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
         let home = tempfile::tempdir().unwrap();
         guard.set("HOME", home.path().to_str().unwrap());
@@ -16578,50 +16525,18 @@ mod tests {
 
         let mut state = DaemonState::new();
         state.session_name = Some("auth".to_string());
-        mark_explicit_storage_state_loaded(&mut state, "/tmp/explicit.json");
-        for policy in ["auto", "always"] {
-            state.restore_save = policy.to_string();
-            let err = auto_save_restore_state(&mut state).await.unwrap_err();
-            assert!(err.contains("Ambiguous ownership"), "{err}");
-            assert!(err.contains("confirm ownership before loading"), "{err}");
-            assert_eq!(state.restore_save_status, "error");
-            assert!(state.restore_saved_path.is_none());
-            assert_eq!(fs::read_to_string(&ambiguous).unwrap(), "original");
-        }
-
-        fs::remove_file(&ambiguous).unwrap();
+        state.restore_save = "auto".to_string();
+        try_auto_restore_state(&mut state).await;
+        assert_eq!(state.restore_status, "skipped_ambiguous");
+        assert!(state
+            .restore_status_detail
+            .as_deref()
+            .unwrap()
+            .contains(ambiguous.to_str().unwrap()));
+        assert!(!state.restore_load_failed);
         assert_eq!(auto_save_restore_state(&mut state).await.unwrap(), None);
         assert_eq!(state.restore_save_status, "no_browser");
-    }
-
-    #[cfg(not(windows))]
-    #[tokio::test]
-    async fn test_failed_ownership_restore_blocks_always_until_restore_retried() {
-        let guard = EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
-        let home = tempfile::tempdir().unwrap();
-        guard.set("HOME", home.path().to_str().unwrap());
-        guard.remove("AGENT_BROWSER_NAMESPACE");
-        let sessions = state::get_sessions_dir();
-        fs::create_dir_all(&sessions).unwrap();
-        let ambiguous = sessions.join("auth-worker-one.json");
-        fs::write(&ambiguous, "original").unwrap();
-
-        let mut state = DaemonState::new();
-        state.session_name = Some("auth".to_string());
-        state.restore_save = "always".to_string();
-        let err = try_auto_restore_state(&mut state).await.unwrap_err();
-        assert!(err.contains("Ambiguous ownership"), "{err}");
-        assert_eq!(state.restore_status, "load_failed");
-        assert!(state.browser.is_none());
-        fs::remove_file(&ambiguous).unwrap();
-        mark_explicit_storage_state_loaded(&mut state, "/tmp/explicit.json");
-        let err = auto_save_restore_state(&mut state).await.unwrap_err();
-        assert!(err.contains("Ambiguous ownership"), "{err}");
-        assert!(state.restore_saved_path.is_none());
-
-        try_auto_restore_state(&mut state).await.unwrap();
-        assert_eq!(auto_save_restore_state(&mut state).await.unwrap(), None);
-        assert_eq!(state.restore_save_status, "no_browser");
+        assert_eq!(fs::read_to_string(&ambiguous).unwrap(), "original");
     }
 
     #[test]
@@ -16632,7 +16547,6 @@ mod tests {
         state.restore_status_detail = Some("missing text".to_string());
         state.restore_loaded_path = Some("/tmp/old-key.json".to_string());
         state.restore_load_failed = true;
-        state.restore_ownership_error = Some("ambiguous".to_string());
         state.restore_validation_pending = true;
         state.restore_save_status = "skipped_restore_failed".to_string();
         state.restore_saved_path = Some("/tmp/old-key.json".to_string());
@@ -16644,7 +16558,6 @@ mod tests {
         assert!(state.restore_status_detail.is_none());
         assert!(state.restore_loaded_path.is_none());
         assert!(!state.restore_load_failed);
-        assert!(state.restore_ownership_error.is_none());
         assert!(!state.restore_validation_pending);
         assert_eq!(state.restore_save_status, "not_attempted");
         assert!(state.restore_saved_path.is_none());

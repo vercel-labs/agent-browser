@@ -3603,8 +3603,8 @@ Automatic State Persistence:
   agent-browser --session myapp --restore open https://example.com
   Or set AGENT_BROWSER_RESTORE environment variable.
 
-Ambiguous legacy state files block named clearing and automatic restore. Preserve the files,
-confirm their owners, and see https://agent-browser.dev/sessions for recovery steps.
+Ambiguous legacy state files are skipped by automatic restore and block named clearing. Preserve
+the files, confirm their owners, and see https://agent-browser.dev/sessions for recovery steps.
 
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.

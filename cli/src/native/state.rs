@@ -767,15 +767,15 @@ fn state_file_owner(fname: &str, name: &str) -> Option<bool> {
         }
     }
 
+    if stem.contains('.') {
+        return None;
+    }
+
     let mut owners = HashSet::new();
     for (index, _) in stem.match_indices('-') {
         let (owner, rest) = stem.split_at(index);
-        if is_valid_session_name(owner) && rest.len() > 1 {
-            owners.insert(owner);
-        }
-    }
-    if let Some((owner, id)) = stem.split_once('.') {
-        if is_valid_session_name(owner) && !id.is_empty() {
+        let id = &rest[1..];
+        if is_valid_session_name(owner) && is_valid_session_name(id) {
             owners.insert(owner);
         }
     }
@@ -826,23 +826,43 @@ fn matching_state_files(dir: &std::path::Path, name: Option<&str>) -> Result<Vec
     Ok(files)
 }
 
-/// Find the newest active state file, or report ambiguous ownership and read errors.
-pub fn find_auto_state_file(session_name: &str) -> Result<Option<String>, String> {
-    let files = matching_state_files(&get_sessions_dir(), Some(session_name))?;
+fn find_state_file_by_ownership(session_name: &str, definite: bool) -> Option<String> {
+    if !is_valid_session_name(session_name) {
+        return None;
+    }
+
+    let dir = get_sessions_dir();
+    let entries = fs::read_dir(&dir).ok()?;
     let mut best_path: Option<(PathBuf, std::time::SystemTime)> = None;
-    for path in files {
-        if path.to_string_lossy().ends_with(".previous") {
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let fname = entry.file_name().to_string_lossy().to_string();
+        if !(fname.ends_with(".json") || fname.ends_with(".json.enc")) {
             continue;
         }
-        let modified = fs::metadata(&path)
-            .map_err(|e| format!("Failed to read state metadata {}: {}", path.display(), e))?
-            .modified()
-            .unwrap_or(std::time::UNIX_EPOCH);
+        if state_file_owner(&fname, session_name) != Some(definite) {
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
         if best_path.as_ref().is_none_or(|(_, m)| modified > *m) {
             best_path = Some((path, modified));
         }
     }
-    Ok(best_path.map(|(p, _)| p.to_string_lossy().to_string()))
+    best_path.map(|(p, _)| p.to_string_lossy().to_string())
+}
+
+/// Find the newest unambiguously owned active state file for `session_name`.
+pub fn find_auto_state_file(session_name: &str) -> Option<String> {
+    find_state_file_by_ownership(session_name, true)
+}
+
+/// Find the newest active legacy state file whose ownership is ambiguous for `session_name`.
+pub fn find_ambiguous_auto_state_file(session_name: &str) -> Option<String> {
+    find_state_file_by_ownership(session_name, false)
 }
 
 /// Dispatch a state management command from its JSON payload.
@@ -1063,20 +1083,9 @@ mod tests {
             ("auth-browser-one.json", "auth", Some(false)),
             ("auth-browser-one.json", "auth-browser", Some(false)),
             ("auth-browser-one-two.json", "auth-browser-one", Some(false)),
-            ("auth-browser.one.json", "auth", Some(false)),
-            ("auth-browser.one.json", "auth-browser", Some(false)),
-            ("auth-browser.json.json", "auth", Some(false)),
-            ("auth-browser.json.json", "auth-browser", Some(false)),
-            ("auth-browser.release.v1.json", "auth", Some(false)),
-            ("auth-browser.release.v1.json", "auth-browser", Some(false)),
-            ("auth.browser-one.json", "auth", Some(true)),
-            ("auth.browser-one.json", "auth-browser", None),
-            ("auth.browser.one.json", "auth", Some(true)),
-            ("auth..json", "auth", None),
-            ("auth...json", "auth", Some(true)),
-            ("auth.browser@one.json", "auth", Some(true)),
-            ("v2.auth.browser.json", "v2", Some(true)),
-            ("v2.auth.browser.json", "auth", None),
+            ("auth.backup.json", "auth", None),
+            ("auth-browser.one.json", "auth", None),
+            ("auth-browser.one.json", "auth-browser", None),
             ("v2@.auth.browser.json", "auth", Some(true)),
             ("v2@.auth.browser.json", "v2", None),
             (
@@ -1086,8 +1095,6 @@ mod tests {
             ),
             ("v2@.auth-browser.session-one.json", "auth", None),
             ("v2@.auth-browser.session-one.json", "v2", None),
-            ("v2.browser-one.json", "v2", Some(true)),
-            ("v2.browser-one.json", "browser-one", None),
         ] {
             assert_eq!(state_file_owner(file, key), expected, "{file}, {key}");
         }
@@ -1108,12 +1115,10 @@ mod tests {
 
         let sessions = get_sessions_dir();
         fs::create_dir_all(&sessions).unwrap();
-        assert!(find_auto_state_file("auth").unwrap().is_none());
+        assert!(find_auto_state_file("auth").is_none());
         let now = std::time::SystemTime::now();
         for (i, file) in [
             "auth-old.json",
-            "auth.browser.one.json.enc",
-            "auth.browser-old.json.enc",
             "v2@.auth.browser-current.json",
             "v2@.auth.browser-current-encrypted.json.enc",
         ]
@@ -1128,7 +1133,7 @@ mod tests {
                 .unwrap()
                 .set_modified(now + std::time::Duration::from_secs(i as u64 + 1))
                 .unwrap();
-            let found = find_auto_state_file("auth").unwrap().unwrap();
+            let found = find_auto_state_file("auth").unwrap();
             assert_eq!(PathBuf::from(&found), path);
             assert!(validate_state_file(&found).is_ok());
         }
@@ -1142,77 +1147,25 @@ mod tests {
         }
         assert!(find_auto_state_file("auth")
             .unwrap()
-            .unwrap()
             .ends_with("v2@.auth.browser-current-encrypted.json.enc"));
         assert!(find_auto_state_file("auth-admin")
             .unwrap()
-            .unwrap()
             .ends_with("v2@.auth-admin.browser.json"));
-        assert!(find_auto_state_file("auth-ad").unwrap().is_none());
+        assert!(find_auto_state_file("auth-ad").is_none());
         assert!(dispatch_state_command(&json!({"action":"state_clear"}))
             .unwrap()
             .is_err());
         let cleared = dispatch_state_command(&json!({"action":"state_clear","sessionName":"auth"}))
             .unwrap()
             .unwrap();
-        assert_eq!(cleared["deleted"], 7);
+        assert_eq!(cleared["deleted"], 5);
         assert!(sessions.join("v2@.auth-admin.browser.json").exists());
-        assert!(find_auto_state_file("auth").unwrap().is_none());
+        assert!(find_auto_state_file("auth").is_none());
     }
 
     #[cfg(not(windows))]
     #[test]
-    fn test_old_v2_key_does_not_collide_with_new_marker() {
-        let guard = crate::test_utils::EnvGuard::new(&[
-            "HOME",
-            "AGENT_BROWSER_NAMESPACE",
-            "AGENT_BROWSER_ENCRYPTION_KEY",
-        ]);
-        guard.remove("AGENT_BROWSER_NAMESPACE");
-        guard.set("AGENT_BROWSER_ENCRYPTION_KEY", "fixture-key");
-
-        for suffix in [".json", ".json.enc", ".json.previous", ".json.enc.previous"] {
-            for first in ["auth", "v2"] {
-                let dir = tempfile::tempdir().unwrap();
-                guard.set("HOME", dir.path().to_str().unwrap());
-                let sessions = get_sessions_dir();
-                fs::create_dir_all(&sessions).unwrap();
-                let legacy = sessions.join(format!("v2.auth.browser{suffix}"));
-                let current = sessions.join(format!("v2@.auth.browser{suffix}"));
-                for path in [&legacy, &current] {
-                    write_state_fixture(path);
-                    assert!(validate_state_file(path.to_str().unwrap()).is_ok());
-                }
-
-                for (key, path) in [("v2", &legacy), ("auth", &current)] {
-                    let found = find_auto_state_file(key).unwrap();
-                    if suffix.ends_with(".previous") {
-                        assert!(found.is_none());
-                    } else {
-                        assert_eq!(PathBuf::from(found.unwrap()), *path);
-                    }
-                }
-
-                let (removed, kept, second) = if first == "auth" {
-                    (&current, &legacy, "v2")
-                } else {
-                    (&legacy, &current, "auth")
-                };
-                assert_eq!(state_clear(None, Some(first), false).unwrap()["deleted"], 1);
-                assert!(!removed.exists());
-                assert!(kept.exists());
-                assert_eq!(
-                    state_clear(None, Some(second), false).unwrap()["deleted"],
-                    1
-                );
-                assert!(!kept.exists());
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn test_ambiguous_active_and_backup_files_block_restore_and_named_clear() {
+    fn test_ambiguous_files_are_skipped_by_restore_and_block_named_clear() {
         let guard = crate::test_utils::EnvGuard::new(&[
             "HOME",
             "AGENT_BROWSER_NAMESPACE",
@@ -1221,39 +1174,55 @@ mod tests {
         guard.set("AGENT_BROWSER_NAMESPACE", "team-one");
         guard.set("AGENT_BROWSER_ENCRYPTION_KEY", "fixture-key");
 
-        for stem in [
-            "auth-worker-one",
-            "auth-worker.one",
-            "auth-worker.json",
-            "auth-worker.release.v1",
-        ] {
-            for suffix in [".json", ".json.enc", ".json.previous", ".json.enc.previous"] {
-                let dir = tempfile::tempdir().unwrap();
-                guard.set("HOME", dir.path().to_str().unwrap());
-                let sessions = get_sessions_dir();
-                fs::create_dir_all(&sessions).unwrap();
-                let definite = sessions.join("v2@.auth.browser.json");
-                let definite_prefix = sessions.join("v2@.auth-worker.browser.json");
-                let ambiguous = sessions.join(format!("{stem}{suffix}"));
-                let other = sessions.join("v2@.other.browser.json");
-                for path in [&definite, &definite_prefix, &ambiguous, &other] {
-                    write_state_fixture(path);
-                    assert!(validate_state_file(path.to_str().unwrap()).is_ok());
-                }
+        for suffix in [".json", ".json.enc", ".json.previous", ".json.enc.previous"] {
+            let dir = tempfile::tempdir().unwrap();
+            guard.set("HOME", dir.path().to_str().unwrap());
+            let sessions = get_sessions_dir();
+            fs::create_dir_all(&sessions).unwrap();
+            let ambiguous = sessions.join(format!("auth-worker-one{suffix}"));
+            let other = sessions.join("v2@.other.browser.json");
+            for path in [&ambiguous, &other] {
+                write_state_fixture(path);
+                assert!(validate_state_file(path.to_str().unwrap()).is_ok());
+            }
 
-                for key in ["auth", "auth-worker"] {
-                    let restore_error = find_auto_state_file(key).unwrap_err();
-                    assert!(restore_error.contains(ambiguous.to_str().unwrap()));
-                    assert!(restore_error.contains("Preserve it and any backups"));
-                    assert!(restore_error.contains("confirm ownership before loading"));
-                    assert!(restore_error.contains("If ownership is uncertain, do not load it"));
-                    assert!(restore_error.contains("intended session and namespace"));
-                    assert!(restore_error.contains("https://agent-browser.dev/sessions"));
-                    let clear_error = state_clear(None, Some(key), false).unwrap_err();
-                    assert_eq!(clear_error, restore_error);
-                    for path in [&definite, &definite_prefix, &ambiguous, &other] {
-                        assert!(path.exists());
-                    }
+            for key in ["auth", "auth-worker"] {
+                assert!(find_auto_state_file(key).is_none());
+                if suffix.ends_with(".previous") {
+                    assert!(find_ambiguous_auto_state_file(key).is_none());
+                } else {
+                    assert_eq!(
+                        PathBuf::from(find_ambiguous_auto_state_file(key).unwrap()),
+                        ambiguous
+                    );
+                }
+            }
+
+            let definite = sessions.join("v2@.auth.browser.json");
+            let definite_prefix = sessions.join("v2@.auth-worker.browser.json");
+            for path in [&definite, &definite_prefix] {
+                write_state_fixture(path);
+                assert!(validate_state_file(path.to_str().unwrap()).is_ok());
+            }
+            assert_eq!(
+                PathBuf::from(find_auto_state_file("auth").unwrap()),
+                definite
+            );
+            assert_eq!(
+                PathBuf::from(find_auto_state_file("auth-worker").unwrap()),
+                definite_prefix
+            );
+
+            for key in ["auth", "auth-worker"] {
+                let clear_error = state_clear(None, Some(key), false).unwrap_err();
+                assert!(clear_error.contains(ambiguous.to_str().unwrap()));
+                assert!(clear_error.contains("Preserve it and any backups"));
+                assert!(clear_error.contains("confirm ownership before loading"));
+                assert!(clear_error.contains("If ownership is uncertain, do not load it"));
+                assert!(clear_error.contains("intended session and namespace"));
+                assert!(clear_error.contains("https://agent-browser.dev/sessions"));
+                for path in [&definite, &definite_prefix, &ambiguous, &other] {
+                    assert!(path.exists());
                 }
             }
         }
@@ -1261,18 +1230,18 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn test_state_lookup_distinguishes_missing_from_errors() {
+    fn test_state_clear_reports_directory_errors() {
         let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
         let dir = tempfile::tempdir().unwrap();
         guard.set("HOME", dir.path().to_str().unwrap());
         guard.remove("AGENT_BROWSER_NAMESPACE");
-        assert!(find_auto_state_file("auth").unwrap().is_none());
-        assert!(find_auto_state_file("invalid.name").is_err());
+        assert!(find_auto_state_file("auth").is_none());
+        assert!(find_auto_state_file("invalid.name").is_none());
 
         let sessions = get_sessions_dir();
         fs::create_dir_all(sessions.parent().unwrap()).unwrap();
         fs::write(&sessions, "not a directory").unwrap();
-        assert!(find_auto_state_file("auth").is_err());
+        assert!(find_auto_state_file("auth").is_none());
         assert!(state_clear(None, Some("auth"), false).is_err());
     }
 

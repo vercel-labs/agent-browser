@@ -12280,244 +12280,70 @@ async fn e2e_session_name_auto_restores_cookies() {
 #[cfg(not(windows))]
 #[tokio::test]
 #[ignore]
-async fn e2e_ambiguous_restore_rolls_back_local_and_attached_launches() {
-    let (_env, home) = isolated_restore_home();
+async fn e2e_ambiguous_legacy_state_is_skipped_and_migrated_to_v2_on_close() {
+    let (_env, _home) = isolated_restore_home();
     let sessions = super::state::get_sessions_dir();
     std::fs::create_dir_all(&sessions).unwrap();
-    let explicit_path = home.path().join("explicit.json");
-    std::fs::write(&explicit_path, r#"{"cookies":[],"origins":[]}"#).unwrap();
-
-    let mut producer = DaemonState::new();
-    let response = execute_command(
-        &json!({ "id": "producer", "action": "launch", "headless": true }),
-        &mut producer,
-    )
-    .await;
-    assert_success(&response);
-    let cdp = producer.browser.as_ref().unwrap().get_cdp_url().to_string();
-    let ambiguous = sessions.join("auth-worker-one.json");
-    let original = r#"{"cookies":[],"origins":[]}"#;
+    let ambiguous = sessions.join("my-session-default.json");
+    let original = r#"{"cookies":[{"name":"legacy","value":"secret","domain":".example.com","path":"/","expires":2000000000,"size":12,"httpOnly":false,"secure":false,"session":false,"sameSite":"Lax"}],"origins":[]}"#;
     std::fs::write(&ambiguous, original).unwrap();
 
-    let commands = [
-        json!({
-            "id": "explicit", "action": "launch", "headless": true,
-            "restoreKey": "auth", "restoreSave": "always", "storageState": explicit_path
-        }),
-        json!({
-            "id": "implicit", "action": "navigate", "url": "about:blank",
-            "restoreKey": "auth", "restoreSave": "always"
-        }),
-        json!({
-            "id": "attached", "action": "launch", "cdpUrl": cdp,
-            "restoreKey": "auth", "restoreSave": "always"
-        }),
-    ];
-    let mut failed = Vec::new();
-    for command in commands {
-        let mut state = DaemonState::new();
-        let response = execute_command(&command, &mut state).await;
-        assert_eq!(response["success"], false, "{response}");
-        let error = response["error"].as_str().unwrap();
-        assert!(error.contains("Ambiguous ownership"), "{error}");
-        assert!(
-            error.contains("confirm ownership before loading"),
-            "{error}"
-        );
-        assert!(state.browser.is_none());
-        assert_eq!(std::fs::read_to_string(&ambiguous).unwrap(), original);
-        failed.push(state);
-    }
-    assert!(
-        producer
-            .browser
-            .as_ref()
-            .unwrap()
-            .is_connection_alive()
-            .await
-    );
-    for (index, mut state) in failed.into_iter().enumerate() {
-        if index == 1 {
-            std::fs::remove_file(&ambiguous).unwrap();
-        }
-        let response =
-            execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
-        assert_success(&response);
-        assert_eq!(get_data(&response)["saveStatus"], "error");
-        assert!(get_data(&response)["saveError"]
-            .as_str()
-            .unwrap()
-            .contains("Ambiguous ownership"));
-        if index == 0 {
-            assert_eq!(std::fs::read_to_string(&ambiguous).unwrap(), original);
-        }
-    }
-    assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 0);
-    let response =
-        execute_command(&json!({ "id": "close", "action": "close" }), &mut producer).await;
-    assert_success(&response);
-}
-
-#[cfg(not(windows))]
-#[tokio::test]
-#[ignore]
-async fn e2e_ambiguous_state_blocks_periodic_and_close_autosave() {
-    let (_env, home) = isolated_restore_home();
-    let sessions = super::state::get_sessions_dir();
-    std::fs::create_dir_all(&sessions).unwrap();
-    let explicit_path = home.path().join("explicit.json");
-    std::fs::write(&explicit_path, r#"{"cookies":[],"origins":[]}"#).unwrap();
-    let ambiguous = sessions.join("auth-worker-one.json");
-    let original = r#"{"cookies":[],"origins":[]}"#;
-    let saved_before = sessions.join("v2@.auth.browser.json");
-    let saved_contents = r#"{"cookies":[],"origins":[],"fixture":"preserved"}"#;
-
-    for policy in ["auto", "always"] {
-        std::fs::write(&saved_before, saved_contents).unwrap();
+    for key in ["my", "my-session"] {
         let mut state = DaemonState::new();
         let response = execute_command(
             &json!({
                 "id": "launch", "action": "launch", "headless": true,
-                "restoreKey": "auth", "restoreSave": policy, "storageState": explicit_path
+                "restoreKey": key
             }),
             &mut state,
         )
         .await;
         assert_success(&response);
-        assert_eq!(state.restore_status, "loaded");
-        std::fs::write(&ambiguous, original).unwrap();
-        state.last_command_finished =
-            std::time::Instant::now().checked_sub(std::time::Duration::from_secs(10));
-        maybe_autosave_restore_state(&mut state, 30_000).await;
-        assert_eq!(state.restore_save_status, "error");
-        for command in [
-            json!({ "id": "switch", "action": "evaluate", "script": "1", "restoreKey": "other" }),
-            json!({ "id": "relaunch", "action": "launch", "headless": false }),
-            json!({ "id": "close", "action": "close" }),
-            json!({ "id": "shutdown", "action": crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION }),
-        ] {
-            let response = execute_command(&command, &mut state).await;
-            assert_eq!(response["success"], false, "{response}");
-            assert!(response["error"]
-                .as_str()
-                .unwrap()
-                .contains("Ambiguous ownership"));
-            assert_eq!(state.session_name.as_deref(), Some("auth"));
-            assert!(state.browser.as_ref().unwrap().is_connection_alive().await);
-            assert_eq!(std::fs::read_to_string(&ambiguous).unwrap(), original);
-            assert_eq!(
-                std::fs::read_to_string(&saved_before).unwrap(),
-                saved_contents
-            );
-        }
-        assert_evaluate(&mut state, "after-failed-close", "6 * 7", json!(42)).await;
-        let mut files: Vec<_> = std::fs::read_dir(&sessions)
+        assert_eq!(state.restore_status, "skipped_ambiguous");
+        assert!(state
+            .restore_status_detail
+            .as_deref()
             .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.is_file())
-            .collect();
-        files.sort();
-        assert_eq!(files, vec![ambiguous.clone(), saved_before.clone()]);
+            .contains(ambiguous.to_str().unwrap()));
+        let cookies = execute_command(
+            &json!({ "id": "cookies", "action": "cookies_get" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&cookies);
+        assert!(get_data(&cookies)["cookies"].as_array().unwrap().is_empty());
 
-        std::fs::remove_file(&ambiguous).unwrap();
-        let response =
-            execute_command(&json!({ "id": "retry", "action": "close" }), &mut state).await;
-        assert_success(&response);
-        assert_eq!(get_data(&response)["saveStatus"], "saved");
-        let saved = std::path::Path::new(get_data(&response)["statePath"].as_str().unwrap());
-        assert!(saved.is_file());
-        assert!(saved
+        let close = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
+        assert_success(&close);
+        assert_eq!(get_data(&close)["restoreStatus"], "skipped_ambiguous");
+        assert_eq!(get_data(&close)["saveStatus"], "saved");
+        let saved_path = std::path::Path::new(get_data(&close)["statePath"].as_str().unwrap());
+        assert!(saved_path.is_file());
+        assert!(saved_path
             .file_name()
             .unwrap()
             .to_string_lossy()
-            .starts_with("v2@.auth."));
-        assert!(state.browser.is_none());
-        cleanup_restore_state_files("auth");
-    }
-}
+            .starts_with(&format!("v2@.{key}.")));
+        assert_eq!(std::fs::read_to_string(&ambiguous).unwrap(), original);
 
-#[cfg(not(windows))]
-#[tokio::test]
-#[ignore]
-async fn e2e_always_still_saves_after_non_ownership_restore_failure() {
-    let (_env, _home) = isolated_restore_home();
-    let sessions = super::state::get_sessions_dir();
-    std::fs::create_dir_all(&sessions).unwrap();
-    let corrupt = sessions.join("v2@.auth.browser.json");
-    std::fs::write(&corrupt, "not json").unwrap();
-
-    for (policy, expected) in [("auto", "skipped_restore_failed"), ("always", "saved")] {
-        let mut state = DaemonState::new();
+        let mut reopened = DaemonState::new();
         let response = execute_command(
             &json!({
-                "id": "launch", "action": "launch", "headless": true,
-                "restoreKey": "auth", "restoreSave": policy
+                "id": "reopen", "action": "launch", "headless": true,
+                "restoreKey": key
             }),
-            &mut state,
+            &mut reopened,
         )
         .await;
         assert_success(&response);
-        assert_eq!(state.restore_status, "load_failed");
-        let response =
-            execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
-        assert_success(&response);
-        assert_eq!(get_data(&response)["saveStatus"], expected);
+        assert_eq!(reopened.restore_status, "loaded");
+        let close = execute_command(
+            &json!({ "id": "close-reopened", "action": "close" }),
+            &mut reopened,
+        )
+        .await;
+        assert_success(&close);
     }
-    assert_eq!(std::fs::read_to_string(&corrupt).unwrap(), "not json");
-    assert!(sessions.join(".tmp").is_dir());
-    assert_eq!(
-        std::fs::read_dir(&sessions)
-            .unwrap()
-            .filter(|entry| entry.as_ref().unwrap().path().is_file())
-            .count(),
-        2
-    );
-}
-
-#[cfg(not(windows))]
-#[tokio::test]
-#[ignore]
-async fn e2e_close_reports_non_ownership_save_error_after_closing() {
-    let (_env, _home) = isolated_restore_home();
-    let sessions = super::state::get_sessions_dir();
-    std::fs::create_dir_all(&sessions).unwrap();
-    let temp_path = sessions.join(".tmp");
-    std::fs::write(&temp_path, "not a directory").unwrap();
-
-    let mut state = DaemonState::new();
-    let response = execute_command(
-        &json!({
-            "id": "launch", "action": "launch", "headless": true,
-            "restoreKey": "auth", "restoreSave": "always"
-        }),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
-    let ambiguous = sessions.join("auth-worker-one.json");
-    std::fs::write(&ambiguous, "original").unwrap();
-    let response =
-        execute_command(&json!({ "id": "blocked", "action": "close" }), &mut state).await;
-    assert_eq!(response["success"], false, "{response}");
-    assert!(response["error"]
-        .as_str()
-        .unwrap()
-        .contains("Ambiguous ownership"));
-    assert!(state.browser.as_ref().unwrap().is_connection_alive().await);
-    std::fs::remove_file(&ambiguous).unwrap();
-    let response = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
-    assert_success(&response);
-    assert_eq!(get_data(&response)["closed"], true);
-    assert_eq!(get_data(&response)["saveStatus"], "error");
-    assert!(get_data(&response)["saveError"]
-        .as_str()
-        .unwrap()
-        .contains("Failed to create temporary state directory"));
-    assert!(state.browser.is_none());
-    assert_eq!(
-        std::fs::read_to_string(&temp_path).unwrap(),
-        "not a directory"
-    );
 }
 
 #[tokio::test]
@@ -12580,7 +12406,6 @@ async fn e2e_restore_loads_during_explicit_launch_before_navigation() {
     }
 
     let path = super::state::find_auto_state_file(&restore_key)
-        .unwrap()
         .expect("first close should create restore state");
 
     {
@@ -12690,9 +12515,7 @@ async fn e2e_periodic_autosave_survives_abrupt_browser_exit() {
         maybe_autosave_restore_state(&mut state, 30_000).await;
         assert_eq!(state.restore_save_status, "not_attempted");
         assert!(
-            super::state::find_auto_state_file(&restore_key)
-                .unwrap()
-                .is_none(),
+            super::state::find_auto_state_file(&restore_key).is_none(),
             "autosave must not fire inside the post-command quiet period"
         );
 
@@ -12706,9 +12529,7 @@ async fn e2e_periodic_autosave_survives_abrupt_browser_exit() {
             "successful save should reset the periodic interval"
         );
         assert!(
-            super::state::find_auto_state_file(&restore_key)
-                .unwrap()
-                .is_some(),
+            super::state::find_auto_state_file(&restore_key).is_some(),
             "periodic autosave should write the session state file"
         );
 
@@ -12747,7 +12568,6 @@ async fn e2e_periodic_autosave_survives_abrupt_browser_exit() {
     }
 
     let path = super::state::find_auto_state_file(&restore_key)
-        .unwrap()
         .expect("autosaved state should survive the abrupt browser exit");
 
     {
@@ -12892,7 +12712,6 @@ async fn e2e_restore_preserves_cookie_login_after_close_and_reopen() {
     }
 
     let path = super::state::find_auto_state_file(&restore_key)
-        .unwrap()
         .expect("close should save cookie-backed restore state");
 
     {
@@ -12977,7 +12796,6 @@ async fn e2e_restore_validation_failure_does_not_overwrite_state() {
     }
 
     let path = super::state::find_auto_state_file(&restore_key)
-        .unwrap()
         .expect("first close should create restore state");
     let before = std::fs::read_to_string(&path).expect("state file should be readable");
 
@@ -13042,10 +12860,8 @@ async fn e2e_restore_key_switch_reloads_instead_of_reusing_live_browser() {
     create_restore_state_with_cookie(&restore_key_b, cookie_name, "value-b").await;
 
     let path_a = super::state::find_auto_state_file(&restore_key_a)
-        .unwrap()
         .expect("first restore key should have saved state");
     let path_b = super::state::find_auto_state_file(&restore_key_b)
-        .unwrap()
         .expect("second restore key should have saved state");
 
     let mut state = DaemonState::new();

@@ -108,9 +108,9 @@ Use `state save`, `state load`, and `--state <path>` when you need an explicit p
 
 ### Ambiguous legacy state files
 
-If a legacy filename has multiple plausible owners for a restore key, automatic restore and named clear fail before changing any state files. This includes encrypted files and `.previous` backups, even when an unambiguous saved file exists. Ambiguity also blocks automatic saves, including with `--restore-save always`.
+If a legacy filename has multiple plausible owners for a restore key, automatic restore skips it (`restoreStatus: "skipped_ambiguous"` when no unambiguous state file exists) and allows the session to launch and save a new `v2@.<restore-key>.<session-id>.json` file. Named `state clear <name>` fails before changing any state files when an ambiguous legacy file or `.previous` backup matches `<name>`.
 
-Preserve the reported files in a secure location outside the managed sessions directory, keeping their filenames and suffixes. Verify each file's owner from your records; if you cannot confirm ownership, do not load it. After confirming ownership, use `agent-browser state load <path>` to load the preserved file into the intended session. Encrypted files require the original `AGENT_BROWSER_ENCRYPTION_KEY` in the daemon's environment. If restore already failed, retry it after moving the ambiguous files; an explicit load alone does not clear the earlier ownership failure for automatic saving. Repeat for any other ambiguous files reported.
+Preserve the reported files in a secure location outside the managed sessions directory, keeping their filenames and suffixes. Verify each file's owner from your records; if you cannot confirm ownership, do not load it. After confirming ownership, use `agent-browser state load <path>` to load the preserved file into the intended session. Encrypted files require the original `AGENT_BROWSER_ENCRYPTION_KEY` in the daemon's environment.
 
 ## Common Patterns
 

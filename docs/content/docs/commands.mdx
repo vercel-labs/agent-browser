@@ -510,7 +510,7 @@ agent-browser state clear --all       # Clear all saved states (bare `state clea
 agent-browser state clean --older-than <days>  # Delete old states
 ```
 
-Automatic restore and named `state clear` fail without changing saved state files when a matching legacy filename has multiple plausible owners for the requested key, including encrypted files and backups. Preserve those files and verify ownership before loading one. See [ambiguous legacy state files](/sessions#ambiguous-legacy-state-files) for recovery steps.
+When a matching legacy filename has multiple plausible owners for the requested key, automatic restore skips it (`restoreStatus: "skipped_ambiguous"` when no unambiguous state file exists) and named `state clear` fails without changing saved state files, including encrypted files and backups. Preserve those files and verify ownership before loading one. See [ambiguous legacy state files](/sessions#ambiguous-legacy-state-files) for recovery steps.
 
 ## Sessions
 
