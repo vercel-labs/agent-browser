@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use super::{build_flow, write_flow, SaveInput};
+use super::{build_flow, may_become_candidate, save_start_url, write_flow, HostPolicy, SaveInput};
 use crate::native::actions::{HarEntry, FIND_ACTIONS};
 use crate::native::element::RefMap;
 
@@ -421,8 +421,9 @@ impl FlowRecorder {
         Ok((from, to))
     }
 
-    /// Whether a request tagged to a step in the range has not finished
-    /// loading, so its response body is not on the entry yet.
+    /// Whether a request that could become a flow request, tagged to a step
+    /// in the range, has not finished loading, so its response body is not on
+    /// the entry yet. Third-party, telemetry and streaming requests never count.
     pub fn has_unfinished_requests(
         &self,
         from: Option<u64>,
@@ -432,12 +433,23 @@ impl FlowRecorder {
         let Ok((first, last)) = self.resolve_range(from, to) else {
             return false;
         };
+        let commands: Vec<(u64, Value)> = self
+            .commands
+            .iter()
+            .filter(|(seq, _)| *seq >= first && *seq <= last)
+            .cloned()
+            .collect();
+        let Some(start) = save_start_url(&commands, self) else {
+            return false;
+        };
+        let policy = HostPolicy::from_start(&start);
         entries.iter().any(|e| {
             e.loading_finished_timestamp.is_none()
                 && self
                     .request_tags
                     .get(&e.request_id)
                     .is_some_and(|seq| *seq >= first && *seq <= last)
+                && may_become_candidate(e, &policy)
         })
     }
 

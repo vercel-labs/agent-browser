@@ -579,24 +579,38 @@ fn with_page_query_params(
     out
 }
 
-/// Build the flow file and the save report from what was recorded.
-pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
-    let start = start_url(input.commands)
+/// The page a saved range starts on: its first `open`, else the page the
+/// first step ran on, else the page open when capture began.
+pub(super) fn save_start_url(commands: &[(u64, Value)], recorder: &FlowRecorder) -> Option<String> {
+    start_url(commands)
         .or_else(|| {
-            input
-                .commands
+            commands
                 .first()
-                .and_then(|(seq, _)| input.recorder.meta.get(seq))
+                .and_then(|(seq, _)| recorder.meta.get(seq))
                 .and_then(|m| m.from_url.clone())
                 .filter(|u| u.starts_with("http"))
         })
-        .or_else(|| {
-            input
-                .recorder
-                .page_url
-                .clone()
-                .filter(|u| u.starts_with("http"))
-        })
+        .or_else(|| recorder.page_url.clone().filter(|u| u.starts_with("http")))
+}
+
+/// An unfinished entry that could still become a flow request: it is
+/// first-party, not telemetry, an XHR/Fetch or a document, and its response
+/// (if the headers already arrived) is not a stream.
+pub(super) fn may_become_candidate(e: &HarEntry, policy: &HostPolicy) -> bool {
+    if !policy.allows_url(&e.url) || is_telemetry(&e.url) {
+        return false;
+    }
+    let mime = e.mime_type.to_ascii_lowercase();
+    match e.resource_type.as_str() {
+        "XHR" | "Fetch" => mime.is_empty() || mime.contains("json"),
+        "Document" => mime.is_empty() || mime.contains("html"),
+        _ => false,
+    }
+}
+
+/// Build the flow file and the save report from what was recorded.
+pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
+    let start = save_start_url(input.commands, input.recorder)
         .ok_or("nothing to save: the flow has no `open <url>` command and no page was open")?;
     let host = host_of(&start).ok_or("the flow's start URL has no host")?;
     let base = base_domain(&host);
