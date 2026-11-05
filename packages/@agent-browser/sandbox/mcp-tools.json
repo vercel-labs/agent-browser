@@ -2262,6 +2262,10 @@
             "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults.",
             "type": "boolean"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key.",
             "oneOf": [
@@ -4067,6 +4071,10 @@
             "description": "Starts with an ASCII letter, then ASCII letters, digits, `-`, or `_`; `t<N>` and `T<N>` forms are reserved for tab IDs.",
             "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key.",

@@ -512,6 +512,8 @@ pub struct Flags {
     /// Env-only (AGENT_BROWSER_NO_XVFB): disable automatic Xvfb for headed
     /// launches on displayless Linux hosts.
     pub no_xvfb: bool,
+    /// AGENT_BROWSER_NO_XVFB is set, to any value, so an off value can be sent.
+    pub no_xvfb_set: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
     pub pin_tab: bool,
@@ -532,6 +534,8 @@ pub struct Flags {
     pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
     pub default_timeout: Option<u64>, // AGENT_BROWSER_DEFAULT_TIMEOUT in ms
     pub no_auto_dialog: bool,
+    /// `--relaunch`: relaunch the session's browser even when no setting changed.
+    pub relaunch: bool,
     pub model: Option<String>,
     pub plugins: Vec<PluginConfig>,
     pub verbose: bool,
@@ -733,6 +737,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         no_webmcp: env_var_is_truthy("AGENT_BROWSER_NO_WEBMCP")
             || config.no_webmcp.unwrap_or(false),
         no_xvfb: env_var_is_truthy("AGENT_BROWSER_NO_XVFB"),
+        no_xvfb_set: env::var_os("AGENT_BROWSER_NO_XVFB").is_some(),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
@@ -792,6 +797,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             .and_then(|s| s.parse::<u64>().ok()),
         no_auto_dialog: env_var_is_truthy("AGENT_BROWSER_NO_AUTO_DIALOG")
             || config.no_auto_dialog.unwrap_or(false),
+        relaunch: false,
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
         plugins,
         verbose: false,
@@ -1269,6 +1275,13 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                     i += 1;
                 }
             }
+            "--relaunch" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.relaunch = val;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--model" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.model = Some(s.clone());
@@ -1327,6 +1340,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--content-boundaries",
         "--confirm-interactive",
         "--no-auto-dialog",
+        "--relaunch",
         "-v",
         "--verbose",
         "-q",

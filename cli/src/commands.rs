@@ -351,7 +351,6 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     // doesn't already carry an explicit timeout. Centralised here so that new
     // wait variants automatically inherit the default without per-variant wiring.
     inherit_wait_timeout(&mut result, flags.default_timeout);
-    attach_ca_cert_to_launch_command(&mut result, flags);
 
     Ok(result)
 }
@@ -367,18 +366,6 @@ pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
         .is_some_and(|action| action.starts_with("wait"));
     if is_wait && cmd.get("timeout").is_none() {
         cmd["timeout"] = json!(timeout);
-    }
-}
-
-pub fn attach_ca_cert_to_launch_command(cmd: &mut Value, flags: &Flags) {
-    if cmd.get("action").and_then(Value::as_str) != Some("launch") {
-        return;
-    }
-    if let Some(ref ca) = flags.ca_cert {
-        cmd["caCert"] = json!(ca);
-    }
-    if flags.clear_ca_cert {
-        cmd["clearCaCert"] = json!(true);
     }
 }
 
@@ -414,7 +401,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let url = match first_url {
                 Some(u) => *u,
                 None if cmd == "open" => {
-                    return Ok(json!({ "id": id, "action": "launch", "headless": !flags.headed }));
+                    return Ok(json!({ "id": id, "action": "launch" }));
                 }
                 None => {
                     return Err(ParseError::MissingArguments {
@@ -3742,6 +3729,7 @@ mod tests {
             webgpu: false,
             no_webmcp: false,
             no_xvfb: false,
+            no_xvfb_set: false,
             device: None,
             auto_connect: false,
             pin_tab: false,
@@ -3791,6 +3779,7 @@ mod tests {
             idle_timeout: None,
             default_timeout: None,
             no_auto_dialog: false,
+            relaunch: false,
             model: None,
             plugins: Vec::new(),
             verbose: false,
@@ -4404,16 +4393,19 @@ mod tests {
     fn test_open_without_url_launches() {
         let cmd = parse_command(&args("open"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
-        assert_eq!(cmd["headless"], true);
+        assert!(cmd.get("headless").is_none());
     }
 
     #[test]
-    fn test_open_without_url_headed() {
+    fn test_open_without_url_leaves_headed_to_settings() {
         let mut flags = default_flags();
         flags.headed = true;
         let cmd = parse_command(&args("open"), &flags).unwrap();
         assert_eq!(cmd["action"], "launch");
-        assert_eq!(cmd["headless"], false);
+        assert!(
+            cmd.get("headless").is_none(),
+            "headed rides in the settings patch, not the launch command"
+        );
     }
 
     #[test]
