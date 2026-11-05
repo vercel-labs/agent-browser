@@ -178,7 +178,10 @@ impl FirefoxSession {
             .await?;
         bidi.send(
             "network.addDataCollector",
-            json!({"dataTypes": ["response"], "maxEncodedDataSize": 10_000_000}),
+            json!({
+                "dataTypes": ["request", "response"],
+                "maxEncodedDataSize": 10_000_000
+            }),
         )
         .await?;
 

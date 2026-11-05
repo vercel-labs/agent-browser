@@ -14403,6 +14403,9 @@ fn firefox_serve(
                     .unwrap()
                     .push(format!("{port}{path}#authorization"));
             }
+            if path == "/har-post" {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
             let status = if path == "/auth" {
                 "401 Unauthorized"
             } else {
@@ -16032,4 +16035,50 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
     other_server.abort();
     redirect_server.abort();
     hook_server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_har_preserves_post_body_and_elapsed_time() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    let started = firefox_command(
+        &mut state,
+        json!({ "id": "har-start", "action": "har_start", "content": "all" }),
+    )
+    .await;
+    assert_success(&started);
+    assert_eq!(
+        firefox_eval(&mut state, "fetch('/har-post', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'payload=har-probe'}).then(r => r.text())").await,
+        "ok"
+    );
+    let path = tmp.path().join("capture.har");
+    let stopped = firefox_command(
+        &mut state,
+        json!({ "id": "har-stop", "action": "har_stop", "path": path.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&stopped);
+    let har: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let entry = har["log"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["request"]["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("/har-post")
+        })
+        .expect("HAR must contain the delayed POST");
+    assert_eq!(entry["request"]["postData"]["text"], "payload=har-probe");
+    assert!(entry["time"].as_f64().unwrap() >= 300.0);
+    assert!(entry["timings"]["wait"].as_f64().unwrap() >= 300.0);
+    assert!(entry["timings"]["send"].as_f64().unwrap() >= 0.0);
+    firefox_close(&mut state).await;
 }
