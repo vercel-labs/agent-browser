@@ -421,17 +421,19 @@ impl FlowRecorder {
         Ok((from, to))
     }
 
-    /// Whether a request that could become a flow request, tagged to a step
-    /// in the range, has not finished loading, so its response body is not on
-    /// the entry yet. Third-party, telemetry and streaming requests never count.
-    pub fn has_unfinished_requests(
+    /// The requests that could become flow requests, tagged to a step in the
+    /// range, that have not finished loading, so their response body is not on
+    /// the entry yet, as `METHOD /path`. Third-party, telemetry and streaming
+    /// requests never count, and neither does a redirect hop: a later entry
+    /// with the same request id carries the request on.
+    pub fn unfinished_requests(
         &self,
         from: Option<u64>,
         to: Option<u64>,
         entries: &[HarEntry],
-    ) -> bool {
+    ) -> Vec<String> {
         let Ok((first, last)) = self.resolve_range(from, to) else {
-            return false;
+            return Vec::new();
         };
         let commands: Vec<(u64, Value)> = self
             .commands
@@ -440,17 +442,30 @@ impl FlowRecorder {
             .cloned()
             .collect();
         let Some(start) = save_start_url(&commands, self) else {
-            return false;
+            return Vec::new();
         };
         let policy = HostPolicy::from_start(&start);
-        entries.iter().any(|e| {
-            e.loading_finished_timestamp.is_none()
-                && self
-                    .request_tags
-                    .get(&e.request_id)
-                    .is_some_and(|seq| *seq >= first && *seq <= last)
-                && may_become_candidate(e, &policy)
-        })
+        entries
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| {
+                e.loading_finished_timestamp.is_none()
+                    && self
+                        .request_tags
+                        .get(&e.request_id)
+                        .is_some_and(|seq| *seq >= first && *seq <= last)
+                    && !entries[i + 1..]
+                        .iter()
+                        .any(|n| n.request_id == e.request_id)
+                    && may_become_candidate(e, &policy)
+            })
+            .map(|(_, e)| {
+                let path = url::Url::parse(&e.url)
+                    .map(|u| u.path().to_string())
+                    .unwrap_or_else(|_| e.url.clone());
+                format!("{} {}", e.method, path)
+            })
+            .collect()
     }
 
     /// A command that is not recorded starts: requests it sends belong to no

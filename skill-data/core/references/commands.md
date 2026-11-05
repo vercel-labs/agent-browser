@@ -274,6 +274,8 @@ agent-browser flow run <name> --where field=value --fields a,b.c --limit 5  # Re
 agent-browser flow list [--origin <host>]             # Saved flows, with params and verified state
 ```
 
+`flow save` waits for the range's first-party requests that are still loading, up to the command timeout, and reports any it had to leave out as `still loading at save`.
+
 `--capture flow` is a launch setting: on a running session without capture it relaunches the browser with capture on, and later commands that repeat or omit it do not relaunch. Every recorded command returns `recorded: {seq}` in JSON. Failed commands stay in the recording with `ok: false`. Saving does not stop the capture, so one session can save several flows; by default `flow save` starts at the last navigation after the previous save. `close` reports `unsaved: {steps: N}` when steps after the last save exist. `har stop` is unavailable while capture is on; use `flow save`.
 
 `flow save` keeps first-party JSON responses and, for pages rendered on the server, JSON the HTML embeds (`__NEXT_DATA__`, JSON-LD, `window.x = {...}` state); a run fetches the page and reads the same block back. `flow save` also finds params on its own: a value the task sent that came from an item of an earlier response (an id picked from a list) becomes a param, and a value copied from a single field (a session key) is filled from that response on every run. The save report lists them, plus the steps it could not turn into requests and why, such as a login the recording stopped at.

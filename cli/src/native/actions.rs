@@ -12314,19 +12314,17 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let to = cmd.get("to").and_then(|v| v.as_u64());
     let deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_millis(state.timeout_ms(cmd));
+    let mut still_loading;
     loop {
         state.drain_cdp_events_background().await?;
-        if !state
-            .flow
-            .has_unfinished_requests(from, to, &state.har_entries)
-            || tokio::time::Instant::now() >= deadline
-        {
+        still_loading = state.flow.unfinished_requests(from, to, &state.har_entries);
+        if still_loading.is_empty() || tokio::time::Instant::now() >= deadline {
             break;
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
     }
     let entries = state.har_entries.clone();
-    state.flow.save(super::flow::SaveArgs {
+    let mut report = state.flow.save(super::flow::SaveArgs {
         name: &name,
         from: cmd.get("from").and_then(|v| v.as_u64()),
         to: cmd.get("to").and_then(|v| v.as_u64()),
@@ -12335,7 +12333,19 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         output: cmd.get("output").and_then(|v| v.as_str()),
         entries: &entries,
         login_wall,
-    })
+    })?;
+    // Requests still loading at the deadline are not in the flow.
+    let step = report["steps"].clone();
+    if let Some(gaps) = report["gaps"].as_array_mut() {
+        for request in still_loading {
+            gaps.push(json!({
+                "step": step,
+                "command": "flow save",
+                "reason": format!("still loading at save: {request}"),
+            }));
+        }
+    }
+    Ok(report)
 }
 
 /// The single write gate: the first write a run sends that `--allow-write`

@@ -356,7 +356,8 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     Ok(result)
 }
 
-/// Stamps `timeout` on a wait-family command that has none.
+/// Stamps `timeout` on a wait-family command or `flow_save` that has none,
+/// so the client read timeout follows it.
 pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     let Some(timeout) = timeout else {
         return;
@@ -364,7 +365,7 @@ pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     let is_wait = cmd
         .get("action")
         .and_then(Value::as_str)
-        .is_some_and(|action| action.starts_with("wait"));
+        .is_some_and(|action| action.starts_with("wait") || action == "flow_save");
     if is_wait && cmd.get("timeout").is_none() {
         cmd["timeout"] = json!(timeout);
     }
@@ -6317,6 +6318,16 @@ mod tests {
         let mut f = default_flags();
         f.default_timeout = Some(ms);
         f
+    }
+
+    #[test]
+    fn test_flow_save_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(40000);
+        let cmd = parse_command(&args("flow save stoves"), &flags).unwrap();
+        assert_eq!(cmd["action"], "flow_save");
+        assert_eq!(cmd["timeout"], 40000);
+        let none = parse_command(&args("flow save stoves"), &default_flags()).unwrap();
+        assert!(none.get("timeout").is_none());
     }
 
     #[test]
