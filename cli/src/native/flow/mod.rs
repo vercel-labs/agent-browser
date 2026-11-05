@@ -363,13 +363,13 @@ pub(super) fn dropped_name(e: &HarEntry, secrets: &[String], known: bool) -> Str
         .path()
         .split('/')
         .map(|seg| {
-            let decoded = urlencoding::decode(seg).map(|d| d.into_owned());
+            let decoded = percent_decode_lossless(seg);
             let hit = secrets.iter().any(|s| {
                 let escaped = serde_json::to_string(s).unwrap_or_default();
                 seg.contains(s.as_str())
                     || seg.contains(urlencoding::encode(s).as_ref())
                     || seg.contains(escaped.trim_matches('"'))
-                    || decoded.as_ref().is_ok_and(|d| d.contains(s.as_str()))
+                    || decoded.contains(s.as_str())
             });
             if hit { "<redacted>" } else { seg }.to_string()
         })
@@ -407,38 +407,40 @@ fn holds_secret(text: &str, secrets: &[String]) -> bool {
 }
 
 /// Percent decoding that never fails: an escape that does not form valid
-/// UTF-8 stays as written, so the rest of the text is still compared.
+/// UTF-8 stays exactly as written, so the rest of the text is still compared.
 fn percent_decode_lossless(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::new();
-    let mut run: Vec<u8> = Vec::new();
-    let mut i = 0;
-    let flush = |run: &mut Vec<u8>, out: &mut String| {
-        let mut rest: &[u8] = run;
-        while !rest.is_empty() {
-            match std::str::from_utf8(rest) {
+    // Decoded bytes of a run of escapes, each with the source it came from.
+    let mut run: Vec<(u8, &str)> = Vec::new();
+    let flush = |run: &mut Vec<(u8, &str)>, out: &mut String| {
+        let raw: Vec<u8> = run.iter().map(|(b, _)| *b).collect();
+        let mut at = 0;
+        while at < raw.len() {
+            match std::str::from_utf8(&raw[at..]) {
                 Ok(valid) => {
                     out.push_str(valid);
                     break;
                 }
                 Err(e) => {
-                    let (good, bad) = rest.split_at(e.valid_up_to());
-                    out.push_str(std::str::from_utf8(good).unwrap_or(""));
-                    let n = e.error_len().unwrap_or(bad.len());
-                    for b in &bad[..n] {
-                        out.push_str(&format!("%{:02X}", b));
+                    let good = at + e.valid_up_to();
+                    out.push_str(std::str::from_utf8(&raw[at..good]).unwrap_or(""));
+                    let end = good + e.error_len().unwrap_or(raw.len() - good);
+                    for (_, src) in &run[good..end] {
+                        out.push_str(src);
                     }
-                    rest = &bad[n..];
+                    at = end;
                 }
             }
         }
         run.clear();
     };
+    let mut i = 0;
     while i < bytes.len() {
         let hex = |b: u8| (b as char).to_digit(16);
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                run.push((h * 16 + l) as u8);
+                run.push(((h * 16 + l) as u8, &text[i..i + 3]));
                 i += 3;
                 continue;
             }
@@ -457,9 +459,7 @@ fn percent_decode_lossless(text: &str) -> String {
 /// parser resolves.
 fn decoded_forms(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(plus) = urlencoding::decode(&text.replace('+', " ")) {
-        out.push(plus.into_owned());
-    }
+    out.push(percent_decode_lossless(&text.replace('+', " ")));
     out.push(percent_decode_lossless(text));
     if let Ok(json) = serde_json::from_str::<Value>(text) {
         let mut strings = Vec::new();
@@ -4483,6 +4483,64 @@ mod tests {
             !text.contains("91qq") && !text.contains("api/echo"),
             "{text}"
         );
+    }
+
+    fn echo_flow_text(secret: &str, url: &str) -> (String, String) {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+            None,
+        );
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "@e1", "value": secret }),
+            None,
+            Some(&traits("text", "", "secret value")),
+        );
+        r.tag_now("echo");
+        r.tag_now("home");
+        let echo = entry("echo", url, "Fetch", "application/json", r#"{"ok":true}"#);
+        let home = entry(
+            "home",
+            "https://api.example.com.ar/home",
+            "Fetch",
+            "application/json",
+            r#"{"items":[1]}"#,
+        );
+        let (flow, report) = build_flow_value(SaveInput {
+            name: "echo",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[echo.clone(), home],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let name = dropped_name(&echo, &r.secrets, carries_secret(&echo, &r.secrets));
+        (format!("{flow}{report}"), name)
+    }
+
+    #[test]
+    fn a_secret_next_to_an_undecodable_escape_is_found_in_a_form_value() {
+        let (text, _) =
+            echo_flow_text("a b", "https://api.example.com.ar/api/echo?q=caf%E9&pw=a+b");
+        assert!(
+            !text.contains("pw=a+b") && !text.contains("caf%E9"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_secret_with_a_lowercase_undecodable_escape_is_found() {
+        let (text, name) =
+            echo_flow_text("zz w%e9", "https://api.example.com.ar/api/hangs/zz%20w%e9");
+        assert!(!text.contains("%e9") && !text.contains("zz%20w"), "{text}");
+        assert_eq!(name, "GET /api/hangs/<redacted>");
     }
 
     #[test]
