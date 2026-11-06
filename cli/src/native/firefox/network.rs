@@ -356,7 +356,22 @@ async fn before_request(
 ) -> Result<(), String> {
     let id = request["request"].as_str().unwrap_or("");
     let url = request["url"].as_str().unwrap_or("");
-    let mut decision = {
+    let blank = match context {
+        Some(context) => net.blank_contexts.read().await.contains(context),
+        None => false,
+    };
+    let decision = if blank {
+        let filter = net.domain_filter.read().await;
+        if is_blocked(url, resource_type(request), filter.as_ref()) {
+            NetworkDecision::Fail
+        } else {
+            NetworkDecision::Fulfill {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "text/html".to_string())],
+                body: "PGh0bWw+PC9odG1sPg==".to_string(),
+            }
+        }
+    } else {
         let mut extra = net.headers.read().await.clone();
         let origin = url::Url::parse(url)
             .ok()
@@ -384,17 +399,6 @@ async fn before_request(
             &origin_headers,
         )
     };
-    let blank = match context {
-        Some(context) => net.blank_contexts.read().await.contains(context),
-        None => false,
-    };
-    if blank && !matches!(decision, NetworkDecision::Fail | NetworkDecision::Abort) {
-        decision = NetworkDecision::Fulfill {
-            status: 200,
-            headers: vec![("Content-Type".to_string(), "text/html".to_string())],
-            body: "PGh0bWw+PC9odG1sPg==".to_string(),
-        };
-    }
     match decision {
         NetworkDecision::Fail | NetworkDecision::Abort => {
             bidi.send("network.failRequest", json!({"request": id}))
@@ -1307,6 +1311,32 @@ mod tests {
             .write()
             .await
             .insert("storage-tab".into());
+        before_request(
+            &ff.bidi,
+            &net,
+            &json!({"request": "r1", "url": "https://example.com/", "headers": []}),
+            Some("storage-tab"),
+        )
+        .await
+        .unwrap();
+        let sent = messages.lock().unwrap().last().unwrap().clone();
+        assert_eq!(sent["method"], "network.provideResponse");
+        assert_eq!(sent["params"]["body"]["value"], "PGh0bWw+PC9odG1sPg==");
+    }
+
+    #[tokio::test]
+    async fn blank_context_bypasses_abort_route() {
+        let (ff, _tx, _, messages, _) =
+            crate::native::firefox::session::tests::fake_session_with_rdp().await;
+        let net = NetContext::default();
+        net.blank_contexts
+            .write()
+            .await
+            .insert("storage-tab".into());
+        let mut route = mock_route("*", "", 200);
+        route.response = None;
+        route.abort = true;
+        net.routes.write().await.push(route);
         before_request(
             &ff.bidi,
             &net,
