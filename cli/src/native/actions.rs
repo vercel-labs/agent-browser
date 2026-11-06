@@ -1233,6 +1233,7 @@ impl DaemonState {
                 bidi: Arc::clone(&ff.bidi),
                 context: ff.top_context.clone(),
                 contexts: ff.context_parents.clone(),
+                modifiers: Default::default(),
             });
             let paused = live.as_ref().is_some_and(|live| {
                 self.pending_dialog.as_ref().is_some_and(|dialog| {

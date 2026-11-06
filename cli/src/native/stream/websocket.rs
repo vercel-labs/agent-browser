@@ -931,6 +931,7 @@ mod tests {
             bidi,
             context: "ctx".to_string(),
             contexts: Default::default(),
+            modifiers: Default::default(),
         })));
         let reader_task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();

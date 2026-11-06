@@ -15845,6 +15845,84 @@ async fn e2e_firefox_drag_scrolls_destination_and_releases_on_failure() {
     firefox_close(&mut state).await;
 }
 
+/// Dashboard modifier masks hold Shift across keys and apply it before pointer input.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_stream_modifier_masks() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        r#"document.body.innerHTML = '<button style="position:fixed;left:0;top:0;width:100px;height:80px">Probe</button>';
+        window.__streamKeys = [];
+        for (const type of ['keydown', 'keyup', 'click']) {
+            window.addEventListener(type, e => {
+                window.__streamKeys.push([e.type, e.key || '', e.shiftKey]);
+                e.preventDefault();
+            });
+        }"#,
+    )
+    .await;
+    let ff = state.firefox.as_ref().unwrap();
+    let live = super::bidi::stream::FirefoxLive {
+        bidi: Arc::clone(&ff.bidi),
+        context: ff.top_context.clone(),
+        contexts: ff.context_parents.clone(),
+        modifiers: Default::default(),
+    };
+    for (key, modifiers) in [("K", 8), ("J", 8), ("a", 0)] {
+        for event in ["keyDown", "keyUp"] {
+            super::bidi::stream::dispatch_input(
+                &live,
+                "input_keyboard",
+                &json!({"eventType": event, "key": key, "modifiers": modifiers}),
+            )
+            .await;
+        }
+    }
+    for (event, modifiers) in [
+        ("mousePressed", 8),
+        ("mouseReleased", 8),
+        ("mouseMoved", 0),
+    ] {
+        super::bidi::stream::dispatch_input(
+            &live,
+            "input_mouse",
+            &json!({"eventType": event, "x": 20, "y": 20, "button": "left", "modifiers": modifiers}),
+        )
+        .await;
+    }
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "input-ready", "action": "wait", "function": "window.__streamKeys.length >= 11", "timeout": 5000}),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "window.__streamKeys").await,
+        json!([
+            ["keydown", "Shift", true],
+            ["keydown", "K", true],
+            ["keyup", "K", true],
+            ["keydown", "J", true],
+            ["keyup", "J", true],
+            ["keyup", "Shift", false],
+            ["keydown", "a", false],
+            ["keyup", "a", false],
+            ["keydown", "Shift", true],
+            ["click", "", true],
+            ["keyup", "Shift", false],
+        ])
+    );
+    firefox_close(&mut state).await;
+}
+
 /// Firefox publishes the same tab data to the stream endpoint as its tab commands return.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]

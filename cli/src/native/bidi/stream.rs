@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 
 use super::client::BidiClient;
 use super::input::{self, Origin};
@@ -17,6 +18,7 @@ pub struct FirefoxLive {
     pub bidi: Arc<BidiClient>,
     pub context: String,
     pub contexts: HashMap<String, String>,
+    pub modifiers: Arc<Mutex<HashMap<String, u8>>>,
 }
 
 /// Stops the polling task when dropped.
@@ -111,14 +113,14 @@ async fn publish_frame(live: &FirefoxLive, server: &StreamServer) {
     );
 }
 
-fn input_actions(msg_type: &str, msg: &Value) -> Option<Value> {
+fn input_actions(msg_type: &str, msg: &Value, held: u8) -> Option<(Value, u8)> {
     let text = |field: &str| msg.get(field).and_then(Value::as_str).unwrap_or("");
     let number = |field: &str| msg.get(field).and_then(Value::as_f64).unwrap_or(0.0);
     let origin = Origin::Viewport {
         x: number("x"),
         y: number("y"),
     };
-    match (msg_type, text("eventType")) {
+    let mut actions = match (msg_type, text("eventType")) {
         ("input_mouse", "mouseMoved") => Some(input::pointer_hover(&origin)),
         ("input_mouse", "mousePressed") => Some(input::pointer_down(&origin, text("button"))),
         ("input_mouse", "mouseReleased") => Some(input::pointer_up(&origin, text("button"))),
@@ -130,19 +132,65 @@ fn input_actions(msg_type: &str, msg: &Value) -> Option<Value> {
         ("input_keyboard", "keyDown") => Some(input::key_event_actions("keyDown", text("key"))),
         ("input_keyboard", "keyUp") => Some(input::key_event_actions("keyUp", text("key"))),
         _ => None,
+    }?;
+    let modifiers = [(1, "Alt"), (2, "Control"), (4, "Meta"), (8, "Shift")];
+    let mut desired = msg
+        .get("modifiers")
+        .and_then(Value::as_u64)
+        .map(|mask| (mask & 15) as u8)
+        .unwrap_or(held);
+    let keyboard = msg_type == "input_keyboard";
+    let mut prefix = Vec::new();
+    for (bit, key) in modifiers {
+        if keyboard && text("key") == key {
+            if text("eventType") == "keyDown" {
+                desired |= bit;
+            } else {
+                desired &= !bit;
+            }
+        } else if (held ^ desired) & bit != 0 {
+            let event = if desired & bit != 0 {
+                "keyDown"
+            } else {
+                "keyUp"
+            };
+            prefix.push(input::key_event_actions(event, key)[0]["actions"][0].clone());
+        }
     }
+    if keyboard {
+        actions[0]["id"] = json!("dashboard-key");
+        actions[0]["actions"]
+            .as_array_mut()
+            .unwrap()
+            .splice(0..0, prefix);
+    } else if !prefix.is_empty() {
+        actions[0]["actions"]
+            .as_array_mut()
+            .unwrap()
+            .splice(0..0, (0..prefix.len()).map(|_| json!({"type": "pause"})));
+        actions.as_array_mut().unwrap().push(json!({
+            "type": "key", "id": "dashboard-key", "actions": prefix,
+        }));
+    }
+    Some((actions, desired))
 }
 
-/// Sends one dashboard mouse or keyboard message to the tab as `input.performActions`.
+/// Sends dashboard input without waiting for a reply. Cached modifiers assume Firefox accepts successfully sent actions.
 pub async fn dispatch_input(live: &FirefoxLive, msg_type: &str, msg: &Value) {
-    if let Some(actions) = input_actions(msg_type, msg) {
-        let _ = live
+    let mut modifiers = live.modifiers.lock().await;
+    let held = modifiers.get(&live.context).copied().unwrap_or(0);
+    if let Some((actions, desired)) = input_actions(msg_type, msg, held) {
+        if live
             .bidi
             .send_no_wait(
                 "input.performActions",
                 json!({ "context": live.context, "actions": actions }),
             )
-            .await;
+            .await
+            .is_ok()
+        {
+            modifiers.insert(live.context.clone(), desired);
+        }
     }
 }
 
@@ -153,12 +201,44 @@ mod tests {
     #[test]
     fn key_messages_become_key_actions_and_unknown_events_are_dropped() {
         let down = json!({"eventType": "keyDown", "key": "Enter"});
-        let actions = input_actions("input_keyboard", &down).unwrap();
+        let (actions, held) = input_actions("input_keyboard", &down, 0).unwrap();
+        assert_eq!(held, 0);
+        assert_eq!(actions[0]["id"], "dashboard-key");
         assert_eq!(
             actions[0]["actions"][0],
             json!({"type": "keyDown", "value": "\u{E007}"})
         );
-        assert!(input_actions("input_keyboard", &json!({"eventType": "char"})).is_none());
-        assert!(input_actions("input_touch", &json!({})).is_none());
+        assert!(input_actions("input_keyboard", &json!({"eventType": "char"}), 0).is_none());
+        assert!(input_actions("input_touch", &json!({}), 0).is_none());
+    }
+
+    #[test]
+    fn explicit_modifiers_are_not_duplicated_and_pointer_input_waits_for_modifiers() {
+        let down = json!({"eventType": "keyDown", "key": "Shift", "modifiers": 8});
+        let (actions, held) = input_actions("input_keyboard", &down, 0).unwrap();
+        assert_eq!(held, 8);
+        assert_eq!(actions[0]["actions"].as_array().unwrap().len(), 1);
+        let up = json!({"eventType": "keyUp", "key": "Shift", "modifiers": 0});
+        let (actions, held) = input_actions("input_keyboard", &up, held).unwrap();
+        assert_eq!(held, 0);
+        assert_eq!(actions[0]["actions"].as_array().unwrap().len(), 1);
+        for event in ["mouseMoved", "mousePressed", "mouseReleased", "mouseWheel"] {
+            let (actions, held) = input_actions(
+                "input_mouse",
+                &json!({"eventType": event, "modifiers": 10}),
+                0,
+            )
+            .unwrap();
+            assert_eq!(held, 10);
+            assert_eq!(actions[0]["actions"][0]["type"], "pause");
+            assert_eq!(actions[0]["actions"][1]["type"], "pause");
+            assert_eq!(
+                actions[1]["actions"],
+                json!([
+                    {"type": "keyDown", "value": "\u{E009}"},
+                    {"type": "keyDown", "value": "\u{E008}"},
+                ])
+            );
+        }
     }
 }
