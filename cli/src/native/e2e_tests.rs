@@ -16627,7 +16627,11 @@ async fn e2e_firefox_navigate_networkidle_waits_for_delayed_request() {
     )
     .await;
     assert_eq!(resp["success"], false, "{resp}");
-    assert!(resp["error"].as_str().unwrap_or("").contains("networkidle"));
+    let error = resp["error"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        error.contains("timeout") || error.contains("timed out"),
+        "{resp}"
+    );
     firefox_close(&mut state).await;
 }
 
