@@ -6,6 +6,8 @@ use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
+use std::str::FromStr;
+
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// Which addresses a flow may send to.
@@ -130,17 +132,6 @@ fn non_public_v6(ip: Ipv6Addr) -> bool {
         || (s[0] == 0x100 && s[1..4] == [0; 3])
 }
 
-/// The address to pin a proxy to: the first IPv4 address if there is one,
-/// else the first address. reqwest takes one host per proxy, so there is no
-/// failover between addresses.
-pub fn pick_address(addrs: Vec<IpAddr>) -> Option<IpAddr> {
-    addrs
-        .iter()
-        .find(|a| a.is_ipv4())
-        .or(addrs.first())
-        .copied()
-}
-
 /// `host` when the browser reached it only at non-public addresses that the
 /// name still resolves to now, on the URL's own port, and the name resolves
 /// to nothing else. Through any proxy (launch flag, system setting, an
@@ -171,49 +162,16 @@ pub fn local_recording(recorded: &[SocketAddr], port: u16, resolved: &[IpAddr]) 
         })
 }
 
-/// Resolve the hostnames of the `http://` proxies, with `limit` as the time
-/// each lookup may take. A failure is kept per name so the build can fail
-/// closed with the proxy named.
-pub async fn resolve_proxy_hosts(
-    proxies: &[EnvProxy],
-    limit: std::time::Duration,
-) -> std::collections::HashMap<(String, u16), Result<IpAddr, String>> {
-    let mut found = std::collections::HashMap::new();
-    for p in proxies {
-        let Some(url::Host::Domain(name)) = p.url.host() else {
-            continue;
-        };
-        if p.url.scheme() != "http" {
-            continue;
-        }
-        let port = p.url.port_or_known_default().unwrap_or(80);
-        let key = (name.to_string(), port);
-        if found.contains_key(&key) {
-            continue;
-        }
-        let looked = tokio::time::timeout(limit, tokio::net::lookup_host((name, port))).await;
-        let result = match looked {
-            Ok(Ok(addrs)) => pick_address(addrs.map(|a| a.ip()).collect())
-                .ok_or_else(|| format!("could not resolve proxy {name}: no addresses")),
-            Ok(Err(e)) => Err(format!("could not resolve proxy {name}: {e}")),
-            Err(_) => Err(format!(
-                "could not resolve proxy {name}: no answer within {}s",
-                limit.as_secs()
-            )),
-        };
-        found.insert(key, result);
-    }
-    found
-}
-
 /// Proxy hostnames the resolver treats apart from targets.
 #[derive(Debug, Default)]
 pub struct ProxyNames {
     /// Proxies from the user's configuration: trusted, never filtered.
     pub trusted: Vec<String>,
-    /// `http://` proxies whose name did not resolve, with the reason: a
-    /// request through one fails with it, and one `NO_PROXY` excludes runs.
-    pub unreachable: Vec<(String, String)>,
+    /// `http://` proxies named by a hostname, as (stand-in name, real
+    /// name). The proxy URL carries the stand-in, so the real name is looked
+    /// up only when a request goes through the proxy, and a target never
+    /// shares the stand-in.
+    pub stand_ins: Vec<(String, String)>,
 }
 
 /// The reqwest proxies for the environment, honoring `NO_PROXY` for which
@@ -221,22 +179,17 @@ pub struct ProxyNames {
 pub fn client_proxies(
     env: impl Fn(&str) -> Option<String>,
     no_proxy: Option<reqwest::NoProxy>,
-    lookup: impl Fn(&str, u16) -> Result<IpAddr, String>,
 ) -> Result<(Vec<reqwest::Proxy>, ProxyNames), String> {
     let mut proxies = Vec::new();
     let mut names = ProxyNames::default();
-    for p in env_proxies(env)? {
-        let (url, name) = match pin_proxy(p.url.clone(), &lookup) {
-            Ok(pinned) => pinned,
-            Err(reason) => {
-                let host = p.url.host_str().unwrap_or("");
-                names
-                    .unreachable
-                    .push((host.trim_end_matches('.').to_ascii_lowercase(), reason));
-                (p.url, None)
-            }
-        };
-        names.trusted.extend(name);
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    for (i, p) in env_proxies(env)?.into_iter().enumerate() {
+        let (url, kept) = stand_in_proxy(p.url, &format!("p{i}-{run}"));
+        match kept {
+            Some(ProxyName::Trusted(name)) => names.trusted.push(name),
+            Some(ProxyName::StandIn(stand_in, real)) => names.stand_ins.push((stand_in, real)),
+            None => {}
+        }
         let proxy = if p.for_https {
             reqwest::Proxy::https(url.as_str())
         } else {
@@ -302,8 +255,10 @@ pub struct ReachResolver {
     pub non_public: fn(IpAddr) -> bool,
     /// Proxy hosts from the user's configuration: trusted, never filtered.
     pub trusted: Vec<String>,
-    /// Proxy hosts that did not resolve, refused with the reason.
-    pub unreachable: Vec<(String, String)>,
+    /// See `ProxyNames::stand_ins`.
+    pub stand_ins: Vec<(String, String)>,
+    /// The flow has no recorded reach, so a refusal says how to record one.
+    pub no_recorded_reach: bool,
 }
 
 impl ReachResolver {
@@ -313,7 +268,8 @@ impl ReachResolver {
             reach,
             non_public: is_non_public,
             trusted: Vec::new(),
-            unreachable: Vec::new(),
+            stand_ins: Vec::new(),
+            no_recorded_reach: false,
         }
     }
 }
@@ -357,25 +313,33 @@ pub fn env_proxies(env: impl Fn(&str) -> Option<String>) -> Result<Vec<EnvProxy>
     Ok(out)
 }
 
-/// An `http://` proxy named by a hostname is resolved once and used by
-/// address, so its connection never goes through the resolver's filter and
-/// the filter keeps no exception that a target could share. Other proxies
-/// are returned unchanged, with the hostname the resolver must trust.
-pub fn pin_proxy(
-    mut url: url::Url,
-    lookup: impl Fn(&str, u16) -> Result<IpAddr, String>,
-) -> Result<(url::Url, Option<String>), String> {
+/// How the resolver treats a proxy's hostname.
+#[derive(Debug, PartialEq)]
+pub enum ProxyName {
+    /// An `https://` proxy keeps its name for TLS: trusted, never filtered.
+    Trusted(String),
+    /// (stand-in, real name) of an `http://` proxy.
+    StandIn(String, String),
+}
+
+/// An `http://` proxy named by a hostname gets a stand-in name, unique to
+/// the run under `.invalid`, that the resolver maps back to the real name
+/// without the filter, so no exception exists that a target could share,
+/// and the name is looked up only when a request uses the proxy. Proxies
+/// given by address are returned unchanged.
+pub fn stand_in_proxy(mut url: url::Url, tag: &str) -> (url::Url, Option<ProxyName>) {
     let Some(url::Host::Domain(name)) = url.host().map(|h| h.to_owned()) else {
-        return Ok((url, None));
+        return (url, None);
     };
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
     if url.scheme() != "http" {
-        let trusted = name.trim_end_matches('.').to_ascii_lowercase();
-        return Ok((url, Some(trusted)));
+        return (url, Some(ProxyName::Trusted(name)));
     }
-    let port = url.port_or_known_default().unwrap_or(80);
-    let ip = lookup(&name, port)?;
-    let _ = url.set_ip_host(ip);
-    Ok((url, None))
+    let stand_in = format!("{tag}.proxy.invalid");
+    if url.set_host(Some(&stand_in)).is_err() {
+        return (url, None);
+    }
+    (url, Some(ProxyName::StandIn(stand_in, name)))
 }
 
 impl Resolve for ReachResolver {
@@ -386,25 +350,47 @@ impl Resolve for ReachResolver {
             .trusted
             .iter()
             .any(|t| t.eq_ignore_ascii_case(host.trim_end_matches('.')));
-        if let Some((_, reason)) = self
-            .unreachable
+        if let Some((_, real)) = self
+            .stand_ins
             .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(host.trim_end_matches('.')))
+            .find(|(s, _)| s.eq_ignore_ascii_case(host.trim_end_matches('.')))
         {
-            let refused = Refused(reason.clone());
-            return Box::pin(async move { Err(Box::new(refused) as Box<dyn Error + Send + Sync>) });
+            let real = real.clone();
+            let inner = Name::from_str(&real).map(|n| self.inner.resolve(n));
+            return Box::pin(async move {
+                let could_not = |e: &dyn std::fmt::Display| {
+                    Box::new(Refused(format!("could not resolve proxy {real}: {e}")))
+                        as Box<dyn Error + Send + Sync>
+                };
+                let addrs: Vec<SocketAddr> = match inner {
+                    Ok(inner) => inner.await.map_err(|e| could_not(&e))?.collect(),
+                    Err(e) => return Err(could_not(&e)),
+                };
+                if addrs.is_empty() {
+                    return Err(could_not(&"no addresses"));
+                }
+                Ok(Box::new(addrs.into_iter()) as Addrs)
+            });
         }
+        let hint = self.no_recorded_reach && reach == Reach::Public;
         let inner = self.inner.resolve(name);
         Box::pin(async move {
             let addrs: Vec<SocketAddr> = inner.await?.collect();
             if trusted {
                 return Ok(Box::new(addrs.into_iter()) as Addrs);
             }
-            let kept = admit(&host, addrs, reach, non_public)?;
+            let kept = admit(&host, addrs, reach, non_public).map_err(|r| match hint {
+                true => Refused(format!("{}; {}", r.0, RESAVE_FOR_LOCAL)),
+                false => r,
+            })?;
             Ok(Box::new(kept.into_iter()) as Addrs)
         })
     }
 }
+
+/// Added to a refusal when a flow without a recorded `reach` hits a local
+/// address: the file may predate the field.
+pub const RESAVE_FOR_LOCAL: &str = "if this flow was recorded against a local host, record it again with `flow save` so the file gets `\"reach\": \"local\"`";
 
 struct SystemResolver;
 
@@ -424,7 +410,6 @@ mod tests {
     use crate::native::flow::{flow_of, http_client_with, run_http, PreparedRequest};
     use serde_json::json;
     use std::str::FromStr;
-    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn ip(s: &str) -> IpAddr {
@@ -587,7 +572,8 @@ mod tests {
             reach: Reach::Public,
             non_public: is_non_public,
             trusted: vec![],
-            unreachable: vec![],
+            stand_ins: vec![],
+            no_recorded_reach: false,
         };
         let err = match rebound.resolve(name()).await {
             Ok(_) => panic!("loopback must be refused"),
@@ -599,7 +585,8 @@ mod tests {
             reach: Reach::Public,
             non_public: is_non_public,
             trusted: vec![],
-            unreachable: vec![],
+            stand_ins: vec![],
+            no_recorded_reach: false,
         };
         assert_eq!(ok.resolve(name()).await.unwrap().count(), 1);
     }
@@ -658,7 +645,8 @@ mod tests {
             reach: Reach::of_start(start),
             non_public,
             trusted: vec![],
-            unreachable: vec![],
+            stand_ins: vec![],
+            no_recorded_reach: false,
         };
         http_client_with(None, &flow, Arc::new(resolver), vec![]).unwrap()
     }
@@ -759,7 +747,8 @@ mod tests {
             reach: Reach::Public,
             non_public: loopback_is_public,
             trusted: vec![],
-            unreachable: vec![],
+            stand_ins: vec![],
+            no_recorded_reach: false,
         };
         let client = http_client_with(None, &flow, Arc::new(resolver), vec![]).unwrap();
         let res = run_http(
@@ -851,92 +840,89 @@ mod tests {
     }
 
     #[test]
-    fn an_http_proxy_by_name_is_pinned_to_its_address() {
-        let lookup = |h: &str, port: u16| {
-            assert_eq!((h, port), ("proxy.corp", 3128));
-            Ok(ip("10.1.2.3"))
-        };
-        let u = url::Url::parse("http://user:pw@proxy.corp:3128").unwrap();
-        let (pinned, trusted) = pin_proxy(u, lookup).unwrap();
-        assert_eq!(pinned.as_str(), "http://user:pw@10.1.2.3:3128/");
-        assert!(trusted.is_none());
-        let (same, _) = pin_proxy(
-            url::Url::parse("http://127.0.0.1:7890").unwrap(),
-            |_, _| panic!(),
-        )
-        .unwrap();
-        assert_eq!(same.as_str(), "http://127.0.0.1:7890/");
-        let (v6, _) = pin_proxy(url::Url::parse("http://proxy.corp:80").unwrap(), |_, _| {
-            Ok(ip("fd00::1"))
-        })
-        .unwrap();
-        assert_eq!(v6.host_str(), Some("[fd00::1]"));
-        // https: the name stays for TLS, so the resolver trusts it.
-        let (kept, trusted) = pin_proxy(
-            url::Url::parse("https://proxy.corp:443").unwrap(),
-            |_, _| panic!(),
-        )
-        .unwrap();
-        assert_eq!(kept.host_str(), Some("proxy.corp"));
-        assert_eq!(trusted.as_deref(), Some("proxy.corp"));
-    }
-
-    #[test]
-    fn a_proxy_that_does_not_resolve_fails_closed_with_its_own_message() {
-        let err = pin_proxy(url::Url::parse("http://nope.corp:80").unwrap(), |h, _| {
-            Err(format!("could not resolve proxy {h}: no such host"))
-        })
-        .unwrap_err();
-        assert!(
-            err.starts_with("could not resolve proxy nope.corp"),
-            "{err}"
-        );
-        let (_, names) = client_proxies(
-            env_of(&[("HTTP_PROXY", "http://nope.corp:80")]),
-            None,
-            |h, _| Err(format!("could not resolve proxy {h}: no such host")),
-        )
-        .unwrap();
-        assert_eq!(names.unreachable.len(), 1);
-        assert_eq!(names.unreachable[0].0, "nope.corp");
-        assert!(names.unreachable[0]
-            .1
-            .starts_with("could not resolve proxy nope.corp"));
-    }
-
-    #[test]
-    fn pinning_prefers_the_first_ipv4_address() {
-        let pick = |s: &[&str]| pick_address(s.iter().map(|a| ip(a)).collect());
+    fn an_http_proxy_by_name_gets_a_stand_in_name() {
+        let u = url::Url::parse("http://user:pw@Proxy.Corp:3128").unwrap();
+        let (url, name) = stand_in_proxy(u, "p0-abc");
+        assert_eq!(url.as_str(), "http://user:pw@p0-abc.proxy.invalid:3128/");
         assert_eq!(
-            pick(&["fd00::1", "10.0.0.1", "10.0.0.2"]),
-            Some(ip("10.0.0.1"))
+            name,
+            Some(ProxyName::StandIn(
+                "p0-abc.proxy.invalid".to_string(),
+                "proxy.corp".to_string()
+            ))
         );
-        assert_eq!(pick(&["fd00::1", "fd00::2"]), Some(ip("fd00::1")));
-        assert_eq!(pick(&[]), None);
+        let (same, name) = stand_in_proxy(url::Url::parse("http://127.0.0.1:7890").unwrap(), "t");
+        assert_eq!(same.as_str(), "http://127.0.0.1:7890/");
+        assert!(name.is_none());
+        // https: the name stays for TLS, so the resolver trusts it.
+        let (kept, name) = stand_in_proxy(url::Url::parse("https://proxy.corp:443").unwrap(), "t");
+        assert_eq!(kept.host_str(), Some("proxy.corp"));
+        assert_eq!(name, Some(ProxyName::Trusted("proxy.corp".to_string())));
+        // Each run has its own stand-ins.
+        let (_, a) =
+            client_proxies(env_of(&[("HTTP_PROXY", "http://proxy.corp:1")]), None).unwrap();
+        let (_, b) =
+            client_proxies(env_of(&[("HTTP_PROXY", "http://proxy.corp:1")]), None).unwrap();
+        assert_ne!(a.stand_ins[0].0, b.stand_ins[0].0);
+        assert_eq!(a.stand_ins[0].1, "proxy.corp");
+    }
+
+    /// Answers every name with `addrs` and records the names asked for.
+    struct Asked(Vec<SocketAddr>, Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Resolve for Asked {
+        fn resolve(&self, name: Name) -> Resolving {
+            self.1.lock().unwrap().push(name.as_str().to_string());
+            let addrs = self.0.clone();
+            Box::pin(async move { Ok(Box::new(addrs.into_iter()) as Addrs) })
+        }
     }
 
     #[tokio::test]
-    async fn proxy_names_resolve_asynchronously_and_fail_closed() {
-        let proxies = env_proxies(env_of(&[
-            ("HTTP_PROXY", "http://localhost:3128"),
-            ("HTTPS_PROXY", "https://secure.corp:443"),
-        ]))
+    async fn a_proxy_name_is_looked_up_only_when_a_request_uses_it() {
+        let (port, hits) = serve(OK.to_string()).await;
+        let flow = flow_of(json!({ "startUrl": "http://127.0.0.1:3000/", "origin": "127.0.0.1" }));
+        let proxy = format!("http://proxy.corp:{port}");
+        let (proxies, names) = client_proxies(
+            env_of(Box::leak(Box::new([(
+                "HTTP_PROXY",
+                Box::leak(proxy.into_boxed_str()) as &str,
+            )]))),
+            reqwest::NoProxy::from_string("127.0.0.1"),
+        )
         .unwrap();
-        let found = resolve_proxy_hosts(&proxies, Duration::from_secs(5)).await;
-        assert!(found.contains_key(&("localhost".to_string(), 3128)));
-        // https proxies keep their name and need no lookup.
-        assert_eq!(found.len(), 1);
-        let missing =
-            env_proxies(env_of(&[("HTTP_PROXY", "http://nonexistent.invalid:3128")])).unwrap();
-        let none = resolve_proxy_hosts(&missing, Duration::from_secs(5)).await;
-        let got = none
-            .get(&("nonexistent.invalid".to_string(), 3128))
-            .unwrap();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let resolver = ReachResolver {
+            inner: Arc::new(Asked(
+                vec![SocketAddr::new(ip("127.0.0.1"), port)],
+                asked.clone(),
+            )),
+            reach: Reach::Local,
+            non_public: is_non_public,
+            trusted: names.trusted,
+            stand_ins: names.stand_ins,
+            no_recorded_reach: false,
+        };
+        let client = http_client_with(None, &flow, Arc::new(resolver), proxies).unwrap();
+        // NO_PROXY sends this one direct: the proxy's name is never asked.
+        let res = run_http(
+            &client,
+            &request(&format!("http://127.0.0.1:{port}/")),
+            None,
+            None,
+        )
+        .await;
+        assert!(!res.reason.unwrap_or_default().contains("proxy"));
         assert!(
-            got.as_ref()
-                .is_err_and(|e| e.starts_with("could not resolve proxy nonexistent.invalid")),
-            "{got:?}"
+            asked.lock().unwrap().is_empty(),
+            "{:?}",
+            asked.lock().unwrap()
         );
+        // A request through the proxy looks up the real name, unfiltered.
+        let res = run_http(&client, &request("http://app.localhost/"), None, None).await;
+        assert!(!res.reason.unwrap_or_default().contains("resolved to"));
+        assert_eq!(*asked.lock().unwrap(), vec!["proxy.corp".to_string()]);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -984,24 +970,20 @@ mod tests {
     fn proxied_client(
         proxy_env: &'static [(&'static str, &'static str)],
         no_proxy: &str,
-        proxy_ip: &'static str,
         port: u16,
     ) -> crate::native::flow::HttpClients {
         let flow =
             flow_of(json!({ "startUrl": "https://app.example.com/", "origin": "example.com" }));
-        let (proxies, names) = client_proxies(
-            env_of(proxy_env),
-            reqwest::NoProxy::from_string(no_proxy),
-            move |_, _| Ok(ip(proxy_ip)),
-        )
-        .unwrap();
+        let (proxies, names) =
+            client_proxies(env_of(proxy_env), reqwest::NoProxy::from_string(no_proxy)).unwrap();
         // Every name resolves to loopback, which a public flow may not use.
         let resolver = ReachResolver {
             inner: Arc::new(Fixed(vec![SocketAddr::new(ip("127.0.0.1"), port)])),
             reach: Reach::Public,
             non_public: is_non_public,
             trusted: names.trusted,
-            unreachable: names.unreachable,
+            stand_ins: names.stand_ins,
+            no_recorded_reach: false,
         };
         http_client_with(None, &flow, Arc::new(resolver), proxies).unwrap()
     }
@@ -1013,7 +995,7 @@ mod tests {
             "HTTP_PROXY",
             Box::leak(format!("http://proxy.corp:{port}").into_boxed_str()) as &str,
         )]));
-        let client = proxied_client(env, "", "127.0.0.1", port);
+        let client = proxied_client(env, "", port);
         let res = run_http(&client, &request("http://app.example.com/"), None, None).await;
         assert!(!res.reason.unwrap_or_default().contains("resolved to"));
         assert_eq!(
@@ -1030,7 +1012,7 @@ mod tests {
             "HTTP_PROXY",
             Box::leak(format!("http://proxy.corp:{port}").into_boxed_str()) as &str,
         )]));
-        let client = proxied_client(env, "app.example.com", "127.0.0.1", port);
+        let client = proxied_client(env, "app.example.com", port);
         let res = run_http(
             &client,
             &request(&format!("http://app.example.com:{port}/")),
@@ -1048,14 +1030,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_target_named_like_the_proxy_is_filtered() {
-        // The proxy is pinned, so its name is not trusted: a direct request
-        // to that name is an ordinary target.
+        // The proxy goes by a stand-in, so its name is not trusted: a direct
+        // request to that name is an ordinary target.
         let (port, hits) = serve(OK.to_string()).await;
         let env: &'static [(&str, &str)] = Box::leak(Box::new([(
             "HTTP_PROXY",
             Box::leak(format!("http://proxy.example.com:{port}").into_boxed_str()) as &str,
         )]));
-        let client = proxied_client(env, "proxy.example.com", "127.0.0.1", port);
+        let client = proxied_client(env, "proxy.example.com", port);
         let res = run_http(
             &client,
             &request(&format!("http://proxy.example.com:{port}/")),
@@ -1080,7 +1062,6 @@ mod tests {
                 ("http_proxy", "http://127.0.0.1:7890"),
             ]),
             reqwest::NoProxy::from_string("127.0.0.1"),
-            |_, _| panic!("an address needs no lookup"),
         )
         .unwrap();
         let resolver = ReachResolver {
@@ -1088,7 +1069,8 @@ mod tests {
             reach: Reach::Local,
             non_public: is_non_public,
             trusted: names.trusted,
-            unreachable: names.unreachable,
+            stand_ins: names.stand_ins,
+            no_recorded_reach: false,
         };
         let client = http_client_with(None, &flow, Arc::new(resolver), proxies).unwrap();
         let res = run_http(
@@ -1108,7 +1090,6 @@ mod tests {
         let (proxies, names) = client_proxies(
             env_of(&[("HTTP_PROXY", "http://proxy.offvpn.invalid:3128")]),
             reqwest::NoProxy::from_string("127.0.0.1"),
-            |h, _| Err(format!("could not resolve proxy {h}: no such host")),
         )
         .unwrap();
         let resolver = ReachResolver {
@@ -1116,7 +1097,8 @@ mod tests {
             reach: Reach::Local,
             non_public: is_non_public,
             trusted: names.trusted,
-            unreachable: names.unreachable,
+            stand_ins: names.stand_ins,
+            no_recorded_reach: false,
         };
         let client = http_client_with(None, &flow, Arc::new(resolver), proxies).unwrap();
         // NO_PROXY sends this one direct, so the dead proxy does not matter.
@@ -1218,7 +1200,8 @@ mod tests {
                 reach: Reach::of_flow(flow),
                 non_public: is_non_public,
                 trusted: vec![],
-                unreachable: vec![],
+                stand_ins: vec![],
+                no_recorded_reach: flow.reach.is_none(),
             };
             http_client_with(None, flow, Arc::new(resolver), vec![]).unwrap()
         };
@@ -1230,10 +1213,14 @@ mod tests {
         // the name later resolves to loopback.
         let recorded_public = flow_of(json!({ "startUrl": url }));
         let res = run_http(&client_for(&recorded_public), &request(&url), None, None).await;
-        assert!(res
-            .reason
-            .unwrap_or_default()
-            .contains("resolved to a non-public address"));
+        let reason = res.reason.unwrap_or_default();
+        assert!(
+            reason.contains("resolved to a non-public address"),
+            "{reason}"
+        );
+        // A file without a recorded reach may predate it: the refusal says
+        // how to record one.
+        assert!(reason.contains(r#""reach": "local""#), "{reason}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

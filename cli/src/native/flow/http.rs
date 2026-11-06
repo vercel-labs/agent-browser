@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use super::net::{
-    client_proxies, env_proxies, refusal_in, resolve_proxy_hosts, Reach, ReachResolver,
-};
+use super::net::{client_proxies, refusal_in, Reach, ReachResolver};
 use super::*;
 
 /// How long a request, or the lookup of a proxy's address, may take.
@@ -146,20 +144,11 @@ pub async fn http_client(
     flow: &Flow,
 ) -> Result<HttpClients, String> {
     let env = |k: &str| std::env::var(k).ok();
-    let env_proxies = env_proxies(env)?;
-    let addresses = resolve_proxy_hosts(&env_proxies, REQUEST_TIMEOUT).await;
-    let (proxies, names) =
-        client_proxies(
-            env,
-            reqwest::NoProxy::from_env(),
-            |host, port| match addresses.get(&(host.to_string(), port)) {
-                Some(found) => found.clone(),
-                None => Err(format!("could not resolve proxy {host}")),
-            },
-        )?;
+    let (proxies, names) = client_proxies(env, reqwest::NoProxy::from_env())?;
     let mut resolver = ReachResolver::system(Reach::of_flow(flow));
     resolver.trusted = names.trusted;
-    resolver.unreachable = names.unreachable;
+    resolver.stand_ins = names.stand_ins;
+    resolver.no_recorded_reach = flow.reach.is_none();
     http_client_with(filter, flow, Arc::new(resolver), proxies)
 }
 
