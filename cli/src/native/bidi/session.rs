@@ -1134,21 +1134,29 @@ pub(crate) mod tests {
         ff.top_context = "tab-3".into();
         let mut received = ff.bidi.subscribe_buffered();
         tx.send(json!({
+            "type": "event",
             "method": "browsingContext.contextCreated",
             "params": {"context": "popup", "originalOpener": "tab-3"}
         }))
         .unwrap();
-        received.recv().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
         ff.drain_events(&mut None);
         assert_eq!(ff.top_context, "popup");
         ff.context = "popup".into();
 
         tx.send(json!({
+            "type": "event",
             "method": "browsingContext.contextDestroyed",
             "params": {"context": "popup"}
         }))
         .unwrap();
-        received.recv().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
         ff.drain_events(&mut None);
         assert_eq!(ff.top_context, "tab-3");
         assert_eq!(ff.context, "tab-3");
