@@ -204,6 +204,12 @@ impl Running {
                     // extensions cannot be combined with it. The one set last
                     // wins, so an inherited value cannot wedge the session.
                     match key {
+                        Key::Proxy => displace(
+                            &mut next,
+                            patch,
+                            &[Key::ProxyUsername, Key::ProxyPassword],
+                            &mut changes,
+                        ),
                         Key::StorageState => displace(
                             &mut next,
                             patch,

@@ -5833,6 +5833,7 @@ struct SettingsOutcome {
 struct PendingSettings {
     keys: Vec<Key>,
     before: Running,
+    proxy_credentials: Option<(String, String)>,
     filter: Option<DomainFilter>,
     ca_cert: Option<EffectiveCaCert>,
     attached: Option<AttachedTarget>,
@@ -5906,6 +5907,7 @@ async fn rollback_launch_settings(
     state.effective_ca_cert = pending.ca_cert;
     state.attached_target = pending.attached;
     state.cdp_headers = pending.cdp_headers;
+    *state.proxy_credentials.write().await = pending.proxy_credentials;
     outcome.mark_rolled_back(&restored);
 }
 
@@ -6026,6 +6028,7 @@ async fn apply_settings_patch(
         Some(PendingSettings {
             keys,
             before: state.settings.clone(),
+            proxy_credentials: state.proxy_credentials.read().await.clone(),
             filter: state.domain_filter.read().await.clone(),
             ca_cert: state.effective_ca_cert.clone(),
             attached: state.attached_target.clone(),
@@ -20782,6 +20785,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: response_body.len() as i64,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: Some(response_body.to_string()),
             response_body_base64: false,
         });
@@ -22840,6 +22845,7 @@ mod firefox_routing_tests {
             .await
             .unwrap_err();
         assert!(e.contains("--args"), "{e}");
+        state.session_name = Some("k".into());
         let e = handle_launch(
             &launch(json!({"allowedDomains":"a.test","restoreKey":"k"})),
             &mut state,

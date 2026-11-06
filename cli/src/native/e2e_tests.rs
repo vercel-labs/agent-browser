@@ -16974,7 +16974,6 @@ async fn e2e_firefox_har_preserves_post_body_and_elapsed_time() {
     firefox_close(&mut state).await;
 }
 
-
 const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
 <input id="email" type="text" placeholder="Email">
 <input id="code" autocomplete="one-time-code">

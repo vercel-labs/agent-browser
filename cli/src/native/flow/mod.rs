@@ -2077,6 +2077,8 @@ mod tests {
             response_body_size: body.len() as i64,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: Some(body.to_string()),
             response_body_base64: false,
         }
