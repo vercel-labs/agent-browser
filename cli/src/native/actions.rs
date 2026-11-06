@@ -18772,9 +18772,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
         guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", " , ");
         let state = DaemonState::new();
-        let filter = state.domain_filter.try_read().unwrap();
-        let filter = filter.as_ref().expect("domain filter");
-        assert!(filter.is_allowed("any.test"));
+        // No filter at all, so direct-page providers are not refused either.
+        assert!(state.domain_filter.try_read().unwrap().is_none());
     }
 
     #[test]
