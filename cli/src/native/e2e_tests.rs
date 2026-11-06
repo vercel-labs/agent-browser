@@ -15818,6 +15818,11 @@ async fn e2e_firefox_iframe_and_shadow_root_refs() {
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
     firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "document.getElementById('host').removeAttribute('id'); 0",
+    )
+    .await;
 
     let shadow = firefox_ref(&mut state, "Shadow button").await;
     assert_success(&firefox_act(&mut state, "click", &shadow, json!({})).await);
