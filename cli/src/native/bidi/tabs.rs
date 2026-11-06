@@ -120,7 +120,15 @@ async fn tab_title(bidi: &BidiClient, context: &str) -> Value {
 
 /// Lists top-level tabs as `{tabs: [{tabId, targetId, label, title, url, type, active}]}`.
 pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
-    Ok(json!({ "tabs": stream_tabs(session(state)?).await? }))
+    let ff = session(state)?;
+    let tree = ff.bidi.send_timeout(
+        "browsingContext.getTree", json!({"maxDepth": 0}), Duration::from_secs(1),
+    ).await?;
+    let contexts = tree["contexts"].as_array().cloned().unwrap_or_default();
+    let titles = join_all(contexts.iter().map(|context| {
+        tab_title(&ff.bidi, context["context"].as_str().unwrap_or_default())
+    })).await;
+    Ok(json!({ "tabs": build_tab_list(ff, &contexts, &titles) }))
 }
 
 /// Builds the same tab list for the dashboard without letting a blocked page hold the daemon.
