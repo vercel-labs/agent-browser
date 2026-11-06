@@ -2636,6 +2636,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.active_iframe_sessions.clear();
     state.webmcp.clear_all();
     state.screencasting = false;
+    state.pending_dialog = None;
     state.reset_input_state();
     state.update_stream_client().await;
 
@@ -16466,6 +16467,9 @@ mod tests {
             while let Some(Ok(Message::Text(text))) = ws.next().await {
                 let cmd: Value = serde_json::from_str(&text).unwrap();
                 let events = match cmd["method"].as_str().unwrap() {
+                    "Runtime.evaluate" if cmd["params"]["expression"].is_string() => vec![
+                        json!({"method":"Page.javascriptDialogOpening", "params":{"url":"https://page.test/", "type":"confirm", "message":"pending"}}),
+                    ],
                     "Runtime.evaluate" => vec![
                         json!({"sessionId":"other", "method":"Runtime.consoleAPICalled", "params":{"args":[{"type":"string", "value":"wrong page"}]}}),
                         json!({"method":"Runtime.consoleAPICalled", "params":{"args":[{"type":"string", "value":"from the page"}]}}),
@@ -16541,6 +16545,28 @@ mod tests {
         .await
         .unwrap();
 
+        client
+            .send_command(
+                "Runtime.evaluate",
+                Some(json!({"expression":"setTimeout(() => confirm('pending'), 0)"})),
+                None,
+            )
+            .await
+            .unwrap();
+        state.drain_cdp_events();
+        assert_eq!(
+            handle_dialog(&json!({"response":"status"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"hasDialog":true, "type":"confirm", "message":"pending"})
+        );
+        close_current_browser(&mut state).await.unwrap();
+        assert_eq!(
+            handle_dialog(&json!({"response":"status"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"hasDialog":false})
+        );
         server.abort();
     }
 
