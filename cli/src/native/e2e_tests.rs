@@ -15070,10 +15070,24 @@ fn required_firefox_binary() -> String {
     path
 }
 
+type FirefoxHits = Arc<Mutex<Vec<String>>>;
+
 struct FirefoxFixture {
     url: String,
     other: String,
+    hits: FirefoxHits,
     servers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl FirefoxFixture {
+    fn hit_count(&self, needle: &str) -> usize {
+        self.hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|hit| hit.contains(needle))
+            .count()
+    }
 }
 
 impl Drop for FirefoxFixture {
@@ -15084,7 +15098,12 @@ impl Drop for FirefoxFixture {
     }
 }
 
-fn firefox_serve(listener: tokio::net::TcpListener, other: String) -> tokio::task::JoinHandle<()> {
+fn firefox_serve(
+    listener: tokio::net::TcpListener,
+    other: String,
+    hits: FirefoxHits,
+) -> tokio::task::JoinHandle<()> {
+    let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -15092,6 +15111,7 @@ fn firefox_serve(listener: tokio::net::TcpListener, other: String) -> tokio::tas
             let n = stream.read(&mut request).await.unwrap_or(0);
             let head = String::from_utf8_lossy(&request[..n]);
             let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+            hits.lock().unwrap().push(format!("{port}{path}"));
             let (content_type, extra, body) = match path.as_str() {
                 "/" => (
                     "text/html; charset=utf-8",
@@ -15141,13 +15161,15 @@ async fn firefox_fixture() -> FirefoxFixture {
     let side = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://localhost:{}/", main.local_addr().unwrap().port());
     let other = format!("http://127.0.0.1:{}", side.local_addr().unwrap().port());
+    let hits: FirefoxHits = Arc::default();
     let servers = vec![
-        firefox_serve(main, other.clone()),
-        firefox_serve(side, other.clone()),
+        firefox_serve(main, other.clone(), hits.clone()),
+        firefox_serve(side, other.clone(), hits.clone()),
     ];
     FirefoxFixture {
         url,
         other,
+        hits,
         servers,
     }
 }
@@ -15339,6 +15361,31 @@ async fn firefox_title(state: &mut DaemonState) -> String {
     let resp = firefox_command(state, json!({ "id": "title", "action": "title" })).await;
     assert_success(&resp);
     get_data(&resp)["title"].as_str().unwrap().to_string()
+}
+
+async fn firefox_ref(state: &mut DaemonState, name: &str) -> String {
+    let resp = firefox_command(
+        state,
+        json!({ "id": "snap", "action": "snapshot", "interactive": true }),
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["name"] == name)
+        .map(|(ref_id, _)| format!("@{}", ref_id.trim_start_matches('@')))
+        .unwrap_or_else(|| panic!("no ref named {name} in {resp}"))
+}
+
+async fn firefox_act(state: &mut DaemonState, action: &str, selector: &str, extra: Value) -> Value {
+    let mut request = json!({ "id": action, "action": action, "selector": selector });
+    request
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    firefox_command(state, request).await
 }
 
 async fn firefox_close(state: &mut DaemonState) {
