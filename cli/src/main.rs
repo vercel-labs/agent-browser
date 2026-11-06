@@ -2228,9 +2228,16 @@ mod tests {
     #[test]
     fn firefox_cdp_flags_travel_with_the_command_settings() {
         let (command, wire) = settings_of(&[
-            "--engine", "firefox", "--cdp", "9222",
-            "--download-path", "/tmp/downloads", "--allowed-domains", "example.com",
-            "get", "url",
+            "--engine",
+            "firefox",
+            "--cdp",
+            "9222",
+            "--download-path",
+            "/tmp/downloads",
+            "--allowed-domains",
+            "example.com",
+            "get",
+            "url",
         ]);
         assert_eq!(command["action"], "url");
         assert_eq!(wire["engine"], "firefox");
