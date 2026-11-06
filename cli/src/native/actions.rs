@@ -23,9 +23,10 @@ use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
-    ExceptionThrownEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent, TargetCreatedEvent,
-    TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
+    session_matches, AttachToTargetParams, AttachToTargetResult, CdpEvent,
+    DispatchMouseEventParams, ExceptionThrownEvent, GetFullAXTreeResult,
+    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfo,
+    TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -1881,7 +1882,10 @@ impl DaemonState {
                     }
 
                     let session_matches = if let Some(ref browser) = self.browser {
-                        event.session_id.as_deref() == browser.active_session_id().ok()
+                        session_matches(
+                            browser.active_session_id().ok(),
+                            event.session_id.as_deref(),
+                        )
                     } else {
                         false
                     };
@@ -1919,15 +1923,13 @@ impl DaemonState {
 
                     match event.method.as_str() {
                         "WebMCP.toolsAdded" => {
-                            if let Some(session_id) = event.session_id.as_deref() {
-                                self.webmcp
-                                    .apply_tools_added(session_id, &event.params, "null");
-                            }
+                            let session_id = event.session_id.as_deref().unwrap_or_default();
+                            self.webmcp
+                                .apply_tools_added(session_id, &event.params, "null");
                         }
                         "WebMCP.toolsRemoved" => {
-                            if let Some(session_id) = event.session_id.as_deref() {
-                                self.webmcp.apply_tools_removed(session_id, &event.params);
-                            }
+                            let session_id = event.session_id.as_deref().unwrap_or_default();
+                            self.webmcp.apply_tools_removed(session_id, &event.params);
                         }
                         "WebMCP.toolResponded" => {
                             self.webmcp.apply_response(event.params.clone());
@@ -7600,7 +7602,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
             match rx.recv().await {
                 Ok(event) => {
                     if event.method == "Page.loadEventFired"
-                        && event.session_id.as_deref() == Some(&session_id)
+                        && session_matches(Some(&session_id), event.session_id.as_deref())
                     {
                         return;
                     }
@@ -8652,7 +8654,8 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                 // or with a different sessionId than the page session, so we
                 // accept them regardless. Page-domain events are matched by
                 // session to avoid cross-tab confusion.
-                let is_page_session = event.session_id.as_deref() == Some(&session_id);
+                let is_page_session =
+                    session_matches(Some(&session_id), event.session_id.as_deref());
                 let is_download_event = |method: &str, browser_method: &str, page_method: &str| {
                     method == browser_method || (method == page_method && is_page_session)
                 };
@@ -10254,7 +10257,7 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event))
                 if event.method == "WebMCP.toolsAdded"
-                    && event.session_id.as_deref() == Some(session_id.as_str()) =>
+                    && session_matches(Some(session_id.as_str()), event.session_id.as_deref()) =>
             {
                 state
                     .webmcp
@@ -10262,7 +10265,7 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
             }
             Ok(Ok(event))
                 if event.method == "WebMCP.toolsRemoved"
-                    && event.session_id.as_deref() == Some(session_id.as_str()) =>
+                    && session_matches(Some(session_id.as_str()), event.session_id.as_deref()) =>
             {
                 state.webmcp.apply_tools_removed(&session_id, &event.params);
             }
@@ -11815,7 +11818,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
                 if event.method == "Network.responseReceived"
-                    && event.session_id.as_deref() == Some(&session_id)
+                    && session_matches(Some(&session_id), event.session_id.as_deref())
                 {
                     if let Some(resp_url) = event
                         .params
@@ -14205,7 +14208,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let result = tokio::time::timeout_at(deadline, rx.recv()).await;
         match result {
             Ok(Ok(event)) => {
-                if event.session_id.as_deref() == Some(&session_id) {
+                if session_matches(Some(&session_id), event.session_id.as_deref()) {
                     match event.method.as_str() {
                         "Page.frameNavigated" | "Page.loadEventFired" => {
                             navigated = true;
@@ -16273,6 +16276,85 @@ mod tests {
             "agent-browser-{label}-{}-{nanos}",
             std::process::id()
         ))
+    }
+
+    #[tokio::test]
+    async fn test_direct_page_debug_events() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let events = match cmd["method"].as_str().unwrap() {
+                    "Runtime.evaluate" => vec![
+                        json!({"sessionId": "other-page", "method": "Runtime.consoleAPICalled", "params": {"args": [{"type": "string", "value": "wrong page"}]}}),
+                        json!({"method": "Runtime.consoleAPICalled", "params": {"args": [{"type": "string", "value": "from the page"}]}}),
+                        json!({"method": "Network.requestWillBeSent", "params": {"requestId": "r1", "request": {"url": "https://page.test/"}}}),
+                    ],
+                    "Tracing.end" => vec![
+                        json!({"method": "Tracing.dataCollected", "params": {"value": [{"name": "marker"}]}}),
+                        json!({"method": "Tracing.tracingComplete", "params": {}}),
+                    ],
+                    _ => vec![],
+                };
+                for msg in events
+                    .into_iter()
+                    .chain([json!({"id": cmd["id"], "result": {}})])
+                {
+                    ws.send(Message::Text(msg.to_string())).await.unwrap();
+                }
+            }
+        });
+
+        let mut state = DaemonState::new();
+        let browser = BrowserManager::connect_cdp_direct(&url).await.unwrap();
+        let client = browser.client.clone();
+        state.browser = Some(browser);
+        state.subscribe_to_browser_events();
+        state.har_recording = true;
+        state.request_tracking = true;
+        client
+            .send_command_no_params("Runtime.evaluate", None)
+            .await
+            .unwrap();
+        state.drain_cdp_events();
+        assert_eq!(state.event_tracker.console_entries.len(), 1);
+        assert_eq!(state.event_tracker.console_entries[0].text, "from the page");
+        assert_eq!(state.tracked_requests.len(), 1);
+        assert_eq!(state.har_entries.len(), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.json");
+        let mut trace = native_tracing::TracingState::new();
+        native_tracing::trace_start(&client, "", &mut trace)
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            native_tracing::trace_stop(&client, "", &mut trace, path.to_str()),
+        )
+        .await
+        .expect("direct-page trace did not finish")
+        .unwrap();
+        assert_eq!(result["eventCount"], 1);
+        native_tracing::profiler_start(&client, "", &mut trace, None)
+            .await
+            .unwrap();
+        let path = dir.path().join("profile.json");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            native_tracing::profiler_stop(&client, "", &mut trace, path.to_str()),
+        )
+        .await
+        .expect("direct-page profile did not finish")
+        .unwrap();
+        assert_eq!(result["eventCount"], 1);
+        server.abort();
     }
 
     #[test]

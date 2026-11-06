@@ -96,6 +96,16 @@ pub struct CdpEvent {
     pub session_id: Option<String>,
 }
 
+/// Direct page sockets omit the session ID on the wire. An unattached browser
+/// has no active page and must not consume those events.
+pub fn session_matches(active_session: Option<&str>, event_session: Option<&str>) -> bool {
+    match active_session {
+        Some("") => event_session.is_none_or(str::is_empty),
+        Some(active) => event_session == Some(active),
+        None => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Target domain
 // ---------------------------------------------------------------------------

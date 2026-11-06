@@ -3800,6 +3800,8 @@ Usage: agent-browser connect <port|url>
 
 Connects to a running browser instance via Chrome DevTools Protocol (CDP).
 This allows controlling browsers, Electron apps, or remote browser services.
+Page WebSocket URLs (/devtools/page/...) also support console messages,
+network requests, HAR recording, tracing, and profiling for that page.
 
 Arguments:
   <port>               Local port number (e.g., 9222)

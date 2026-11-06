@@ -49,6 +49,8 @@ For an `https://` CDP URL, discovery keeps the encryption of the input: requests
 
 Root WebSocket endpoints accept query strings with or without an explicit slash, so both `wss://browser-service.com?token=...` and `wss://browser-service.com/?token=...` work.
 
+You can also connect to a page WebSocket URL such as `ws://localhost:9222/devtools/page/abc123`. Console messages, network requests, HAR recording, tracing, and profiling work on that page through both CLI commands and MCP tools.
+
 ## Auto-Connect
 
 Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:

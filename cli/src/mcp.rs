@@ -1862,7 +1862,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_CONNECT,
             "Connect CDP",
-            "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
+            "Connect to a browser over CDP. Page WebSocket URLs also support console messages, network requests, HAR recording, tracing, and profiling. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
             json!({
                 "target": { "type": "string", "description": "CDP port or URL." },
                 "pinTab": { "type": "boolean", "description": "Strict session-to-tab binding (sticky for the session). Explicit false disables a sticky pin; omitted leaves it unchanged." }
