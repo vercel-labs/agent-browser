@@ -1699,6 +1699,103 @@ async fn e2e_stream_command_requires_same_origin_before_daemon_relay() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_snapshot_summary_disclosure_gets_ref() {
+    let html = r#"<!doctype html><details id="panel"><summary>Advanced</summary><select id="choice"><option>A</option></select></details>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let find_summary_ref = |snapshot: &Value| {
+        get_data(snapshot)["refs"]
+            .as_object()
+            .expect("snapshot refs should be an object")
+            .iter()
+            .find(|(_, metadata)| metadata["role"].as_str() == Some("DisclosureTriangle"))
+            .map(|(reference, _)| reference.clone())
+    };
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    let summary_ref = find_summary_ref(&resp).expect(snapshot);
+    assert!(
+        snapshot.contains("DisclosureTriangle \"Advanced\""),
+        "{snapshot}"
+    );
+    assert!(
+        snapshot.contains(&format!("ref={summary_ref}")),
+        "{snapshot}"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("DisclosureTriangle"),
+        "interactive snapshot should keep the summary toggle: {snapshot}"
+    );
+    assert!(
+        snapshot.contains(&format!("ref={summary_ref}")),
+        "{snapshot}"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "snapshot", "compact": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("DisclosureTriangle"),
+        "compact snapshot should keep a closed details toggle: {snapshot}"
+    );
+    assert!(
+        snapshot.contains(&format!("ref={summary_ref}")),
+        "{snapshot}"
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "click",
+            "selector": format!("@{summary_ref}")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_evaluate(
+        &mut state,
+        "7",
+        "document.getElementById('panel').open",
+        json!(true),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_snapshot_and_click_ref() {
     let (base_url, _server) = start_link_fixture_server().await;
     let mut state = DaemonState::new();
