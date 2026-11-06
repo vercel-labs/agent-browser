@@ -4,7 +4,10 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use super::{build_flow, write_flow, SaveInput};
+use super::{
+    build_flow, carries_secret, describe_command, dropped_name, may_become_candidate,
+    save_start_url, write_flow, HostPolicy, SaveInput,
+};
 use crate::native::actions::{HarEntry, FIND_ACTIONS};
 use crate::native::element::RefMap;
 
@@ -463,6 +466,89 @@ impl FlowRecorder {
             ));
         }
         Ok((from, to))
+    }
+
+    /// A gap for each request that could become a flow request, tagged to a
+    /// step in the range, that has not finished loading, so its response body
+    /// is not on the entry yet. Third-party, telemetry and streaming requests
+    /// never count. The gap names the step that started the request and the
+    /// request by method and path, with a secret hidden as a dropped request is.
+    pub fn loading_gaps(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+    ) -> Vec<Value> {
+        self.gaps_of_loading(from, to, entries, None)
+    }
+
+    /// Whether a request of the range is still loading and worth waiting
+    /// on: one the last step started that has no response yet, or one whose
+    /// body is still arriving (not `stalled`).
+    pub fn awaiting_response(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+        stalled: &dyn Fn(&HarEntry) -> bool,
+    ) -> bool {
+        !self
+            .gaps_of_loading(from, to, entries, Some(stalled))
+            .is_empty()
+    }
+
+    fn gaps_of_loading(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+        stalled: Option<&dyn Fn(&HarEntry) -> bool>,
+    ) -> Vec<Value> {
+        let Ok((first, last)) = self.resolve_range(from, to) else {
+            return Vec::new();
+        };
+        let commands: Vec<(u64, Value)> = self
+            .commands
+            .iter()
+            .filter(|(seq, _)| *seq >= first && *seq <= last)
+            .cloned()
+            .collect();
+        let Some(start) = save_start_url(&commands, self) else {
+            return Vec::new();
+        };
+        let policy = HostPolicy::from_start(&start);
+        entries
+            .iter()
+            .filter(|e| e.loading_finished_timestamp.is_none() && may_become_candidate(e, &policy))
+            .filter(|e| match stalled {
+                None => true,
+                // A request with no answer yet is waited on only if the last
+                // step started it; one from an earlier step outlived the
+                // steps after it, as a long poll does.
+                Some(_) if e.status.is_none() => {
+                    self.request_tags.get(&e.request_id) == Some(&last)
+                }
+                Some(s) => !s(e),
+            })
+            .filter_map(|e| {
+                let seq = *self.request_tags.get(&e.request_id)?;
+                let index = commands.iter().position(|(s, _)| *s == seq)?;
+                let known = carries_secret(e, &self.secrets);
+                let label = if known || self.unknown_secret_seqs.contains(&seq) {
+                    dropped_name(e, &self.secrets, known)
+                } else {
+                    let path = url::Url::parse(&e.url)
+                        .map(|u| u.path().to_string())
+                        .unwrap_or_else(|_| e.url.clone());
+                    format!("{} {}", e.method, path)
+                };
+                Some(json!({
+                    "step": index + 1,
+                    "command": describe_command(&commands[index].1),
+                    "reason": format!("still loading at save: {label}"),
+                }))
+            })
+            .collect()
     }
 
     /// A command that is not recorded starts: requests it sends belong to no
