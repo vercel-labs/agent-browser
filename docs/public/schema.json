@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Agent Browser Configuration",
-  "description": "Configuration file for agent-browser (e.g., agent-browser.json or ~/.agent-browser/config.json)",
+  "description": "Configuration for agent-browser. All fields are supported in ~/.agent-browser/config.json or a file explicitly selected with --config or AGENT_BROWSER_CONFIG. Automatically discovered ./agent-browser.json accepts only headed, json, debug, userAgent, hideScrollbars, annotate, colorScheme, maxOutput, screenshotQuality, screenshotFormat, and idleTimeout; other fields are ignored with a warning.",
   "type": "object",
   "properties": {
     "headed": {
@@ -59,7 +59,7 @@
       "items": {
         "type": "string"
       },
-      "description": "Paths to browser extensions. Extensions from user-level and project-level configs are concatenated."
+      "description": "Paths to browser extensions. Set these in user config or an explicitly selected config; automatically discovered project config ignores them."
     },
     "initScripts": {
       "type": "array",
@@ -232,7 +232,7 @@
     },
     "plugins": {
       "type": "array",
-      "description": "External plugin registry. Project-level entries are appended after user-level entries, and duplicate names resolve to the later entry.",
+      "description": "External plugin registry. Set this in user config or an explicitly selected config; automatically discovered project config ignores it. Duplicate names resolve to the later entry.",
       "items": {
         "type": "object",
         "required": ["name", "command"],

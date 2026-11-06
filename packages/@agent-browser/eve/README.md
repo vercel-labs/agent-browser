@@ -126,7 +126,7 @@ The 28 tools in the CLI's `core` MCP profile are listed to the model every turn.
 | `wait_for_text` | Wait for text |
 | `wait_ms` | Wait milliseconds |
 
-Cookie, storage, and saved-auth-state commands are intentionally not exposed as tools — they make credential material visible to the model. If you need them, add a scoped tool in your own agent (or an [override](#overrides)) with the guardrails your app requires.
+Cookie, storage, and saved-auth-state commands are not exposed as tools because they make credential material visible to the model. If you need them, add a scoped tool in your own agent (or an [override](#overrides)) with the guardrails your app requires.
 
 ## Overrides
 

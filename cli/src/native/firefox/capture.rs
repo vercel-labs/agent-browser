@@ -113,7 +113,7 @@ fn pdf_save_path(cmd: &Value) -> String {
     match cmd.get("path").and_then(Value::as_str) {
         Some(path) => path.to_string(),
         None => {
-            let dir = dirs::home_dir()
+            let dir = std::env::home_dir()
                 .unwrap_or_else(std::env::temp_dir)
                 .join(".agent-browser")
                 .join("tmp")

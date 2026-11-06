@@ -67,9 +67,80 @@ fn assert_error_code(resp: &Value, code: &str) {
     assert_eq!(resp.get("code").and_then(Value::as_str), Some(code));
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_empty_table_cell_refs_resolve() {
+    let html = r#"<!doctype html><table role="table"><tbody><tr>
+<td role="cell" id="empty-cell"></td>
+<td role="cell" id="named-cell">Named cell</td>
+<td role="cell" id="nbsp-cell">&nbsp;</td>
+<th role="columnheader" id="empty-columnheader"></th>
+<th role="rowheader" id="empty-rowheader"></th>
+</tr></tbody></table><div role="grid"><div role="row"><div role="gridcell" id="empty-gridcell"></div></div></div>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let refs = get_data(&resp)["refs"]
+        .as_object()
+        .expect("snapshot refs should be an object");
+    let mut resolved = Vec::new();
+    for (reference, metadata) in refs {
+        let role = metadata["role"].as_str().unwrap_or_default();
+        if ["cell", "gridcell", "columnheader", "rowheader"].contains(&role) {
+            let resp = execute_command(
+                &json!({
+                    "id": format!("resolve-{reference}"),
+                    "action": "getattribute",
+                    "selector": format!("@{reference}"),
+                    "attribute": "id"
+                }),
+                &mut state,
+            )
+            .await;
+            assert_success(&resp);
+            resolved.push((
+                get_data(&resp)["value"].as_str().unwrap().to_string(),
+                role.to_string(),
+            ));
+        }
+    }
+    resolved.sort();
+    assert_eq!(
+        resolved,
+        [
+            ("empty-cell".to_string(), "cell".to_string()),
+            ("empty-columnheader".to_string(), "columnheader".to_string()),
+            ("empty-gridcell".to_string(), "gridcell".to_string()),
+            ("empty-rowheader".to_string(), "rowheader".to_string()),
+            ("named-cell".to_string(), "cell".to_string()),
+            ("nbsp-cell".to_string(), "cell".to_string()),
+        ]
+    );
+
+    let resp = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "wheel_probe" => include_str!("test_fixtures/wheel_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "snapshot_diff_probe" => include_str!("test_fixtures/snapshot_diff_probe.html"),
@@ -869,7 +940,7 @@ async fn create_restore_state_with_cookie(
 }
 
 fn cleanup_restore_state_files(restore_key: &str) {
-    let Some(sessions_dir) = dirs::home_dir().map(|home| home.join(".agent-browser/sessions"))
+    let Some(sessions_dir) = std::env::home_dir().map(|home| home.join(".agent-browser/sessions"))
     else {
         return;
     };
@@ -1097,7 +1168,9 @@ async fn test_obscura_launch_uses_request_proxy_bypass() {
         (json!({"proxyBypass": "localhost"}), "--proxy-bypass"),
         (json!({"proxyBypass": null}), "Failed to launch Obscura"),
         (json!({"proxy": {"bypass": "localhost"}}), "--proxy-bypass"),
-        (json!({}), "Failed to launch Obscura"),
+        // A launch that names no bypass defers to the running one; the CLI
+        // clears it with an explicit null.
+        (json!({}), "--proxy-bypass"),
     ] {
         let mut state = DaemonState::new();
         let mut request = json!({
@@ -1214,11 +1287,13 @@ async fn verify_obscura_page(auto_launch: bool) {
     let obscura_bin = required_obscura_binary();
     let env = obscura_test_environment();
     let fixture = obscura_fixture().await;
-    let mut state = DaemonState::new();
     if auto_launch {
         env.set("AGENT_BROWSER_ENGINE", "obscura");
         env.set("AGENT_BROWSER_EXECUTABLE_PATH", &obscura_bin);
-    } else {
+    }
+    // The daemon reads its settings once, when the state is created.
+    let mut state = DaemonState::new();
+    if !auto_launch {
         let resp = obscura_command(
             &mut state,
             json!({
@@ -1793,6 +1868,125 @@ async fn e2e_snapshot_refs_invalidate_iframe_navigation() {
         .unwrap()
         .contains(&json!(format!("@{child}"))));
     assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_stale_presentational_iframe_ref_recovers_for_read_and_hover() {
+    let mut state = DaemonState::new();
+    for command in [
+        json!({"action": "launch", "headless": true}),
+        json!({"action": "navigate", "url": "about:blank"}),
+        json!({"action": "setcontent", "html": "<iframe role='none' data-version='original'></iframe>"}),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let snapshot = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let refs = get_data(&snapshot)["refs"].as_object().unwrap();
+    let reference = refs
+        .iter()
+        .find(|(_, node)| node["role"] == "Iframe")
+        .unwrap()
+        .0
+        .clone();
+    let selector = format!("@{reference}");
+    for role in ["presentation", "none"] {
+        assert_success(
+            &execute_command(
+                &json!({"action": "evaluate", "script": format!("document.querySelector('iframe').outerHTML = \"<iframe role='{role}' data-version='{role}'></iframe>\"; true")}),
+                &mut state,
+            )
+            .await,
+        );
+        let attribute = execute_command(
+            &json!({"action": "getattribute", "selector": selector, "attribute": "data-version"}),
+            &mut state,
+        )
+        .await;
+        assert_success(&attribute);
+        assert_eq!(get_data(&attribute)["value"], role);
+        assert_success(
+            &execute_command(
+                &json!({"action": "hover", "selector": selector}),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_presentational_cross_origin_iframe_refs_support_fill_and_inputvalue() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/");
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.starts_with("GET /child ") {
+                    "<!doctype html><input aria-label='Child field'>".to_string()
+                } else {
+                    format!(
+                        "<!doctype html><iframe role='none' src='http://localhost:{port}/child'></iframe><iframe role='presentation' src='http://localhost:{port}/child'></iframe>"
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    let mut state = DaemonState::new();
+    for (id, command) in [
+        ("1", json!({"action": "launch", "headless": true})),
+        ("2", json!({"action": "navigate", "url": url})),
+    ] {
+        let mut command = command;
+        command["id"] = json!(id);
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let snapshot = execute_command(&json!({"id": "3", "action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let refs = get_data(&snapshot)["refs"].as_object().unwrap();
+    assert_eq!(
+        refs.values()
+            .filter(|node| node["role"] == "Iframe")
+            .count(),
+        2
+    );
+    let child_refs = refs
+        .iter()
+        .filter(|(_, node)| node["role"] == "textbox" && node["name"] == "Child field")
+        .map(|(reference, _)| reference.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(child_refs.len(), 2);
+    for (index, reference) in child_refs.iter().enumerate() {
+        let selector = format!("@{reference}");
+        let fill = execute_command(
+            &json!({"id": format!("fill-{index}"), "action": "fill", "selector": selector, "value": format!("filled-{index}")}),
+            &mut state,
+        )
+        .await;
+        assert_success(&fill);
+        let value = execute_command(
+            &json!({"id": format!("value-{index}"), "action": "inputvalue", "selector": selector}),
+            &mut state,
+        )
+        .await;
+        assert_success(&value);
+        assert_eq!(get_data(&value)["value"], format!("filled-{index}"));
+    }
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    server.abort();
 }
 
 // ---------------------------------------------------------------------------
@@ -2778,6 +2972,43 @@ async fn e2e_tab_new_with_label_can_be_switched_and_closed() {
     .await;
     assert_success(&resp);
 
+    for (index, label) in ["t1", "T1", "t0", "T0", "t01", "T01", "T4294967296"]
+        .iter()
+        .enumerate()
+    {
+        let resp = execute_command(
+            &json!({
+                "id": format!("reserved-{index}"),
+                "action": "tab_new",
+                "url": "about:blank",
+                "label": label,
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            resp.get("success").and_then(Value::as_bool),
+            Some(false),
+            "reserved label `{label}` should be rejected: {}",
+            serde_json::to_string_pretty(&resp).unwrap_or_default()
+        );
+        assert!(
+            resp.get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| error.contains("reserved for tab IDs")),
+            "reserved label `{label}` should report the reserved-ID error: {}",
+            serde_json::to_string_pretty(&resp).unwrap_or_default()
+        );
+
+        let resp = execute_command(
+            &json!({ "id": format!("reserved-list-{index}"), "action": "tab_list" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["tabs"].as_array().unwrap().len(), 1);
+    }
+
     // Open a labeled tab and verify the response echoes the label and a
     // `t<N>` style tabId.
     let resp = execute_command(
@@ -2838,6 +3069,43 @@ async fn e2e_tab_new_with_label_can_be_switched_and_closed() {
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_rejected_tab_label_preserves_refs_and_frame() {
+    let mut state = DaemonState::new();
+    for command in [
+        json!({ "action": "launch", "headless": true }),
+        json!({ "action": "navigate", "url": "data:text/html,<iframe id='child' srcdoc='<button>Preserved</button>'></iframe>" }),
+        json!({ "action": "frame", "selector": "#child" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let snapshot = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+    assert_success(&snapshot);
+    let button_ref = get_data(&snapshot)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["name"] == "Preserved")
+        .unwrap()
+        .0
+        .clone();
+    let frame_id = state.active_frame_id.clone().unwrap();
+
+    let response =
+        execute_command(&json!({ "action": "tab_new", "label": "t1" }), &mut state).await;
+    assert_eq!(response["success"], false);
+    assert!(state.ref_map.get(&button_ref).is_some());
+    assert_eq!(state.active_frame_id.as_deref(), Some(frame_id.as_str()));
+
+    for command in [
+        json!({ "action": "click", "selector": format!("@{button_ref}") }),
+        json!({ "action": "close" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
 }
 
 /// Duplicate labels must be rejected so agents can treat a label as a unique
@@ -3197,6 +3465,72 @@ async fn e2e_wait_load_state_resolves_immediately_when_already_loaded() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_wait_network_idle_reports_timeout_on_busy_page() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let n = stream.read(&mut request).await.unwrap_or(0);
+            if String::from_utf8_lossy(&request[..n]).starts_with("GET /hang") {
+                held.push(stream);
+                continue;
+            }
+            let body = "<h1>Busy</h1><script>setInterval(() => fetch('/hang'), 200)</script>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let started = std::time::Instant::now();
+    let wait_resp = execute_command(
+        &json!({ "id": "3", "action": "waitforloadstate", "state": "networkidle", "timeout": 30000 }),
+        &mut state,
+    )
+    .await;
+    let waited = started.elapsed();
+    let close_resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+    assert_success(&close_resp);
+    assert_eq!(wait_resp["success"], false, "{wait_resp}");
+    // The requested budget is the one that counts. The inner wait used to stop
+    // at the browser's hardcoded 25s default, so a 30s wait failed early.
+    assert!(
+        waited >= std::time::Duration::from_millis(28_000),
+        "network-idle wait returned after {waited:?}, expected to use the 30000ms budget"
+    );
+    assert!(
+        wait_resp["error"].as_str().is_some_and(|error| {
+            error.contains("Timed out after 30000ms") && error.contains("load state 'networkidle'")
+        }),
+        "expected the network-idle timeout error: {}",
+        serde_json::to_string_pretty(&wait_resp).unwrap_or_default()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Same-document navigation regression test
 // ---------------------------------------------------------------------------
@@ -3500,9 +3834,380 @@ async fn e2e_hover_scroll_press() {
     assert_success(&resp);
 }
 
+/// One `press` must produce exactly one keydown/keyup pair whose `code`
+/// matches the key. Sending the Windows VK code as `nativeVirtualKeyCode`
+/// made macOS Chrome resolve a different physical key and repeat keydown
+/// thousands of times per second until navigation.
+#[tokio::test]
+#[ignore]
+async fn e2e_press_dispatches_single_keystroke() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<html><body><script>",
+        "window.__events=[];",
+        "addEventListener('keydown',e=>__events.push('down:'+e.key+'/'+e.code));",
+        "addEventListener('keyup',e=>__events.push('up:'+e.key+'/'+e.code));",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for (i, (key, expected)) in [
+        ("a", "a/KeyA"),
+        ("Escape", "Escape/Escape"),
+        ("End", "End/End"),
+        ("Enter", "Enter/Enter"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = execute_command(
+            &json!({ "id": format!("reset-{i}"), "action": "evaluate", "script": "window.__events=[]" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": format!("press-{i}"), "action": "press", "key": key }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        // Give a stuck key time to auto-repeat before counting.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let resp = execute_command(
+            &json!({ "id": format!("read-{i}"), "action": "evaluate", "script": "window.__events" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(
+            get_data(&resp)["result"],
+            json!([format!("down:{expected}"), format!("up:{expected}")]),
+            "press {key}"
+        );
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Raw mouse regressions
 // ---------------------------------------------------------------------------
+
+async fn wait_for_wheel_events(state: &mut DaemonState, expected: usize) -> Value {
+    for _ in 0..100 {
+        let resp = execute_command(
+            &json!({
+                "action": "evaluate",
+                "script": "({ last: window.__wheelProbe, events: window.__wheelEvents, buttons: window.__wheelButtons, scrollTop: document.getElementById('target').scrollTop })"
+            }),
+            state,
+        )
+        .await;
+        assert_success(&resp);
+        let result = get_data(&resp)["result"].clone();
+        if result["events"].as_array().map(Vec::len) == Some(expected)
+            && result["scrollTop"].as_f64().unwrap_or_default() > 0.0
+        {
+            return result;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("Expected {expected} wheel events and nested scrolling");
+}
+
+async fn launch_wheel_probe() -> DaemonState {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("wheel_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": "document.addEventListener('wheel', event => { window.__wheelButtons = event.buttons; }); 'armed'"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    state
+}
+
+async fn wheel_target_coordinates(state: &mut DaemonState) -> (i64, i64) {
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": r#"(() => {
+                const rect = document.getElementById('target').getBoundingClientRect();
+                return {
+                    x: Math.round(rect.left + rect.width / 2),
+                    y: Math.round(rect.top + rect.height / 2)
+                };
+            })()"#
+        }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    let target = &get_data(&resp)["result"];
+    let x = target["x"].as_i64().expect("target x should be numeric");
+    let y = target["y"].as_i64().expect("target y should be numeric");
+    (x, y)
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_mouse_wheel_uses_last_pointer_coordinates() {
+    let mut state = launch_wheel_probe().await;
+    let (x, y) = wheel_target_coordinates(&mut state).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "mousemove", "x": x, "y": y }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "wheel", "deltaX": -12.5, "deltaY": 37.25 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["deltaX"], -12.5);
+    assert_eq!(get_data(&resp)["deltaY"], 37.25);
+
+    let probe = wait_for_wheel_events(&mut state, 1).await;
+    assert_eq!(probe["events"].as_array().map(Vec::len), Some(1), "{probe}");
+    let wheel = &probe["last"];
+    assert_eq!(wheel["target"], "target", "wheel probe: {wheel}");
+    assert_eq!(wheel["x"].as_i64(), Some(x));
+    assert_eq!(wheel["y"].as_i64(), Some(y));
+    assert_eq!(wheel["deltaX"].as_f64(), Some(-12.5));
+    assert_eq!(wheel["deltaY"].as_f64(), Some(37.25));
+    assert_eq!(probe["buttons"], 0);
+    assert!(probe["scrollTop"].as_f64().unwrap() > 0.0, "{probe}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_mouse_wheel_honors_explicit_coordinates() {
+    let mut state = launch_wheel_probe().await;
+    let (x, y) = wheel_target_coordinates(&mut state).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "mousemove", "x": x + 20, "y": y + 10 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let explicit_x = x - 10;
+    let explicit_y = y - 10;
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "wheel",
+            "x": explicit_x,
+            "y": explicit_y,
+            "deltaX": 2.5,
+            "deltaY": 31.5
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["deltaX"], 2.5);
+    assert_eq!(get_data(&resp)["deltaY"], 31.5);
+
+    let probe = wait_for_wheel_events(&mut state, 1).await;
+    let wheel = &probe["last"];
+    assert_eq!(wheel["target"], "target", "wheel probe: {wheel}");
+    assert_eq!(wheel["x"].as_i64(), Some(explicit_x));
+    assert_eq!(wheel["y"].as_i64(), Some(explicit_y));
+    assert_eq!(wheel["deltaX"].as_f64(), Some(2.5));
+    assert_eq!(wheel["deltaY"].as_f64(), Some(31.5));
+    assert!(probe["scrollTop"].as_f64().unwrap() > 0.0, "{probe}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_raw_mouse_wheel_preserves_held_button_after_rejected_dispatch() {
+    let mut state = launch_wheel_probe().await;
+    let (x, y) = wheel_target_coordinates(&mut state).await;
+
+    let raw_x = x + 20;
+    let raw_y = y + 10;
+    let resp = Box::pin(execute_command(
+        &json!({
+            "id": "7",
+            "action": "mouse",
+            "eventType": "mouseMoved",
+            "x": raw_x,
+            "y": raw_y
+        }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+
+    let resp = Box::pin(execute_command(
+        &json!({
+            "id": "7a",
+            "action": "mouse",
+            "eventType": "mousePressed",
+            "x": raw_x,
+            "y": raw_y,
+            "button": "left"
+        }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+
+    let resp = Box::pin(execute_command(
+        &json!({
+            "id": "7b",
+            "action": "mouse",
+            "eventType": "mousePressed",
+            "x": raw_x + 30,
+            "y": raw_y + 20,
+            "button": "invalid"
+        }),
+        &mut state,
+    ))
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(Value::as_bool),
+        Some(false),
+        "invalid button should fail: {resp}"
+    );
+
+    let resp = Box::pin(execute_command(
+        &json!({ "id": "8", "action": "wheel", "deltaX": 2, "deltaY": 29 }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["deltaX"], 2.0);
+    assert_eq!(get_data(&resp)["deltaY"], 29.0);
+
+    let probe = wait_for_wheel_events(&mut state, 1).await;
+    let wheel = &probe["last"];
+    assert_eq!(wheel["target"], "target", "wheel probe: {wheel}");
+    assert_eq!(wheel["x"].as_i64(), Some(raw_x));
+    assert_eq!(wheel["y"].as_i64(), Some(raw_y));
+    assert_eq!(wheel["deltaX"].as_f64(), Some(2.0));
+    assert_eq!(wheel["deltaY"].as_f64(), Some(29.0));
+    assert_eq!(probe["buttons"], 1);
+    assert!(probe["scrollTop"].as_f64().unwrap() > 0.0, "{probe}");
+
+    let resp = Box::pin(execute_command(
+        &json!({
+            "id": "9",
+            "action": "mouse",
+            "eventType": "mouseReleased",
+            "x": raw_x,
+            "y": raw_y,
+            "button": "left"
+        }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+
+    let resp = Box::pin(execute_command(
+        &json!({ "id": "99", "action": "close" }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_input_mouse_wheel_uses_input_mouse_coordinates() {
+    let mut state = launch_wheel_probe().await;
+    let (x, y) = wheel_target_coordinates(&mut state).await;
+    let input_x = x + 35;
+    let input_y = y + 15;
+
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "input_mouse",
+            "type": "mouseMoved",
+            "x": input_x,
+            "y": input_y,
+            "button": "none"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "wheel", "deltaX": -3.5, "deltaY": 8.25 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["deltaX"], -3.5);
+    assert_eq!(get_data(&resp)["deltaY"], 8.25);
+
+    let probe = wait_for_wheel_events(&mut state, 1).await;
+    let wheel = &probe["last"];
+    assert_eq!(wheel["target"], "target", "wheel probe: {wheel}");
+    assert_eq!(wheel["x"].as_i64(), Some(input_x));
+    assert_eq!(wheel["y"].as_i64(), Some(input_y));
+    assert_eq!(wheel["deltaX"].as_f64(), Some(-3.5));
+    assert_eq!(wheel["deltaY"].as_f64(), Some(8.25));
+    assert_eq!(probe["buttons"], 0);
+    assert!(probe["scrollTop"].as_f64().unwrap() > 0.0, "{probe}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
 
 #[tokio::test]
 #[ignore]
@@ -11534,7 +12239,7 @@ async fn e2e_session_name_auto_restores_cookies() {
     }
 
     // Clean up auto-saved state files
-    let sessions_dir = dirs::home_dir()
+    let sessions_dir = std::env::home_dir()
         .unwrap()
         .join(".agent-browser")
         .join("sessions");
@@ -14255,6 +14960,15 @@ fn html_response(body: &str) -> String {
     )
 }
 
+/// Boxed so the command future lives on the heap; a long test would
+/// otherwise overflow the stack.
+fn exec<'a>(
+    cmd: &'a Value,
+    state: &'a mut DaemonState,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + 'a>> {
+    Box::pin(execute_command(cmd, state))
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_state_load_keeps_storage_away_from_page_scripts_and_redirects() {
@@ -14356,24 +15070,10 @@ fn required_firefox_binary() -> String {
     path
 }
 
-type FirefoxHits = Arc<Mutex<Vec<String>>>;
-
 struct FirefoxFixture {
     url: String,
     other: String,
-    hits: FirefoxHits,
     servers: Vec<tokio::task::JoinHandle<()>>,
-}
-
-impl FirefoxFixture {
-    fn hit_count(&self, needle: &str) -> usize {
-        self.hits
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|hit| hit.contains(needle))
-            .count()
-    }
 }
 
 impl Drop for FirefoxFixture {
@@ -14384,12 +15084,7 @@ impl Drop for FirefoxFixture {
     }
 }
 
-fn firefox_serve(
-    listener: tokio::net::TcpListener,
-    other: String,
-    hits: FirefoxHits,
-) -> tokio::task::JoinHandle<()> {
-    let port = listener.local_addr().unwrap().port();
+fn firefox_serve(listener: tokio::net::TcpListener, other: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -14397,7 +15092,6 @@ fn firefox_serve(
             let n = stream.read(&mut request).await.unwrap_or(0);
             let head = String::from_utf8_lossy(&request[..n]);
             let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
-            hits.lock().unwrap().push(format!("{port}{path}"));
             let (content_type, extra, body) = match path.as_str() {
                 "/" => (
                     "text/html; charset=utf-8",
@@ -14447,15 +15141,13 @@ async fn firefox_fixture() -> FirefoxFixture {
     let side = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://localhost:{}/", main.local_addr().unwrap().port());
     let other = format!("http://127.0.0.1:{}", side.local_addr().unwrap().port());
-    let hits: FirefoxHits = Arc::default();
     let servers = vec![
-        firefox_serve(main, other.clone(), hits.clone()),
-        firefox_serve(side, other.clone(), hits.clone()),
+        firefox_serve(main, other.clone()),
+        firefox_serve(side, other.clone()),
     ];
     FirefoxFixture {
         url,
         other,
-        hits,
         servers,
     }
 }
@@ -14649,31 +15341,6 @@ async fn firefox_title(state: &mut DaemonState) -> String {
     get_data(&resp)["title"].as_str().unwrap().to_string()
 }
 
-async fn firefox_ref(state: &mut DaemonState, name: &str) -> String {
-    let resp = firefox_command(
-        state,
-        json!({ "id": "snap", "action": "snapshot", "interactive": true }),
-    )
-    .await;
-    assert_success(&resp);
-    get_data(&resp)["refs"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .find(|(_, node)| node["name"] == name)
-        .map(|(ref_id, _)| format!("@{}", ref_id.trim_start_matches('@')))
-        .unwrap_or_else(|| panic!("no ref named {name} in {resp}"))
-}
-
-async fn firefox_act(state: &mut DaemonState, action: &str, selector: &str, extra: Value) -> Value {
-    let mut request = json!({ "id": action, "action": action, "selector": selector });
-    request
-        .as_object_mut()
-        .unwrap()
-        .extend(extra.as_object().unwrap().clone());
-    firefox_command(state, request).await
-}
-
 async fn firefox_close(state: &mut DaemonState) {
     let resp = firefox_command(state, json!({ "id": "close", "action": "close" })).await;
     assert_success(&resp);
@@ -14782,6 +15449,35 @@ async fn e2e_firefox_form_entry() {
     .await;
     assert_success(&inserted);
     assert_eq!(firefox_eval(&mut state, "literal.value").await, "a\tb");
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_read_active_page() {
+    required_firefox_binary();
+    let home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    _env.set("HOME", home.path().to_str().unwrap());
+    _env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "document.body.innerHTML = '<h1>Active page read marker</h1>'",
+    )
+    .await;
+    let resp = firefox_command(&mut state, json!({ "id": "read", "action": "read" })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["finalUrl"], fixture.url);
+    assert_eq!(get_data(&resp)["source"], "active-tab-html");
+    assert!(get_data(&resp)["content"]
+        .as_str()
+        .unwrap()
+        .contains("Active page read marker"));
     firefox_close(&mut state).await;
 }
 
@@ -15747,6 +16443,86 @@ async fn e2e_firefox_cookie_default_path() {
     firefox_close(&mut state).await;
 }
 
+/// Uses a temporary HOME on Unix to keep autosave files out of the user profile.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_autosave_preserves_blocked_storage_and_clears_readable_empty_storage() {
+    required_firefox_binary();
+    let home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    _env.set("HOME", home.path().to_str().unwrap());
+    _env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+    let (origin, server) = start_raw_http_server(html_response("<title>storage</title>")).await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &format!("{origin}/")).await;
+    firefox_eval(
+        &mut state,
+        "localStorage.setItem('local', 'saved'); sessionStorage.setItem('session', 'saved'); true",
+    )
+    .await;
+    let path = super::firefox::storage::save_auto_state(
+        state.firefox.as_ref().unwrap(),
+        "blocked-storage",
+        "autosave",
+    )
+    .await
+    .unwrap();
+    let before: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        before["origins"][0]["localStorage"],
+        json!([{ "name": "local", "value": "saved" }])
+    );
+    assert_eq!(
+        before["origins"][0]["sessionStorage"],
+        json!([{ "name": "session", "value": "saved" }])
+    );
+
+    for storage in ["localStorage", "sessionStorage"] {
+        firefox_eval(
+            &mut state,
+            &format!(
+                "window.savedDescriptor = Object.getOwnPropertyDescriptor(window, '{storage}'); \
+                 Object.defineProperty(window, '{storage}', {{ configurable: true, get() {{ throw new DOMException('Blocked', 'SecurityError'); }} }}); true"
+            ),
+        )
+        .await;
+        super::firefox::storage::save_auto_state(
+            state.firefox.as_ref().unwrap(),
+            "blocked-storage",
+            "autosave",
+        )
+        .await
+        .unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["origins"], before["origins"], "{storage}");
+        firefox_eval(
+            &mut state,
+            &format!("Object.defineProperty(window, '{storage}', window.savedDescriptor); true"),
+        )
+        .await;
+    }
+
+    firefox_eval(
+        &mut state,
+        "localStorage.clear(); sessionStorage.clear(); true",
+    )
+    .await;
+    super::firefox::storage::save_auto_state(
+        state.firefox.as_ref().unwrap(),
+        "blocked-storage",
+        "autosave",
+    )
+    .await
+    .unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["origins"], json!([]));
+    firefox_close(&mut state).await;
+    server.abort();
+}
+
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_restore_validation_failure_does_not_overwrite_state() {
@@ -15876,31 +16652,652 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
     hook_server.abort();
 }
 
+const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
+<input id="email" type="text" placeholder="Email">
+<input id="code" autocomplete="one-time-code">
+<input id="pw" type="password">
+<button id="login" onclick="login()">Login</button>
+<button id="session" onclick="session()">Session</button>
+<button id="items" onclick="items()">Items</button>
+<button id="gql" onclick="gql()">Gql</button>
+<button id="add" onclick="add()">Add</button>
+<button id="cartadd" onclick="fetch('/cart/remove?id=7')">CartAdd</button>
+<script>
+let csrf = ''; let user = '';
+async function login() { await fetch('/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: document.getElementById('email').value, pw: document.getElementById('pw').value }) }); }
+async function session() { const r = await fetch('/api/session'); const j = await r.json(); csrf = j.csrf; user = j.user; }
+async function items() { await fetch('/api/items?u=' + encodeURIComponent(user)); }
+async function gql() { await fetch('/graphql', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: 'query Items { items { id name } }' }) }); }
+async function add() { await fetch('/api/cart', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 7, csrf }) }); }
+</script></body></html>"#;
+
+struct FlowFixture {
+    site: String,
+    other: String,
+    log: Arc<Mutex<Vec<String>>>,
+    servers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl FlowFixture {
+    fn hits(&self, needle: &str) -> usize {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains(needle))
+            .count()
+    }
+}
+
+/// Clicks that make the fixture page send a request, by the log line it leaves.
+const FLOW_FIXTURE_FIRES: &[(&str, &str)] = &[
+    ("#login", "POST /login"),
+    ("#session", "GET /api/session"),
+    ("#items", "GET /api/items"),
+    ("#gql", "POST /graphql"),
+    ("#add", "POST /api/cart"),
+    ("#cartadd", "GET /cart/remove"),
+];
+
+impl FlowFixture {
+    /// Wait until `done` holds, for the page's own requests to reach the server.
+    async fn wait_until(&self, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !done() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Run a command; for a click that fires a request, wait until the server
+    /// has it and the browser has read the whole response.
+    async fn run_settled(&self, state: &mut DaemonState, cmd: &Value) -> Value {
+        let needle = (cmd["action"] == "click")
+            .then(|| cmd["selector"].as_str())
+            .flatten()
+            .and_then(|sel| FLOW_FIXTURE_FIRES.iter().find(|(s, _)| *s == sel))
+            .map(|(_, needle)| *needle);
+        let before = needle.map(|n| self.hits(n)).unwrap_or(0);
+        let resp = exec(cmd, state).await;
+        if let Some(needle) = needle {
+            self.wait_until(|| self.hits(needle) > before).await;
+        }
+        settle_responses(state).await;
+        resp
+    }
+}
+
+/// Wait until every request the browser has seen has finished loading.
+async fn settle_responses(state: &mut DaemonState) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let _ = state.drain_cdp_events_background().await;
+        let finished = state
+            .har_entries
+            .iter()
+            .all(|e| e.loading_finished_timestamp.is_some());
+        if finished || std::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+impl Drop for FlowFixture {
+    fn drop(&mut self) {
+        for s in &self.servers {
+            s.abort();
+        }
+    }
+}
+
+async fn flow_fixture() -> FlowFixture {
+    let site_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let other_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let site_port = site_listener.local_addr().unwrap().port();
+    let other_port = other_listener.local_addr().unwrap().port();
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> (String, String, String, String) {
+        let mut data = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            data.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&data).to_string();
+            if let Some(head_end) = text.find("\r\n\r\n") {
+                let length = text[..head_end]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                if data.len() >= head_end + 4 + length {
+                    break;
+                }
+            }
+        }
+        let text = String::from_utf8_lossy(&data).to_string();
+        let head_end = text.find("\r\n\r\n").unwrap_or(text.len());
+        let mut lines = text[..head_end].lines();
+        let first = lines.next().unwrap_or("").to_string();
+        let mut parts = first.split_whitespace();
+        let method = parts.next().unwrap_or("").to_string();
+        let path = parts.next().unwrap_or("").to_string();
+        let cookie = lines
+            .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))
+            .unwrap_or("")
+            .to_string();
+        let body = text.get(head_end + 4..).unwrap_or("").to_string();
+        (method, path, cookie, body)
+    }
+
+    async fn reply(
+        stream: &mut tokio::net::TcpStream,
+        status: &str,
+        ctype: &str,
+        extra: &str,
+        body: &str,
+    ) {
+        let response = format!(
+            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n{}Connection: close\r\n\r\n{}",
+            status, ctype, body.len(), extra, body
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+    }
+
+    let site_log = log.clone();
+    let site = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = site_listener.accept().await.unwrap();
+            let (method, path, cookie, body) = read_request(&mut stream).await;
+            site_log
+                .lock()
+                .unwrap()
+                .push(format!("site {} {} {}", method, path, body));
+            let signed_in = cookie.contains("sid=abc");
+            let route = path.split('?').next().unwrap_or("").to_string();
+            match (method.as_str(), route.as_str()) {
+                ("GET", "/") => {
+                    reply(&mut stream, "200 OK", "text/html", "", FLOW_FIXTURE_PAGE).await
+                }
+                ("POST", "/login") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "Set-Cookie: sid=abc; Path=/\r\n",
+                        r#"{"ok":true}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/session") if signed_in => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"csrf":"tok-8d41","user":"ana"}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/items") if signed_in => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"items":[{"id":1,"name":"kettle"},{"id":2,"name":"toaster"}]}"#,
+                    )
+                    .await
+                }
+                ("POST", "/graphql") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"data":{"items":[{"id":1,"name":"kettle"}]}}"#,
+                    )
+                    .await
+                }
+                ("POST", "/api/cart") if body.contains("tok-8d41") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"cart":[7]}"#,
+                    )
+                    .await
+                }
+                ("POST", "/api/cart") => {
+                    reply(&mut stream, "403 Forbidden", "application/json", "", "{}").await
+                }
+                ("GET", p) if p.starts_with("/cart/remove") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"added":true}"#,
+                    )
+                    .await
+                }
+                ("GET", "/go") => {
+                    reply(
+                        &mut stream,
+                        "302 Found",
+                        "text/plain",
+                        &format!("Location: http://localhost:{}/data\r\n", other_port),
+                        "",
+                    )
+                    .await
+                }
+                (_, _) if !signed_in && path.starts_with("/api/") => {
+                    reply(
+                        &mut stream,
+                        "401 Unauthorized",
+                        "application/json",
+                        "",
+                        "{}",
+                    )
+                    .await
+                }
+                _ => reply(&mut stream, "404 Not Found", "application/json", "", "{}").await,
+            }
+        }
+    });
+    let other_log = log.clone();
+    let other = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = other_listener.accept().await.unwrap();
+            let (method, path, _, _) = read_request(&mut stream).await;
+            other_log
+                .lock()
+                .unwrap()
+                .push(format!("other {} {}", method, path));
+            reply(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                "",
+                r#"{"other":true}"#,
+            )
+            .await;
+        }
+    });
+    FlowFixture {
+        site: format!("http://127.0.0.1:{}", site_port),
+        other: format!("http://localhost:{}", other_port),
+        log,
+        servers: vec![site, other],
+    }
+}
+
 #[tokio::test]
-#[ignore = "requires FIREFOX_BIN; run serially"]
-async fn e2e_firefox_read_active_page() {
-    required_firefox_binary();
-    let home = tempfile::tempdir().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let _env = firefox_test_environment(tmp.path());
-    _env.set("HOME", home.path().to_str().unwrap());
-    _env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
-    let fixture = firefox_fixture().await;
+#[ignore]
+async fn e2e_flow_capture_save_run_and_guards() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&[
+        "AGENT_BROWSER_FLOWS_DIR",
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+    ]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    guard.remove("AGENT_BROWSER_ACTION_POLICY");
+    guard.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
     let mut state = DaemonState::new();
-    launch_firefox(&mut state, json!({})).await;
-    firefox_open(&mut state, &fixture.url).await;
-    firefox_eval(
-        &mut state,
-        "document.body.innerHTML = '<h1>Active page read marker</h1>'",
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("f{}", n));
+        cmd
+    }
+
+    let launch = run(
+        &mut n,
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+    );
+    assert_success(&exec(&launch, &mut state).await);
+    assert!(state.flow.active());
+    // Turning capture on for a session that has none relaunches it with capture.
+    let mut plain = DaemonState::new();
+    assert_success(
+        &exec(
+            &json!({ "id": "p1", "action": "launch", "headless": true }),
+            &mut plain,
+        )
+        .await,
+    );
+    assert!(!plain.flow.active());
+    let late = exec(
+        &json!({ "id": "p2", "action": "launch", "headless": true, "capture": ["flow"] }),
+        &mut plain,
     )
     .await;
-    let resp = firefox_command(&mut state, json!({ "id": "read", "action": "read" })).await;
-    assert_success(&resp);
-    assert_eq!(get_data(&resp)["finalUrl"], fixture.url);
-    assert_eq!(get_data(&resp)["source"], "active-tab-html");
-    assert!(get_data(&resp)["content"]
+    assert_success(&late);
+    assert_eq!(
+        late["data"]["lifecycle"]["relaunchedBrowser"], true,
+        "{late}"
+    );
+    assert!(plain.flow.active());
+    let _ = exec(&json!({ "id": "p3", "action": "close" }), &mut plain).await;
+
+    let first = exec(
+        &run(
+            &mut n,
+            json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&first);
+    assert_eq!(first["recorded"]["seq"], 1);
+    for (action, selector, value) in [
+        ("fill", "#email", Some("ana@example.com")),
+        ("fill", "#code", Some("482913")),
+        ("click", "#login", None),
+        ("click", "#session", None),
+        ("click", "#add", None),
+        ("click", "#cartadd", None),
+        ("click", "#pw", None),
+    ] {
+        let mut cmd = json!({ "action": action, "selector": selector });
+        if let Some(v) = value {
+            cmd["value"] = json!(v);
+        }
+        let resp = fx.run_settled(&mut state, &run(&mut n, cmd)).await;
+        assert_success(&resp);
+    }
+    let typed = exec(
+        &run(
+            &mut n,
+            json!({ "action": "keyboard", "subaction": "type", "text": "s3cret!" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&typed);
+
+    let failed = exec(
+        &run(
+            &mut n,
+            json!({ "action": "click", "selector": "#missing", "timeout": 500 }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(failed["success"], false);
+    assert!(
+        failed["recorded"]["seq"].is_u64(),
+        "failed commands are recorded: {failed}"
+    );
+
+    let steps = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
+    assert_success(&steps);
+    assert_eq!(steps["data"]["steps"].as_array().unwrap().len(), 10);
+    assert_eq!(steps["data"]["steps"][9]["ok"], false);
+
+    // Save the first flow without the failed step, keep recording.
+    let saved = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_save", "name": "cart", "to": 9, "description": "Add to cart" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    assert_eq!(saved["data"]["from"], 1);
+    assert_eq!(saved["data"]["to"], 9);
+    assert!(state.flow.active(), "save keeps the capture running");
+    // The flow answers with the cart write, picked by request id.
+    let add_id = saved["data"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().ends_with("/api/cart"))
+        .and_then(|r| r["id"].as_str())
+        .unwrap()
+        .to_string();
+    let resaved = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_save", "name": "cart", "from": 1, "to": 9, "output": add_id }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resaved);
+    assert_eq!(resaved["data"]["output"], add_id.as_str());
+    let writes = saved["data"]["writes"].as_array().unwrap();
+    assert!(writes.iter().any(|w| w["method"] == "POST"
+        && w["url"].as_str().unwrap().ends_with("/api/cart")
+        && w["kind"] == "explicit"));
+    assert!(writes
+        .iter()
+        .any(|w| w["method"] == "POST" && w["url"].as_str().unwrap().ends_with("/login")));
+    assert!(writes.iter().any(|w| w["method"] == "GET"
+        && w["url"].as_str().unwrap().contains("/cart/remove?id=7")
+        && w["kind"] == "suspected"));
+
+    // A second flow in the same session, from the step after the first save.
+    for selector in ["#items", "#gql"] {
+        let resp = fx
+            .run_settled(
+                &mut state,
+                &run(&mut n, json!({ "action": "click", "selector": selector })),
+            )
+            .await;
+        assert_success(&resp);
+    }
+    let saved2 = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "browse" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved2);
+    assert_eq!(saved2["data"]["from"], 10);
+    assert_eq!(
+        saved2["data"]["writes"],
+        json!([]),
+        "a GraphQL query and a data GET are reads: {}",
+        saved2["data"]
+    );
+
+    // Files: no typed secret, the email is a param, the CSRF value is a reference.
+    let cart_path = dir.path().join("127.0.0.1").join("cart.json");
+    let cart_text = std::fs::read_to_string(&cart_path).unwrap();
+    assert!(!cart_text.contains("482913"));
+    assert!(
+        !cart_text.contains("s3cret!"),
+        "keyboard text into a password field is redacted"
+    );
+    assert!(
+        !cart_text.contains("ana@example.com"),
+        "typed values are not stored as examples"
+    );
+    assert!(cart_text.contains(r#""source": "typed""#));
+    assert!(cart_text.contains("{{email}}"));
+    assert!(dir.path().join("127.0.0.1").join("browse.json").exists());
+
+    // Runs: a read flow needs no confirmation; a write flow asks first.
+    let browse = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "browse", "params": {} }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(browse["data"]["ok"], true, "{browse}");
+    let ask = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "cart", "params": { "email": "ana@example.com" } }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(ask["data"]["confirmation_required"], true, "{ask}");
+    assert!(ask["data"]["action"]
         .as_str()
         .unwrap()
-        .contains("Active page read marker"));
-    firefox_close(&mut state).await;
+        .starts_with("flow_write:"));
+
+    let posts_before = fx.hits("POST /api/cart");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "cart", "params": { "email": "ana@example.com" }, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert_eq!(
+        fx.hits("POST /api/cart"),
+        posts_before + 1,
+        "the write is sent once: {sent}\n{:#?}",
+        fx.log.lock().unwrap()
+    );
+
+    // An edited flow cannot reach another host, directly or by redirect.
+    let browse_path = dir.path().join("127.0.0.1").join("browse.json");
+    let original = std::fs::read_to_string(&browse_path).unwrap();
+    let other_hits = fx.hits("other ");
+    for target in [format!("{}/data", fx.other), format!("{}/go", fx.site)] {
+        let mut flow: Value = serde_json::from_str(&original).unwrap();
+        let at = flow["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|s| !s["requests"].as_array().unwrap().is_empty())
+            .unwrap();
+        flow["steps"][at]["requests"][0]["url"] = json!(target);
+        std::fs::write(&browse_path, serde_json::to_string(&flow).unwrap()).unwrap();
+        let resp = exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_run", "name": "browse", "params": {} }),
+            ),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{target}: {resp}");
+        if target.starts_with(&fx.other) {
+            assert!(
+                resp["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("outside the hosts"),
+                "{resp}"
+            );
+        }
+    }
+    assert_eq!(
+        fx.hits("other "),
+        other_hits,
+        "no request reached the other host"
+    );
+
+    // Runs are not recorded, and close reports nothing unsaved after the last save.
+    let steps = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
+    assert_eq!(steps["data"]["steps"].as_array().unwrap().len(), 12);
+    let closed = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+    assert_success(&closed);
+    assert!(closed["data"].get("unsaved").is_none(), "{closed}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("v{}", n));
+        cmd
+    }
+    let profile = unique_auth_profile_name("flow-capture");
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "auth_save", "name": profile, "url": format!("{}/", fx.site),
+            "username": "vault@example.test", "password": "v4ult-pw" }),
+    ] {
+        assert_success(&exec(&run(&mut n, cmd), &mut state).await);
+    }
+    // The vault login fills the password and submits; its requests are not steps.
+    let before = fx.hits("POST /login");
+    let login = exec(
+        &run(
+            &mut n,
+            json!({ "action": "auth_login", "name": profile, "noNavigate": true }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&login);
+    fx.wait_until(|| fx.hits("POST /login") > before).await;
+    settle_responses(&mut state).await;
+    // The field still holds the vault password, so this recorded click sends it.
+    for cmd in [
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#items" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    // A password typed key by key into a password field.
+    for cmd in [
+        json!({ "action": "evaluate", "script": "document.getElementById('pw').value = ''" }),
+        json!({ "action": "click", "selector": "#pw" }),
+        json!({ "action": "press", "key": "k" }),
+        json!({ "action": "press", "key": "e" }),
+        json!({ "action": "press", "key": "y" }),
+        json!({ "action": "press", "key": "9" }),
+        json!({ "action": "click", "selector": "#login" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    assert!(fx.hits("key9") >= 1, "the page did send the typed password");
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "vault" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let text = std::fs::read_to_string(dir.path().join("127.0.0.1").join("vault.json")).unwrap();
+    assert!(
+        !text.contains("v4ult-pw"),
+        "vault password reached the flow file"
+    );
+    assert!(
+        !text.contains("key9"),
+        "typed password reached the flow file"
+    );
+    assert!(
+        saved["data"]["gaps"]
+            .to_string()
+            .contains("typed or pasted into a secret field"),
+        "{saved}"
+    );
+    let _ = exec(
+        &run(&mut n, json!({ "action": "auth_delete", "name": profile })),
+        &mut state,
+    )
+    .await;
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }

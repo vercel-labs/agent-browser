@@ -349,14 +349,14 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
         .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|p| p + 2))
 }
 
+pub(super) fn parse_content_length(headers: &str) -> Option<usize> {
+    request_header_value(headers, "content-length")?
+        .parse()
+        .ok()
+}
+
 fn parse_content_length_bytes(headers: &[u8]) -> Option<usize> {
-    let header_str = std::str::from_utf8(headers).ok()?;
-    for line in header_str.lines() {
-        if line.len() > 16 && line[..16].eq_ignore_ascii_case("content-length: ") {
-            return line[16..].trim().parse().ok();
-        }
-    }
-    None
+    parse_content_length(std::str::from_utf8(headers).ok()?)
 }
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -443,17 +443,23 @@ pub(super) async fn relay_command_to_daemon(
 }
 
 pub(super) fn serve_embedded_file(url_path: &str) -> (&'static str, &'static str, Vec<u8>) {
-    let clean = url_path.trim_start_matches('/');
+    let clean = url_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/');
     let key = if clean.is_empty() {
         "index.html"
     } else {
         clean
     };
 
-    let file = DashboardAssets::get(key).or_else(|| DashboardAssets::get("index.html"));
+    let file = DashboardAssets::get(key)
+        .map(|file| (key, file))
+        .or_else(|| DashboardAssets::get("index.html").map(|file| ("index.html", file)));
 
     match file {
-        Some(content) => {
+        Some((key, content)) => {
             let ext = key.rsplit('.').next().unwrap_or("");
             let ct = match ext {
                 "html" => "text/html; charset=utf-8",
@@ -486,6 +492,35 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn parse_content_length_handles_spacing_case_and_unicode_header_values() {
+        let headers = "POST / HTTP/1.1\r\nX-Label: 123456é\r\ncOnTeNt-LeNgTh:\t5 \r\n\r\n";
+
+        assert_eq!(parse_content_length(headers), Some(5));
+    }
+
+    #[test]
+    fn test_serve_embedded_file_query_string() {
+        let (_, expected_content_type, expected_body) = serve_embedded_file("/");
+        let (status, content_type, body) = serve_embedded_file("/?port=35511");
+
+        assert_eq!(status, "200 OK");
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        assert_eq!(content_type, expected_content_type);
+        assert_eq!(body, expected_body);
+    }
+
+    #[test]
+    fn test_serve_embedded_file_missing_route_falls_back_to_index() {
+        let (_, expected_content_type, expected_body) = serve_embedded_file("/");
+        let (status, content_type, body) = serve_embedded_file("/missing-route.js");
+
+        assert_eq!(status, "200 OK");
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        assert_eq!(content_type, expected_content_type);
+        assert_eq!(body, expected_body);
+    }
 
     async fn send_request_to_handler(request: &str, session_name: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -34,6 +34,7 @@ bun run run.ts --category skill-loading
 bun run run.ts --category skill-selection
 bun run run.ts --category command-usage
 bun run run.ts --category context-footprint
+bun run run.ts --category reference-routing
 
 # Run deterministic CLI vs MCP context footprint measurement
 bun run context-footprint.ts
@@ -86,6 +87,10 @@ Tests that the agent picks the correct specialized skill for the task. For examp
 ### command-usage
 
 Tests that the agent produces correct agent-browser commands for common workflows: navigation + screenshot, form filling with snapshot-interact pattern, diffing, authentication, data extraction.
+
+### reference-routing
+
+Tests that an agent that already loaded `agent-browser skills get core` loads the one reference a task needs with `skills get core --ref <ref>`, instead of guessing, loading every reference with `--full`, or reading the skill directory. A control case checks that a task core already covers loads no reference.
 
 ### context-footprint
 

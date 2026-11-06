@@ -666,7 +666,7 @@ fn round(value: f64) -> i64 {
 }
 
 fn get_screenshot_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser").join("tmp").join("screenshots")
     } else {
         std::env::temp_dir()
