@@ -120,12 +120,25 @@ pub fn parse_attach_url(target: &str) -> Result<Option<AttachTarget>, String> {
     target_from_url(url).map(Some)
 }
 
-/// Probes a port or HTTP URL for Firefox's WebDriver BiDi WebSocket.
-pub async fn probe_attach_target(target: &str) -> Result<AttachTarget, String> {
+fn probe_target_url(target: &str) -> Result<Url, String> {
     let url = endpoint_url(target).map_err(|e| format!("invalid Firefox endpoint: {e}"))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err("expected an http(s)://host:port URL or a port".into());
+    if matches!(url.scheme(), "http" | "https")
+        || (matches!(url.scheme(), "ws" | "wss") && matches!(url.path(), "/" | "/session"))
+    {
+        Ok(url)
+    } else {
+        Err("expected an http(s)://host:port URL, a port, or a ws(s):// WebSocket root".into())
     }
+}
+
+/// Whether a target has a shape that can be probed for Firefox's WebDriver BiDi WebSocket.
+pub fn can_probe_attach_target(target: &str) -> bool {
+    probe_target_url(target).is_ok()
+}
+
+/// Probes a port, HTTP URL, or WebSocket root for Firefox's WebDriver BiDi WebSocket.
+pub async fn probe_attach_target(target: &str) -> Result<AttachTarget, String> {
+    let url = probe_target_url(target)?;
     let bidi = target_from_url(url)?;
     let connect = tokio::time::timeout(PROBE_TIMEOUT, connect_async(&bidi.bidi_url)).await;
     match connect {
@@ -140,7 +153,10 @@ pub async fn probe_attach_target(target: &str) -> Result<AttachTarget, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_attach_url, target_from_url, AttachTarget};
+    use super::{
+        can_probe_attach_target, parse_attach_url, probe_attach_target, target_from_url,
+        AttachTarget,
+    };
     use crate::native::bidi::firefox::DevtoolsEndpoint;
     use url::Url;
 
@@ -195,6 +211,39 @@ mod tests {
                 devtools_explicit: false,
             })
         );
+    }
+
+    #[test]
+    fn bare_firefox_websocket_roots_are_probed_not_preclassified() {
+        assert_eq!(parse_attach_url("ws://127.0.0.1:9333"), Ok(None));
+        assert_eq!(
+            parse_attach_url("wss://127.0.0.1:9333?token=a&devtools=6080"),
+            Ok(None)
+        );
+        assert!(can_probe_attach_target("ws://127.0.0.1:9333"));
+        assert!(can_probe_attach_target(
+            "wss://127.0.0.1:9333?token=a&devtools=6080"
+        ));
+        assert!(!can_probe_attach_target(
+            "ws://127.0.0.1:9333/devtools/browser/x"
+        ));
+    }
+
+    #[tokio::test]
+    async fn probes_a_bare_websocket_root_as_a_bidi_session() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = tokio_tungstenite::accept_async(stream).await;
+        });
+
+        let target = probe_attach_target(&format!("ws://{address}"))
+            .await
+            .unwrap();
+
+        assert_eq!(target.bidi_url, format!("ws://{address}/session"));
+        server.await.unwrap();
     }
 
     #[test]

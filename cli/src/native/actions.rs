@@ -4866,9 +4866,7 @@ async fn auto_launch_inner(
     let allowed_domains = current_allowed_domains(state).await;
     let firefox_target = cdp
         .as_deref()
-        .map(bidi::attach::parse_attach_url)
-        .transpose()?
-        .flatten();
+        .and_then(|target| bidi::attach::parse_attach_url(target).ok().flatten());
     if engine.as_deref() == Some("firefox") || firefox_target.is_some() {
         reject_firefox_launch_extras(&enable_features, &init_script_paths, &plugins)?;
         return launch_firefox(
@@ -5774,19 +5772,22 @@ async fn detect_attach_connection(
     target: &str,
     headers: Option<Vec<(String, String)>>,
 ) -> Result<AttachConnection, String> {
-    if let Some(target) = bidi::attach::parse_attach_url(target)? {
-        return Ok(AttachConnection::Firefox(target));
+    let parsed = bidi::attach::parse_attach_url(target);
+    if let Ok(Some(target)) = &parsed {
+        return Ok(AttachConnection::Firefox(target.clone()));
     }
     let cdp_error = match BrowserManager::connect_cdp_when_listening(target, headers).await {
         Ok(manager) => return Ok(AttachConnection::Cdp(Box::new(manager))),
         Err(error) => error,
     };
-    let can_probe_bidi = target.parse::<u16>().is_ok()
-        || url::Url::parse(target).is_ok_and(|url| matches!(url.scheme(), "http" | "https"));
-    if !can_probe_bidi {
-        return Err(cdp_error);
-    }
-    match bidi::attach::probe_attach_target(target).await {
+    let bidi = match parsed {
+        Err(error) => Err(error),
+        Ok(_) if bidi::attach::can_probe_attach_target(target) => {
+            bidi::attach::probe_attach_target(target).await
+        }
+        Ok(_) => return Err(cdp_error),
+    };
+    match bidi {
         Ok(target) => Ok(AttachConnection::Firefox(target)),
         Err(error) => Err(combine_cdp_and_firefox_attach_errors(
             &cdp_error, target, &error,
@@ -19610,12 +19611,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[tokio::test]
     async fn test_firefox_attach_detection_preserves_explicit_devtools() {
-        for (query, explicit) in [
-            ("", false),
-            ("?devtools=6080", true),
-            ("?devtools=6000", true),
+        for (suffix, explicit) in [
+            ("/session", false),
+            ("/session?devtools=6080", true),
+            ("/session?devtools=6000", true),
         ] {
-            let target = format!("ws://127.0.0.1:9333/session{query}");
+            let target = format!("ws://127.0.0.1:9333{suffix}");
             let AttachConnection::Firefox(parsed) =
                 detect_attach_connection(&target, None).await.unwrap()
             else {
@@ -19624,6 +19625,86 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             assert_eq!(parsed.bidi_url, "ws://127.0.0.1:9333/session");
             assert_eq!(parsed.devtools_explicit, explicit);
         }
+    }
+
+    async fn bare_cdp_server() -> (String, tokio::task::JoinHandle<()>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    continue;
+                };
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let result = match request["method"].as_str().unwrap_or("") {
+                        "Target.getTargets" => json!({
+                            "targetInfos": [{
+                                "targetId": "page-1",
+                                "type": "page",
+                                "title": "",
+                                "url": "about:blank",
+                                "attached": false
+                            }]
+                        }),
+                        "Target.attachToTarget" => json!({ "sessionId": "session-1" }),
+                        _ => json!({}),
+                    };
+                    let reply = json!({ "id": request["id"], "result": result });
+                    if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                        return;
+                    }
+                }
+                return;
+            }
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn bare_websocket_root_uses_cdp_before_firefox_detection() {
+        let (target, server) = bare_cdp_server().await;
+
+        let AttachConnection::Cdp(manager) = detect_attach_connection(&target, None).await.unwrap()
+        else {
+            panic!("a local CDP server at a bare WebSocket root must win");
+        };
+
+        assert_eq!(manager.get_cdp_url(), target);
+        drop(manager);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn detect_attempts_cdp_before_returning_a_firefox_parse_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = accepted.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        let connection = detect_attach_connection(
+            &format!("ws://127.0.0.1:{port}/session?devtools=nope"),
+            None,
+        )
+        .await;
+        let error = connection.err().expect("invalid Firefox target must fail");
+
+        assert!(accepted.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            error.starts_with("CDP WebSocket connect failed:"),
+            "{error}"
+        );
+        assert!(error.contains("invalid devtools port"), "{error}");
+        server.abort();
     }
 
     #[test]
