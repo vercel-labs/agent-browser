@@ -7474,6 +7474,60 @@ async fn e2e_snapshot_cursor_many_elements() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_in_nested_shadow_root() {
+    let mut state = DaemonState::new();
+    let response = execute_command(
+        &json!({ "id": "launch", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+
+    let html = r#"<div onclick="void 0">Light</div><my-card></my-card><script>
+        const outer = document.querySelector('my-card').attachShadow({mode: 'open'});
+        outer.innerHTML = '<inner-card></inner-card>';
+        const inner = outer.querySelector('inner-card').attachShadow({mode: 'open'});
+        inner.innerHTML = '<div>Shadow</div>';
+        inner.firstChild.onclick = function() { document.title = this.textContent; };
+    </script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let response = execute_command(
+        &json!({"id": "open", "action": "navigate", "url": url}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let response = execute_command(
+        &json!({"id": "snap", "action": "snapshot", "interactive": true}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let data = get_data(&response);
+    let snapshot = data["snapshot"].as_str().unwrap();
+    assert_eq!(ref_recovery_refs(snapshot, "Light").len(), 1, "{snapshot}");
+    let shadow_refs = ref_recovery_refs(snapshot, "Shadow");
+    assert_eq!(shadow_refs.len(), 1, "{snapshot}");
+    assert_eq!(
+        ref_recovery_eval(&mut state, "inner.firstChild.getAttributeNames()").await,
+        json!([])
+    );
+    let reference = &shadow_refs[0];
+    let response = execute_command(
+        &json!({"id": "click", "action": "click", "selector": format!("@{reference}")}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let response = execute_command(&json!({"id": "title", "action": "title"}), &mut state).await;
+    assert_success(&response);
+    assert_eq!(get_data(&response)["title"], "Shadow");
+    let response = execute_command(&json!({"id": "close", "action": "close"}), &mut state).await;
+    assert_success(&response);
+}
+
 /// Test that a selector-scoped snapshot of a web component includes the
 /// content of its shadow root.
 #[tokio::test]
