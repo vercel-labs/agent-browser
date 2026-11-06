@@ -31,7 +31,7 @@ export AGENT_BROWSER_ENGINE=firefox
 agent-browser open example.com
 ```
 
-Or in your `agent-browser.json` config:
+Set `engine` in `~/.agent-browser/config.json` or in a trusted file loaded explicitly with `--config`. The auto-discovered `./agent-browser.json` does not support this setting:
 
 ```json
 {

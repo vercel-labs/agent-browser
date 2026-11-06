@@ -5892,6 +5892,7 @@ struct SettingsOutcome {
 struct PendingSettings {
     keys: Vec<Key>,
     before: Running,
+    proxy_credentials: Option<(String, String)>,
     filter: Option<DomainFilter>,
     ca_cert: Option<EffectiveCaCert>,
     attached: Option<AttachedTarget>,
@@ -5965,6 +5966,7 @@ async fn rollback_launch_settings(
     state.effective_ca_cert = pending.ca_cert;
     state.attached_target = pending.attached;
     state.cdp_headers = pending.cdp_headers;
+    *state.proxy_credentials.write().await = pending.proxy_credentials;
     outcome.mark_rolled_back(&restored);
 }
 
@@ -6085,6 +6087,7 @@ async fn apply_settings_patch(
         Some(PendingSettings {
             keys,
             before: state.settings.clone(),
+            proxy_credentials: state.proxy_credentials.read().await.clone(),
             filter: state.domain_filter.read().await.clone(),
             ca_cert: state.effective_ca_cert.clone(),
             attached: state.attached_target.clone(),
@@ -23019,7 +23022,9 @@ mod firefox_routing_tests {
         let (mut state, _calls) = firefox_state().await;
         state
             .settings
-            .set(Key::Proxy, json!("http://old:secret@proxy:3128"));
+            .set(Key::Proxy, json!("http://proxy:3128"));
+        state.settings.set(Key::ProxyUsername, json!("old"));
+        state.settings.set(Key::ProxyPassword, json!("secret"));
         state.launch_identity = Some(state.settings.launch_identity());
         *state.proxy_credentials.write().await = Some(("old".into(), "secret".into()));
         let result = handle_launch(
