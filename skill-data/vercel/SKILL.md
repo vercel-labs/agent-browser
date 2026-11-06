@@ -1,7 +1,7 @@
 ---
 name: vercel
 description: Access and test Vercel deployments with agent-browser, behind Deployment Protection or at a different feature flag variant. Use when a preview or production URL redirects to a Vercel login page, returns a protection 401 or 403, needs short-lived Trusted Sources OIDC authentication instead of a static bypass secret or public exception, or must be viewed with a Vercel feature flag set to another variant.
-allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(vc:*), Bash(vercel:*), Bash(bunx:*)
+allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(vc:*), Bash(vercel:*), Bash(bun:*)
 ---
 
 # Vercel deployments
@@ -129,8 +129,11 @@ Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api
   case "$FLAGS_SECRET" in
     "" | "[SENSITIVE]") echo "FLAGS_SECRET is not readable; ask the user for it" >&2; exit 1 ;;
   esac
-  OVERRIDE="$(FLAGS_SECRET="$FLAGS_SECRET" bunx --package flags bun -e \
+  MINT_DIR="$(mktemp -d)"
+  (cd "$MINT_DIR" && bun add flags >/dev/null)
+  OVERRIDE="$(cd "$MINT_DIR" && FLAGS_SECRET="$FLAGS_SECRET" bun -e \
     'import { encryptOverrides } from "flags"; console.log(await encryptOverrides({ "my-flag": "variant-b" }))')"
+  rm -rf "$MINT_DIR"
   test -n "$OVERRIDE"
   agent-browser --session "$AGENT_BROWSER_SESSION" cookies set vercel-flag-overrides "$OVERRIDE" --url "$VERCEL_PREVIEW_URL"
   agent-browser --session "$AGENT_BROWSER_SESSION" reload
