@@ -525,6 +525,10 @@ pub struct BrowserManager {
     /// launch rules such as extension-forced headed mode. Meaningless for
     /// attached browsers (browser_process is None).
     headless: bool,
+    /// Whether the outdated-browser check already read this connection's
+    /// product. A reconnect builds a new manager, so even a reused CDP URL
+    /// is checked again.
+    product_checked: bool,
 }
 
 /// Stable machine-readable prefix for "the bound tab no longer exists"
@@ -728,6 +732,7 @@ impl BrowserManager {
                 bound_target_gone: None,
                 wedge_suspect: None,
                 headless,
+                product_checked: false,
             };
             if let Err(error) = manager.discover_and_attach_targets().await {
                 let _ = manager
@@ -837,6 +842,7 @@ impl BrowserManager {
             bound_target_gone: None,
             wedge_suspect: None,
             headless: true,
+            product_checked: false,
         };
 
         let initialization = if direct_page {
@@ -1710,6 +1716,39 @@ impl BrowserManager {
 
     pub fn get_cdp_url(&self) -> &str {
         &self.ws_url
+    }
+
+    /// A manager over an already connected client, for tests that serve CDP
+    /// from a mock socket.
+    #[cfg(test)]
+    pub(crate) fn for_test(client: CdpClient, ws_url: String) -> Self {
+        Self {
+            client: Arc::new(client),
+            browser_process: None,
+            ws_url,
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 1,
+            direct_page: false,
+            pin_tab: false,
+            bound_target_id: None,
+            bound_target_gone: None,
+            wedge_suspect: None,
+            headless: true,
+            product_checked: false,
+        }
+    }
+
+    pub fn product_checked(&self) -> bool {
+        self.product_checked
+    }
+
+    pub fn mark_product_checked(&mut self) {
+        self.product_checked = true;
     }
 
     /// Returns the Chrome debug server address as "host:port".
@@ -2724,6 +2763,7 @@ async fn initialize_lightpanda_manager(
             bound_target_gone: None,
             wedge_suspect: None,
             headless: true,
+            product_checked: false,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
@@ -2834,6 +2874,7 @@ async fn initialize_obscura_manager(
             bound_target_gone: None,
             wedge_suspect: None,
             headless: true,
+            product_checked: false,
         };
 
         match run_with_obscura_deadline(
@@ -3738,6 +3779,7 @@ mod tests {
             bound_target_gone: None,
             wedge_suspect: None,
             headless: true,
+            product_checked: false,
         }
     }
 
@@ -3799,6 +3841,7 @@ mod tests {
             bound_target_gone: None,
             wedge_suspect: None,
             headless: true,
+            product_checked: false,
         };
         manager.close().await.unwrap();
 

@@ -40,6 +40,10 @@ impl Running {
     pub(super) fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Running {
         let mut r = Running::defaults();
 
+        // Cdp, CdpHeaders, AutoConnect and Provider are not seeded: the CLI
+        // resends them on every command, so an attach commits them on success
+        // and a failed attach rolls back instead of becoming the session's target.
+
         let strings = [
             (Key::ExecutablePath, "AGENT_BROWSER_EXECUTABLE_PATH"),
             (Key::Proxy, "AGENT_BROWSER_PROXY"),
@@ -52,9 +56,6 @@ impl Running {
             (Key::ColorScheme, "AGENT_BROWSER_COLOR_SCHEME"),
             (Key::DownloadPath, "AGENT_BROWSER_DOWNLOAD_PATH"),
             (Key::Engine, "AGENT_BROWSER_ENGINE"),
-            (Key::Cdp, "AGENT_BROWSER_CDP"),
-            (Key::CdpHeaders, "AGENT_BROWSER_CDP_HEADERS"),
-            (Key::Provider, "AGENT_BROWSER_PROVIDER"),
             (Key::IdleTimeout, "AGENT_BROWSER_IDLE_TIMEOUT_MS"),
             (Key::RestoreKey, "AGENT_BROWSER_SESSION_NAME"),
             (Key::RestoreSave, "AGENT_BROWSER_RESTORE_SAVE"),
@@ -62,6 +63,7 @@ impl Running {
             (Key::RestoreCheckText, "AGENT_BROWSER_RESTORE_CHECK_TEXT"),
             (Key::RestoreCheckFn, "AGENT_BROWSER_RESTORE_CHECK_FN"),
             (Key::ConfirmActions, "AGENT_BROWSER_CONFIRM_ACTIONS"),
+            (Key::Device, "AGENT_BROWSER_IOS_DEVICE"),
         ];
         for (key, name) in strings {
             if let Some(v) = lookup(name) {
@@ -88,6 +90,7 @@ impl Running {
             (Key::IgnoreHttpsErrors, "AGENT_BROWSER_IGNORE_HTTPS_ERRORS"),
             (Key::Webgpu, "AGENT_BROWSER_WEBGPU"),
             (Key::NoXvfb, "AGENT_BROWSER_NO_XVFB"),
+            (Key::Debug, "AGENT_BROWSER_DEBUG"),
         ];
         for (key, name) in flags {
             if let Some(v) = lookup(name) {
@@ -112,14 +115,17 @@ impl Running {
             r.set(Key::HideScrollbars, Value::Bool(!off));
         }
 
-        // Presence alone turns auto-connect on, whatever the value.
-        if lookup("AGENT_BROWSER_AUTO_CONNECT").is_some() {
-            r.set(Key::AutoConnect, Value::Bool(true));
-        }
-
         if let Some(v) = lookup("AGENT_BROWSER_DEFAULT_TIMEOUT").and_then(|s| s.parse::<u64>().ok())
         {
             r.set(Key::DefaultTimeout, Value::from(v));
+        }
+
+        // The plugin registry the CLI handed the daemon; an empty one sets nothing.
+        if let Some(plugins) = lookup("AGENT_BROWSER_PLUGINS")
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+        {
+            r.set(Key::Plugins, plugins);
         }
 
         if let Some(v) = lookup("AGENT_BROWSER_ARGS") {

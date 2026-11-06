@@ -9,6 +9,7 @@ Multiple isolated browser sessions with state persistence and concurrent browsin
 - [Named Sessions](#named-sessions)
 - [Session Isolation Properties](#session-isolation-properties)
 - [Tab Pinning in a Shared Browser](#tab-pinning-in-a-shared-browser)
+- [Changing settings on a running session](#changing-settings-on-a-running-session)
 - [Session State Persistence](#session-state-persistence)
 - [Common Patterns](#common-patterns)
 - [Default Session](#default-session)
@@ -72,6 +73,10 @@ The flag is sticky per session: pass it once at session creation and later comma
 The structured `lastUrl` is limited to sanitized HTTP(S) URLs and `about:blank`. Credentials, query strings, and fragments are removed from HTTP(S) URLs. Opaque URLs such as `data:` are omitted. In batch JSON, the recovery object appears under `result` instead of `data`.
 
 When re-running a shared-tab script such as the repro from #1530, add `--pin-tab` to the first command for every session. Without it, `open` intentionally preserves the legacy behavior and navigates the shared active tab, so the original script still collides. The same rule applies when sessions attach with `--auto-connect` instead of `--cdp`.
+
+## Changing settings on a running session
+
+Each command carries the settings you set for it (flag, environment variable, or config). The daemon compares them with the running session. A setting you omit keeps its running value, and a setting equal to the running one does nothing, so repeating `--profile ./work` on every command never relaunches the browser. Timeouts, `--action-policy`, `--confirm-actions`, `--no-auto-dialog`, and restore and pin settings apply in place. Launch settings (`--profile`, `--args`, `--headed`, `--proxy`, `--state`, `--allowed-domains`, and similar) relaunch the browser without restarting the daemon. Each change that takes effect prints one line on stderr, for example `⚠ profile: ./a → ./b (--profile), relaunched browser`. Every change appears in `lifecycle.settings.changes` with `--json`, as `applied: true` or `applied: false` (a launch setting changed while no browser is running waits for the next launch). Commands that never launch (`get cdp-url`, `session info`) apply live settings only, and `get cdp-url` sends no launch settings. Settings that only describe a browser agent-browser launches itself (`--profile`, `--args`, `--executable-path`, `--extension`, `--proxy`, `--user-agent`, `--state`) are ignored for `--cdp`, `--auto-connect` and provider sessions and show as `effect: "ignored"`. Inherited `--state`, `--profile`, `--extension`, `--proxy` (and credentials), `--executable-path` and `--args` values are dropped when the session switches to an external browser, an empty `--provider` resets a provider session to a local launch, and `--no-auto-connect` resets an `--auto-connect` session. Secrets are redacted: passwords and CDP headers are hidden, and CDP URLs lose their credentials and query string. A launch setting is kept only after the launch succeeds, except `--allowed-domains`, which stays installed. A command denied by policy or waiting for confirmation changes no launch setting. Setting `--state` replaces an inherited `--profile` or `--extension`, and the reverse. The first command of a session still seeds from the environment the daemon was spawned with, except the connection target, which is kept only after an attach succeeds. `--state <path>` loads the file at launch only; pass `--relaunch` to relaunch the browser and load it again.
 
 ## Session State Persistence
 
