@@ -551,6 +551,7 @@ fn request_started(state: &mut DaemonState, p: &Value) {
     if let Some(timestamp) = timestamp.filter(|_| state.har_recording) {
         state.har_entries.push(HarEntry {
             request_id: id.clone(),
+            remote_addr: None,
             wall_time: timestamp / 1000.0,
             method: method.clone(),
             url: url.clone(),
