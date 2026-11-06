@@ -391,6 +391,27 @@ fn wire_round_trips_the_full_patch() {
 }
 
 #[test]
+fn connection_targets_from_config_are_defaults_but_cli_targets_are_explicit() {
+    let mut config_target = blank_flags();
+    config_target.cdp = Some("9998".to_string());
+    let default_patch = Patch::from_flags(&config_target);
+    assert!(default_patch.has_default_connection_target());
+    assert_eq!(
+        default_patch.to_wire().unwrap()["connectionTargetDefault"],
+        json!(true)
+    );
+
+    config_target.cli_cdp = true;
+    let explicit_patch = Patch::from_flags(&config_target);
+    assert!(!explicit_patch.has_default_connection_target());
+    assert!(explicit_patch
+        .to_wire()
+        .unwrap()
+        .get("connectionTargetDefault")
+        .is_none());
+}
+
+#[test]
 fn wire_uses_row_names_and_null_for_defaults() {
     let mut f = blank_flags();
     f.restore = Some("work".to_string());
