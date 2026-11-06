@@ -1,8 +1,63 @@
 # agent-browser
 
-## 0.41.0
+## 0.41.2
 
 <!-- release:start -->
+
+### New Features
+
+- Added **targeted skill references** with `skills get <name> --ref <ref>` and the MCP `agent_browser_skills_get` tool's `refs` argument, so agents can load one reference or template at a time (#2310)
+- Added **Chrome security warnings** when newer stable releases list CVE fixes, without blocking commands. Set `AGENT_BROWSER_NO_VERSION_CHECK=1` to skip the check (#2309)
+
+### Bug Fixes
+
+- Fixed **session restarts** when commands omit or change timeout settings, preserving open pages and reusing the running daemon's default timeout for waits (#2288)
+- Fixed **bare `open`** dropping configured profiles and browser arguments and relaunching Chrome with a temporary profile (#2287)
+- Fixed **browserless commands** starting a browser when launch options are set in the environment (#2309)
+- Fixed **Windows home directory detection** to respect `USERPROFILE`, and kept the MCP tool catalog's line endings consistent for Windows tests (#2305)
+
+### Improvements
+
+- Slimmed **the core agent skill** and routed detailed guidance to references, with instructions to pass `--session` on every command (#2303, #2312)
+
+### Documentation
+
+- Simplified **the README**, moved detailed guidance to the docs site, and corrected source build instructions (#2302)
+
+### Contributors
+
+- @Railly
+- @ctate
+- @fahimscirex
+- @holny
+- @lahfir
+- @zyz619963502zyz
+
+<!-- release:end -->
+
+## 0.41.1
+
+### Bug Fixes
+
+- Fixed **cookie attributes** so `cookies set` honors `--http-only` and `--same-site`, preserves the existing aliases, and rejects unknown arguments (#2256)
+- Fixed **page error clearing** so `errors --clear` removes captured errors (#2253)
+- Fixed **MCP selector waits** so bare integer selectors return an error instead of becoming timed waits (#2254)
+- Fixed **plugin error redaction** so sensitive operations omit unsupported protocol values (#2255)
+- Fixed **invalid limit handling** so overflowing idle timeouts and invalid output limits produce warnings instead of overflowing or being silently ignored (#2250, #2258)
+- Removed **unpinned npx execution permission** from the installed agent skill (#2249)
+
+### Documentation
+
+- Documented **stdin MCP connections** that reuse one server process in Vercel Sandbox (#2248)
+- Configured **desktop documentation routes** and the desktop sitemap for the docs site (#2278)
+
+### Contributors
+
+- @Railly
+- @lahfir
+
+
+## 0.41.0
 
 ### Breaking Changes
 
@@ -25,8 +80,6 @@
 
 - @Railly
 - @lahfir
-
-<!-- release:end -->
 
 ## 0.40.0
 

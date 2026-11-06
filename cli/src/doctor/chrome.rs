@@ -283,7 +283,7 @@ pub(super) fn puppeteer_cache_dir() -> Option<PathBuf> {
     if let Ok(p) = env::var("PUPPETEER_CACHE_DIR") {
         return Some(PathBuf::from(p));
     }
-    dirs::home_dir().map(|h| h.join(".cache").join("puppeteer"))
+    std::env::home_dir().map(|h| h.join(".cache").join("puppeteer"))
 }
 
 #[cfg(test)]

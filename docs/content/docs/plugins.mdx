@@ -80,6 +80,8 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"abc","url"
 
 `launch.mutate` plugins run automatically for local launches such as `agent-browser open`.
 
+Credential resolution, browser launch and cleanup, and launch mutation errors omit plugin response error text and unsupported protocol values from diagnostics. Manifest discovery and `plugin run` retain detailed errors. Plugins remain trusted local executables; this redaction does not sandbox them.
+
 ## Configure a plugin
 
 `plugin add` creates this config for you. You can also edit the `plugins` array manually:
