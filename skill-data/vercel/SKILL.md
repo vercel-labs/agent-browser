@@ -115,29 +115,32 @@ Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api
 ```bash
 (
   set -e
-  test -n "$VERCEL_ENVIRONMENT"
-  if [ -z "$FLAGS_SECRET" ]; then
-    ENV_FILE="$(mktemp)"
-    vc env pull "$ENV_FILE" --environment "$VERCEL_ENVIRONMENT" \
-      --project "$VERCEL_PROJECT" --scope "$VERCEL_SCOPE" --yes >/dev/null
-    FLAGS_SECRET="$(grep '^FLAGS_SECRET=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')"
-    rm "$ENV_FILE"
-  fi
+  : "${AGENT_BROWSER_SESSION:?set it to the session of the protected open}"
+  : "${VERCEL_ENVIRONMENT:?set it to the environment that serves the URL}"
+  ENV_FILE="$(mktemp)"
+  vc env pull "$ENV_FILE" --environment "$VERCEL_ENVIRONMENT" \
+    --project "$VERCEL_PROJECT" --scope "$VERCEL_SCOPE" --yes >/dev/null
+  PULLED="$(grep '^FLAGS_SECRET=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')"
+  rm "$ENV_FILE"
+  case "$PULLED" in
+    "" | "[SENSITIVE]") ;;
+    *) FLAGS_SECRET="$PULLED" ;;
+  esac
   case "$FLAGS_SECRET" in
     "" | "[SENSITIVE]") echo "FLAGS_SECRET is not readable; ask the user for it" >&2; exit 1 ;;
   esac
   OVERRIDE="$(FLAGS_SECRET="$FLAGS_SECRET" bunx --package flags bun -e \
     'import { encryptOverrides } from "flags"; console.log(await encryptOverrides({ "my-flag": "variant-b" }))')"
   test -n "$OVERRIDE"
-  agent-browser cookies set vercel-flag-overrides "$OVERRIDE" --url "$VERCEL_PREVIEW_URL"
-  agent-browser reload
-  agent-browser screenshot
+  agent-browser --session "$AGENT_BROWSER_SESSION" cookies set vercel-flag-overrides "$OVERRIDE" --url "$VERCEL_PREVIEW_URL"
+  agent-browser --session "$AGENT_BROWSER_SESSION" reload
+  agent-browser --session "$AGENT_BROWSER_SESSION" screenshot
 )
 ```
 
-Run this in the same session as the protected `open`, and confirm in the screenshot that the requested variant rendered before reporting. `agent-browser cookies clear` removes the override along with every other cookie, so repeat the protected `open` after clearing.
+Run this with the session name of the protected `open`, and confirm in the screenshot that the requested variant rendered before reporting. The Flags SDK ignores an override it cannot decrypt without raising an error, so a screenshot that still shows the served variant usually means the secret belongs to another environment. `agent-browser cookies clear` removes the override along with every other cookie, so repeat the protected `open` after clearing.
 
-If `FLAGS_SECRET` is stored as a Secret, `vc env pull` writes the placeholder `[SENSITIVE]` instead of the value because Secret values are write-only, and the script stops. Ask the user to export `FLAGS_SECRET` in your environment and run it again; the script uses an exported value instead of pulling one.
+If `FLAGS_SECRET` is stored as a Secret, `vc env pull` writes the placeholder `[SENSITIVE]` instead of the value because Secret values are write-only, and the script stops. Ask the user for the `FLAGS_SECRET` of `VERCEL_ENVIRONMENT`, export it, and run the script again. A readable value from the pull always takes precedence over an exported one.
 
 If the app evaluates flags without the Flags SDK or through another provider, the cookie has no effect and there is no request-scoped path. Ask the user before changing the flag with `vc flags set`, record the original variant, restore it afterwards, and verify the restore with `vc flags inspect`.
 
