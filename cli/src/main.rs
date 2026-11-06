@@ -1364,8 +1364,8 @@ fn run_close_all(flags: &Flags) {
                     connection::stop_daemon(session);
                     if waiting {
                         err = format!(
-                            "close needs confirmation; run `agent-browser --session {} close` to confirm it",
-                            session
+                            "close needs confirmation; run `agent-browser --session {s} close`, then `agent-browser --session {s} confirm <id>` with the id it prints",
+                            s = session
                         );
                     }
                 }

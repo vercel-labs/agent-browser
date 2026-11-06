@@ -217,7 +217,16 @@ impl Store for FsStore {
             file.sync_all()
                 .map_err(|e| self.persist_failed("sync", &tmp, &e))?;
             drop(file);
-            fs::rename(&tmp, &self.path).map_err(|e| self.persist_failed("replace", &self.path, &e))
+            fs::rename(&tmp, &self.path)
+                .map_err(|e| self.persist_failed("replace", &self.path, &e))?;
+            // The rename is durable only once the directory entry is synced.
+            #[cfg(unix)]
+            if let Some(dir) = self.path.parent() {
+                fs::File::open(dir)
+                    .and_then(|d| d.sync_all())
+                    .map_err(|e| self.persist_failed("sync", dir, &e))?;
+            }
+            Ok(())
         })();
         if written.is_err() {
             let _ = fs::remove_file(&tmp);

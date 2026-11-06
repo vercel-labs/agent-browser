@@ -95,6 +95,17 @@ impl Session {
             .unwrap()
     }
 
+    /// Fails unless the daemon is gone within the 5s the CLI allows a
+    /// graceful daemon shutdown.
+    fn wait_for_daemon_exit(&self) {
+        let pid = self.dir().join(format!("{SESSION}.pid"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pid.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!pid.exists(), "the daemon is still running");
+    }
+
     fn kill_daemon(&self) {
         let pid = self.pid();
         assert!(Command::new("kill")
@@ -483,7 +494,7 @@ fn close_all_on_a_dead_session_is_governed_by_its_stored_policy() {
     );
     assert_eq!(fs::read_to_string(session.settings()).unwrap(), stored);
     // The daemon started only for the close is stopped again.
-    assert!(!session.dir().join(format!("{SESSION}.pid")).exists());
+    session.wait_for_daemon_exit();
 }
 
 #[test]
@@ -505,7 +516,17 @@ fn close_all_on_a_dead_session_waiting_for_confirmation_leaves_no_daemon() {
         "{json}"
     );
     assert_eq!(fs::read_to_string(session.settings()).unwrap(), stored);
-    assert!(!session.dir().join(format!("{SESSION}.pid")).exists());
+    session.wait_for_daemon_exit();
+
+    // The advice works: `close` parks a confirmation, `confirm` closes.
+    let parked = session.run(&["close"]);
+    let id = parked["data"]["confirmation_id"].as_str().unwrap();
+    let confirmed = session.run(&["confirm", id]);
+    assert_eq!(
+        confirmed["data"]["result"]["data"]["closed"], true,
+        "{confirmed}"
+    );
+    assert!(!session.settings().exists());
 }
 
 #[test]
@@ -532,8 +553,8 @@ fn close_all_closes_a_dead_session_and_removes_its_file() {
     assert_eq!(json["data"]["sessions"][0], "sec", "{json}");
     assert_eq!(json["data"]["closed"], 1, "{json}");
     assert!(!session.settings().exists());
-    let pid = session.dir().join(format!("{SESSION}.pid"));
-    assert!(!pid.exists(), "the daemon started for the close is gone");
+    // The daemon removes its pid file as it exits, just after answering.
+    session.wait_for_daemon_exit();
 }
 
 #[test]
