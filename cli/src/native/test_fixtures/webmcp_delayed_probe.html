@@ -6,8 +6,9 @@
   </head>
   <body>
     <script>
+      const modelContext = navigator.modelContext ?? document.modelContext;
       setTimeout(() => {
-        document.modelContext.registerTool({
+        modelContext.registerTool({
           name: "delayed_tool",
           description: "Registers shortly after page load",
           inputSchema: {

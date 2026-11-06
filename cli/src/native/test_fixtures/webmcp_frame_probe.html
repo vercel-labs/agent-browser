@@ -2,7 +2,8 @@
 <html>
   <body>
     <script>
-      const duplicateTool = document.modelContext.registerTool({
+      const modelContext = navigator.modelContext ?? document.modelContext;
+      const duplicateTool = modelContext.registerTool({
         name: "duplicate_tool",
         description: "Duplicate tool in a child frame",
         inputSchema: {
@@ -16,7 +17,7 @@
         execute: async () => ({ scope: "frame" })
       });
 
-      const frameWait = document.modelContext.registerTool({
+      const frameWait = modelContext.registerTool({
         name: "frame_wait",
         description: "Waits in a child frame until the frame is removed",
         inputSchema: {

@@ -8,7 +8,8 @@
     <output id="result">idle</output>
     <iframe id="tool-frame" src="http://127.0.0.1:__PORT__/frame.html" allow="tools"></iframe>
     <script>
-      document.modelContext.registerTool({
+      const modelContext = navigator.modelContext ?? document.modelContext;
+      modelContext.registerTool({
         name: "set_message",
         description: "Sets the visible message",
         inputSchema: {
@@ -29,7 +30,7 @@
         }
       });
 
-      document.modelContext.registerTool({
+      modelContext.registerTool({
         name: "wait_for_cancel",
         description: "Waits until canceled",
         inputSchema: {
@@ -43,7 +44,7 @@
         execute: async () => new Promise(() => {})
       });
 
-      document.modelContext.registerTool({
+      modelContext.registerTool({
         name: "fail_tool",
         description: "Returns a controlled failure",
         inputSchema: {
@@ -59,7 +60,7 @@
         }
       });
 
-      document.modelContext.registerTool({
+      modelContext.registerTool({
         name: "duplicate_tool",
         description: "Duplicate tool in the main frame",
         inputSchema: {

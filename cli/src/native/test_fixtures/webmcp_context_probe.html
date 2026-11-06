@@ -7,11 +7,12 @@
     <label>Tool description <input id="description" /></label>
     <output id="result">idle</output>
     <script>
+      const modelContext = navigator.modelContext ?? document.modelContext;
       let controller;
       function register(description = "Set the visible message") {
         controller?.abort();
         controller = new AbortController();
-        document.modelContext.registerTool({
+        modelContext.registerTool({
           name: "set_message", description,
           inputSchema: {
             type: "object",
