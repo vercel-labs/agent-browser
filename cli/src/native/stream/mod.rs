@@ -20,6 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 
 use super::cdp::client::CdpClient;
+use crate::session_settings::IdleTimeout;
 
 /// Screencast encoding for the live stream, from `AGENT_BROWSER_STREAM_*`.
 ///
@@ -128,6 +129,9 @@ fn seq_in_serialized_frame(frame: &str) -> Option<u64> {
 pub(crate) struct IdleActivity {
     last: std::sync::Mutex<Instant>,
     notify: Notify,
+    /// The idle timeout in effect. A session setting can change it while the
+    /// daemon runs, so the shutdown loop reads it on every pass.
+    timeout: std::sync::Mutex<Option<IdleTimeout>>,
 }
 
 impl IdleActivity {
@@ -135,7 +139,16 @@ impl IdleActivity {
         Self {
             last: std::sync::Mutex::new(Instant::now()),
             notify: Notify::new(),
+            timeout: std::sync::Mutex::new(None),
         }
+    }
+
+    pub(crate) fn timeout(&self) -> Option<IdleTimeout> {
+        *self.timeout.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    pub(crate) fn set_timeout(&self, timeout: Option<IdleTimeout>) {
+        *self.timeout.lock().unwrap_or_else(|err| err.into_inner()) = timeout;
     }
 
     pub(crate) fn mark(&self) {

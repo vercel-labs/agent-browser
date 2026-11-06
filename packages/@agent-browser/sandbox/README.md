@@ -6,7 +6,7 @@ This package does not define model tools. Use it from framework-specific tools, 
 
 ## eve
 
-For eve agents, use [`@agent-browser/eve`](../eve/) — it mounts the full browser tool set and exposes the sandbox bootstrap helpers from `@agent-browser/eve/sandbox`, with this package as an internal dependency.
+For eve agents, use [`@agent-browser/eve`](../eve/). It mounts the full browser tool set and exposes the sandbox bootstrap helpers from `@agent-browser/eve/sandbox`, with this package as an internal dependency.
 
 ## Vercel Sandbox
 
@@ -55,12 +55,8 @@ await sandbox.stop();
 
 `@agent-browser/sandbox/mcp-tools.json` lists every `agent-browser mcp` tool with its title, description, input schema, annotations, and startup profiles, generated from the CLI of the same version. Use it to build tools for runtimes that cannot run `tools/list`, and call them with `agent-browser mcp call <tool> '<json>'`. Run `pnpm mcp-tools:sync` after changing MCP tools; a Rust test fails while the file is out of date.
 
-## Version Pinning
+## Version pinning
 
-By default, this package installs the matching `agent-browser` version:
-
-```ts
-agent-browser@0.30.1
-```
+By default, this package installs the `agent-browser` version that matches its own, such as `agent-browser@0.41.0` for `@agent-browser/sandbox@0.41.0`.
 
 Pass `installSpec: "latest"` or another npm spec to override that default.

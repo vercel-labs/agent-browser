@@ -908,14 +908,17 @@ async fn wait_download(
 pub async fn download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let result = download_to_path(cmd, state).await;
     if let Some(ff) = state.firefox.as_ref() {
-        let dir = ff
-            .download_dir
-            .clone()
-            .or_else(|| dirs::download_dir().map(|p| p.to_string_lossy().into_owned()));
-        if let Some(dir) = dir {
-            let params = json!({"downloadBehavior": {"type": "allowed", "destinationFolder": dir}});
-            let _ = ff.bidi.send("browser.setDownloadBehavior", params).await;
-        }
+        let behavior = match &ff.download_dir {
+            Some(dir) => json!({"type": "allowed", "destinationFolder": dir}),
+            None => Value::Null,
+        };
+        let _ = ff
+            .bidi
+            .send(
+                "browser.setDownloadBehavior",
+                json!({"downloadBehavior": behavior}),
+            )
+            .await;
     }
     result
 }
