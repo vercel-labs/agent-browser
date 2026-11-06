@@ -264,6 +264,8 @@ agent-browser network har start                # Record traffic (embeds text res
 agent-browser network har start --content all  # Embed all bodies (binary as base64)
 agent-browser network har start --content none # Sizes and headers only
 agent-browser network har stop [output.har]    # Stop and save HAR
+agent-browser network wait "/api/login" --status 200  # Wait for specific response
+agent-browser network wait "/api/data" --method POST   # Wait for POST response
 ```
 
 If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
