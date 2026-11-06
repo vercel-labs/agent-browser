@@ -66,8 +66,8 @@ pub struct FirefoxSession {
     pub net: NetContext,
     /// True once the single global network intercept is installed; it is never installed twice.
     pub intercepting: bool,
-    /// Ids of requests that have started and not yet finished or failed.
-    pub inflight: HashSet<String>,
+    /// Unfinished requests mapped to their reported browsing contexts.
+    pub inflight: HashMap<String, Option<String>>,
     /// Origins of pages this session navigated to, kept so state saves still cover them after the tab moves on.
     pub visited_origins: HashSet<String>,
     pub(crate) dispatcher: Option<AbortOnDrop>,
@@ -355,7 +355,7 @@ impl FirefoxSession {
             events,
             net,
             intercepting: false,
-            inflight: HashSet::new(),
+            inflight: HashMap::new(),
             visited_origins: HashSet::new(),
             dispatcher,
         };
@@ -372,6 +372,14 @@ impl FirefoxSession {
                 self.note_visit(url);
             }
             if let Some(children) = context["children"].as_array() {
+                if let Some(parent) = context["context"].as_str() {
+                    for child in children {
+                        if let Some(child) = child["context"].as_str() {
+                            self.context_parents
+                                .insert(child.to_string(), parent.to_string());
+                        }
+                    }
+                }
                 self.record_context_origins(children);
             }
         }
@@ -422,6 +430,7 @@ impl FirefoxSession {
     pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> Vec<Value> {
         let mut drained = Vec::new();
         while let Ok(e) = self.events.try_recv() {
+            self.track_request(&e);
             if e["method"] == "browsingContext.contextCreated" {
                 if let (Some(context), Some(opener)) = (
                     e["params"]["context"].as_str(),
@@ -460,6 +469,48 @@ impl FirefoxSession {
             drained.push(e);
         }
         drained
+    }
+
+    /// Tracks request lifetimes and removes requests belonging to destroyed contexts.
+    pub(super) fn track_request(&mut self, event: &Value) {
+        let params = &event["params"];
+        let id = params["request"]["request"].as_str();
+        match event["method"].as_str() {
+            Some("network.beforeRequestSent") => {
+                let url = params["request"]["url"].as_str().unwrap_or("");
+                if !url.starts_with("ws:") && !url.starts_with("wss:") {
+                    if let Some(id) = id {
+                        self.inflight.insert(
+                            id.to_string(),
+                            params["context"].as_str().map(str::to_string),
+                        );
+                    }
+                }
+            }
+            Some("network.responseCompleted" | "network.fetchError") => {
+                if let Some(id) = id {
+                    self.inflight.remove(id);
+                }
+            }
+            Some("browsingContext.contextDestroyed") => {
+                if let Some(context) = params["context"].as_str() {
+                    self.inflight.retain(|_, owner| {
+                        !owner.as_deref().is_some_and(|owner| {
+                            context_contains(context, owner, &self.context_parents)
+                        })
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// True while the active tab or one of its descendant frames has an unfinished request.
+    pub fn has_inflight_in_active_tab(&self) -> bool {
+        self.inflight
+            .values()
+            .filter_map(|context| context.as_deref())
+            .any(|context| context_contains(&self.top_context, context, &self.context_parents))
     }
 
     /// Runs `fut` until it finishes or a prompt opens in `context` or its owning tab. Returns `None` for the prompt.
@@ -615,6 +666,22 @@ fn apply_event(
             *dialog = None;
         }
         _ => {}
+    }
+}
+
+fn context_contains<'a>(
+    root: &str,
+    mut context: &'a str,
+    parents: &'a HashMap<String, String>,
+) -> bool {
+    loop {
+        if root == context {
+            return true;
+        }
+        match parents.get(context) {
+            Some(parent) => context = parent,
+            None => return false,
+        }
     }
 }
 
@@ -818,7 +885,7 @@ pub(crate) mod tests {
             events,
             net: NetContext::default(),
             intercepting: false,
-            inflight: HashSet::new(),
+            inflight: HashMap::new(),
             dispatcher: None,
         }
     }
@@ -1224,6 +1291,50 @@ pub(crate) mod tests {
             json!({"method":"browsingContext.userPromptClosed","params":{"context":"frame"}});
         apply_event(&close, &mut d, &mut context_parents);
         assert!(d.is_none());
+    }
+
+    #[tokio::test]
+    async fn inflight_requests_follow_tab_ancestry_and_end_on_completion_error_or_destroy() {
+        let (mut session, _, _) = fake_session().await;
+        session.record_context_origins(&[json!({
+            "context": "ctx-active",
+            "children": [{"context": "frame", "children": [{"context": "nested"}]}],
+        })]);
+        for (id, context) in [("background", Some("other")), ("unknown", None)] {
+            session.track_request(&json!({
+                "method": "network.beforeRequestSent",
+                "params": {"context": context, "request": {"request": id, "url": "http://example.com/"}},
+            }));
+        }
+        assert!(!session.has_inflight_in_active_tab());
+        session.top_context = "other".into();
+        assert!(session.has_inflight_in_active_tab());
+        session.track_request(&json!({
+            "method": "network.fetchError",
+            "params": {"request": {"request": "background"}},
+        }));
+        assert!(!session.has_inflight_in_active_tab());
+        session.top_context = "ctx-active".into();
+        session.context = "frame".into();
+        for id in ["completed", "destroyed"] {
+            session.track_request(&json!({
+                "method": "network.beforeRequestSent",
+                "params": {"context": "nested", "request": {"request": id, "url": "http://example.com/"}},
+            }));
+        }
+        assert!(session.has_inflight_in_active_tab());
+        session.track_request(&json!({
+            "method": "network.responseCompleted",
+            "params": {"request": {"request": "completed"}},
+        }));
+        assert!(!session.inflight.contains_key("completed"));
+        assert!(session.has_inflight_in_active_tab());
+        session.track_request(&json!({
+            "method": "browsingContext.contextDestroyed",
+            "params": {"context": "frame"},
+        }));
+        assert!(!session.inflight.contains_key("destroyed"));
+        assert!(!session.has_inflight_in_active_tab());
     }
 
     #[tokio::test]
