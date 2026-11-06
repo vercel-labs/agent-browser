@@ -510,7 +510,13 @@ mod tests {
                 .await
                 .unwrap();
         let server = Arc::new(server);
-        let mut state = DaemonState::new_with_stream(Some(slot), Some(server.clone()), activity);
+        let mut state = DaemonState::new_with_stream(
+            crate::session_settings::Running::defaults(),
+            Arc::new(crate::session_settings::MemStore::default()),
+            Some(slot),
+            Some(server.clone()),
+            activity,
+        );
         state.engine = "firefox".into();
         state.firefox = Some(ff);
 
