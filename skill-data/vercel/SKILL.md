@@ -114,13 +114,18 @@ Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api
 
 ```bash
 (
-  ENV_FILE="$(mktemp)"
-  vc env pull "$ENV_FILE" --environment preview --yes >/dev/null
-  FLAGS_SECRET="$(grep '^FLAGS_SECRET=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')"
-  rm "$ENV_FILE"
-  test -n "$FLAGS_SECRET"
+  if [ -z "$FLAGS_SECRET" ]; then
+    ENV_FILE="$(mktemp)"
+    vc env pull "$ENV_FILE" --environment preview --yes >/dev/null
+    FLAGS_SECRET="$(grep '^FLAGS_SECRET=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')"
+    rm "$ENV_FILE"
+  fi
+  case "$FLAGS_SECRET" in
+    "" | "[SENSITIVE]") echo "FLAGS_SECRET is not readable; ask the user for it" >&2; exit 1 ;;
+  esac
   OVERRIDE="$(FLAGS_SECRET="$FLAGS_SECRET" bunx --package flags bun -e \
     'import { encryptOverrides } from "flags"; console.log(await encryptOverrides({ "my-flag": "variant-b" }))')"
+  test -n "$OVERRIDE"
   agent-browser cookies set vercel-flag-overrides "$OVERRIDE" --url "$VERCEL_PREVIEW_URL"
 )
 
@@ -130,7 +135,7 @@ agent-browser screenshot
 
 Run this in the same session as the protected `open`, and confirm in the screenshot that the requested variant rendered before reporting. `agent-browser cookies clear` removes the override along with every other cookie, so repeat the protected `open` after clearing.
 
-If `FLAGS_SECRET` is stored as a Secret, `vc env pull` returns it empty because Secret values are write-only, and the `test -n` check stops the script. Ask the user to export `FLAGS_SECRET` in your environment, then mint the cookie from that variable instead of pulling it.
+If `FLAGS_SECRET` is stored as a Secret, `vc env pull` writes the placeholder `[SENSITIVE]` instead of the value because Secret values are write-only, and the script stops. Ask the user to export `FLAGS_SECRET` in your environment and run it again; the script uses an exported value instead of pulling one.
 
 If the app evaluates flags without the Flags SDK or through another provider, the cookie has no effect and there is no request-scoped path. Ask the user before changing the flag with `vc flags set`, record the original variant, restore it afterwards, and verify the restore with `vc flags inspect`.
 
