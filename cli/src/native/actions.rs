@@ -383,10 +383,7 @@ impl AttachedTarget {
         let (key, value) = match self {
             Self::CdpUrl(url) => ("cdpUrl", json!(url)),
             Self::CdpPort(port) => ("cdpPort", json!(port)),
-            Self::Firefox(target) => {
-                cmd.insert("engine".to_string(), json!("firefox"));
-                ("cdpUrl", json!(target))
-            }
+            Self::Firefox(target) => ("cdpUrl", json!(target)),
             Self::AutoConnect => ("autoConnect", json!(true)),
             Self::Provider(provider) => ("provider", json!(provider)),
         };
@@ -396,7 +393,8 @@ impl AttachedTarget {
 
 /// Points a launch that names no connection target at the browser the session is
 /// attached to, without the fields only a local launch honors, so it runs exactly
-/// like the original attach. Returns `None` when the launch needs no rewrite.
+/// like the original attach. A Firefox attachment supplies the endpoint without
+/// becoming an engine setting. Returns `None` when the launch needs no rewrite.
 fn resolve_launch_target(cmd: &Value, attached: Option<&AttachedTarget>) -> Option<Value> {
     let attached = attached?;
     if AttachedTarget::named_by(cmd).is_some() {
@@ -4866,6 +4864,17 @@ async fn auto_launch_with(
     result
 }
 
+/// Whether the session settings, endpoint, or current attachment select Firefox.
+fn launch_targets_firefox(
+    engine: Option<&str>,
+    firefox_target: bool,
+    attached: Option<&AttachedTarget>,
+) -> bool {
+    engine == Some("firefox")
+        || firefox_target
+        || (engine.is_none() && matches!(attached, Some(AttachedTarget::Firefox(_))))
+}
+
 async fn auto_launch_inner(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
@@ -4908,7 +4917,11 @@ async fn auto_launch_inner(
     let firefox_target = cdp
         .as_deref()
         .and_then(|target| bidi::attach::parse_attach_url(target).ok().flatten());
-    if engine.as_deref() == Some("firefox") || firefox_target.is_some() {
+    if launch_targets_firefox(
+        engine.as_deref(),
+        firefox_target.is_some(),
+        state.attached_target.as_ref(),
+    ) {
         reject_firefox_launch_extras(&enable_features, &init_script_paths, &plugins)?;
         return launch_firefox(
             state,
@@ -5955,7 +5968,6 @@ async fn launch_firefox(
     }
     state.engine = "firefox".to_string();
     if attached {
-        state.settings.set(Key::Engine, json!("firefox"));
         if let Some(target) = cdp {
             state.attached_target = Some(AttachedTarget::Firefox(target));
         }
@@ -19786,11 +19798,63 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             resolve_launch_target(&cmd, Some(&attached)),
             Some(json!({
                 "action": "launch",
-                "engine": "firefox",
                 "cdpUrl": "ws://127.0.0.1:9333/session?devtools=6080",
                 "allowedDomains": ["example.com"]
             }))
         );
+    }
+
+    #[test]
+    fn test_firefox_attach_does_not_persist_an_inferred_engine() {
+        let attached = AttachedTarget::Firefox("9333".to_string());
+        let reconnect =
+            resolve_launch_target(&json!({ "action": "launch" }), Some(&attached)).unwrap();
+        assert_eq!(reconnect, json!({ "action": "launch", "cdpUrl": "9333" }));
+        assert_eq!(launch_envelope_patch(&reconnect, None).get(Key::Engine), None);
+        assert!(launch_targets_firefox(None, false, Some(&attached)));
+        assert!(launch_targets_firefox(
+            Some("firefox"),
+            false,
+            Some(&AttachedTarget::CdpPort(9333))
+        ));
+        assert!(!launch_targets_firefox(Some("chrome"), false, Some(&attached)));
+        let configured =
+            launch_envelope_patch(&json!({ "action": "launch", "engine": "firefox" }), None);
+        assert_eq!(configured.value(Key::Engine), Some(&json!("firefox")));
+
+        let chrome = json!({ "action": "launch", "cdpPort": 9333 });
+        let patch = launch_envelope_patch(&chrome, None);
+        assert_eq!(patch.get(Key::Engine), None);
+    }
+
+    #[tokio::test]
+    async fn test_chrome_launch_replaces_an_inferred_firefox_attachment() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Cdp, json!("9333"));
+        state.attached_target = Some(AttachedTarget::Firefox("9333".to_string()));
+        state.engine = "firefox".to_string();
+        let reconnect =
+            resolve_launch_target(&json!({ "action": "launch" }), state.attached_target.as_ref())
+                .unwrap();
+        let reconnect_patch = launch_envelope_patch(&reconnect, None);
+        apply_settings_patch(&mut state, &reconnect_patch, true)
+            .await
+            .unwrap();
+        assert_eq!(state.settings.engine(), None);
+        let (target, server) = bare_cdp_server().await;
+
+        let result = handle_launch(
+            &json!({ "action": "launch", "cdpUrl": target.clone() }),
+            &mut state,
+        )
+        .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(state.attached_target, Some(AttachedTarget::CdpUrl(target)));
+        assert_eq!(state.settings.engine(), None);
+        assert_eq!(state.engine, "chrome");
+        server.abort();
     }
 
     #[test]
