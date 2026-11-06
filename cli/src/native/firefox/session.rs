@@ -19,9 +19,10 @@ use crate::native::cdp::chrome::LaunchOptions;
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-const CONTEXT_EVENTS: [&str; 2] = [
+const CONTEXT_EVENTS: [&str; 3] = [
     "browsingContext.contextCreated",
     "browsingContext.contextDestroyed",
+    "browsingContext.domContentLoaded",
 ];
 const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptOpened",
@@ -65,6 +66,7 @@ pub struct FirefoxSession {
     /// Ids of requests that have started and not yet finished or failed.
     pub inflight: HashSet<String>,
     pub(crate) dispatcher: Option<AbortOnDrop>,
+    pub visited_origins: HashSet<String>,
 }
 
 /// Builds the BiDi `proxy` capability from a `--proxy` value such as `http://host:3128`.
@@ -200,6 +202,7 @@ impl FirefoxSession {
             .ok_or("Firefox reported no browsing context")?
             .to_string();
         let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
+            viewport: options.viewport_size.map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
             user_agent: options.user_agent.clone(),
             media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
                 media: None,
@@ -214,7 +217,7 @@ impl FirefoxSession {
             dispatch_events,
             emulation.clone(),
         ));
-        let session = Self {
+        let mut session = Self {
             process: Some(process),
             headless: options.headless,
             bidi,
@@ -239,9 +242,33 @@ impl FirefoxSession {
             intercepting: false,
             inflight: HashSet::new(),
             dispatcher,
+            visited_origins: HashSet::new(),
         };
-        let _ = emulation::apply_to_context(&session, &session.context).await;
+        if let Some(contexts) = tree["contexts"].as_array() {
+            session.record_context_origins(contexts);
+        }
+        emulation::apply_to_context(&session, &session.context).await?;
         Ok(session)
+    }
+
+    fn record_context_origins(&mut self, contexts: &[Value]) {
+        for context in contexts {
+            if let Some(url) = context["url"].as_str() {
+                self.note_visit(url);
+            }
+            if let Some(children) = context["children"].as_array() {
+                self.record_context_origins(children);
+            }
+        }
+    }
+
+    pub fn note_visit(&mut self, url: &str) {
+        if let Ok(parsed) = url::Url::parse(url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" {
+                self.visited_origins.insert(origin);
+            }
+        }
     }
 
     /// Returns the stable `t<N>` id for `context`, assigning the next id the first time it is seen.
@@ -279,6 +306,11 @@ impl FirefoxSession {
                 && e["params"]["context"] == self.top_context
             {
                 self.top_context.clear();
+            }
+            if matches!(e["method"].as_str(), Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")) {
+                if let Some(url) = e["params"]["url"].as_str() {
+                    self.note_visit(url);
+                }
             }
             apply_event(&e, dialog, &mut self.context_parents);
             drained.push(e);
@@ -540,6 +572,7 @@ pub(crate) mod tests {
             shadow_ids: Default::default(),
             emulation: Arc::default(),
             download_dir: None,
+            visited_origins: HashSet::new(),
             events,
             net: NetContext::default(),
             intercepting: false,
@@ -670,6 +703,7 @@ pub(crate) mod tests {
             emulation: Arc::default(),
             download_dir: None,
             events,
+            visited_origins: HashSet::new(),
             net: NetContext::default(),
             intercepting: false,
             inflight: HashSet::new(),
@@ -711,6 +745,23 @@ pub(crate) mod tests {
             received.recv().await.unwrap();
         }
         assert_eq!(ff.drain_events(&mut None).len(), 2048);
+    }
+
+    #[tokio::test]
+    async fn tracks_navigation_events_from_any_context() {
+        let (mut session, tx, _) = fake_session().await;
+        tx.send(json!({"type": "event", "method": "browsingContext.domContentLoaded", "params": {"context": "popup", "url": "https://example.com/page"}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                session.drain_events(&mut None);
+                if session.visited_origins.contains("https://example.com") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

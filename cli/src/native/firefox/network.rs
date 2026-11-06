@@ -145,6 +145,7 @@ pub struct NetContext {
     /// Downloads seen on this session, so `wait --download` can claim one that
     /// finished before the command arrived.
     pub downloads: Arc<Mutex<DownloadLedger>>,
+    pub blank_contexts: Arc<RwLock<HashSet<String>>>,
 }
 
 impl NetContext {
@@ -325,7 +326,7 @@ async fn resolve(bidi: Arc<BidiClient>, net: NetContext, event: Value) {
         .to_string();
     let (result, fallback, fallback_params) = match event["method"].as_str() {
         Some("network.beforeRequestSent") => (
-            before_request(&bidi, &net, &event["params"]["request"]).await,
+            before_request(&bidi, &net, &event["params"]["request"], event["params"]["context"].as_str()).await,
             "network.failRequest",
             json!({"request": id}),
         ),
@@ -345,10 +346,11 @@ async fn before_request(
     bidi: &BidiClient,
     net: &NetContext,
     request: &Value,
+    context: Option<&str>,
 ) -> Result<(), String> {
     let id = request["request"].as_str().unwrap_or("");
     let url = request["url"].as_str().unwrap_or("");
-    let decision = {
+    let mut decision = {
         let mut extra = net.headers.read().await.clone();
         let origin = url::Url::parse(url)
             .ok()
@@ -376,6 +378,17 @@ async fn before_request(
             &origin_headers,
         )
     };
+    let blank = match context {
+        Some(context) => net.blank_contexts.read().await.contains(context),
+        None => false,
+    };
+    if blank && !matches!(decision, NetworkDecision::Fail | NetworkDecision::Abort) {
+        decision = NetworkDecision::Fulfill {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/html".to_string())],
+            body: "PGh0bWw+PC9odG1sPg==".to_string(),
+        };
+    }
     match decision {
         NetworkDecision::Fail | NetworkDecision::Abort => {
             bidi.send("network.failRequest", json!({"request": id}))
@@ -1280,6 +1293,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn storage_context_requests_receive_blank_page() {
+        let (ff, _tx, _, messages, _) =
+            crate::native::firefox::session::tests::fake_session_with_rdp().await;
+        let net = NetContext::default();
+        net.blank_contexts.write().await.insert("storage-tab".into());
+        before_request(
+            &ff.bidi,
+            &net,
+            &json!({"request": "r1", "url": "https://example.com/", "headers": []}),
+            Some("storage-tab"),
+        )
+        .await
+        .unwrap();
+        let sent = messages.lock().unwrap().last().unwrap().clone();
+        assert_eq!(sent["method"], "network.provideResponse");
+        assert_eq!(sent["params"]["body"]["value"], "PGh0bWw+PC9odG1sPg==");
+    }
+
+    #[tokio::test]
     async fn mocked_responses_preserve_json_cors_and_base64_over_bidi() {
         let (ff, _tx, _, messages, _) =
             crate::native::firefox::session::tests::fake_session_with_rdp().await;
@@ -1319,6 +1351,7 @@ mod tests {
                 &ff.bidi,
                 &net,
                 &json!({"request": "r1", "url": "https://api.example/data", "headers": bidi_headers(headers)}),
+                None,
             )
             .await
             .unwrap();

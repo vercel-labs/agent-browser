@@ -69,7 +69,9 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
                     .map_err(|e| {
                         format!("Navigation failed: {}", page::normalize_net_error_text(&e))
                     })?;
-                nav["url"].as_str().unwrap_or(url).to_string()
+                let landed = nav["url"].as_str().unwrap_or(url).to_string();
+                ff.note_visit(&landed);
+                landed
             }
             None => "about:blank".to_string(),
         }

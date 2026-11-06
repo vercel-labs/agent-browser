@@ -33,6 +33,7 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "storage_clear",
     "state_save",
     "state_load",
+    "dialog",
     "screenshot",
     "pdf",
     "snapshot",
@@ -55,7 +56,6 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "scrollintoview",
     "highlight",
     "dispatch",
-    "dialog",
     "fill",
     "type",
     "press",
@@ -227,6 +227,7 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
         "storage_clear" => storage::storage_clear(cmd, state).await,
         "state_save" => storage::state_save(cmd, state).await,
         "state_load" => storage::state_load(cmd, state).await,
+        "dialog" => interact::dialog(cmd, state).await,
         "screenshot" => capture::screenshot(cmd, state).await,
         "pdf" => capture::pdf(cmd, state).await,
         "snapshot" => Box::pin(snapshot::snapshot(cmd, state)).await,
@@ -249,7 +250,6 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
         "scrollintoview" => interact::scrollintoview(cmd, state).await,
         "highlight" => interact::highlight(cmd, state).await,
         "dispatch" => interact::dispatch(cmd, state).await,
-        "dialog" => interact::dialog(cmd, state).await,
         "fill" => forms::fill(cmd, state).await,
         "type" => forms::type_text(cmd, state).await,
         "press" => forms::press(cmd, state).await,
@@ -424,4 +424,5 @@ mod tests {
         state.pending_dialog = Some(dialog("ctx-background", Some("ctx-background")));
         assert!(dialog_guard("navigate", &state).is_ok());
     }
+
 }
