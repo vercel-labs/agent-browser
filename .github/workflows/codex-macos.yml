@@ -1,0 +1,41 @@
+name: Codex macOS integration
+
+on:
+  push:
+    branches: [main, 'codex/**']
+    paths:
+      - 'integrations/codex-macos/**'
+      - '.github/workflows/codex-macos.yml'
+      - '.github/workflows/release.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'integrations/codex-macos/**'
+      - '.github/workflows/codex-macos.yml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-macos-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Offline installer checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            integrations/codex-macos
+            .github/workflows
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify installer and publication boundaries
+        run: python3 -B integrations/codex-macos/checks.py
