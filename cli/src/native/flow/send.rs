@@ -156,10 +156,17 @@ pub async fn run_requests(
             }
         };
         check(req)?;
-        let wanted: Vec<&PreparedRequest> = requests[index..]
+        // Later requests are filled with what is known so far, so the replay
+        // can find their captured answers.
+        let filled: Vec<PreparedRequest> = requests[index..]
             .iter()
             .filter(|r| r.id == req.id || r.write || starts_at_replay(flow, &r.id))
+            .map(|r| match r.id == req.id {
+                true => req.clone(),
+                false => r.resolve(&bodies).unwrap_or_else(|_| r.clone()),
+            })
             .collect();
+        let wanted: Vec<&PreparedRequest> = filled.iter().collect();
         let first_attempt = results.len();
         let mut done = false;
         while let Some(tier) = next_tier(flow, req, &results[first_attempt..], &ledger) {

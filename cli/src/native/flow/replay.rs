@@ -289,7 +289,8 @@ pub fn check_replay_commands(flow: &Flow, commands: &[Value]) -> Result<(), Stri
 /// a body the same body or GraphQL operation (one endpoint serves every
 /// query). Query parameters the replay added and the recording never had,
 /// such as cache-busters, are ignored. An exact URL wins; otherwise exactly
-/// one entry must match, so an ambiguous or missing match is an error.
+/// one entry must match, so an ambiguous or missing match is an error. A
+/// reference still unfilled in the path or query matches any value.
 pub fn replay_lookup<'a>(
     entries: &'a [HarEntry],
     req: &PreparedRequest,
@@ -304,6 +305,20 @@ pub fn replay_lookup<'a>(
             .and_then(|v| v["operationName"].as_str().map(String::from))
     };
     let want = key(&req.url);
+    // A path segment that still has a reference to fill matches any segment.
+    let same_place = |got: Option<(String, String)>| match (&want, got) {
+        (Some((wh, wp)), Some((gh, gp))) => {
+            let (ws, gs): (Vec<&str>, Vec<&str>) =
+                (wp.split('/').collect(), gp.split('/').collect());
+            *wh == gh
+                && ws.len() == gs.len()
+                && ws
+                    .iter()
+                    .zip(&gs)
+                    .all(|(w, g)| w == g || (w.contains("%7B%7B") && !g.is_empty()))
+        }
+        (w, g) => *w == g,
+    };
     let want_op = operation(req.body.as_deref());
     let same_body = |e: &HarEntry| match &req.body {
         None => true,
@@ -325,7 +340,7 @@ pub fn replay_lookup<'a>(
     let candidates: Vec<&HarEntry> = entries
         .iter()
         .rev()
-        .filter(|e| e.method == req.method && key(&e.url) == want && same_body(e))
+        .filter(|e| e.method == req.method && same_place(key(&e.url)) && same_body(e))
         .collect();
     if let Some(exact) = candidates.iter().find(|e| e.url == req.url) {
         return Ok(exact);

@@ -7786,6 +7786,58 @@ mod tests {
         }
 
         #[test]
+        fn a_reference_in_a_path_finds_its_replayed_answer() {
+            let templated = PreparedRequest {
+                url: "https://a.test/items/{{@s1r1.id}}".to_string(),
+                ..prepared("s1r2")
+            };
+            let entries = vec![replayed("https://a.test/items/7")];
+            assert!(replay_lookup(&entries, &templated).is_ok());
+            // The replay does not wait out the clock for it.
+            let flow = click_flow();
+            let mut browser = ScriptBrowser::new(Vec::new(), entries.clone());
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[&templated],
+                Duration::from_secs(20),
+                soon(3000),
+            ))
+            .ok()
+            .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            // With two candidates the unfilled path is ambiguous; the filled
+            // one picks its own.
+            let entries = vec![
+                replayed("https://a.test/items/7"),
+                replayed("https://a.test/items/8"),
+            ];
+            assert!(replay_lookup(&entries, &templated).is_err());
+            let filled = PreparedRequest {
+                url: "https://a.test/items/8".to_string(),
+                ..templated.clone()
+            };
+            assert!(replay_lookup(&entries, &filled)
+                .ok()
+                .unwrap()
+                .url
+                .ends_with("/8"));
+            // A different path or depth is still no match.
+            let other = vec![
+                replayed("https://a.test/orders/7"),
+                replayed("https://a.test/items/7/x"),
+            ];
+            assert!(replay_lookup(&other, &templated).is_err());
+        }
+
+        #[test]
         fn reading_the_tab_url_cannot_outlast_the_run_deadline() {
             let flow = click_flow();
             let mut browser = ScriptBrowser::new(Vec::new(), Vec::new()).hanging_tab();
