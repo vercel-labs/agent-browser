@@ -862,14 +862,14 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FLOW_LIST,
             "List saved flows",
-            "List tasks saved with flow save, with their params and whether their last run verified.",
+            "Experimental. List tasks saved with flow save, with their params and whether their last run verified.",
             json!({ "origin": { "type": "string", "description": "Only flows for this host's site." } }),
             &[],
         ),
         tool(
             TOOL_FLOW_RUN,
             "Run saved flow",
-            "Run a saved task by sending its requests directly, falling back to the page, then to a replay of the recorded commands. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed.",
+            "Experimental. Run a saved task by sending its requests directly, falling back to the page, then to a replay of the recorded commands. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
             json!({
                 "name": { "type": "string" },
                 "params": { "type": "object", "additionalProperties": { "type": "string" } },
@@ -884,21 +884,22 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FLOW_STEPS,
             "List captured steps",
-            "List the steps a session opened with capture flow has recorded: number, command, URL, tagged request count, and whether it succeeded. Use the numbers with flow save from and to.",
+            "Experimental. List the steps a session opened with capture flow has recorded: number, command, URL, tagged request count, and whether it succeeded. Use the numbers with flow save from and to.",
             json!({}),
             &[],
         ),
         tool(
             TOOL_FLOW_SAVE,
             "Save flow",
-            "Save recorded steps as a flow so later runs can skip the browser. The session must be opened with capture flow. By default the flow starts at the last navigation after the previous save. params maps a param name to the value you typed, so later runs can change it.",
+            "Experimental. Save recorded steps as a flow so later runs can skip the browser. The session must be opened with capture flow. By default the flow starts at the last navigation after the previous save. params maps a param name to the value you typed, so later runs can change it.",
             json!({
                 "name": { "type": "string" },
                 "from": { "type": "integer", "minimum": 1, "description": "First step number; defaults to the last navigation after the previous save." },
                 "to": { "type": "integer", "minimum": 1, "description": "Last step; defaults to the latest." },
                 "description": { "type": "string", "description": "One line saying what the flow does." },
                 "params": { "type": "object", "additionalProperties": { "type": "string" } },
-                "output": { "type": "string", "description": "Request id whose response the flow returns." }
+                "output": { "type": "string", "description": "Request id whose response the flow returns." },
+                "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds to wait for requests the last step started that have no response yet." }
             }),
             &["name"],
         ),
@@ -2956,7 +2957,7 @@ fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError>
         args.push("--limit".to_string());
         args.push(limit.to_string());
     }
-    for (key, flag) in [("from", "--from"), ("to", "--to")] {
+    for (key, flag) in [("from", "--from"), ("to", "--to"), ("timeout", "--timeout")] {
         if let Some(n) = arguments.get(key).and_then(Value::as_u64) {
             args.push(flag.to_string());
             args.push(n.to_string());

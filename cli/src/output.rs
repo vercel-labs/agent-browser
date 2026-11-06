@@ -399,6 +399,9 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
                     dropped
                 ));
             }
+            if let Some(note) = data.get("reachNote").and_then(|n| n.as_str()) {
+                out.push_str(&format!("Not marked local: {}\n", note));
+            }
             out.push_str("Unverified until the first successful `flow run`.");
             Some(out)
         }
@@ -4504,7 +4507,8 @@ WebMCP (experimental):
 Saved flows (experimental, open the session with --capture flow):
   flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed
   flow save <name>           Save the steps since the last open as a flow; accepts --from <seq>,
-                             --to <seq>, --param k=v, --output <id>, and --description <text>
+                             --to <seq>, --param k=v, --output <id>, --description <text>,
+                             and --timeout <ms>
   flow run <name>            Send the saved requests directly, then from the page, then by replaying
                              the recorded commands; accepts --param k=v, --where f=v, --fields a,b,
                              --limit n, --origin <host>, and --allow-write <all|id,...>
@@ -4960,6 +4964,29 @@ pub fn print_version() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn flow_save_text_shows_why_a_flow_is_not_local() {
+        let data = serde_json::json!({
+            "name": "items",
+            "origin": "lvh.me",
+            "path": "/tmp/items.json",
+            "requests": [],
+            "params": [],
+            "reachNote": "lvh.me resolves to 127.0.0.1 on port 4719, but the browser reached it at 127.0.0.1:4720"
+        });
+        let text = super::format_flow_text(Some("flow_save"), &data).unwrap();
+        assert!(
+            text.contains("Not marked local: lvh.me resolves to 127.0.0.1"),
+            "{text}"
+        );
+        let mut plain = data.clone();
+        plain.as_object_mut().unwrap().remove("reachNote");
+        assert!(!super::format_flow_text(Some("flow_save"), &plain)
+            .unwrap()
+            .contains("Not marked local"));
+    }
+
     use super::{
         boundary_origin, format_a11y_text, format_react_tree_text, format_snapshot_delta,
         format_storage_text, format_vitals_text, format_webmcp_context, format_webmcp_text,

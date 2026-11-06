@@ -46,6 +46,10 @@ pub struct Flow {
     pub start_url: String,
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+    /// `local` when the recording reached the start host only at
+    /// non-public addresses; a run then sends only to those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<super::net::Reach>,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]

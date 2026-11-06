@@ -1,6 +1,12 @@
 //! The direct-HTTP tier: the saved request sent with the session's cookies.
 
+use std::sync::Arc;
+
+use super::net::{client_proxies, refusal_in, Reach, ReachResolver};
 use super::*;
+
+/// How long a request, or the lookup of a proxy's address, may take.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A session route (`network route`) that matches the request answers it on
 /// the HTTP tier too, so mocks apply to the whole session.
@@ -128,12 +134,16 @@ pub async fn run_http(
                 }
             })
         }
-        // A write that left the machine may have been applied.
-        Err(e) if req.write && !e.is_connect() => Err(Failure::unknown_outcome(format!(
-            "the write was sent but no response came back: {}",
-            e
-        ))),
-        Err(e) => Err(Failure::transport(format!("request failed: {}", e))),
+        Err(e) => match refusal_in(&e) {
+            // The resolver refused the destination before any connection.
+            Some(reason) => Err(Failure::refused(reason)),
+            // A write that left the machine may have been applied.
+            None if req.write && !e.is_connect() => Err(Failure::unknown_outcome(format!(
+                "the write was sent but no response came back: {}",
+                e
+            ))),
+            None => Err(Failure::transport(format!("request failed: {}", e))),
+        },
     };
     with_retry_after(tier_result(req, Tier::Http, started, outcome), retry_after)
 }
@@ -155,14 +165,37 @@ impl HttpClients {
     }
 }
 
-pub fn http_client(
+pub async fn http_client(
     filter: Option<crate::native::network::DomainFilter>,
     flow: &Flow,
 ) -> Result<HttpClients, String> {
+    let env = |k: &str| std::env::var(k).ok();
+    let (proxies, names) = client_proxies(env, reqwest::NoProxy::from_env())?;
+    let mut resolver = ReachResolver::system(Reach::of_flow(flow));
+    resolver.trusted = names.trusted;
+    resolver.stand_ins = names.stand_ins;
+    resolver.no_recorded_reach = flow.reach.is_none();
+    http_client_with(filter, flow, Arc::new(resolver), proxies)
+}
+
+/// `http_client` with the resolver and proxies given. The environment's
+/// proxies are read by `http_client` only, so a test's client has none
+/// unless it passes them.
+pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
+    filter: Option<crate::native::network::DomainFilter>,
+    flow: &Flow,
+    resolver: Arc<R>,
+    proxies: Vec<reqwest::Proxy>,
+) -> Result<HttpClients, String> {
     let build = |policy| {
-        reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder().no_proxy();
+        for p in &proxies {
+            builder = builder.proxy(p.clone());
+        }
+        builder
             .redirect(policy)
-            .timeout(Duration::from_secs(20))
+            .dns_resolver(resolver.clone())
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))
     };

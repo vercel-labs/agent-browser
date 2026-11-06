@@ -19,6 +19,9 @@ pub enum Stop {
     OutcomeUnknown,
     /// A write was accepted but its answer is not the recorded one.
     WriteApplied,
+    /// The host resolved to an address flow run does not send to; nothing
+    /// was sent, and no tier tries it.
+    AddressRefused,
 }
 
 impl Stop {
@@ -32,6 +35,7 @@ impl Stop {
             Stop::Blocked => "blocked",
             Stop::OutcomeUnknown => "outcome_unknown",
             Stop::WriteApplied => "write_applied",
+            Stop::AddressRefused => "address_refused",
         }
     }
 
@@ -50,6 +54,7 @@ impl Stop {
                 "The site accepted the write, so it was applied; do not repeat it. Check the site for the result"
             }
             Stop::Blocked => "Continue in the UI or let the user clear the challenge",
+            Stop::AddressRefused => "Nothing was sent; continue in the UI",
         }
     }
 }
@@ -177,6 +182,15 @@ impl Failure {
 
     /// A response that ends the run: another tier would get the same answer,
     /// and it does not mean the site changed.
+    /// The resolver refused the destination before any connection: the
+    /// run ends without trying another tier.
+    pub fn refused(reason: String) -> Failure {
+        Failure {
+            stop: Some(Stop::AddressRefused),
+            ..Failure::new(false, None, reason)
+        }
+    }
+
     pub(crate) fn stop(stop: Stop, status: u16, reason: String) -> Failure {
         Failure {
             status: Some(status),
