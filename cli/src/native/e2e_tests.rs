@@ -801,7 +801,7 @@ async fn e2e_webmcp_ordinary_page_stays_quiet_without_reprobing() {
         .send_command_no_params("WebMCP.disable", Some(&session))
         .await
         .unwrap();
-    let resp = execute_command(&json!({"id": "register", "action": "evaluate", "script": "(navigator.modelContext ?? document.modelContext).registerTool({name: 'probe', description: 'probe', inputSchema: {type: 'object'}, execute: async () => ({ok: true})}); true"}), &mut state).await;
+    let resp = execute_command(&json!({"id": "register", "action": "evaluate", "script": "document.modelContext.registerTool({name: 'probe', description: 'probe', inputSchema: {type: 'object'}, execute: async () => ({ok: true})}); true"}), &mut state).await;
     assert_success(&resp);
     assert!(get_data(&resp).get("webmcp").is_none());
     assert_eq!(state.webmcp.observations.len(), 1);
