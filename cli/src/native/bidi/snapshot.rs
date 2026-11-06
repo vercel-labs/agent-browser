@@ -552,7 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn lagged_frame_events_do_not_abort_wait() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         let (tx, events) = broadcast::channel(1024);
         ff.frames = Some(FrameWatch {
             events,
@@ -585,7 +585,7 @@ mod tests {
 
     #[tokio::test]
     async fn closed_frame_events_report_a_terminal_error() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         let (tx, events) = broadcast::channel(1024);
         drop(tx);
         ff.frames = Some(FrameWatch {

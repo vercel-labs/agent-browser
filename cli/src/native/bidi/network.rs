@@ -1349,13 +1349,13 @@ mod tests {
     #[tokio::test]
     async fn storage_context_requests_receive_blank_page() {
         let (ff, _tx, _, messages, _) =
-            crate::native::firefox::session::tests::fake_session_with_rdp().await;
+            crate::native::bidi::session::tests::fake_session_with_rdp().await;
         let net = NetContext::default();
         net.blank_contexts.write().await.insert("storage-tab".into());
         before_request(
             &ff.bidi,
             &net,
-            &json!({"request": "r1", "url": "https://example.com/", "headers": []}),
+            &RequestData { request: "r1".into(), url: "https://example.com/".into(), ..Default::default() },
             Some("storage-tab"),
         )
         .await
@@ -1726,7 +1726,7 @@ mod tests {
 
     #[tokio::test]
     async fn tracked_requests_include_request_body() {
-        let (ff, _, _) = crate::native::firefox::session::tests::fake_session_with(|v| {
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(|v| {
             if v["params"]["dataType"] == "request" {
                 json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD10cmFja2Vk"}})
             } else {
