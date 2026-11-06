@@ -273,6 +273,9 @@ impl StreamServer {
         }
         if current.as_ref().map(|live| &live.context) != live.as_ref().map(|live| &live.context) {
             self.frame_watch.send_replace(None);
+            let _ = self
+                .frame_tx
+                .send(json!({"type": "frame_clear"}).to_string());
         }
         *current = live;
     }
@@ -918,6 +921,46 @@ mod tests {
         assert_eq!(current.modifiers.lock().await.get("ctx-old"), Some(&8));
         let mut ws = connect_client(server.port()).await;
         expect_no_frame(&mut ws, 200).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_firefox_live_clear_reaches_connected_clients() {
+        let (ff, _events, _) = crate::native::bidi::session::tests::fake_session().await;
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "firefox-frame-clear".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+        server
+            .set_firefox_live(Some(FirefoxLive {
+                bidi: ff.bidi.clone(),
+                context: "ctx-old".into(),
+                contexts: Default::default(),
+                modifiers: Default::default(),
+            }))
+            .await;
+        server.broadcast_frame(r#"{"type":"frame","data":"old-tab"}"#);
+
+        let mut ws = connect_client(server.port()).await;
+        assert_eq!(next_frame(&mut ws).await["data"], "old-tab");
+
+        server.set_firefox_live(None).await;
+        let message = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for frame clear")
+            .expect("stream ended")
+            .expect("ws error");
+        let Message::Text(text) = message else {
+            panic!("expected text message");
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["type"],
+            "frame_clear"
+        );
         server.shutdown().await;
     }
 

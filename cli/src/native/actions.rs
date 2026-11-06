@@ -275,6 +275,7 @@ struct DrainedEvents {
     attached_page_sessions: Vec<(TargetInfo, String)>,
     /// Cross-origin iframe (frame_id, session_id) pairs from Target.attachedToTarget.
     attached_iframe_sessions: Vec<(String, String)>,
+    waiting_for_debugger_sessions: HashSet<String>,
     /// Worker-like targets that can initiate network traffic but do not support
     /// page-domain setup.
     attached_worker_sessions: Vec<(TargetInfo, String)>,
@@ -1263,12 +1264,9 @@ impl DaemonState {
                     bidi::session::dialog_blocks_tab(dialog.owner_context.as_deref(), &live.context)
                 })
             });
-            self.firefox_poller = live
-                .clone()
-                .map(|live| bidi::stream::spawn_poller(live, Arc::clone(&server), paused));
-            server.set_firefox_live(live).await;
+            self.firefox_poller = None;
+            server.set_firefox_live(live.clone()).await;
             let sc = server.is_screencasting().await;
-            let (vw, vh) = server.viewport().await;
             if let Some(ref mgr) = self.browser {
                 server
                     .bind_cdp_session_and_broadcast_tabs(session_id, &mgr.tab_list())
@@ -1281,9 +1279,12 @@ impl DaemonState {
                     .bind_cdp_session_and_broadcast_tabs(session_id, &[])
                     .await;
             }
+            let (vw, vh) = server.viewport().await;
             server
                 .broadcast_status(connected, sc, vw, vh, &self.engine)
                 .await;
+            self.firefox_poller =
+                live.map(|live| bidi::stream::spawn_poller(live, Arc::clone(&server), paused));
         }
     }
 
@@ -1470,7 +1471,7 @@ impl DaemonState {
                             iframe_sid,
                             filter.as_ref(),
                             has_proxy_creds,
-                            false,
+                            drained.waiting_for_debugger_sessions.contains(iframe_sid),
                         )
                         .await?;
                     }
@@ -1506,7 +1507,7 @@ impl DaemonState {
                             page_sid,
                             filter.as_ref(),
                             has_proxy_creds,
-                            false,
+                            drained.waiting_for_debugger_sessions.contains(page_sid),
                         )
                         .await?;
                     }
@@ -1819,6 +1820,7 @@ impl DaemonState {
         let mut destroyed_targets: Vec<String> = Vec::new();
         let mut attached_page_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
+        let mut waiting_for_debugger_sessions = HashSet::new();
         let mut attached_worker_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
@@ -1920,10 +1922,20 @@ impl DaemonState {
                             continue;
                         }
                         "Target.attachedToTarget" => {
-                            if let (Some(sid), Some(target_info_value)) = (
-                                event.params.get("sessionId").and_then(|v| v.as_str()),
-                                event.params.get("targetInfo"),
-                            ) {
+                            let sid = event.params.get("sessionId").and_then(|v| v.as_str());
+                            if event
+                                .params
+                                .get("waitingForDebugger")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                            {
+                                if let Some(sid) = sid {
+                                    waiting_for_debugger_sessions.insert(sid.to_string());
+                                }
+                            }
+                            if let (Some(sid), Some(target_info_value)) =
+                                (sid, event.params.get("targetInfo"))
+                            {
                                 match serde_json::from_value::<TargetInfo>(
                                     target_info_value.clone(),
                                 ) {
@@ -1960,6 +1972,7 @@ impl DaemonState {
                             if let Some(sid) =
                                 event.params.get("sessionId").and_then(|v| v.as_str())
                             {
+                                waiting_for_debugger_sessions.remove(sid);
                                 if let Some(frame_id) =
                                     self.iframe_sessions
                                         .iter()
@@ -2402,6 +2415,7 @@ impl DaemonState {
             destroyed_targets,
             attached_page_sessions,
             attached_iframe_sessions,
+            waiting_for_debugger_sessions,
             attached_worker_sessions,
             attached_other_sessions,
             detached_iframe_sessions,
@@ -5373,7 +5387,7 @@ async fn validate_restored_state(state: &DaemonState) -> Result<(), String> {
     Ok(())
 }
 
-fn mark_explicit_storage_state_loaded(state: &mut DaemonState, path: &str) {
+pub(crate) fn mark_explicit_storage_state_loaded(state: &mut DaemonState, path: &str) {
     if state.session_name.is_none() && state.restore_status == "not_configured" {
         return;
     }
@@ -5478,6 +5492,7 @@ pub(crate) async fn auto_save_restore_state(
     }
 
     let session_id = state.session_id.clone();
+    bidi::network::drain(state).await;
     if let Some(ff) = state.firefox.as_mut() {
         return match bidi::storage::save_auto_state(ff, &session_name, &session_id).await {
             Ok(path) => {
@@ -16952,6 +16967,10 @@ mod tests {
         let drained = state.drain_cdp_events();
         assert_eq!(drained.attached_worker_sessions.len(), 1);
         assert_eq!(drained.attached_worker_sessions[0].1, "new");
+        assert_eq!(
+            drained.waiting_for_debugger_sessions,
+            HashSet::from(["new".to_string()])
+        );
     }
 
     #[test]

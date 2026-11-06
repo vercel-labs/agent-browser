@@ -21,9 +21,10 @@ const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 const DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 const ATTACH_DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-const CONTEXT_EVENTS: [&str; 2] = [
+const CONTEXT_EVENTS: [&str; 3] = [
     "browsingContext.contextCreated",
     "browsingContext.contextDestroyed",
+    "browsingContext.domContentLoaded",
 ];
 const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptOpened",
@@ -44,6 +45,7 @@ pub struct FirefoxSession {
     /// Stable `t<N>` ids keyed by BiDi context; assigned on first sight and never reused.
     pub tab_ids: HashMap<String, u32>,
     pub(crate) context_parents: HashMap<String, String>,
+    top_context_openers: HashMap<String, String>,
     next_tab_id: u32,
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
@@ -308,6 +310,7 @@ impl FirefoxSession {
             .clone();
         let next_tab_id = contexts.len() as u32 + 1;
         let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
+            viewport: options.viewport_size.map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
             user_agent: options.user_agent.clone(),
             media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
                 media: None,
@@ -322,7 +325,7 @@ impl FirefoxSession {
             dispatch_events,
             emulation.clone(),
         ));
-        let session = Self {
+        let mut session = Self {
             process,
             headless: !attached && options.headless,
             bidi,
@@ -334,6 +337,7 @@ impl FirefoxSession {
                 .map(|(index, context)| (context, index as u32 + 1))
                 .collect(),
             context_parents: HashMap::new(),
+            top_context_openers: HashMap::new(),
             next_tab_id,
             top_context: context.clone(),
             context,
@@ -353,11 +357,24 @@ impl FirefoxSession {
             visited_origins: HashSet::new(),
             dispatcher,
         };
-        let _ = emulation::apply_to_context(&session, &session.context).await;
+        if let Some(contexts) = tree["contexts"].as_array() {
+            session.record_context_origins(contexts);
+        }
+        emulation::apply_to_context(&session, &session.context).await?;
         Ok(session)
     }
 
-    /// Records the origin of a URL the session navigated to.
+    fn record_context_origins(&mut self, contexts: &[Value]) {
+        for context in contexts {
+            if let Some(url) = context["url"].as_str() {
+                self.note_visit(url);
+            }
+            if let Some(children) = context["children"].as_array() {
+                self.record_context_origins(children);
+            }
+        }
+    }
+
     pub fn note_visit(&mut self, url: &str) {
         if let Ok(parsed) = url::Url::parse(url) {
             let origin = parsed.origin().ascii_serialization();
@@ -403,14 +420,36 @@ impl FirefoxSession {
     pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> Vec<Value> {
         let mut drained = Vec::new();
         while let Ok(e) = self.events.try_recv() {
-            if e["method"] == "browsingContext.contextCreated"
-                && e["params"]["originalOpener"].is_string()
-            {
-                self.top_context = e["params"]["context"].as_str().unwrap_or_default().into();
-            } else if e["method"] == "browsingContext.contextDestroyed"
-                && e["params"]["context"] == self.top_context
-            {
-                self.top_context.clear();
+            if e["method"] == "browsingContext.contextCreated" {
+                if let (Some(context), Some(opener)) = (
+                    e["params"]["context"].as_str(),
+                    e["params"]["originalOpener"].as_str(),
+                ) {
+                    self.top_context_openers
+                        .insert(context.to_string(), opener.to_string());
+                    self.top_context = context.to_string();
+                }
+            } else if e["method"] == "browsingContext.contextDestroyed" {
+                if let Some(context) = e["params"]["context"].as_str() {
+                    let closes_active_tab = self.context == context
+                        || owner_tab(&self.context, &self.context_parents) == context;
+                    if context == self.top_context {
+                        self.top_context =
+                            self.top_context_openers.remove(context).unwrap_or_default();
+                    } else {
+                        self.top_context_openers.remove(context);
+                    }
+                    self.top_context_openers
+                        .retain(|_, opener| opener.as_str() != context);
+                    if closes_active_tab {
+                        self.context = self.top_context.clone();
+                    }
+                }
+            }
+            if matches!(e["method"].as_str(), Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")) {
+                if let Some(url) = e["params"]["url"].as_str() {
+                    self.note_visit(url);
+                }
             }
             apply_event(&e, dialog, &mut self.context_parents);
             drained.push(e);
@@ -747,6 +786,7 @@ pub(crate) mod tests {
             context: "ctx-active".into(),
             tab_ids: HashMap::from([("ctx-active".into(), 1)]),
             context_parents: HashMap::new(),
+            top_context_openers: HashMap::new(),
             next_tab_id: 2,
             top_context: "ctx-active".into(),
             refs: HashMap::new(),
@@ -758,11 +798,11 @@ pub(crate) mod tests {
             shadow_ids: Default::default(),
             emulation: Arc::default(),
             download_dir: None,
+            visited_origins: HashSet::new(),
             events,
             net: NetContext::default(),
             intercepting: false,
             inflight: HashSet::new(),
-            visited_origins: HashSet::new(),
             dispatcher: None,
         }
     }
@@ -1080,6 +1120,50 @@ pub(crate) mod tests {
             received.recv().await.unwrap();
         }
         assert_eq!(ff.drain_events(&mut None).len(), 2048);
+    }
+
+    #[tokio::test]
+    async fn drain_events_restores_popup_opener_when_popup_closes() {
+        let (mut ff, tx, _) = fake_session().await;
+        ff.context = "tab-3".into();
+        ff.top_context = "tab-3".into();
+        let mut received = ff.bidi.subscribe_buffered();
+        tx.send(json!({
+            "method": "browsingContext.contextCreated",
+            "params": {"context": "popup", "originalOpener": "tab-3"}
+        }))
+        .unwrap();
+        received.recv().await.unwrap();
+        ff.drain_events(&mut None);
+        assert_eq!(ff.top_context, "popup");
+        ff.context = "popup".into();
+
+        tx.send(json!({
+            "method": "browsingContext.contextDestroyed",
+            "params": {"context": "popup"}
+        }))
+        .unwrap();
+        received.recv().await.unwrap();
+        ff.drain_events(&mut None);
+        assert_eq!(ff.top_context, "tab-3");
+        assert_eq!(ff.context, "tab-3");
+    }
+
+    #[tokio::test]
+    async fn tracks_navigation_events_from_any_context() {
+        let (mut session, tx, _) = fake_session().await;
+        tx.send(json!({"type": "event", "method": "browsingContext.domContentLoaded", "params": {"context": "popup", "url": "https://example.com/page"}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                session.drain_events(&mut None);
+                if session.visited_origins.contains("https://example.com") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
