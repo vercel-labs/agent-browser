@@ -1679,7 +1679,7 @@ fn main() {
     // Handle state management commands locally — these are pure file operations
     // that don't need a daemon, avoiding an unnecessary daemon startup that
     // would lack runtime config like session_name.
-    if let Some(result) = native::state::dispatch_state_command(&cmd) {
+    if let Some(result) = native::state::dispatch_state_command(&cmd, &flags.session) {
         let action = cmd.get("action").and_then(|v| v.as_str());
         let resp = match result {
             Ok(data) => connection::Response {

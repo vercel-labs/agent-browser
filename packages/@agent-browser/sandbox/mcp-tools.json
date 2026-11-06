@@ -3798,7 +3798,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Clear saved state.",
+      "description": "Clear saved state for one restore key, or every saved state with all=true. One is required. Ambiguous legacy files prevent named clearing without deleting any files.",
       "inputSchema": {
         "properties": {
           "all": {

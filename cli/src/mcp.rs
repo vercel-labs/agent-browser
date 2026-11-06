@@ -6267,7 +6267,7 @@ mod tests {
         assert_eq!(parse(json!({"all": true}))["all"], true);
         let bare = parse(json!({}));
         assert!(bare.get("sessionName").is_none() && bare.get("all").is_none());
-        let err = crate::native::state::dispatch_state_command(&bare)
+        let err = crate::native::state::dispatch_state_command(&bare, "default")
             .unwrap()
             .unwrap_err();
         assert!(err.contains("needs a session name or --all"));

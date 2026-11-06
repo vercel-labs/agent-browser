@@ -3537,7 +3537,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "state_save" => handle_state_save(cmd, state).await,
         "state_load" => handle_state_load(cmd, state).await,
         "state_list" | "state_show" | "state_clear" | "state_clean" | "state_rename" => {
-            state::dispatch_state_command(cmd)
+            state::dispatch_state_command(cmd, &state.session_id)
                 .expect("dispatch_state_command must handle all state_* actions matched here")
         }
         "trace_start" => handle_trace_start(state).await,
@@ -5092,7 +5092,7 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
             return;
         }
     };
-    if let Some(path) = state::find_auto_state_file(&session_name) {
+    if let Some(path) = state::find_auto_state_file(&session_name, &state.session_id) {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 match state::load_state(&mgr.client, session_id, &path).await {
@@ -5116,7 +5116,9 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
                 }
             }
         }
-    } else if let Some(path) = state::find_ambiguous_auto_state_file(&session_name) {
+    } else if let Some(path) =
+        state::find_ambiguous_auto_state_file(&session_name, &state.session_id)
+    {
         state.restore_status = "skipped_ambiguous".to_string();
         state.restore_status_detail = Some(format!(
             "Skipped legacy state file {} with ambiguous ownership; use `agent-browser state load <path>` after confirming its owner.",

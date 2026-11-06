@@ -108,7 +108,7 @@ Use `state save`, `state load`, and `--state <path>` when you need an explicit p
 
 ### Ambiguous legacy state files
 
-If a legacy filename has multiple plausible owners for a restore key, automatic restore skips it (`restoreStatus: "skipped_ambiguous"` when no unambiguous state file exists) and allows the session to launch and save a new `v2@.<restore-key>.<session-id>.json` file. Named `state clear <name>` fails before changing any state files when an ambiguous legacy file or `.previous` backup matches `<name>`.
+Legacy state files are named `<restore-key>-<session-id>.json`, and both halves can contain hyphens, so one name can fit two restore keys. The running session ID decides: a legacy file whose session ID is the current session belongs to the key in front of it, so `auth` saved in `worker-one` is restored and cleared from `worker-one` and never claimed by `auth-worker`. A legacy file from another session is ambiguous when it fits several keys: automatic restore skips it (`restoreStatus: "skipped_ambiguous"` when no unambiguous state file exists) and allows the session to launch and save a new `v2@.<restore-key>.<session-id>.json` file. Named `state clear <name>` fails before changing any state files when an ambiguous legacy file or `.previous` backup matches `<name>`.
 
 Preserve the reported files in a secure location outside the managed sessions directory, keeping their filenames and suffixes. Verify each file's owner from your records; if you cannot confirm ownership, do not load it. After confirming ownership, use `agent-browser state load <path>` to load the preserved file into the intended session. Encrypted files require the original `AGENT_BROWSER_ENCRYPTION_KEY` in the daemon's environment.
 
