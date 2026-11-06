@@ -273,12 +273,14 @@ If HAR export fails, recording and captured requests remain available. Fix the d
 ```bash
 agent-browser --capture flow open <url>               # Open a session that records its commands and requests
 agent-browser flow steps [--json]                     # Recorded steps: seq, command, URL, request count, ok or failed
-agent-browser flow save <name> [--param k=v]... [--output <id>] [--description <text>]  # Keep first-party JSON requests, turn values into params; --output takes a saved id (s1r1, numbered within the range) or a capture id s<step>r<n>; an id that means two requests is refused
+agent-browser flow save <name> [--param k=v]... [--output <id>] [--description <text>] [--timeout <ms>]  # Keep first-party JSON requests, turn values into params; --output takes a saved id (s1r1, numbered within the range) or a capture id s<step>r<n>; an id that means two requests is refused
 agent-browser flow save <name> --from <seq> --to <seq>  # Save a range of steps
 agent-browser flow run <name> [--param k=v]...        # Send the saved requests over HTTP
 agent-browser flow run <name> --where field=value --fields a,b.c --limit 5  # Return only matching items and fields
 agent-browser flow list [--origin <host>]             # Saved flows, with params and verified state
 ```
+
+`flow save` waits for first-party requests the range's last step started that have no response yet, up to the command timeout (`--timeout` to wait less); a response whose body gets no bytes for 500 ms after its headers (a long poll) is not waited on. Requests left out are reported as `still loading at save`, also in the error when nothing else was recorded.
 
 `--capture flow` is a launch setting: on a running session without capture it relaunches the browser with capture on, and later commands that repeat or omit it do not relaunch. Every recorded command returns `recorded: {seq}` in JSON. Failed commands stay in the recording with `ok: false`. Saving does not stop the capture, so one session can save several flows; by default `flow save` starts at the last navigation after the previous save. `close` reports `unsaved: {steps: N}` when steps after the last save exist. `har stop` is unavailable while capture is on; use `flow save`.
 
