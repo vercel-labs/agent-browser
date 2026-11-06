@@ -20758,7 +20758,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             None,
             false,
             None,
-            false,
+            Vec::new(),
             false,
         )
         .await

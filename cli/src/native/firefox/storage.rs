@@ -5,7 +5,6 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 
 use super::actions::session;
-use super::page::normalize_net_error_text;
 use super::session::FirefoxSession;
 use crate::native::actions::{self as chrome, DaemonState};
 use crate::native::cookies::Cookie;
@@ -684,23 +683,41 @@ mod tests {
 
     #[tokio::test]
     async fn unreachable_origin_is_skipped_and_restore_continues() {
-        use super::super::session::tests::{fake_session_with_replies, FakeReply};
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
 
-        let (mut ff, _tx, _) = fake_session_with_replies(|request| {
-            if request["method"] == "browsingContext.navigate"
-                && request["params"]["url"] == "https://unreachable.example/"
-            {
-                FakeReply::Error {
-                    error: "unknown error",
-                    message: "unreachable",
-                }
-            } else if request["method"] == "script.callFunction" {
-                FakeReply::Result(json!({"type": "boolean", "value": true}))
-            } else {
-                FakeReply::Result(json!({}))
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let id = request["id"].clone();
+                let reply = if request["method"] == "browsingContext.navigate"
+                    && request["params"]["url"] == "https://unreachable.example/"
+                {
+                    json!({"type":"error","id":id,"error":"unknown error","message":"unreachable"})
+                } else if request["method"] == "script.callFunction" {
+                    json!({
+                        "type": "success",
+                        "id": id,
+                        "result": {
+                            "type": "success",
+                            "result": {"type": "boolean", "value": true}
+                        }
+                    })
+                } else {
+                    json!({"type":"success","id":id,"result":{}})
+                };
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
             }
-        })
-        .await;
+        });
+        let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
+        ff.bidi = std::sync::Arc::new(super::super::bidi::BidiClient::connect(&url).await.unwrap());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(
@@ -730,6 +747,7 @@ mod tests {
 
         assert_eq!(skipped, vec!["https://unreachable.example".to_string()]);
         assert!(ff.visited_origins.contains("https://reachable.example"));
+        server.abort();
     }
 
     #[test]

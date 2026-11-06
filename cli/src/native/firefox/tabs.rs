@@ -4,10 +4,10 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use super::actions::session;
+use super::bidi::{remote_to_json, BidiClient};
 use super::emulation;
 use super::page;
 use crate::native::actions::{self as chrome, DaemonState};
-use super::bidi::{remote_to_json, BidiClient};
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 
 /// Opens a tab and makes it active. Must return what Chrome's `handle_tab_new` returns,
