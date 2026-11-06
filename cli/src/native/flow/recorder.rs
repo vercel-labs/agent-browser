@@ -438,8 +438,9 @@ impl FlowRecorder {
         self.gaps_of_loading(from, to, entries, None)
     }
 
-    /// Whether a request of the range is still loading and not `stalled`:
-    /// one with no response yet, or whose body is still arriving.
+    /// Whether a request of the range is still loading and worth waiting
+    /// on: one the last step started that has no response yet, or one whose
+    /// body is still arriving (not `stalled`).
     pub fn awaiting_response(
         &self,
         from: Option<u64>,
@@ -475,7 +476,16 @@ impl FlowRecorder {
         entries
             .iter()
             .filter(|e| e.loading_finished_timestamp.is_none() && may_become_candidate(e, &policy))
-            .filter(|e| e.status.is_none() || stalled.is_none_or(|s| !s(e)))
+            .filter(|e| match stalled {
+                None => true,
+                // A request with no answer yet is waited on only if the last
+                // step started it; one from an earlier step outlived the
+                // steps after it, as a long poll does.
+                Some(_) if e.status.is_none() => {
+                    self.request_tags.get(&e.request_id) == Some(&last)
+                }
+                Some(s) => !s(e),
+            })
             .filter_map(|e| {
                 let seq = *self.request_tags.get(&e.request_id)?;
                 let index = commands.iter().position(|(s, _)| *s == seq)?;
