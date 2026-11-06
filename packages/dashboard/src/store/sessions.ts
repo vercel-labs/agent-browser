@@ -7,6 +7,7 @@ import type { SessionInfo } from "@/types";
 import { type ExecResult, execCommand, killSession, sessionArgs } from "@/lib/exec";
 import { getDashboardApiPath, getSessionTabsPath } from "@/lib/dashboard-routes";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
+import { disposeChat } from "@/store/chat";
 import { streamTabsAtom, streamEngineAtom } from "@/store/stream";
 
 function getPort(): number {
@@ -121,21 +122,13 @@ function parseExecError(result: ExecResult): string {
   return "";
 }
 
-const CHAT_STORAGE_PREFIX = "dashboard-chat-";
-
-function clearChatStorage(sessionName: string) {
-  try {
-    sessionStorage.removeItem(`${CHAT_STORAGE_PREFIX}${sessionName}`);
-  } catch { /* ignore */ }
-}
-
 export const closeSessionAtom = atom(null, (get, set, port: number) => {
   const sessions = get(sessionsAtom);
   const s = sessions.find((x) => x.port === port)?.session;
   if (s) {
     set(closingSessionsAtom, (prev) => new Set(prev).add(s));
+    disposeChat(s);
     execCommand(sessionArgs(s, "close"));
-    clearChatStorage(s);
   }
 });
 
@@ -144,8 +137,8 @@ export const killSessionAtom = atom(null, (get, set, port: number) => {
   const s = sessions.find((x) => x.port === port)?.session;
   if (s) {
     set(closingSessionsAtom, (prev) => new Set(prev).add(s));
+    disposeChat(s);
     killSession(s);
-    clearChatStorage(s);
   }
 });
 
@@ -154,8 +147,8 @@ export const closeAllSessionsAtom = atom(null, (get, set) => {
   for (const s of sessions) {
     if (!s.pending && !s.closing) {
       set(closingSessionsAtom, (prev) => new Set(prev).add(s.session));
+      disposeChat(s.session);
       execCommand(sessionArgs(s.session, "close"));
-      clearChatStorage(s.session);
     }
   }
 });
@@ -229,6 +222,10 @@ export function useSessionsSync(pollInterval = 5000) {
             failCountRef.current = 0;
             const data: SessionInfo[] = await resp.json();
             data.sort((a, b) => a.session.localeCompare(b.session));
+            const names = new Set(data.map((x) => x.session));
+            for (const prev of get(polledSessionsAtom)) {
+              if (!names.has(prev.session)) disposeChat(prev.session);
+            }
             set(polledSessionsAtom, data);
 
             // Reconcile pending/closing

@@ -41,12 +41,37 @@ pub async fn click(
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
+    click_element(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        button,
+        click_count,
+        iframe_sessions,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn click_element(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    button: &str,
+    click_count: i32,
+    iframe_sessions: &HashMap<String, String>,
+    require_actionable: bool,
+) -> Result<ClickResult, String> {
     let (x, y, effective_session_id) = resolve_element_center(
         client,
         session_id,
         ref_map,
         selector_or_ref,
         iframe_sessions,
+        require_actionable,
     )
     .await?;
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
@@ -102,6 +127,7 @@ pub async fn hover(
         ref_map,
         selector_or_ref,
         iframe_sessions,
+        false,
     )
     .await?;
     let offset =
@@ -273,7 +299,6 @@ pub async fn type_text_into_active_context(
                         text: text_str.clone(),
                         unmodified_text: text_str,
                         windows_virtual_key_code: Some(key_code),
-                        native_virtual_key_code: Some(key_code),
                         modifiers: None,
                     },
                     Some(session_id),
@@ -290,7 +315,6 @@ pub async fn type_text_into_active_context(
                         text: None,
                         unmodified_text: None,
                         windows_virtual_key_code: Some(key_code),
-                        native_virtual_key_code: Some(key_code),
                         modifiers: None,
                     },
                     Some(session_id),
@@ -357,7 +381,6 @@ pub async fn press_key_with_modifiers(
                 text: text.clone(),
                 unmodified_text: text.clone(),
                 windows_virtual_key_code: Some(key_code),
-                native_virtual_key_code: Some(key_code),
                 modifiers,
             },
             Some(session_id),
@@ -374,7 +397,6 @@ pub async fn press_key_with_modifiers(
                 text: None,
                 unmodified_text: None,
                 windows_virtual_key_code: Some(key_code),
-                native_virtual_key_code: Some(key_code),
                 modifiers,
             },
             Some(session_id),
@@ -540,7 +562,7 @@ pub async fn check(
     )
     .await?;
     if !is_checked {
-        let result = click(
+        let result = click_element(
             client,
             session_id,
             ref_map,
@@ -548,6 +570,7 @@ pub async fn check(
             "left",
             1,
             iframe_sessions,
+            false,
         )
         .await?;
         position = Some(result.position);
@@ -594,7 +617,7 @@ pub async fn uncheck(
     )
     .await?;
     if is_checked {
-        let result = click(
+        let result = click_element(
             client,
             session_id,
             ref_map,
@@ -602,6 +625,7 @@ pub async fn uncheck(
             "left",
             1,
             iframe_sessions,
+            false,
         )
         .await?;
         position = Some(result.position);
@@ -947,6 +971,7 @@ pub async fn tap_touch(
         ref_map,
         selector_or_ref,
         iframe_sessions,
+        false,
     )
     .await?;
 

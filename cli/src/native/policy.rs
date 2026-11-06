@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 
@@ -16,10 +15,12 @@ pub enum PolicyResult {
 }
 
 /// Policy configuration loaded from a JSON file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActionPolicy {
     #[serde(skip)]
     path: PathBuf,
+    #[serde(skip)]
+    load_error: Option<String>,
     #[serde(default)]
     default: Option<String>,
     #[serde(default)]
@@ -30,15 +31,14 @@ pub struct ActionPolicy {
     confirm: Option<Vec<String>>,
 }
 
-/// Confirmation categories parsed from AGENT_BROWSER_CONFIRM_ACTIONS.
+/// Confirmation categories parsed from the confirm-actions setting.
 #[derive(Debug, Clone)]
 pub struct ConfirmActions {
     pub categories: HashSet<String>,
 }
 
 impl ConfirmActions {
-    pub fn from_env() -> Option<Self> {
-        let val = env::var("AGENT_BROWSER_CONFIRM_ACTIONS").ok()?;
+    pub fn parse(val: &str) -> Option<Self> {
         if val.is_empty() {
             return None;
         }
@@ -71,17 +71,26 @@ impl ActionPolicy {
         Ok(policy)
     }
 
-    /// Load policy if AGENT_BROWSER_ACTION_POLICY env var is set.
-    /// Falls back to AGENT_BROWSER_POLICY for backwards compatibility.
-    pub fn load_if_exists() -> Option<Self> {
-        let path = env::var("AGENT_BROWSER_ACTION_POLICY")
-            .or_else(|_| env::var("AGENT_BROWSER_POLICY"))
-            .ok()?;
-        Self::load(&path).ok()
+    /// Load the policy at `path`. A file that cannot be loaded yields a policy
+    /// that denies every action except `close`.
+    pub fn from_path(path: &str) -> Self {
+        let mut policy = Self {
+            path: PathBuf::from(path),
+            ..Self::default()
+        };
+        policy.reload();
+        policy
     }
 
     /// Check whether an action is allowed, denied, or requires confirmation.
     pub fn check(&self, action: &str) -> PolicyResult {
+        if let Some(err) = &self.load_error {
+            if action == "close" {
+                return PolicyResult::Allow;
+            }
+            return PolicyResult::Deny(format!("action policy failed to load: {}", err));
+        }
+
         if let Some(deny) = &self.deny {
             if deny.iter().any(|a| a == action) {
                 return PolicyResult::Deny(format!("Action '{}' is denied by policy", action));
@@ -94,8 +103,8 @@ impl ActionPolicy {
             }
         }
 
-        if let Some(allow) = &self.allow {
-            if !allow.is_empty() && !allow.iter().any(|a| a == action) {
+        if let Some(allow) = self.allow.as_ref().filter(|a| !a.is_empty()) {
+            if !allow.iter().any(|a| a == action) {
                 let is_default_deny = self
                     .default
                     .as_deref()
@@ -120,22 +129,20 @@ impl ActionPolicy {
         PolicyResult::Allow
     }
 
-    /// Reload policy from the file. Re-reads the JSON and updates the policy.
-    pub fn reload(&mut self) -> Result<(), String> {
-        let contents = fs::read_to_string(&self.path)
-            .map_err(|e| format!("Failed to read policy file: {}", e))?;
-        let mut policy: ActionPolicy =
-            serde_json::from_str(&contents).map_err(|e| format!("Invalid policy JSON: {}", e))?;
-        policy.path = self.path.clone();
-        *self = policy;
-        Ok(())
+    /// Re-read the policy file. A file that cannot be read or parsed leaves a policy that denies every action except `close`.
+    pub fn reload(&mut self) {
+        let path = self.path.clone();
+        *self = Self::load(&path.to_string_lossy()).unwrap_or_else(|e| Self {
+            load_error: Some(format!("{} ({})", e, path.display())),
+            path,
+            ..Self::default()
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::EnvGuard;
 
     #[test]
     fn test_policy_allow_whitelist() {
@@ -205,10 +212,40 @@ mod tests {
     }
 
     #[test]
-    fn test_confirm_actions_from_env() {
-        let _guard = EnvGuard::new(&["AGENT_BROWSER_CONFIRM_ACTIONS"]);
-        _guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate,click,fill");
-        let ca = ConfirmActions::from_env().unwrap();
+    fn test_policy_default_deny_empty_allow_denies_all() {
+        let json = r#"{"default": "deny", "allow": []}"#;
+        let policy: ActionPolicy = serde_json::from_str(json).unwrap();
+        assert!(matches!(policy.check("click"), PolicyResult::Deny(_)));
+    }
+
+    #[test]
+    fn test_policy_fails_closed_on_load_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("policy.json");
+        let path = file.to_string_lossy().to_string();
+        let mut policy = ActionPolicy::from_path(&path);
+        assert!(matches!(policy.check("evaluate"), PolicyResult::Deny(_)));
+        assert_eq!(policy.check("close"), PolicyResult::Allow);
+
+        fs::write(&file, r#"{"default": "allow"}"#).unwrap();
+        policy.reload();
+        assert_eq!(policy.check("evaluate"), PolicyResult::Allow);
+
+        fs::write(&file, "{bad").unwrap();
+        policy.reload();
+        match policy.check("evaluate") {
+            PolicyResult::Deny(r) => assert!(r.contains(&path)),
+            other => panic!("expected deny, got {:?}", other),
+        }
+
+        fs::write(&file, r#"{"default": "allow"}"#).unwrap();
+        policy.reload();
+        assert_eq!(policy.check("evaluate"), PolicyResult::Allow);
+    }
+
+    #[test]
+    fn test_confirm_actions_parse() {
+        let ca = ConfirmActions::parse("navigate,click,fill").unwrap();
         assert!(ca.requires_confirmation("navigate"));
         assert!(ca.requires_confirmation("click"));
         assert!(ca.requires_confirmation("fill"));

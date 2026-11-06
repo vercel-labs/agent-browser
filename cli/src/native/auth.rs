@@ -43,7 +43,7 @@ fn validate_profile_name(name: &str) -> Result<(), String> {
 }
 
 fn get_auth_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser").join("auth")
     } else {
         std::env::temp_dir().join("agent-browser").join("auth")
@@ -58,7 +58,7 @@ const ENCRYPTION_KEY_ENV: &str = "AGENT_BROWSER_ENCRYPTION_KEY";
 const KEY_FILE_NAME: &str = ".encryption-key";
 
 fn get_agent_browser_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser")
     } else {
         std::env::temp_dir().join("agent-browser")
@@ -111,10 +111,10 @@ fn get_encryption_key() -> Result<Vec<u8>, String> {
     ))
 }
 
-/// Ensure an encryption key exists, auto-generating one if needed.
+/// Ensure an encryption key exists, auto-generating one only when neither the env var nor the key file is present.
 fn ensure_encryption_key() -> Result<Vec<u8>, String> {
-    if let Ok(key) = get_encryption_key() {
-        return Ok(key);
+    if std::env::var_os(ENCRYPTION_KEY_ENV).is_some() || get_key_file_path().exists() {
+        return get_encryption_key();
     }
 
     let mut key = [0u8; 32];
@@ -469,6 +469,21 @@ mod tests {
             assert_eq!(key.len(), 32);
             assert!(key.iter().all(|&b| b == 0xaa));
         });
+    }
+
+    #[test]
+    fn test_ensure_encryption_key_rejects_malformed_env_key() {
+        let _lock = AUTH_TEST_MUTEX.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let env = crate::test_utils::EnvGuard::new(&["HOME", ENCRYPTION_KEY_ENV]);
+        env.set("HOME", home.path().to_str().unwrap());
+        env.set(ENCRYPTION_KEY_ENV, "nothex");
+        assert!(ensure_encryption_key().is_err());
+        assert!(!home
+            .path()
+            .join(".agent-browser")
+            .join(KEY_FILE_NAME)
+            .exists());
     }
 
     #[test]

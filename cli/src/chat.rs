@@ -107,7 +107,7 @@ async fn run_single_turn(
     json_mode: bool,
 ) {
     let mut openai_messages: Vec<Value> =
-        vec![json!({"role": "system", "content": chat::get_system_prompt()})];
+        vec![json!({"role": "system", "content": chat::system_prompt_for(session)})];
     openai_messages.push(json!({"role": "user", "content": message}));
 
     let result = run_chat_turn(session, model, &mut openai_messages, verbosity, json_mode).await;
@@ -118,7 +118,7 @@ async fn run_single_turn(
 
 async fn run_interactive(session: &str, model: &str, verbosity: Verbosity, json_mode: bool) {
     let mut openai_messages: Vec<Value> =
-        vec![json!({"role": "system", "content": chat::get_system_prompt()})];
+        vec![json!({"role": "system", "content": chat::system_prompt_for(session)})];
 
     let gateway_url = chat::configured_chat_base_url();
     let api_key = chat::configured_chat_api_key().unwrap_or_default();
@@ -218,6 +218,7 @@ async fn run_chat_turn(
 
     let total_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     let tool_timeout = std::time::Duration::from_secs(60);
+    let was_open = crate::connection::daemon_ready(session);
 
     let mut all_text = String::new();
     let mut all_tool_calls: Vec<Value> = Vec::new();
@@ -343,13 +344,15 @@ async fn run_chat_turn(
                 eprintln!("{}", color::dim(&format!("> {}", command)));
             }
 
-            let result =
-                match tokio::time::timeout(tool_timeout, chat::execute_chat_tool(session, command))
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
-                };
+            let result = match tokio::time::timeout(
+                tool_timeout,
+                chat::execute_chat_tool(session, command, was_open),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
+            };
 
             if !json_mode && verbosity == Verbosity::Verbose {
                 for line in result.lines() {
