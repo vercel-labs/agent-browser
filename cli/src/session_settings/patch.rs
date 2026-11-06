@@ -24,6 +24,9 @@ pub struct Patch {
     entries: BTreeMap<Key, Requested>,
     /// Relaunch the browser even when no setting changed (`--relaunch`).
     relaunch: bool,
+    /// Connection target came from environment/config rather than a command-line flag.
+    /// Such targets are defaults and must not replace a target attached explicitly.
+    default_connection_target: bool,
     /// Keys whose requested value equals the running one but whose content
     /// differs (a CA file edited in place). Daemon-side only: never sent.
     changed_in_place: BTreeSet<Key>,
@@ -32,6 +35,7 @@ pub struct Patch {
 /// Wire name of the forced-relaunch marker. It is not a setting, so it has no
 /// row in the table.
 const RELAUNCH_FIELD: &str = "relaunch";
+const DEFAULT_CONNECTION_TARGET_FIELD: &str = "connectionTargetDefault";
 
 impl fmt::Debug for Patch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -45,6 +49,9 @@ impl fmt::Debug for Patch {
         if self.relaunch {
             map.entry(&RELAUNCH_FIELD, &true);
         }
+        if self.default_connection_target {
+            map.entry(&DEFAULT_CONNECTION_TARGET_FIELD, &true);
+        }
         map.finish()
     }
 }
@@ -52,13 +59,19 @@ impl fmt::Debug for Patch {
 impl Patch {
     /// Reads the resolved flags once per invocation. Pure.
     pub fn from_flags(flags: &Flags) -> Patch {
-        let entries = SPECS
+        let entries: BTreeMap<Key, Requested> = SPECS
             .iter()
             .filter_map(|s| (s.read)(flags).map(|requested| (s.key, requested)))
             .collect();
+        let has_connection_target = [Key::Cdp, Key::AutoConnect, Key::Provider]
+            .into_iter()
+            .any(|key| entries.contains_key(&key));
+        let explicit_connection_target =
+            flags.cli_cdp || flags.cli_provider || flags.cli_auto_connect || flags.no_auto_connect;
         Patch {
             entries,
             relaunch: flags.relaunch,
+            default_connection_target: has_connection_target && !explicit_connection_target,
             changed_in_place: BTreeSet::new(),
         }
     }
@@ -70,6 +83,22 @@ impl Patch {
     /// Whether the invocation asked for a relaunch regardless of changes.
     pub fn forces_relaunch(&self) -> bool {
         self.relaunch
+    }
+
+    /// Whether the only connection target in this patch came from env/config.
+    pub fn has_default_connection_target(&self) -> bool {
+        self.default_connection_target
+    }
+
+    /// Drops a default target and its WebSocket headers after an explicit attach.
+    pub fn ignore_default_connection_target(&mut self) {
+        if !self.default_connection_target {
+            return;
+        }
+        for key in [Key::Cdp, Key::CdpHeaders, Key::AutoConnect, Key::Provider] {
+            self.entries.remove(&key);
+        }
+        self.default_connection_target = false;
     }
 
     /// Marks a key as changed even if its value equals the running one.
@@ -88,6 +117,7 @@ impl Patch {
         live.relaunch = false;
         live.entries
             .retain(|key, _| spec(*key).effect == Effect::Live);
+        live.clear_default_connection_target_if_empty();
         live
     }
 
@@ -112,6 +142,16 @@ impl Patch {
     /// Drops a key the patch would otherwise carry.
     pub fn remove(&mut self, key: Key) {
         self.entries.remove(&key);
+        self.clear_default_connection_target_if_empty();
+    }
+
+    fn clear_default_connection_target_if_empty(&mut self) {
+        let has_connection_target = [Key::Cdp, Key::AutoConnect, Key::Provider]
+            .into_iter()
+            .any(|key| self.entries.contains_key(&key));
+        if !has_connection_target {
+            self.default_connection_target = false;
+        }
     }
 
     pub fn get(&self, key: Key) -> Option<&Requested> {
@@ -149,6 +189,12 @@ impl Patch {
         if self.relaunch {
             object.insert(RELAUNCH_FIELD.to_string(), Value::Bool(true));
         }
+        if self.default_connection_target {
+            object.insert(
+                DEFAULT_CONNECTION_TARGET_FIELD.to_string(),
+                Value::Bool(true),
+            );
+        }
         Some(Value::Object(object))
     }
 
@@ -159,9 +205,16 @@ impl Patch {
         let object = wire.as_object().ok_or(SettingsError::NotAnObject)?;
         let mut entries = BTreeMap::new();
         let mut relaunch = false;
+        let mut default_connection_target = false;
         for (name, value) in object {
             if name == RELAUNCH_FIELD {
                 relaunch = value.as_bool().ok_or_else(|| {
+                    SettingsError::UnknownKey(format!("{} (expected a boolean)", name))
+                })?;
+                continue;
+            }
+            if name == DEFAULT_CONNECTION_TARGET_FIELD {
+                default_connection_target = value.as_bool().ok_or_else(|| {
                     SettingsError::UnknownKey(format!("{} (expected a boolean)", name))
                 })?;
                 continue;
@@ -190,6 +243,7 @@ impl Patch {
         Ok(Patch {
             entries,
             relaunch,
+            default_connection_target,
             changed_in_place: BTreeSet::new(),
         })
     }
@@ -200,6 +254,7 @@ impl Patch {
         Patch {
             entries: entries.into_iter().collect(),
             relaunch: false,
+            default_connection_target: false,
             changed_in_place: BTreeSet::new(),
         }
     }
