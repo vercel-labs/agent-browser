@@ -898,7 +898,8 @@ fn tools() -> Vec<Value> {
                 "to": { "type": "integer", "minimum": 1, "description": "Last step; defaults to the latest." },
                 "description": { "type": "string", "description": "One line saying what the flow does." },
                 "params": { "type": "object", "additionalProperties": { "type": "string" } },
-                "output": { "type": "string", "description": "Request id whose response the flow returns." }
+                "output": { "type": "string", "description": "Request id whose response the flow returns." },
+                "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds to wait for requests the last step started that have no response yet." }
             }),
             &["name"],
         ),
@@ -2956,7 +2957,7 @@ fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError>
         args.push("--limit".to_string());
         args.push(limit.to_string());
     }
-    for (key, flag) in [("from", "--from"), ("to", "--to")] {
+    for (key, flag) in [("from", "--from"), ("to", "--to"), ("timeout", "--timeout")] {
         if let Some(n) = arguments.get(key).and_then(Value::as_u64) {
             args.push(flag.to_string());
             args.push(n.to_string());

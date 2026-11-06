@@ -144,7 +144,7 @@ Every recorded command returns `recorded: {seq}` in its JSON response. Failed co
 `flow steps --json` returns the same data.
 
 ```bash
-agent-browser flow save <name> [--from <seq>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]
+agent-browser flow save <name> [--from <seq>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>] [--timeout <ms>]
 ```
 
 <table>
@@ -168,6 +168,8 @@ Saving does not stop or reset the capture, so one session can save several flows
 - JSON that server-rendered pages embed in their HTML: `<script type="application/json">`, `__NEXT_DATA__`, JSON-LD and `window.x = {...}` state
 
 It never saves cookies, `authorization`, or token and CSRF headers. Each run reads cookies from the live session.
+
+Before it saves, `flow save` waits for first-party requests that the last step of the saved range started and that have no response yet, up to the command timeout (`AGENT_BROWSER_DEFAULT_TIMEOUT`, or `--timeout`). One an earlier step started that still has no response outlived the steps after it, as a long poll does, and is not waited on; a long poll the last step started waits until the timeout. A response whose body gets no bytes for 500 ms after its headers, such as a long poll, is not waited on (the same quiet window as `wait --load networkidle`). Requests left out are reported as `still loading at save`, also in the error when the save has nothing else to keep.
 
 The save report lists the requests it kept, the params, and any step it could not turn into a request, with the reason. When the recording stops at a sign-in form, the report says so.
 
