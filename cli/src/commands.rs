@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead};
 
 use crate::color;
-use crate::flags::Flags;
+use crate::flags::{is_global_flag, Flags};
 use crate::validation::{is_valid_session_name, session_name_error};
 
 /// Error type for command parsing with contextual information
@@ -346,7 +346,20 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
 /// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
-    let mut result = parse_command_inner(args, flags)?;
+    parse_command_with_batch_scope(args, flags, false)
+}
+
+/// Parses a batch item and rejects global flags that belong on the outer invocation.
+pub fn parse_batch_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+    parse_command_with_batch_scope(args, flags, true)
+}
+
+fn parse_command_with_batch_scope(
+    args: &[String],
+    flags: &Flags,
+    batch_item: bool,
+) -> Result<Value, ParseError> {
+    let mut result = parse_command_inner(args, flags, batch_item)?;
 
     // Inject AGENT_BROWSER_DEFAULT_TIMEOUT into any wait-family command that
     // doesn't already carry an explicit timeout. Centralised here so that new
@@ -354,6 +367,18 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     inherit_wait_timeout(&mut result, flags.default_timeout);
 
     Ok(result)
+}
+
+fn reject_batch_global_flag(batch_item: bool, arg: &str) -> Result<(), ParseError> {
+    if batch_item && is_global_flag(arg) {
+        Err(ParseError::InvalidValue {
+            message: "Pass global flags on the outer batch invocation, not inside a batch item."
+                .to_string(),
+            usage: "[global flags] batch <commands...>",
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// Stamps `timeout` on a wait-family command or `flow_save` that has none,
@@ -371,7 +396,11 @@ pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     }
 }
 
-fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+fn parse_command_inner(
+    args: &[String],
+    flags: &Flags,
+    batch_item: bool,
+) -> Result<Value, ParseError> {
     if args.is_empty() {
         return Err(ParseError::MissingArguments {
             context: "".to_string(),
@@ -379,6 +408,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         });
     }
 
+    reject_batch_global_flag(batch_item, &args[0])?;
     let cmd = args[0].as_str();
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let id = gen_id();
@@ -394,6 +424,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Navigation ===
         // Maps to "navigate" action in protocol; reflected in ACTION_CATEGORIES in action-policy.ts
         "open" | "goto" | "navigate" => {
+            for arg in &rest {
+                reject_batch_global_flag(batch_item, arg)?;
+            }
             // `open` without a URL launches the browser but stays on
             // about:blank. Lets agents set up routes, cookies, or init
             // scripts before the first real navigation (see `batch`).
@@ -912,7 +945,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         if_changed = true;
                         i += 1;
                     }
-                    arg => positional.push(arg),
+                    arg => {
+                        reject_batch_global_flag(batch_item, arg)?;
+                        positional.push(arg);
+                    }
                 }
                 i += 1;
             }
@@ -1017,7 +1053,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         obj.insert("full".to_string(), json!(true));
                         obj.insert("delta".to_string(), json!(true));
                     }
-                    _ => {}
+                    _ => reject_batch_global_flag(batch_item, rest[i])?,
                 }
                 i += 1;
             }
@@ -2081,6 +2117,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Core Web Vitals + hydration ===
         "vitals" | "web-vitals" => {
+            for arg in &rest {
+                reject_batch_global_flag(batch_item, arg)?;
+            }
             let mut cmd = json!({ "id": id, "action": "vitals" });
             let json_out = rest.contains(&"--json");
             if json_out {
@@ -7342,5 +7381,32 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_batch_items_reject_global_flags_and_keep_literal_text() {
+        for item in [
+            "--session other open https://example.com",
+            "goto --init-script probe.js",
+            "screenshot --init-script probe.js",
+            "snapshot --init-script probe.js",
+            "vitals --init-script probe.js",
+        ] {
+            let err = parse_batch_command(&args(item), &default_flags()).unwrap_err();
+            assert!(
+                matches!(&err, ParseError::InvalidValue { message, .. } if message.contains("outer batch invocation")),
+                "{item}: {err:?}"
+            );
+        }
+        for item in [
+            "fill #field --json",
+            "type #field --clear",
+            "vitals https://example.com",
+        ] {
+            assert!(
+                parse_batch_command(&args(item), &default_flags()).is_ok(),
+                "{item}"
+            );
+        }
     }
 }
