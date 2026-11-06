@@ -514,16 +514,8 @@ async fn apply_events(state: &mut DaemonState, events: Vec<Value>) {
             Some("network.responseStarted") => response_seen(state, p, true),
             Some("network.responseCompleted") => {
                 response_seen(state, p, false);
-                if let Some(ff) = state.firefox.as_mut() {
-                    ff.inflight.remove(request_id(p));
-                }
                 request_body(state, request_id(p)).await;
                 har_body(state, request_id(p)).await;
-            }
-            Some("network.fetchError") => {
-                if let Some(ff) = state.firefox.as_mut() {
-                    ff.inflight.remove(request_id(p));
-                }
             }
             Some("log.entryAdded") => log_entry(state, p),
             _ => {}
@@ -540,11 +532,6 @@ fn request_started(state: &mut DaemonState, p: &Value) {
     let id = request_id(p).to_string();
     let url = request["url"].as_str().unwrap_or("").to_string();
     let method = request["method"].as_str().unwrap_or("GET").to_string();
-    if !is_websocket(&url) {
-        if let Some(ff) = state.firefox.as_mut() {
-            ff.inflight.insert(id.clone());
-        }
-    }
     let timestamp = p["timestamp"].as_f64();
     let millis = timestamp.map(|t| t as u64).unwrap_or_default();
     let resource_type = resource_type(request).to_string();
@@ -776,7 +763,7 @@ fn log_entry(state: &mut DaemonState, p: &Value) {
     }
 }
 
-/// Waits until no tracked request has been in flight for 500ms; `Err` on timeout.
+/// Waits until the active tab and its frames have no unfinished requests for 500ms.
 pub async fn wait_idle(state: &mut DaemonState, timeout_ms: u64) -> Result<(), ()> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     let mut idle_since: Option<tokio::time::Instant> = None;
@@ -785,7 +772,7 @@ pub async fn wait_idle(state: &mut DaemonState, timeout_ms: u64) -> Result<(), (
         let busy = state
             .firefox
             .as_ref()
-            .is_some_and(|ff| !ff.inflight.is_empty());
+            .is_some_and(FirefoxSession::has_inflight_in_active_tab);
         let now = tokio::time::Instant::now();
         if busy {
             idle_since = None;
@@ -1568,6 +1555,7 @@ mod tests {
             "method": method,
             "params": {
                 "isBlocked": blocked,
+                "context": "ctx-active",
                 "timestamp": 1000,
                 "request": {"request": id, "url": url, "method": "GET", "headers": []},
                 "response": {"status": 200, "headers": []},
@@ -1864,30 +1852,29 @@ mod tests {
 
     #[tokio::test]
     async fn in_flight_set_ignores_websockets_and_clears_on_completion() {
-        let (ff, _tx, _) = fake_session().await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-        let started = "network.beforeRequestSent";
-        apply_events(
-            &mut state,
-            vec![
-                request_event(started, "a", "http://example.com/", false),
-                request_event(started, "b", "ws://example.com/socket", false),
-            ],
-        )
-        .await;
-        assert_eq!(state.firefox.as_ref().unwrap().inflight.len(), 1);
-        apply_events(
-            &mut state,
-            vec![request_event(
-                "network.responseCompleted",
-                "a",
-                "http://example.com/",
-                false,
-            )],
-        )
-        .await;
-        assert!(state.firefox.as_ref().unwrap().inflight.is_empty());
+        let (mut ff, tx, _) = fake_session().await;
+        let mut received = ff.bidi.subscribe_buffered();
+        for (id, url) in [
+            ("a", "http://example.com/"),
+            ("b", "ws://example.com/socket"),
+        ] {
+            tx.send(request_event("network.beforeRequestSent", id, url, false))
+                .unwrap();
+        }
+        received.recv().await.unwrap();
+        received.recv().await.unwrap();
+        ff.drain_events(&mut None);
+        assert_eq!(ff.inflight.len(), 1);
+        tx.send(request_event(
+            "network.responseCompleted",
+            "a",
+            "http://example.com/",
+            false,
+        ))
+        .unwrap();
+        received.recv().await.unwrap();
+        ff.drain_events(&mut None);
+        assert!(ff.inflight.is_empty());
     }
 
     #[test]

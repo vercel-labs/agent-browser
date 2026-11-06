@@ -16256,6 +16256,74 @@ async fn e2e_firefox_route_mock() {
 
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_networkidle_is_scoped_to_the_active_tab() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pending_url = format!("http://{}/pending", listener.local_addr().unwrap());
+    let (started, accepted) = tokio::sync::oneshot::channel();
+    let pending = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = [0; 4096];
+        stream.read(&mut buf).await.unwrap();
+        let _ = started.send(());
+        while stream.read(&mut buf).await.unwrap_or(0) != 0 {}
+    });
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        &format!("window.pollController = new AbortController(); fetch('{pending_url}', {{mode:'no-cors', signal:pollController.signal}}).catch(() => {{}}); true"),
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), accepted)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"new", "action":"tab_new", "url":fixture.url}),
+        )
+        .await,
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"idle", "action":"waitforloadstate", "state":"networkidle", "timeout":1500}),
+        )
+        .await,
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"switch", "action":"tab_switch", "tabId":"t1"}),
+        )
+        .await,
+    );
+    let busy = firefox_command(
+        &mut state,
+        json!({"id":"busy", "action":"waitforloadstate", "state":"networkidle", "timeout":700}),
+    )
+    .await;
+    assert_eq!(busy["success"], false, "{busy}");
+    firefox_eval(&mut state, "pollController.abort(); true").await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"aborted", "action":"waitforloadstate", "state":"networkidle", "timeout":2000}),
+        )
+        .await,
+    );
+    firefox_close(&mut state).await;
+    pending.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_navigate_networkidle_waits_for_delayed_request() {
     required_firefox_binary();
     let tmp = tempfile::tempdir().unwrap();
