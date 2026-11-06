@@ -16901,7 +16901,16 @@ async fn e2e_firefox_proxy_credentials_not_sent_to_origin() {
         } }),
     )
     .await;
-    firefox_open(&mut state, &format!("{}auth", fixture.url)).await;
+    firefox_open(&mut state, &fixture.url).await;
+    let request = format!(
+        "let image = document.createElement('img'); image.src = '{}auth'; document.body.append(image); 'started'",
+        fixture.url
+    );
+    assert_eq!(firefox_eval(&mut state, &request).await, json!("started"));
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while fixture.hit_count("/auth") == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     assert!(fixture.hit_count("/auth") > 0, "origin must be reached");
     assert_eq!(
         fixture.hit_count("#authorization"),
