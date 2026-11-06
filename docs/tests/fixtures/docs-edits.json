@@ -198,6 +198,10 @@
       {
         "from": "Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>, <code>obscura</code> (experimental).",
         "to": "Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code> (experimental)."
+      },
+      {
+        "from": "anthropic/claude-sonnet-4.6",
+        "to": "openai/gpt-6-luna-fast"
       }
     ],
     "/plugins": [
@@ -416,6 +420,12 @@
       {
         "from": "pnpm install\npnpm build\npnpm build:native\n./bin/agent-browser install\npnpm link --global",
         "to": "pnpm install\npnpm build:source\npnpm link --global\nagent-browser install"
+      }
+    ],
+    "/dashboard": [
+      {
+        "from": "anthropic/claude-sonnet-4.6",
+        "to": "openai/gpt-6-luna-fast"
       }
     ]
   },
