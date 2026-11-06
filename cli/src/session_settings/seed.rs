@@ -55,6 +55,7 @@ impl Running {
             (Key::UserAgent, "AGENT_BROWSER_USER_AGENT"),
             (Key::ColorScheme, "AGENT_BROWSER_COLOR_SCHEME"),
             (Key::DownloadPath, "AGENT_BROWSER_DOWNLOAD_PATH"),
+            (Key::Context, "AGENT_BROWSER_CONTEXT"),
             (Key::Engine, "AGENT_BROWSER_ENGINE"),
             (Key::IdleTimeout, "AGENT_BROWSER_IDLE_TIMEOUT_MS"),
             (Key::RestoreKey, "AGENT_BROWSER_SESSION_NAME"),

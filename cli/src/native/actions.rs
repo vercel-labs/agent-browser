@@ -4795,6 +4795,7 @@ async fn auto_launch_inner(
         state.cdp_headers = headers.map(|headers| (cdp.clone(), headers));
         state.reset_input_state();
         state.browser = Some(mgr);
+        maybe_create_browser_context(state).await?;
         state.launch_identity = Some(state.settings.launch_identity());
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -4822,7 +4823,11 @@ async fn auto_launch_inner(
         })?;
         state.reset_input_state();
         state.browser = Some(BrowserManager::connect_auto().await?);
-        if !apply_tab_binding_on_attach_or_rollback(state).await? {
+        let isolated = maybe_create_browser_context(state).await?;
+        // With --context, replace_pages_with_context_tab already left exactly one
+        // fresh tab inside the isolated context. Binding to, or opening, another
+        // tab here would land in the default context and defeat the isolation.
+        if !isolated && !apply_tab_binding_on_attach_or_rollback(state).await? {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
                 return Err(e);
@@ -4901,6 +4906,7 @@ async fn auto_launch_inner(
                 Ok(mgr) => {
                     state.reset_input_state();
                     state.browser = Some(mgr);
+                    maybe_create_browser_context(state).await?;
                     state.launch_identity = Some(state.settings.launch_identity());
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
@@ -4966,6 +4972,13 @@ async fn auto_launch_inner(
         options.prepared_nss_home = Some(prepare_nss_home(&ca.bundle)?);
     }
     state.session_setup = SessionSetup::from_launch_options(&options);
+    if state.settings.context().is_some() {
+        eprintln!(
+            "Warning: --context is ignored when launching Chrome directly. \
+             Use --cdp or --auto-connect to share a Chrome instance with \
+             context isolation."
+        );
+    }
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.reset_input_state();
     state.browser = Some(mgr);
@@ -4981,6 +4994,30 @@ async fn auto_launch_inner(
     try_auto_restore_state(state).await;
     load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
     Ok(json!({}))
+}
+
+/// Creates an isolated BrowserContext when `--context` was passed, and moves
+/// the session onto a tab inside it. Returns whether isolation was applied.
+async fn maybe_create_browser_context(state: &mut DaemonState) -> Result<bool, String> {
+    let Some(context_name) = state.settings.context() else {
+        return Ok(false);
+    };
+    let Some(mgr) = state.browser.as_mut() else {
+        return Ok(false);
+    };
+    match mgr.create_browser_context().await {
+        Ok(ctx_id) => {
+            eprintln!(
+                "Created BrowserContext: {} (name: {})",
+                ctx_id, context_name
+            );
+            // Pages discovered on connect belong to the default context, so they
+            // must be replaced with a page inside the new one for real isolation.
+            mgr.replace_pages_with_context_tab().await?;
+            Ok(true)
+        }
+        Err(e) => Err(format!("Failed to create BrowserContext: {}", e)),
+    }
 }
 
 fn string_array_from_command(cmd: &Value, key: &str) -> Option<Vec<String>> {
@@ -5563,6 +5600,7 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
         ("userAgent", Key::UserAgent),
         ("colorScheme", Key::ColorScheme),
         ("downloadPath", Key::DownloadPath),
+        ("contextName", Key::Context),
         ("engine", Key::Engine),
         ("caCert", Key::CaCert),
     ] {
