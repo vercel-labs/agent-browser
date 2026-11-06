@@ -16448,6 +16448,41 @@ async fn e2e_firefox_iframe_and_shadow_root_refs() {
     firefox_close(&mut state).await;
 }
 
+/// A selector shared by light and shadow trees still gives the shadow control a usable ref.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_shadow_ref_survives_a_shared_selector() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        r#"(() => {
+  const markup = name => `<section class="mirror"><button id="shared">${name}</button></section>`;
+  document.body.innerHTML = markup('Light button');
+  const host = document.createElement('div');
+  document.body.append(host);
+  const shadow = host.attachShadow({ mode: 'open' });
+  shadow.innerHTML = markup('Shadow button');
+  document.querySelector('button').onclick = () => document.title = 'light-clicked';
+  shadow.querySelector('button').onclick = () => document.title = 'shadow-clicked';
+  return true;
+})()"#,
+    )
+    .await;
+
+    let light = firefox_ref(&mut state, "Light button").await;
+    let shadow = firefox_ref(&mut state, "Shadow button").await;
+    assert_ne!(light, shadow);
+    assert_success(&firefox_act(&mut state, "click", &shadow, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "shadow-clicked");
+    firefox_close(&mut state).await;
+}
+
 /// A confirm() opened inside a cross-origin iframe stops the click promptly and dismisses.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]

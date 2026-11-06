@@ -490,22 +490,33 @@ impl FirefoxSession {
 
     /// Evaluates `expression` in the active context and returns the decoded value.
     pub async fn eval(&self, expression: &str) -> Result<Value, String> {
-        self.eval_inner(expression, false).await
+        self.eval_in_context(expression, &self.context, false).await
+    }
+
+    /// Evaluates `expression` in the active top-level tab and returns the decoded value.
+    pub async fn eval_top(&self, expression: &str) -> Result<Value, String> {
+        self.eval_in_context(expression, &self.top_context, false)
+            .await
     }
 
     /// Like `eval`, but a script exception yields `null` so callers can keep polling.
     pub async fn eval_lenient(&self, expression: &str) -> Result<Value, String> {
-        self.eval_inner(expression, true).await
+        self.eval_in_context(expression, &self.context, true).await
     }
 
-    async fn eval_inner(&self, expression: &str, lenient: bool) -> Result<Value, String> {
+    async fn eval_in_context(
+        &self,
+        expression: &str,
+        context: &str,
+        lenient: bool,
+    ) -> Result<Value, String> {
         let r = self
             .bidi
             .send(
                 "script.evaluate",
                 json!({
                     "expression": expression,
-                    "target": {"context": self.context},
+                    "target": {"context": context},
                     "awaitPromise": true,
                     "resultOwnership": "none",
                 }),
@@ -525,11 +536,11 @@ impl FirefoxSession {
         Ok(remote_to_json(&r["result"]))
     }
 
-    /// URL of the active context, read from the browsing context tree.
+    /// URL of the active top-level tab, read from the browsing context tree.
     pub async fn url(&self) -> Result<String, String> {
         let tree = self
             .bidi
-            .send("browsingContext.getTree", json!({"root": self.context}))
+            .send("browsingContext.getTree", json!({"root": self.top_context}))
             .await?;
         Ok(tree["contexts"][0]["url"]
             .as_str()
@@ -1160,6 +1171,21 @@ pub(crate) mod tests {
         ff.drain_events(&mut None);
         assert_eq!(ff.top_context, "tab-3");
         assert_eq!(ff.context, "tab-3");
+    }
+
+    #[tokio::test]
+    async fn page_url_uses_the_top_context_when_a_frame_is_active() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let (mut session, _tx, _) = fake_session_with(move |request| {
+            seen.lock().unwrap().push(request.clone());
+            json!({"contexts": [{"context": "ctx-page", "url": "https://page.example/"}]})
+        })
+        .await;
+        session.context = "ctx-frame".into();
+
+        assert_eq!(session.url().await.unwrap(), "https://page.example/");
+        assert_eq!(requests.lock().unwrap()[0]["params"]["root"], "ctx-active");
     }
 
     #[tokio::test]
