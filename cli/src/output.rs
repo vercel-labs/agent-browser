@@ -3757,6 +3757,7 @@ Running 'agent-browser dashboard' with no subcommand is equivalent to 'dashboard
 
 The dashboard runs as a standalone background process, independent of
 browser sessions. All sessions automatically stream to the dashboard.
+Select Auto-fit in the viewport dimensions menu to fit the active session to the panel.
 Loopback origins work without configuration or a token. For a reverse-proxied or
 forwarded dashboard, pass --allowed-origins with the exact browser origin
 or set AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS. The browser stays on the
