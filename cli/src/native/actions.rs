@@ -19841,14 +19841,21 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let reconnect =
             resolve_launch_target(&json!({ "action": "launch" }), Some(&attached)).unwrap();
         assert_eq!(reconnect, json!({ "action": "launch", "cdpUrl": "9333" }));
-        assert_eq!(launch_envelope_patch(&reconnect, None).get(Key::Engine), None);
+        assert_eq!(
+            launch_envelope_patch(&reconnect, None).get(Key::Engine),
+            None
+        );
         assert!(launch_targets_firefox(None, false, Some(&attached)));
         assert!(launch_targets_firefox(
             Some("firefox"),
             false,
             Some(&AttachedTarget::CdpPort(9333))
         ));
-        assert!(!launch_targets_firefox(Some("chrome"), false, Some(&attached)));
+        assert!(!launch_targets_firefox(
+            Some("chrome"),
+            false,
+            Some(&attached)
+        ));
         let configured =
             launch_envelope_patch(&json!({ "action": "launch", "engine": "firefox" }), None);
         assert_eq!(configured.value(Key::Engine), Some(&json!("firefox")));
@@ -19865,9 +19872,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         state.settings.set(Key::Cdp, json!("9333"));
         state.attached_target = Some(AttachedTarget::Firefox("9333".to_string()));
         state.engine = "firefox".to_string();
-        let reconnect =
-            resolve_launch_target(&json!({ "action": "launch" }), state.attached_target.as_ref())
-                .unwrap();
+        let reconnect = resolve_launch_target(
+            &json!({ "action": "launch" }),
+            state.attached_target.as_ref(),
+        )
+        .unwrap();
         let reconnect_patch = launch_envelope_patch(&reconnect, None);
         apply_settings_patch(&mut state, &reconnect_patch, true)
             .await
