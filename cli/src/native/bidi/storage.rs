@@ -437,7 +437,10 @@ async fn collect_origins(
     let remaining: Vec<String> = ff
         .visited_origins
         .iter()
-        .filter(|origin| (origin.starts_with("http://") || origin.starts_with("https://")) && !open.contains(*origin))
+        .filter(|origin| {
+            (origin.starts_with("http://") || origin.starts_with("https://"))
+                && !open.contains(*origin)
+        })
         .cloned()
         .collect();
     if !remaining.is_empty() {
