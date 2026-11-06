@@ -1388,6 +1388,11 @@
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
           },
+          "timeout": {
+            "description": "Milliseconds to wait for requests the last step started that have no response yet.",
+            "minimum": 1,
+            "type": "integer"
+          },
           "to": {
             "description": "Last step; defaults to the latest.",
             "minimum": 1,

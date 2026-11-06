@@ -4483,7 +4483,8 @@ WebMCP (experimental):
 Saved flows (experimental, open the session with --capture flow):
   flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed
   flow save <name>           Save the steps since the last open as a flow; accepts --from <seq>,
-                             --to <seq>, --param k=v, --output <id>, and --description <text>
+                             --to <seq>, --param k=v, --output <id>, --description <text>,
+                             and --timeout <ms>
   flow run <name>            Send over HTTP; accepts --param k=v, --where f=v, --fields a,b, --limit n,
                              --origin <host>, and --allow-write <all|id,...>
   flow list [--origin <host>] Saved flows with params and verified state
