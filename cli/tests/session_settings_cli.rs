@@ -453,3 +453,63 @@ fn close_clears_a_corrupt_file_when_the_daemon_is_dead() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(!session.settings().exists());
 }
+
+#[test]
+fn close_all_on_a_dead_session_is_governed_by_its_stored_policy() {
+    let session = Session::new();
+    let policy = session.tmp.path().join("policy.json");
+    fs::write(&policy, r#"{"deny":["close"]}"#).unwrap();
+    session.touch(&[
+        "--allowed-domains",
+        "example.com",
+        "--action-policy",
+        policy.to_str().unwrap(),
+    ]);
+    let stored = fs::read_to_string(session.settings()).unwrap();
+    session.kill_daemon();
+
+    let out = session.output(&["close", "--all"]);
+
+    assert!(!out.status.success(), "{}", text(&out));
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["data"]["closed"], 0, "{json}");
+    assert_eq!(json["data"]["failed"][0]["session"], "sec", "{json}");
+    assert!(
+        json["data"]["failed"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("denied by policy"),
+        "{json}"
+    );
+    assert_eq!(fs::read_to_string(session.settings()).unwrap(), stored);
+    session.kill_daemon();
+}
+
+#[test]
+fn close_all_closes_a_dead_session_and_removes_its_file() {
+    let session = Session::new();
+    session.touch(&["--allowed-domains", "example.com"]);
+    session.kill_daemon();
+
+    let out = session.output(&["close", "--all"]);
+
+    assert!(out.status.success(), "{}", text(&out));
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["data"]["sessions"][0], "sec", "{json}");
+    assert_eq!(json["data"]["closed"], 1, "{json}");
+    assert!(!session.settings().exists());
+    let pid = session.dir().join(format!("{SESSION}.pid"));
+    assert!(!pid.exists(), "the daemon started for the close is gone");
+}
+
+#[test]
+fn close_all_clears_a_corrupt_file_of_a_dead_session() {
+    let session = Session::new();
+    fs::create_dir_all(session.dir()).unwrap();
+    session.write("{not json");
+
+    let out = session.output(&["close", "--all"]);
+
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!session.settings().exists());
+}

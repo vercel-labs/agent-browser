@@ -1291,16 +1291,19 @@ fn run_close_all(flags: &Flags) {
     // separates out the standalone dashboard. We only want to send `close` to
     // real session daemons; the dashboard has its own `dashboard stop`.
     let inventory = walk_daemons();
-    let sessions: Vec<(String, u32)> = inventory
+    let mut sessions: Vec<(String, Option<u32>)> = inventory
         .sessions
         .iter()
-        .map(|s| (s.name.clone(), s.pid))
+        .map(|s| (s.name.clone(), Some(s.pid)))
         .collect();
 
-    // Sessions whose daemon is gone still hold their stored security settings.
-    session_settings::clear_orphans(&get_socket_dir(), |session| {
+    // Sessions whose daemon is gone still hold stored security settings that
+    // govern them. They are closed like the others: a daemon starts with those
+    // settings, so a policy denying `close` still applies.
+    let orphans = session_settings::orphan_sessions(&get_socket_dir(), |session| {
         sessions.iter().any(|(name, _)| name == session) || connection::daemon_ready(session)
     });
+    sessions.extend(orphans.into_iter().map(|name| (name, None)));
 
     if sessions.is_empty() {
         if flags.json {
@@ -1318,6 +1321,12 @@ fn run_close_all(flags: &Flags) {
     let mut failed: Vec<(String, String)> = Vec::new();
 
     for (session, pid) in &sessions {
+        if pid.is_none() {
+            if let Err(e) = ensure_daemon_for(session, &DaemonOptions::bare(), true) {
+                failed.push((session.clone(), e));
+                continue;
+            }
+        }
         let cmd = json!({ "id": gen_id(), "action": "close" });
         // A close whose response was lost leaves the daemon in an unknown
         // state; force-kill it like an unreachable one.
@@ -1348,10 +1357,15 @@ fn run_close_all(flags: &Flags) {
                 };
                 failed.push((session.clone(), err));
             }
+            Err(e) if pid.is_none() => {
+                // A daemon started only to close this session did not answer.
+                failed.push((session.clone(), e));
+            }
             Err(_) => {
                 // Daemon is unreachable despite its process existing.
                 // Force-kill the process and clean up stale files so future
                 // sessions are not poisoned.
+                let pid = &pid.unwrap_or_default();
                 if is_agent_browser_process(*pid) {
                     #[cfg(unix)]
                     unsafe {

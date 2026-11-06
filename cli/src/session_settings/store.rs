@@ -264,26 +264,25 @@ fn shell_arg(arg: &str) -> String {
     }
 }
 
-/// Removes the settings files in `dir` whose session `is_live` rejects: what
-/// `close --all` leaves behind for sessions whose daemon is gone (idle exit,
-/// kill, a refused start). Returns the sessions cleared.
-pub fn clear_orphans(dir: &Path, is_live: impl Fn(&str) -> bool) -> Vec<String> {
+/// The sessions with a settings file in `dir` that `is_live` rejects: what
+/// `close --all` finds for sessions whose daemon is gone (idle exit, kill, a
+/// refused start). They are closed like any session, so the stored settings
+/// still govern the close.
+pub fn orphan_sessions(dir: &Path, is_live: impl Fn(&str) -> bool) -> Vec<String> {
     let extension = format!(".{}", SessionFile::Settings.extension());
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut cleared = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(session) = name.strip_suffix(&extension) else {
-            continue;
-        };
-        if !session.is_empty() && !is_live(session) && fs::remove_file(entry.path()).is_ok() {
-            cleared.push(session.to_string());
-        }
-    }
-    cleared.sort();
-    cleared
+    let mut sessions: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let session = name.strip_suffix(&extension)?.to_string();
+            (!session.is_empty() && !is_live(&session)).then_some(session)
+        })
+        .collect();
+    sessions.sort();
+    sessions
 }
 
 /// In-memory store for tests.
@@ -778,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_orphans_keeps_live_sessions_and_other_files() {
+    fn test_orphan_sessions_lists_dead_sessions_only_and_removes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         for name in [
             "dead.settings",
@@ -789,18 +788,15 @@ mod tests {
             fs::write(dir.path().join(name), "{}").unwrap();
         }
 
-        let cleared = clear_orphans(dir.path(), |s| s == "live");
+        let orphans = orphan_sessions(dir.path(), |s| s == "live");
 
-        assert_eq!(cleared, ["dead"]);
-        assert_eq!(
-            entries(dir.path()),
-            ["dead.target", "live.settings", "x.settings.tmp.1"]
-        );
+        assert_eq!(orphans, ["dead"]);
+        assert_eq!(entries(dir.path()).len(), 4);
     }
 
     #[test]
-    fn test_clear_orphans_on_a_missing_directory_does_nothing() {
-        assert!(clear_orphans(Path::new("/nonexistent/ab-dir"), |_| false).is_empty());
+    fn test_orphan_sessions_on_a_missing_directory_is_empty() {
+        assert!(orphan_sessions(Path::new("/nonexistent/ab-dir"), |_| false).is_empty());
     }
 
     #[test]
