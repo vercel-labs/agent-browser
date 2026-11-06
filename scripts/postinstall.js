@@ -9,12 +9,14 @@
  * - Mac/Linux: Replaces symlink to point to native binary
  */
 
-import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync } from 'fs';
+import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync, statSync, renameSync } from 'fs';
+import { randomBytes } from 'crypto';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 import { get } from 'https';
 import { execSync } from 'child_process';
+import { pipeline } from 'stream/promises';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
@@ -52,35 +54,50 @@ const GITHUB_REPO = 'vercel-labs/agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
 async function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    const file = createWriteStream(dest);
-    
-    const request = (url) => {
-      get(url, (response) => {
-        // Handle redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          request(response.headers.location);
-          return;
+  const temporaryPath = `${dest}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+  try {
+    await new Promise((resolve, reject) => {
+      let activeResponse;
+      const request = (url) => {
+        try {
+          get(url, (response) => {
+            // Handle redirects
+            if (response.statusCode === 301 || response.statusCode === 302) {
+              request(response.headers.location);
+              return;
+            }
+
+            if (response.statusCode !== 200) {
+              response.resume();
+              reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
+              return;
+            }
+
+            activeResponse = response;
+            pipeline(response, createWriteStream(temporaryPath, { flags: 'wx' })).then(resolve, reject);
+          }).on('error', (err) => {
+            if (activeResponse) activeResponse.destroy(err);
+            else reject(err);
+          });
+        } catch (err) {
+          reject(err);
         }
-        
-        if (response.statusCode !== 200) {
-          reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
-          return;
-        }
-        
-        response.pipe(file);
-        file.on('finish', () => {
-          file.close();
-          resolve();
-        });
-      }).on('error', (err) => {
-        unlinkSync(dest);
-        reject(err);
-      });
-    };
-    
-    request(url);
-  });
+      };
+
+      request(url);
+    });
+
+    if (statSync(temporaryPath).size === 0) {
+      throw new Error('Downloaded native binary is empty');
+    }
+    renameSync(temporaryPath, dest);
+  } finally {
+    try {
+      unlinkSync(temporaryPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+  }
 }
 
 /**
@@ -110,7 +127,8 @@ function writeInstallMethod() {
 
 async function main() {
   // Check if binary already exists
-  if (existsSync(binaryPath)) {
+  const existingBinary = existsSync(binaryPath) ? statSync(binaryPath) : null;
+  if (existingBinary?.isFile() && existingBinary.size > 0) {
     // Ensure binary is executable (npm doesn't preserve execute bit)
     if (platform() !== 'win32') {
       chmodSync(binaryPath, 0o755);
