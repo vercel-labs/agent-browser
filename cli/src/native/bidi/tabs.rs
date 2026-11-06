@@ -8,6 +8,7 @@ use super::emulation;
 use super::page;
 use super::session::FirefoxSession;
 use crate::native::actions::{self as chrome, DaemonState};
+use super::client::{remote_to_json, BidiClient};
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 
 /// Opens a tab and makes it active. Must return what Chrome's `handle_tab_new` returns,
@@ -19,12 +20,7 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }
     let label = cmd.get("label").and_then(Value::as_str);
     if let Some(label) = label {
-        if !is_valid_label(label) {
-            return Err(format!(
-                "Invalid tab label `{label}`; labels must start with a letter and contain only \
-                 letters, digits, `-`, and `_`"
-            ));
-        }
+        validate_tab_label(label)?;
         if session(state)?
             .tab_labels
             .values()
@@ -90,35 +86,46 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }))
 }
 
+fn validate_tab_label(label: &str) -> Result<(), String> {
+    if !is_valid_label(label) {
+        return Err(format!(
+            "Invalid tab label `{label}`; labels must start with a letter and contain only \
+             letters, digits, `-`, and `_`"
+        ));
+    }
+    if !matches!(TabRef::parse(label), Ok(TabRef::Label(_))) {
+        return Err(format!(
+            "Tab label `{label}` uses syntax reserved for tab IDs"
+        ));
+    }
+    Ok(())
+}
+
+async fn tab_title(bidi: &BidiClient, context: &str) -> Value {
+    bidi.send_timeout(
+        "script.callFunction",
+        json!({
+            "functionDeclaration": "() => document.title",
+            "target": {"context": context},
+            "arguments": [],
+            "awaitPromise": true,
+            "resultOwnership": "root",
+        }),
+        Duration::from_millis(250),
+    )
+    .await
+    .map(|result| remote_to_json(&result["result"]))
+    .unwrap_or(Value::Null)
+}
+
 /// Lists top-level tabs as `{tabs: [{tabId, targetId, label, title, url, type, active}]}`.
 pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
-    let ff = session(state)?;
-    let tree = ff
-        .bidi
-        .send("browsingContext.getTree", json!({"maxDepth": 0}))
-        .await?;
-    let contexts: Vec<Value> = tree["contexts"].as_array().cloned().unwrap_or_default();
-    let mut titles = Vec::with_capacity(contexts.len());
-    for context in &contexts {
-        titles.push(
-            ff.bidi
-                .call_function(
-                    context["context"].as_str().unwrap_or_default(),
-                    "() => document.title",
-                    None,
-                    vec![],
-                )
-                .await
-                .unwrap_or(Value::Null),
-        );
-    }
-    Ok(json!({ "tabs": build_tab_list(ff, &contexts, &titles) }))
+    Ok(json!({ "tabs": stream_tabs(session(state)?).await? }))
 }
 
 /// Builds the same tab list for the dashboard without letting a blocked page hold the daemon.
 pub(crate) async fn stream_tabs(ff: &mut FirefoxSession) -> Result<Vec<Value>, String> {
     const TREE_TIMEOUT: Duration = Duration::from_secs(1);
-    const TITLE_TIMEOUT: Duration = Duration::from_millis(250);
     let tree = ff
         .bidi
         .send_timeout(
@@ -133,14 +140,7 @@ pub(crate) async fn stream_tabs(ff: &mut FirefoxSession) -> Result<Vec<Value>, S
         .ok_or("Firefox did not return a context tree")?;
     let bidi = &ff.bidi;
     let titles = join_all(contexts.iter().map(|context| async move {
-        let title = bidi
-            .call_function_timeout(
-                context["context"].as_str().unwrap_or_default(),
-                "() => document.title",
-                TITLE_TIMEOUT,
-            )
-            .await
-            .unwrap_or(Value::Null);
+        let title = tab_title(bidi, context["context"].as_str().unwrap_or_default()).await;
         Value::String(title.as_str().unwrap_or_default().to_string())
     }))
     .await;
@@ -628,6 +628,38 @@ mod tests {
             resolve_tab_ref(&tabs, &UUID_A.to_uppercase()).unwrap(),
             UUID_A
         );
+    }
+
+    #[test]
+    fn tab_labels_reject_stable_id_syntax() {
+        assert!(validate_tab_label("docs").is_ok());
+        for label in ["t1", "T1"] {
+            assert_eq!(
+                validate_tab_label(label).unwrap_err(),
+                format!("Tab label `{label}` uses syntax reserved for tab IDs")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_tab_title_lookup_is_bounded() {
+        use futures_util::StreamExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.next().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let bidi = BidiClient::connect(&url).await.unwrap();
+        let title = tokio::time::timeout(Duration::from_millis(500), tab_title(&bidi, "ctx"))
+            .await
+            .unwrap();
+        assert_eq!(title, Value::Null);
+        drop(bidi);
+        server.abort();
     }
 
     #[test]

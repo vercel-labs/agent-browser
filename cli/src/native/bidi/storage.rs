@@ -5,7 +5,6 @@ use std::collections::HashSet;
 
 use super::actions::session;
 use super::forms::require;
-use super::page::normalize_net_error_text;
 use super::session::FirefoxSession;
 use super::types::{BytesValue, Cookie as BidiCookie, GetCookies};
 use crate::native::actions::{self as chrome, DaemonState};
@@ -597,13 +596,18 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
             continue;
         }
         let nav_url = format!("{}/", origin.origin.trim_end_matches('/'));
-        ff.bidi
+        if ff
+            .bidi
             .send(
                 "browsingContext.navigate",
                 json!({ "context": context, "url": nav_url, "wait": "complete" }),
             )
             .await
-            .map_err(|e| normalize_net_error_text(&e))?;
+            .is_err()
+        {
+            skipped.push(origin.origin.clone());
+            continue;
+        }
         ff.refs.clear();
         ff.note_visit(&nav_url);
 
@@ -767,6 +771,75 @@ mod tests {
             .unwrap();
         assert!(!state.restore_load_failed);
         assert_eq!(state.restore_status, "loaded");
+    }
+
+    #[tokio::test]
+    async fn unreachable_origin_is_skipped_and_restore_continues() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let id = request["id"].clone();
+                let reply = if request["method"] == "browsingContext.navigate"
+                    && request["params"]["url"] == "https://unreachable.example/"
+                {
+                    json!({"type":"error","id":id,"error":"unknown error","message":"unreachable"})
+                } else if request["method"] == "script.callFunction" {
+                    json!({
+                        "type": "success",
+                        "id": id,
+                        "result": {
+                            "type": "success",
+                            "result": {"type": "boolean", "value": true}
+                        }
+                    })
+                } else {
+                    json!({"type":"success","id":id,"result":{}})
+                };
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
+            }
+        });
+        let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
+        ff.bidi = std::sync::Arc::new(super::super::client::BidiClient::connect(&url).await.unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "cookies": [],
+                "origins": [
+                    {
+                        "origin": "https://unreachable.example",
+                        "localStorage": [{"name": "a", "value": "1"}],
+                        "sessionStorage": []
+                    },
+                    {
+                        "origin": "https://reachable.example",
+                        "localStorage": [{"name": "b", "value": "2"}],
+                        "sessionStorage": []
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let skipped = load_state_path(&mut ff, path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(skipped, vec!["https://unreachable.example".to_string()]);
+        assert!(ff.visited_origins.contains("https://reachable.example"));
+        server.abort();
     }
 
     #[test]
