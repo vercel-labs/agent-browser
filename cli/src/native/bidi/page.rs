@@ -89,14 +89,20 @@ fn reset_page_state(state: &mut DaemonState) {
 /// `waitUntil` maps to the BiDi `wait` state.
 pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = require(cmd, "url")?;
-    let wait = match cmd.get("waitUntil").and_then(Value::as_str) {
+    if let Some(filter) = state.domain_filter.read().await.as_ref() {
+        filter.check_url(url)?;
+    }
+    let wait_until = cmd.get("waitUntil").and_then(Value::as_str);
+    let network_idle = wait_until == Some("networkidle");
+    let wait = match wait_until {
         Some("domcontentloaded") => "interactive",
         Some("none") => "none",
         _ => "complete",
     };
-    if let Some(filter) = state.domain_filter.read().await.as_ref() {
-        filter.check_url(url)?;
-    }
+    let timeout_ms = cmd
+        .get("timeout")
+        .and_then(Value::as_u64)
+        .unwrap_or(state.default_timeout_ms);
     network::set_origin_headers(cmd, url, state).await?;
     reset_page_state(state);
     let ff = session(state)?;
@@ -120,6 +126,12 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         return Err(format!("Navigation failed: {msg}"));
     }
     ff.note_visit(landed);
+    if network_idle {
+        network::wait_idle(state, timeout_ms)
+            .await
+            .map_err(|_| "Timeout waiting for networkidle".to_string())?;
+    }
+    let ff = session(state)?;
     let title = ff.eval("document.title").await.unwrap_or(Value::Null);
     Ok(json!({ "url": landed, "title": title, "targetId": context }))
 }
