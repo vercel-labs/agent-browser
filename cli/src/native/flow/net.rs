@@ -91,50 +91,24 @@ fn non_public_v4(ip: Ipv4Addr) -> bool {
 
 fn non_public_v6(ip: Ipv6Addr) -> bool {
     let s = ip.segments();
-    // IPv4 carried inside the address: mapped, compatible, NAT64, 6to4.
-    if let Some(v4) = ip.to_ipv4_mapped() {
+    let v4 = |hi: u16, lo: u16| Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
+    // IPv4 carried inside the address: mapped, SIIT, compatible (and `::`,
+    // `::1`), NAT64, 6to4.
+    let low_v4 = (s[..5] == [0; 5] && s[5] == 0xffff)
+        || (s[..4] == [0; 4] && s[4] == 0xffff && s[5] == 0)
+        || s[..6] == [0; 6]
+        || s[..6] == [0x64, 0xff9b, 0, 0, 0, 0];
+    let embedded = if low_v4 {
+        Some(v4(s[6], s[7]))
+    } else if s[0] == 0x2002 {
+        Some(v4(s[1], s[2]))
+    } else {
+        None
+    };
+    if let Some(v4) = embedded {
         return non_public_v4(v4);
     }
-    // ::ffff:0:a.b.c.d (SIIT)
-    if s[..4] == [0; 4] && s[4] == 0xffff && s[5] == 0 {
-        return non_public_v4(Ipv4Addr::new(
-            (s[6] >> 8) as u8,
-            s[6] as u8,
-            (s[7] >> 8) as u8,
-            s[7] as u8,
-        ));
-    }
-    // 64:ff9b:1::/48 local-use NAT64 (RFC 8215), 100::/64 discard
-    if (s[..3] == [0x64, 0xff9b, 1]) || (s[0] == 0x100 && s[1..4] == [0; 3]) {
-        return true;
-    }
-    if s[..6] == [0; 6] {
-        return non_public_v4(Ipv4Addr::new(
-            (s[6] >> 8) as u8,
-            s[6] as u8,
-            (s[7] >> 8) as u8,
-            s[7] as u8,
-        ));
-    }
-    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-        return non_public_v4(Ipv4Addr::new(
-            (s[6] >> 8) as u8,
-            s[6] as u8,
-            (s[7] >> 8) as u8,
-            s[7] as u8,
-        ));
-    }
-    if s[0] == 0x2002 {
-        return non_public_v4(Ipv4Addr::new(
-            (s[1] >> 8) as u8,
-            s[1] as u8,
-            (s[2] >> 8) as u8,
-            s[2] as u8,
-        ));
-    }
-    ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_multicast()
+    ip.is_multicast()
         // fc00::/7 unique local
         || (s[0] & 0xfe00) == 0xfc00
         // fe80::/10 link-local, fec0::/10 site-local (deprecated)
@@ -142,32 +116,39 @@ fn non_public_v6(ip: Ipv6Addr) -> bool {
         || (s[0] & 0xffc0) == 0xfec0
         // 2001:db8::/32 documentation
         || (s[0] == 0x2001 && s[1] == 0x0db8)
+        // 64:ff9b:1::/48 local-use NAT64 (RFC 8215)
+        || s[..3] == [0x64, 0xff9b, 1]
+        // 100::/64 discard
+        || (s[0] == 0x100 && s[1..4] == [0; 3])
 }
 
-/// Check a URL host that is an IP literal; the resolver is never asked about
-/// those. Names pass here and are checked when they resolve.
-pub fn check_literal(url: &str, reach: Reach) -> Result<(), String> {
-    check_literal_with(url, reach, is_non_public)
+/// Resolve a proxy hostname with the system resolver.
+pub fn system_lookup(host: &str, port: u16) -> Option<IpAddr> {
+    use std::net::ToSocketAddrs;
+    (host, port).to_socket_addrs().ok()?.next().map(|a| a.ip())
 }
 
-fn check_literal_with(
-    url: &str,
-    reach: Reach,
-    non_public: fn(IpAddr) -> bool,
-) -> Result<(), String> {
-    let Ok(parsed) = url::Url::parse(url) else {
-        return Ok(());
-    };
-    let (host, ip) = match parsed.host() {
-        Some(url::Host::Ipv4(ip)) => (ip.to_string(), IpAddr::V4(ip)),
-        Some(url::Host::Ipv6(ip)) => (format!("[{ip}]"), IpAddr::V6(ip)),
-        _ => return Ok(()),
-    };
-    if reach.admits(ip, non_public) {
-        Ok(())
-    } else {
-        Err(reach.refusal(&host, ip))
+/// The reqwest proxies for the environment, honoring `NO_PROXY` for which
+/// targets use them, and the proxy hostnames the resolver must trust.
+pub fn client_proxies(
+    env: impl Fn(&str) -> Option<String>,
+    no_proxy: Option<reqwest::NoProxy>,
+    lookup: impl Fn(&str, u16) -> Option<IpAddr>,
+) -> Result<(Vec<reqwest::Proxy>, Vec<String>), String> {
+    let mut proxies = Vec::new();
+    let mut trusted = Vec::new();
+    for p in env_proxies(env)? {
+        let (url, name) = pin_proxy(p.url, &lookup);
+        trusted.extend(name);
+        let proxy = if p.for_https {
+            reqwest::Proxy::https(url.as_str())
+        } else {
+            reqwest::Proxy::http(url.as_str())
+        }
+        .map_err(|e| format!("invalid proxy {}: {}", url, e))?;
+        proxies.push(proxy.no_proxy(no_proxy.clone()));
     }
+    Ok((proxies, trusted))
 }
 
 /// A destination the resolver refused.
@@ -232,37 +213,67 @@ impl ReachResolver {
             inner: Arc::new(SystemResolver),
             reach,
             non_public: is_non_public,
-            trusted: proxy_hosts(|k| std::env::var(k).ok()),
+            trusted: Vec::new(),
         }
     }
 }
 
-/// Hosts of the proxies the environment configures, lowercase. reqwest
-/// resolves a proxy's host through the same resolver as the target's.
-pub fn proxy_hosts(env: impl Fn(&str) -> Option<String>) -> Vec<String> {
-    let mut hosts = Vec::new();
-    for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
-        for k in [key.to_string(), key.to_ascii_lowercase()] {
-            let Some(v) = env(&k).filter(|v| !v.trim().is_empty()) else {
-                continue;
-            };
-            let v = v.trim();
-            let full = if v.contains("://") {
-                v.to_string()
-            } else {
-                format!("http://{v}")
-            };
-            if let Some(h) = url::Url::parse(&full).ok().and_then(|u| {
-                u.host_str()
-                    .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
-            }) {
-                if !hosts.contains(&h) {
-                    hosts.push(h);
-                }
-            }
-        }
+/// A proxy the environment configures, for http or https targets.
+#[derive(Debug, PartialEq)]
+pub struct EnvProxy {
+    pub for_https: bool,
+    pub url: url::Url,
+}
+
+/// The proxies `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` configure, as
+/// reqwest reads them: `ALL_PROXY` covers a scheme with no proxy of its own.
+pub fn env_proxies(env: impl Fn(&str) -> Option<String>) -> Result<Vec<EnvProxy>, String> {
+    let get = |name: &str| {
+        [name.to_ascii_uppercase(), name.to_ascii_lowercase()]
+            .iter()
+            .find_map(|k| {
+                env(k)
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
+    };
+    let all = get("ALL_PROXY");
+    let mut out = Vec::new();
+    for (for_https, own) in [(false, get("HTTP_PROXY")), (true, get("HTTPS_PROXY"))] {
+        let Some(raw) = own.or_else(|| all.clone()) else {
+            continue;
+        };
+        let full = if raw.contains("://") {
+            raw.clone()
+        } else {
+            format!("http://{raw}")
+        };
+        let url = url::Url::parse(&full).map_err(|e| format!("invalid proxy '{raw}': {e}"))?;
+        out.push(EnvProxy { for_https, url });
     }
-    hosts
+    Ok(out)
+}
+
+/// An `http://` proxy named by a hostname is resolved once and used by
+/// address, so its connection never goes through the resolver's filter and
+/// the filter keeps no exception that a target could share. Other proxies
+/// are returned unchanged, with the hostname the resolver must trust.
+pub fn pin_proxy(
+    mut url: url::Url,
+    lookup: impl Fn(&str, u16) -> Option<IpAddr>,
+) -> (url::Url, Option<String>) {
+    let Some(url::Host::Domain(name)) = url.host().map(|h| h.to_owned()) else {
+        return (url, None);
+    };
+    if url.scheme() != "http" {
+        let trusted = name.trim_end_matches('.').to_ascii_lowercase();
+        return (url, Some(trusted));
+    }
+    let port = url.port_or_known_default().unwrap_or(80);
+    if let Some(ip) = lookup(&name, port) {
+        let _ = url.set_ip_host(ip);
+    }
+    (url, None)
 }
 
 impl Resolve for ReachResolver {
@@ -407,27 +418,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn literal_checks() {
-        for url in [
-            "http://127.0.0.1/",
-            "http://10.0.0.5:8080/x",
-            "http://169.254.169.254/latest/meta-data",
-            "http://[::1]/",
-            "http://[::ffff:127.0.0.1]/",
-            "http://0x7f.1/",
-            "http://2130706433/",
-        ] {
-            let err = check_literal(url, Reach::Public).unwrap_err();
-            assert!(err.contains("non-public address"), "{url}: {err}");
-        }
-        assert!(check_literal("https://8.8.8.8/", Reach::Public).is_ok());
-        assert!(check_literal("https://example.com/", Reach::Public).is_ok());
-        assert!(check_literal("http://127.0.0.1:3000/", Reach::Local).is_ok());
-        let err = check_literal("http://8.8.8.8/", Reach::Local).unwrap_err();
-        assert!(err.contains("public address"), "{err}");
-    }
-
     fn sock(s: &str) -> SocketAddr {
         SocketAddr::new(ip(s), 0)
     }
@@ -556,7 +546,7 @@ mod tests {
             non_public,
             trusted: vec![],
         };
-        http_client_with(None, &flow, Arc::new(resolver), vec![], vec![]).unwrap()
+        http_client_with(None, &flow, Arc::new(resolver), vec![]).unwrap()
     }
 
     const OK: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
@@ -656,7 +646,7 @@ mod tests {
             non_public: loopback_is_public,
             trusted: vec![],
         };
-        let client = http_client_with(None, &flow, Arc::new(resolver), vec![], vec![]).unwrap();
+        let client = http_client_with(None, &flow, Arc::new(resolver), vec![]).unwrap();
         let res = run_http(
             &client,
             &request(&format!("http://ok.example.com:{port}/")),
@@ -714,89 +704,146 @@ mod tests {
             .contains("resolved to a public address (8.8.8.8)"));
     }
 
-    #[test]
-    fn host_policy_checks_literals_against_the_flow_class() {
-        use crate::native::flow::HostPolicy;
-        let local = HostPolicy::from_start("http://127.0.0.1:3000/");
-        assert!(local.check("http://127.0.0.1:3000/api").is_ok());
-        let public = HostPolicy::from_start("https://8.8.8.8/");
-        assert!(public.check("https://8.8.8.8/x").is_ok());
-        let mixed = HostPolicy::from_start("https://shop.example.com/");
-        assert!(mixed.check("http://127.0.0.1/").is_err());
-        assert!(mixed.check("https://api.example.com/").is_ok());
+    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
     }
 
     #[test]
-    fn proxy_hosts_from_the_environment() {
-        let env = |k: &str| match k {
-            "HTTPS_PROXY" => Some("http://User:pw@Proxy.Corp:3128".to_string()),
-            "http_proxy" => Some("proxy.corp:3128".to_string()),
-            "ALL_PROXY" => Some("socks5://10.0.0.9:1080".to_string()),
-            "NO_PROXY" => Some("example.com".to_string()),
-            _ => None,
+    fn env_proxies_follow_reqwest_precedence() {
+        let p = env_proxies(env_of(&[
+            ("HTTPS_PROXY", "http://User:pw@Proxy.Corp:3128"),
+            ("all_proxy", "10.0.0.9:1080"),
+        ]))
+        .unwrap();
+        let got: Vec<(bool, String)> = p.iter().map(|p| (p.for_https, p.url.to_string())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (false, "http://10.0.0.9:1080/".to_string()),
+                (true, "http://User:pw@proxy.corp:3128/".to_string()),
+            ]
+        );
+        assert!(env_proxies(env_of(&[])).unwrap().is_empty());
+        assert!(env_proxies(env_of(&[("HTTP_PROXY", "  ")]))
+            .unwrap()
+            .is_empty());
+        assert!(env_proxies(env_of(&[("HTTP_PROXY", "http://[bad")])).is_err());
+    }
+
+    #[test]
+    fn an_http_proxy_by_name_is_pinned_to_its_address() {
+        let lookup = |h: &str, port: u16| {
+            assert_eq!((h, port), ("proxy.corp", 3128));
+            Some(ip("10.1.2.3"))
         };
-        assert_eq!(proxy_hosts(env), vec!["proxy.corp", "10.0.0.9"]);
-        assert!(proxy_hosts(|_| None).is_empty());
+        let u = url::Url::parse("http://user:pw@proxy.corp:3128").unwrap();
+        let (pinned, trusted) = pin_proxy(u, lookup);
+        assert_eq!(pinned.as_str(), "http://user:pw@10.1.2.3:3128/");
+        assert!(trusted.is_none());
+        let (same, _) = pin_proxy(
+            url::Url::parse("http://127.0.0.1:7890").unwrap(),
+            |_, _| panic!(),
+        );
+        assert_eq!(same.as_str(), "http://127.0.0.1:7890/");
+        let (v6, _) = pin_proxy(url::Url::parse("http://proxy.corp:80").unwrap(), |_, _| {
+            Some(ip("fd00::1"))
+        });
+        assert_eq!(v6.host_str(), Some("[fd00::1]"));
+        // https: the name stays for TLS, so the resolver trusts it.
+        let (kept, trusted) = pin_proxy(
+            url::Url::parse("https://proxy.corp:443").unwrap(),
+            |_, _| panic!(),
+        );
+        assert_eq!(kept.host_str(), Some("proxy.corp"));
+        assert_eq!(trusted.as_deref(), Some("proxy.corp"));
+        // A name that does not resolve is left to fail at connect.
+        let (kept, trusted) =
+            pin_proxy(url::Url::parse("http://nope.corp:80").unwrap(), |_, _| None);
+        assert_eq!(kept.host_str(), Some("nope.corp"));
+        assert!(trusted.is_none());
     }
 
-    async fn through_proxy(trusted: Vec<String>) -> (crate::native::flow::RequestResult, usize) {
-        let (port, hits) = serve(OK.to_string()).await;
+    /// A public flow's client with a proxy at a private address, built the
+    /// way `http_client` builds it.
+    fn proxied_client(
+        proxy_env: &'static [(&'static str, &'static str)],
+        no_proxy: &str,
+        proxy_ip: &'static str,
+        port: u16,
+    ) -> crate::native::flow::HttpClients {
         let flow =
             flow_of(json!({ "startUrl": "https://app.example.com/", "origin": "example.com" }));
+        let (proxies, trusted) = client_proxies(
+            env_of(proxy_env),
+            reqwest::NoProxy::from_string(no_proxy),
+            move |_, _| Some(ip(proxy_ip)),
+        )
+        .unwrap();
+        // Every name resolves to loopback, which a public flow may not use.
         let resolver = ReachResolver {
             inner: Arc::new(Fixed(vec![SocketAddr::new(ip("127.0.0.1"), port)])),
             reach: Reach::Public,
             non_public: is_non_public,
             trusted,
         };
-        let proxy = reqwest::Proxy::all(format!("http://proxy.corp:{port}")).unwrap();
-        let client = crate::native::flow::http_client_with(
-            None,
-            &flow,
-            Arc::new(resolver),
-            vec![proxy],
-            vec![],
-        )
-        .unwrap();
-        let res = run_http(&client, &request("http://app.example.com/"), None, None).await;
-        (res, hits.load(std::sync::atomic::Ordering::SeqCst))
+        http_client_with(None, &flow, Arc::new(resolver), proxies).unwrap()
     }
 
     #[tokio::test]
-    async fn a_private_proxy_host_is_resolved_through_the_filter() {
-        let (res, hits) = through_proxy(vec![]).await;
-        assert!(res
-            .reason
-            .unwrap_or_default()
-            .contains("proxy.corp resolved to a non-public"));
-        assert_eq!(hits, 0);
-    }
-
-    #[tokio::test]
-    async fn a_configured_proxy_host_is_not_filtered() {
-        let (res, hits) = through_proxy(vec!["proxy.corp".to_string()]).await;
-        assert!(!res.reason.unwrap_or_default().contains("resolved to"));
-        assert_eq!(hits, 1, "the request went to the proxy");
-    }
-
-    #[tokio::test]
-    async fn a_target_named_like_a_proxy_is_refused_before_sending() {
+    async fn a_proxy_at_a_private_address_works() {
         let (port, hits) = serve(OK.to_string()).await;
-        let flow = flow_of(json!({ "startUrl": "https://example.com/", "origin": "example.com" }));
-        let resolver = ReachResolver {
-            inner: Arc::new(Fixed(vec![SocketAddr::new(ip("127.0.0.1"), port)])),
-            reach: Reach::Public,
-            non_public: is_non_public,
-            trusted: vec!["proxy.example.com".to_string()],
-        };
-        let client = http_client_with(
+        let env: &'static [(&str, &str)] = Box::leak(Box::new([(
+            "HTTP_PROXY",
+            Box::leak(format!("http://proxy.corp:{port}").into_boxed_str()) as &str,
+        )]));
+        let client = proxied_client(env, "", "127.0.0.1", port);
+        let res = run_http(&client, &request("http://app.example.com/"), None, None).await;
+        assert!(!res.reason.unwrap_or_default().contains("resolved to"));
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the proxy got the request"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_that_bypasses_the_proxy_is_still_filtered() {
+        let (port, hits) = serve(OK.to_string()).await;
+        let env: &'static [(&str, &str)] = Box::leak(Box::new([(
+            "HTTP_PROXY",
+            Box::leak(format!("http://proxy.corp:{port}").into_boxed_str()) as &str,
+        )]));
+        let client = proxied_client(env, "app.example.com", "127.0.0.1", port);
+        let res = run_http(
+            &client,
+            &request(&format!("http://app.example.com:{port}/")),
             None,
-            &flow,
-            Arc::new(resolver),
-            vec![],
-            vec!["proxy.example.com".to_string()],
+            None,
         )
-        .unwrap();
+        .await;
+        let reason = res.reason.unwrap_or_default();
+        assert!(
+            reason.contains("app.example.com resolved to a non-public address (127.0.0.1)"),
+            "{reason}"
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_target_named_like_the_proxy_is_filtered() {
+        // The proxy is pinned, so its name is not trusted: a direct request
+        // to that name is an ordinary target.
+        let (port, hits) = serve(OK.to_string()).await;
+        let env: &'static [(&str, &str)] = Box::leak(Box::new([(
+            "HTTP_PROXY",
+            Box::leak(format!("http://proxy.example.com:{port}").into_boxed_str()) as &str,
+        )]));
+        let client = proxied_client(env, "proxy.example.com", "127.0.0.1", port);
         let res = run_http(
             &client,
             &request(&format!("http://proxy.example.com:{port}/")),
@@ -804,18 +851,41 @@ mod tests {
             None,
         )
         .await;
-        assert!(!res.ok);
-        assert!(res.reason.unwrap().contains("configured proxy"));
-        assert!(res.stop.is_none() && !res.drift);
+        assert!(res
+            .reason
+            .unwrap_or_default()
+            .contains("non-public address"));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
-    #[test]
-    fn host_policy_refuses_a_proxy_host_as_target() {
-        let p = crate::native::flow::HostPolicy::from_start("https://example.com/")
-            .with_proxy_hosts(vec!["proxy.example.com".to_string()]);
-        let err = p.check("https://proxy.example.com/x").unwrap_err();
-        assert!(err.contains("configured proxy"), "{err}");
-        assert!(p.check("https://api.example.com/x").is_ok());
+    #[tokio::test]
+    async fn a_local_flow_with_a_local_proxy_and_no_proxy_still_runs() {
+        let (port, hits) = serve(OK.to_string()).await;
+        let flow = flow_of(json!({ "startUrl": "http://127.0.0.1:3000/", "origin": "127.0.0.1" }));
+        let (proxies, trusted) = client_proxies(
+            env_of(&[
+                ("HTTPS_PROXY", "http://127.0.0.1:7890"),
+                ("http_proxy", "http://127.0.0.1:7890"),
+            ]),
+            reqwest::NoProxy::from_string("127.0.0.1"),
+            |_, _| panic!("an address needs no lookup"),
+        )
+        .unwrap();
+        let resolver = ReachResolver {
+            inner: Arc::new(SystemResolver),
+            reach: Reach::Local,
+            non_public: is_non_public,
+            trusted,
+        };
+        let client = http_client_with(None, &flow, Arc::new(resolver), proxies).unwrap();
+        let res = run_http(
+            &client,
+            &request(&format!("http://127.0.0.1:{port}/")),
+            None,
+            None,
+        )
+        .await;
+        assert!(!res.reason.unwrap_or_default().contains("proxy"));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::net::{refusal_in, Reach, ReachResolver};
+use super::net::{client_proxies, refusal_in, system_lookup, Reach, ReachResolver};
 use super::*;
 
 /// A session route (`network route`) that matches the request answers it,
@@ -21,9 +21,6 @@ pub async fn run_http(
     routed: Option<RoutedResponse>,
 ) -> RequestResult {
     let started = Instant::now();
-    if let Err(e) = clients.hosts.check(&req.url) {
-        return request_result(req, started, Err(Failure::new(false, None, e)));
-    }
     if let Some(r) = routed {
         let outcome = if r.abort {
             Err(Failure::new(
@@ -108,18 +105,16 @@ pub async fn run_http(
                 Failure::new(true, Some(status), format!("could not read body: {}", e))
             })
         }
-        // The resolver refused the destination before any connection.
-        Err(e) if refusal_in(&e).is_some() => Err(Failure::new(
-            false,
-            None,
-            refusal_in(&e).unwrap_or_default(),
-        )),
-        // A write that left the machine may have been applied.
-        Err(e) if req.write && !e.is_connect() => Err(Failure::unknown_outcome(format!(
-            "the write was sent but no response came back: {}",
-            e
-        ))),
-        Err(e) => Err(Failure::new(false, None, format!("request failed: {}", e))),
+        Err(e) => match refusal_in(&e) {
+            // The resolver refused the destination before any connection.
+            Some(reason) => Err(Failure::new(false, None, reason)),
+            // A write that left the machine may have been applied.
+            None if req.write && !e.is_connect() => Err(Failure::unknown_outcome(format!(
+                "the write was sent but no response came back: {}",
+                e
+            ))),
+            None => Err(Failure::new(false, None, format!("request failed: {}", e))),
+        },
     };
     with_retry_after(request_result(req, started, outcome), retry_after)
 }
@@ -127,7 +122,6 @@ pub async fn run_http(
 /// The clients of a run: reads follow same-site redirects, writes never
 /// follow any.
 pub struct HttpClients {
-    hosts: HostPolicy,
     reads: reqwest::Client,
     writes: reqwest::Client,
 }
@@ -146,22 +140,27 @@ pub fn http_client(
     filter: Option<crate::native::network::DomainFilter>,
     flow: &Flow,
 ) -> Result<HttpClients, String> {
-    let resolver = ReachResolver::system(Reach::of_start(&flow.start_url));
-    let proxy_hosts = resolver.trusted.clone();
-    http_client_with(filter, flow, Arc::new(resolver), Vec::new(), proxy_hosts)
+    let (proxies, trusted) = client_proxies(
+        |k| std::env::var(k).ok(),
+        reqwest::NoProxy::from_env(),
+        system_lookup,
+    )?;
+    let mut resolver = ReachResolver::system(Reach::of_start(&flow.start_url));
+    resolver.trusted = trusted;
+    http_client_with(filter, flow, Arc::new(resolver), proxies)
 }
 
-/// `http_client` with the resolver given, so a test can make a name resolve
-/// to an address of its choosing.
+/// `http_client` with the resolver and proxies given. The environment's
+/// proxies are read by `http_client` only, so a test's client has none
+/// unless it passes them.
 pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
     filter: Option<crate::native::network::DomainFilter>,
     flow: &Flow,
     resolver: Arc<R>,
     proxies: Vec<reqwest::Proxy>,
-    proxy_hosts: Vec<String>,
 ) -> Result<HttpClients, String> {
     let build = |policy| {
-        let mut builder = reqwest::Client::builder();
+        let mut builder = reqwest::Client::builder().no_proxy();
         for p in &proxies {
             builder = builder.proxy(p.clone());
         }
@@ -172,10 +171,8 @@ pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))
     };
-    let hosts = HostPolicy::of(flow).with_proxy_hosts(proxy_hosts);
     Ok(HttpClients {
-        reads: build(read_redirects(filter, hosts.clone()))?,
-        hosts,
+        reads: build(read_redirects(filter, flow))?,
         // The 3xx comes back as the answer, so a write that was sent is
         // not sent again by a 307 or 308.
         writes: build(reqwest::redirect::Policy::none())?,
@@ -186,8 +183,9 @@ pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
 /// the same rule browser requests follow.
 fn read_redirects(
     filter: Option<crate::native::network::DomainFilter>,
-    hosts: HostPolicy,
+    flow: &Flow,
 ) -> reqwest::redirect::Policy {
+    let hosts = HostPolicy::of(flow);
     reqwest::redirect::Policy::custom(move |attempt| {
         let blocked = hosts.check(attempt.url().as_str()).err().or_else(|| {
             filter
