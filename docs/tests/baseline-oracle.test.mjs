@@ -6,7 +6,7 @@ import { evaluate } from "@mdx-js/mdx";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import * as runtime from "react/jsx-runtime";
-import ts from "typescript";
+import { transformSync } from "esbuild";
 import {
   baseline,
   pages,
@@ -18,21 +18,23 @@ import {
 const require = createRequire(import.meta.url);
 const evaluated = { exports: {} };
 runInNewContext(
-  ts.transpileModule(baseline.sources["docs/mdx-components.tsx"].raw, {
-    fileName: "original-mdx-components.tsx",
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2022,
-      jsx: ts.JsxEmit.ReactJSX,
-    },
-  }).outputText,
+  transformSync(baseline.sources["docs/mdx-components.tsx"].raw, {
+    sourcefile: "original-mdx-components.tsx",
+    loader: "tsx",
+    format: "cjs",
+    target: "es2022",
+    jsx: "automatic",
+  }).code,
   {
     module: evaluated,
     exports: evaluated.exports,
     require(specifier) {
       if (specifier === "react/jsx-runtime") return require(specifier);
       if (specifier === "next/link")
-        return { default: (props) => React.createElement("a", props) };
+        return {
+          __esModule: true,
+          default: (props) => React.createElement("a", props),
+        };
       if (specifier === "@/components/code-block")
         return {
           CodeBlock: ({ code }) => React.createElement("pre", null, code),
