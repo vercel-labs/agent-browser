@@ -264,8 +264,13 @@ impl StreamServer {
     }
 
     /// Point dashboard input at a Firefox tab, or clear it with `None`.
-    pub async fn set_firefox_live(&self, live: Option<FirefoxLive>) {
+    pub async fn set_firefox_live(&self, mut live: Option<FirefoxLive>) {
         let mut current = self.firefox_live.write().await;
+        if let (Some(current), Some(next)) = (current.as_ref(), live.as_mut()) {
+            if Arc::ptr_eq(&current.bidi, &next.bidi) {
+                next.modifiers = Arc::clone(&current.modifiers);
+            }
+        }
         if current.as_ref().map(|live| &live.context) != live.as_ref().map(|live| &live.context) {
             self.frame_watch.send_replace(None);
         }
@@ -894,17 +899,23 @@ mod tests {
             bidi: ff.bidi.clone(),
             context: "ctx-old".into(),
             contexts: Default::default(),
+            modifiers: Default::default(),
         };
         server.set_firefox_live(Some(live.clone())).await;
         server.broadcast_frame(r#"{"type":"frame","data":"old-tab"}"#);
         server.set_firefox_live(Some(live.clone())).await;
         assert!(server.frame_watch.borrow().is_some());
+        live.modifiers.lock().await.insert("ctx-old".into(), 8);
         server
             .set_firefox_live(Some(FirefoxLive {
                 context: "ctx-new".into(),
-                ..live
+                modifiers: Default::default(),
+                ..live.clone()
             }))
             .await;
+        let current = server.firefox_live.read().await.clone().unwrap();
+        assert!(Arc::ptr_eq(&current.modifiers, &live.modifiers));
+        assert_eq!(current.modifiers.lock().await.get("ctx-old"), Some(&8));
         let mut ws = connect_client(server.port()).await;
         expect_no_frame(&mut ws, 200).await;
         server.shutdown().await;
