@@ -4,11 +4,11 @@ use futures_util::future::join_all;
 use serde_json::{json, Value};
 
 use super::actions::session;
+use super::client::{remote_to_json, BidiClient};
 use super::emulation;
 use super::page;
 use super::session::FirefoxSession;
 use crate::native::actions::{self as chrome, DaemonState};
-use super::client::{remote_to_json, BidiClient};
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 
 /// Opens a tab and makes it active. Must return what Chrome's `handle_tab_new` returns,
