@@ -252,7 +252,7 @@ pub async fn swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
     })
 }
 
-/// Drags from one ref or selector to another.
+/// Drags between selectors or refs using DOM events for HTML5 sources and pointer input otherwise.
 pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let source = cmd
         .get("source")
@@ -270,6 +270,62 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
 
     let ff = session(state)?;
     let (sx, sy) = prepare(ff, &source_target, source, true).await?;
+    let html5 = ff
+        .bidi
+        .call_function(
+            &source_target.context,
+            "function() { return this.draggable === true; }",
+            Some(source_target.node_ref()),
+            vec![],
+        )
+        .await?;
+    if html5 == true {
+        let (tx, ty) = prepare(ff, &target, target_selector, true).await?;
+        ff.race_prompt(
+            &source_target.context,
+            ff.bidi.call_function(
+                &source_target.context,
+                r#"function(target, points) {
+                    const dataTransfer = new DataTransfer();
+                    dataTransfer.effectAllowed = 'all';
+                    const uri = this.localName === 'a' ? this.href
+                        : this.localName === 'img' ? this.currentSrc || this.src : null;
+                    if (uri) {
+                        dataTransfer.setData('text/uri-list', uri);
+                        dataTransfer.setData('text/plain', uri);
+                        dataTransfer.setData('text/html', this.outerHTML);
+                    }
+                    const fire = (node, type, x, y) => node.dispatchEvent(new DragEvent(type, {
+                        bubbles: true, cancelable: true, composed: true,
+                        clientX: x, clientY: y, dataTransfer,
+                    }));
+                    const rect = this.getBoundingClientRect();
+                    const sx = rect.x + rect.width / 2;
+                    const sy = rect.y + rect.height / 2;
+                    const [tx, ty] = points;
+                    if (!fire(this, 'dragstart', sx, sy)) return;
+                    const allowed = {
+                        none: [], copy: ['copy'], link: ['link'], move: ['move'],
+                        copyLink: ['copy', 'link'], copyMove: ['copy', 'move'],
+                        linkMove: ['link', 'move'], all: ['copy', 'link', 'move'],
+                        uninitialized: ['copy', 'link', 'move'],
+                    }[dataTransfer.effectAllowed];
+                    dataTransfer.dropEffect = allowed[0] || 'none';
+                    fire(target, 'dragenter', tx, ty);
+                    if (!fire(target, 'dragover', tx, ty) && allowed.includes(dataTransfer.dropEffect)) {
+                        fire(target, 'drop', tx, ty);
+                    } else {
+                        dataTransfer.dropEffect = 'none';
+                    }
+                    fire(this, 'dragend', tx, ty);
+                }"#,
+                Some(source_target.node_ref()),
+                vec![target.node_ref(), json!([tx, ty])],
+            ),
+        )
+        .await?;
+        return Ok(json!({ "dragged": true, "source": source, "target": target_selector }));
+    }
     let source_origin = Origin::Viewport { x: sx, y: sy };
     let mut release_at = source_origin.clone();
     let result: Result<(), String> = async {
@@ -285,9 +341,7 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
         let (tx, ty) = prepare(ff, &target, target_selector, true).await?;
         let target_origin = Origin::Viewport { x: tx, y: ty };
         release_at = target_origin.clone();
-        let mut move_to_target = pointer_hover(&target_origin);
-        move_to_target[0]["actions"][0]["duration"] = json!(250);
-        if perform(ff, &source_target.context, move_to_target).await? {
+        if perform(ff, &source_target.context, pointer_hover(&target_origin)).await? {
             return Ok(());
         }
         perform(
