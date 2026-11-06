@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 use super::cdp::client::CdpClient;
+use super::cdp::types::session_matches;
 
 const MAX_PROFILE_EVENTS: usize = 5_000_000;
 
@@ -96,7 +97,7 @@ pub async fn trace_stop(
 
         match result {
             Ok(Ok(event)) => {
-                if event.session_id.as_deref() != Some(session_id) {
+                if !session_matches(Some(session_id), event.session_id.as_deref()) {
                     continue;
                 }
                 match event.method.as_str() {
@@ -243,7 +244,7 @@ pub async fn profiler_stop(
 
         match result {
             Ok(Ok(event)) => {
-                if event.session_id.as_deref() != Some(session_id) {
+                if !session_matches(Some(session_id), event.session_id.as_deref()) {
                     continue;
                 }
                 match event.method.as_str() {

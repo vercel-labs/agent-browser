@@ -164,4 +164,6 @@ Use the `-p` flag to connect to a cloud browser provider or configured `browser.
 agent-browser -p browserbase open https://example.com
 ```
 
+A `browser.provider` plugin that returns `directPage: true` connects to a page socket instead of a browser endpoint. Console messages, network requests, HAR recording, tracing, and profiling apply to that page.
+
 See the [Providers](/providers/browser-use) section for setup and configuration of each built-in provider: [Browser Use](/providers/browser-use), [Browserbase](/providers/browserbase), [Browserless](/providers/browserless), [Kernel](/providers/kernel), and [AgentCore](/providers/agentcore).

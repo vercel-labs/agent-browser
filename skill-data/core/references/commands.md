@@ -422,6 +422,8 @@ Other capabilities use the same protocol:
 - `launch.mutate`: append local launch args, extensions, or init scripts
 - `command.run`: `agent-browser plugin run <name> <type> --payload <json>`
 
+A `browser.provider` plugin that returns `directPage: true` connects to a page socket, so console messages, network requests, HAR recording, tracing, and profiling apply to that page.
+
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
 
 ## State Management
