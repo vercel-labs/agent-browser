@@ -235,9 +235,31 @@ impl Store for FsStore {
 }
 
 /// Removes the settings file of `session` without reading it. For the CLI,
-/// which clears on `close` whether or not a daemon can start.
-pub fn clear_file(session: &str) {
-    let _ = fs::remove_file(SessionFile::Settings.path(session));
+/// which clears on `close` whether or not a daemon can start. An empty
+/// directory in its place is removed too, so `close` can clear any entry the
+/// daemon refuses; anything else that cannot be removed is an error naming
+/// the path.
+pub fn clear_file(session: &str) -> Result<(), String> {
+    clear_path(&SessionFile::Settings.path(session))
+}
+
+fn clear_path(path: &Path) -> Result<(), String> {
+    let err = match fs::remove_file(path) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => e,
+    };
+    // A directory, or on Windows a directory symlink, is not a file.
+    let is_dir_like = fs::symlink_metadata(path)
+        .map(|m| m.is_dir() || m.file_type().is_symlink())
+        .unwrap_or(false);
+    if is_dir_like && fs::remove_dir(path).is_ok() {
+        return Ok(());
+    }
+    Err(format!(
+        "session settings {} could not be removed ({err}); remove it by hand",
+        path.display()
+    ))
 }
 
 /// Starts the error a daemon prints when it refuses to start because of the
@@ -852,9 +874,34 @@ mod tests {
         let other = SessionFile::Settings.path("other");
         fs::write(&other, "{}").unwrap();
 
-        clear_file("s");
+        clear_file("s").unwrap();
 
         assert!(!path.exists());
         assert!(other.exists());
+    }
+
+    #[test]
+    fn test_clear_path_removes_an_empty_directory_in_place_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.settings");
+        fs::create_dir(&path).unwrap();
+
+        clear_path(&path).unwrap();
+
+        assert!(!path.exists());
+        clear_path(&path).unwrap();
+    }
+
+    #[test]
+    fn test_clear_path_names_an_entry_it_cannot_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.settings");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), "x").unwrap();
+
+        let err = clear_path(&path).unwrap_err();
+
+        assert!(err.contains("s.settings"), "{err}");
+        assert!(path.join("keep").exists());
     }
 }

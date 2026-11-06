@@ -1246,7 +1246,9 @@ fn run_dashboard_stop(json_mode: bool) {
 /// session contained.
 fn clear_closed_session(session: &str) {
     tls::clear_session(session);
-    session_settings::clear_file(session);
+    if let Err(e) = session_settings::clear_file(session) {
+        eprintln!("{} {}", color::warning_indicator(), e);
+    }
 }
 
 /// What `close` forgets before it is sent. The stored security settings stay:
@@ -1267,7 +1269,7 @@ fn ensure_daemon_for(
 ) -> Result<connection::DaemonResult, String> {
     match ensure_daemon(session, opts) {
         Err(e) if is_close && session_settings::is_refusal(&e) => {
-            session_settings::clear_file(session);
+            session_settings::clear_file(session)?;
             ensure_daemon(session, opts)
         }
         other => other,
