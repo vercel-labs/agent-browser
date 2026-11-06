@@ -1240,12 +1240,9 @@ impl DaemonState {
                     bidi::session::dialog_blocks_tab(dialog.owner_context.as_deref(), &live.context)
                 })
             });
-            self.firefox_poller = live
-                .clone()
-                .map(|live| bidi::stream::spawn_poller(live, Arc::clone(&server), paused));
-            server.set_firefox_live(live).await;
+            self.firefox_poller = None;
+            server.set_firefox_live(live.clone()).await;
             let sc = server.is_screencasting().await;
-            let (vw, vh) = server.viewport().await;
             if let Some(ref mgr) = self.browser {
                 server
                     .bind_cdp_session_and_broadcast_tabs(session_id, &mgr.tab_list())
@@ -1258,9 +1255,12 @@ impl DaemonState {
                     .bind_cdp_session_and_broadcast_tabs(session_id, &[])
                     .await;
             }
+            let (vw, vh) = server.viewport().await;
             server
                 .broadcast_status(connected, sc, vw, vh, &self.engine)
                 .await;
+            self.firefox_poller =
+                live.map(|live| bidi::stream::spawn_poller(live, Arc::clone(&server), paused));
         }
     }
 

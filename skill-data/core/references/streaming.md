@@ -46,6 +46,7 @@ Connect a WebSocket client to `ws://127.0.0.1:<port>`. Frame delivery starts aut
 Every message is JSON text with a `type` field.
 
 - `frame`: a viewport image plus its metadata. Delivered latest-first (see below).
+- `frame_clear`: Firefox only; clear the displayed image when the active tab changes, before frames from the new tab arrive.
 
 ```json
 {

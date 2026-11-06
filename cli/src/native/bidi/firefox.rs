@@ -52,7 +52,7 @@ pub fn validate_firefox_options(
 ) -> Result<(), String> {
     let unsupported = |flag: &str| Err(format!("{flag} is not supported with --engine firefox"));
     if cdp.is_some() {
-        return unsupported("--cdp");
+        return Err("connect and --cdp are not supported with --engine firefox".to_string());
     }
     if auto_connect {
         return unsupported("--auto-connect");
@@ -413,7 +413,7 @@ mod tests {
         o.ca_cert = Some("c".into());
         assert!(err_of(&o).contains("--ca-cert"));
         let e = validate_firefox_options(&ok(), Some("9222"), false, None).unwrap_err();
-        assert!(e.contains("--cdp"));
+        assert!(e.contains("connect") && e.contains("--cdp"));
         let e = validate_firefox_options(&ok(), None, true, None).unwrap_err();
         assert!(e.contains("--auto-connect"));
         let e = validate_firefox_options(&ok(), None, false, Some("browserbase")).unwrap_err();

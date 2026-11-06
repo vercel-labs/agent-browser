@@ -15885,11 +15885,7 @@ async fn e2e_firefox_stream_modifier_masks() {
             .await;
         }
     }
-    for (event, modifiers) in [
-        ("mousePressed", 8),
-        ("mouseReleased", 8),
-        ("mouseMoved", 0),
-    ] {
+    for (event, modifiers) in [("mousePressed", 8), ("mouseReleased", 8), ("mouseMoved", 0)] {
         super::bidi::stream::dispatch_input(
             &live,
             "input_mouse",
@@ -16267,9 +16263,48 @@ async fn e2e_firefox_frame_dialog_does_not_block_new_tab() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["accepted"], false, "{resp}");
+    let resp = firefox_command(&mut state, json!({ "id": "third", "action": "tab_new" })).await;
+    assert_success(&resp);
+    let opener_context = state.firefox.as_ref().unwrap().top_context.clone();
+    assert_eq!(
+        firefox_eval(&mut state, "window.open('about:blank'); 'opened'").await,
+        "opened"
+    );
+    for _ in 0..100 {
+        state.drain_cdp_events_background().await.unwrap();
+        if state.firefox.as_ref().unwrap().top_context != opener_context {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+    let popup_context = state.firefox.as_ref().unwrap().top_context.clone();
+    assert_ne!(popup_context, opener_context);
+    assert_eq!(state.firefox.as_ref().unwrap().context, popup_context);
+
     assert_eq!(firefox_eval(&mut state, "window.close(); 1").await, 1);
+    for _ in 0..100 {
+        state.drain_cdp_events_background().await.unwrap();
+        if state.firefox.as_ref().unwrap().top_context == opener_context {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(state.firefox.as_ref().unwrap().top_context, opener_context);
+    assert_eq!(state.firefox.as_ref().unwrap().context, opener_context);
     assert_eq!(firefox_eval(&mut state, "1 + 1").await, 2);
-    assert_eq!(state.firefox.as_ref().unwrap().top_context, owner_context);
+
+    assert_eq!(firefox_eval(&mut state, "window.close(); 1").await, 1);
+    for _ in 0..100 {
+        state.drain_cdp_events_background().await.unwrap();
+        if state.firefox.as_ref().unwrap().top_context != opener_context {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, 2);
+    let ff = state.firefox.as_ref().unwrap();
+    assert_ne!(ff.top_context, opener_context);
+    assert_eq!(ff.context, ff.top_context);
     firefox_close(&mut state).await;
 }
 

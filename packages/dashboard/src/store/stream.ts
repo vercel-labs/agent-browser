@@ -155,6 +155,10 @@ export function useStreamSync(port: number) {
           setFrame(msg.data);
           break;
 
+        case "frame_clear":
+          setFrame(null);
+          break;
+
         case "status":
           setBrowserConnected(msg.connected);
           setScreencasting(msg.screencasting);

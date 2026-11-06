@@ -41,6 +41,7 @@ pub struct FirefoxSession {
     /// Stable `t<N>` ids keyed by BiDi context; assigned on first sight and never reused.
     pub tab_ids: HashMap<String, u32>,
     pub(crate) context_parents: HashMap<String, String>,
+    top_context_openers: HashMap<String, String>,
     next_tab_id: u32,
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
@@ -223,6 +224,7 @@ impl FirefoxSession {
             accessibility_actor,
             tab_ids: HashMap::from([(context.clone(), 1)]),
             context_parents: HashMap::new(),
+            top_context_openers: HashMap::new(),
             next_tab_id: 2,
             top_context: context.clone(),
             context,
@@ -287,14 +289,31 @@ impl FirefoxSession {
     pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> Vec<Value> {
         let mut drained = Vec::new();
         while let Ok(e) = self.events.try_recv() {
-            if e["method"] == "browsingContext.contextCreated"
-                && e["params"]["originalOpener"].is_string()
-            {
-                self.top_context = e["params"]["context"].as_str().unwrap_or_default().into();
-            } else if e["method"] == "browsingContext.contextDestroyed"
-                && e["params"]["context"] == self.top_context
-            {
-                self.top_context.clear();
+            if e["method"] == "browsingContext.contextCreated" {
+                if let (Some(context), Some(opener)) = (
+                    e["params"]["context"].as_str(),
+                    e["params"]["originalOpener"].as_str(),
+                ) {
+                    self.top_context_openers
+                        .insert(context.to_string(), opener.to_string());
+                    self.top_context = context.to_string();
+                }
+            } else if e["method"] == "browsingContext.contextDestroyed" {
+                if let Some(context) = e["params"]["context"].as_str() {
+                    let closes_active_tab = self.context == context
+                        || owner_tab(&self.context, &self.context_parents) == context;
+                    if context == self.top_context {
+                        self.top_context =
+                            self.top_context_openers.remove(context).unwrap_or_default();
+                    } else {
+                        self.top_context_openers.remove(context);
+                    }
+                    self.top_context_openers
+                        .retain(|_, opener| opener.as_str() != context);
+                    if closes_active_tab {
+                        self.context = self.top_context.clone();
+                    }
+                }
             }
             apply_event(&e, dialog, &mut self.context_parents);
             drained.push(e);
@@ -573,6 +592,7 @@ pub(crate) mod tests {
             context: "ctx-active".into(),
             tab_ids: HashMap::from([("ctx-active".into(), 1)]),
             context_parents: HashMap::new(),
+            top_context_openers: HashMap::new(),
             next_tab_id: 2,
             top_context: "ctx-active".into(),
             refs: HashMap::new(),
@@ -703,6 +723,7 @@ pub(crate) mod tests {
             context: "ctx-active".into(),
             tab_ids: HashMap::from([("ctx-active".into(), 1)]),
             context_parents: HashMap::new(),
+            top_context_openers: HashMap::new(),
             next_tab_id: 2,
             top_context: "ctx-active".into(),
             refs: HashMap::new(),
@@ -757,6 +778,33 @@ pub(crate) mod tests {
             received.recv().await.unwrap();
         }
         assert_eq!(ff.drain_events(&mut None).len(), 2048);
+    }
+
+    #[tokio::test]
+    async fn drain_events_restores_popup_opener_when_popup_closes() {
+        let (mut ff, tx, _) = fake_session().await;
+        ff.context = "tab-3".into();
+        ff.top_context = "tab-3".into();
+        let mut received = ff.bidi.subscribe_buffered();
+        tx.send(json!({
+            "method": "browsingContext.contextCreated",
+            "params": {"context": "popup", "originalOpener": "tab-3"}
+        }))
+        .unwrap();
+        received.recv().await.unwrap();
+        ff.drain_events(&mut None);
+        assert_eq!(ff.top_context, "popup");
+        ff.context = "popup".into();
+
+        tx.send(json!({
+            "method": "browsingContext.contextDestroyed",
+            "params": {"context": "popup"}
+        }))
+        .unwrap();
+        received.recv().await.unwrap();
+        ff.drain_events(&mut None);
+        assert_eq!(ff.top_context, "tab-3");
+        assert_eq!(ff.context, "tab-3");
     }
 
     #[test]
