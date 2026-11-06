@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -237,6 +237,44 @@ pub async fn ensure_intercept(ff: &mut FirefoxSession) -> Result<(), String> {
     Ok(())
 }
 
+type LegacyDownloadKey = (Option<String>, Option<String>, Option<String>);
+
+/// Tracks downloads from Firefox builds that report no download id, so each
+/// start keeps its own id until the matching end event arrives.
+#[derive(Default)]
+struct LegacyDownloadIds {
+    pending: HashMap<LegacyDownloadKey, VecDeque<String>>,
+}
+
+impl LegacyDownloadIds {
+    fn key(params: &Value) -> LegacyDownloadKey {
+        (
+            params["context"].as_str().map(str::to_owned),
+            params["navigation"].as_str().map(str::to_owned),
+            params["url"].as_str().map(str::to_owned),
+        )
+    }
+
+    fn started(&mut self, params: &Value) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.pending
+            .entry(Self::key(params))
+            .or_default()
+            .push_back(id.clone());
+        id
+    }
+
+    fn ended(&mut self, params: &Value) -> Option<String> {
+        let key = Self::key(params);
+        let ids = self.pending.get_mut(&key)?;
+        let id = ids.pop_front();
+        if ids.is_empty() {
+            self.pending.remove(&key);
+        }
+        id
+    }
+}
+
 /// Starts the task that resolves every intercepted request exactly once.
 pub fn spawn_dispatcher(
     bidi: Arc<BidiClient>,
@@ -247,7 +285,7 @@ pub fn spawn_dispatcher(
 ) -> AbortOnDrop {
     AbortOnDrop(tokio::spawn(async move {
         let mut emulated_contexts = HashSet::new();
-        let mut legacy_downloads = HashMap::new();
+        let mut legacy_downloads = LegacyDownloadIds::default();
         while let Some(mut e) = rx.recv().await {
             if e["method"] == "browsingContext.contextCreated" && e["params"]["parent"].is_null() {
                 if let Some(context) = e["params"]["context"].as_str() {
@@ -275,26 +313,10 @@ pub fn spawn_dispatcher(
             );
             if is_download {
                 if e["params"]["download"].as_str().is_none() {
-                    let key = (
-                        e["params"]["context"].as_str().map(str::to_owned),
-                        e["params"]["navigation"].as_str().map(str::to_owned),
-                        e["params"]["url"].as_str().map(str::to_owned),
-                    );
                     let download = if e["method"] == "browsingContext.downloadWillBegin" {
-                        let (download, pending) = legacy_downloads
-                            .entry(key)
-                            .or_insert_with(|| (uuid::Uuid::new_v4().to_string(), 0usize));
-                        *pending += 1;
-                        Some(download.clone())
-                    } else if let Some((download, pending)) = legacy_downloads.get_mut(&key) {
-                        let download = download.clone();
-                        *pending -= 1;
-                        if *pending == 0 {
-                            legacy_downloads.remove(&key);
-                        }
-                        Some(download)
+                        Some(legacy_downloads.started(&e["params"]))
                     } else {
-                        None
+                        legacy_downloads.ended(&e["params"])
                     };
                     if let Some(download) = download {
                         e["params"]["download"] = json!(download);
@@ -431,37 +453,49 @@ async fn before_request(
     Ok(())
 }
 
-/// Answers an auth challenge; proxy credentials go only to proxy (407) challenges, never to origins.
+/// Answers a proxy auth challenge; origin challenges keep the browser's default handling.
 async fn auth_required(
     bidi: &BidiClient,
     net: &NetContext,
     id: &str,
     event: &Value,
 ) -> Result<(), String> {
-    let credentials = if event["response"]["status"] == 407 {
+    let status = event["response"]["status"].as_i64().unwrap_or(0);
+    let credentials = if status == 407 {
         net.proxy_credentials.read().await.clone()
     } else {
         None
     };
-    let params = match credentials {
-        Some((username, password))
-            if {
-                let mut tries = net.proxy_auth_requests.write().await;
-                let n = tries.entry(id.to_string()).or_insert(0);
-                *n += 1;
-                *n <= 2
-            } =>
-        {
-            json!({
-                "request": id,
-                "action": "provideCredentials",
-                "credentials": {"type": "password", "username": username, "password": password},
-            })
-        }
-        _ => json!({"request": id, "action": "cancel"}),
+    let may_retry = if credentials.is_some() {
+        let mut tries = net.proxy_auth_requests.write().await;
+        let n = tries.entry(id.to_string()).or_insert(0);
+        *n += 1;
+        *n <= 2
+    } else {
+        false
     };
+    let params = auth_response(id, status, credentials, may_retry);
     bidi.send("network.continueWithAuth", params).await?;
     Ok(())
+}
+
+fn auth_response(
+    id: &str,
+    status: i64,
+    credentials: Option<(String, String)>,
+    may_retry: bool,
+) -> Value {
+    if status != 407 {
+        return json!({"request": id, "action": "default"});
+    }
+    match credentials {
+        Some((username, password)) if may_retry => json!({
+            "request": id,
+            "action": "provideCredentials",
+            "credentials": {"type": "password", "username": username, "password": password},
+        }),
+        _ => json!({"request": id, "action": "cancel"}),
+    }
 }
 
 /// Drains buffered BiDi events and applies them to the daemon's dialog, network and console state.
@@ -1208,6 +1242,58 @@ mod tests {
     }
 
     #[test]
+    fn legacy_download_end_matches_only_the_same_key() {
+        let mut ids = LegacyDownloadIds::default();
+        let start = json!({
+            "context": "c",
+            "navigation": "n1",
+            "url": "https://example.com/file.bin",
+        });
+        let other = json!({
+            "context": "c",
+            "navigation": "n2",
+            "url": "https://example.com/file.bin",
+        });
+        let id = ids.started(&start);
+        assert_eq!(ids.ended(&other), None);
+        assert_eq!(ids.ended(&start), Some(id));
+    }
+
+    #[test]
+    fn origin_auth_keeps_default_handling_and_ignores_proxy_credentials() {
+        let response = auth_response(
+            "request",
+            401,
+            Some(("proxy-user".into(), "proxy-pass".into())),
+            true,
+        );
+        assert_eq!(response["action"], "default");
+        assert!(response.get("credentials").is_none());
+    }
+
+    #[test]
+    fn proxy_auth_still_uses_configured_credentials() {
+        let response = auth_response(
+            "request",
+            407,
+            Some(("proxy-user".into(), "proxy-pass".into())),
+            true,
+        );
+        assert_eq!(response["action"], "provideCredentials");
+        assert_eq!(response["credentials"]["username"], "proxy-user");
+        assert_eq!(response["credentials"]["password"], "proxy-pass");
+        assert_eq!(
+            auth_response(
+                "request",
+                407,
+                Some(("proxy-user".into(), "proxy-pass".into())),
+                false,
+            )["action"],
+            "cancel"
+        );
+    }
+
+    #[test]
     fn blocked_domain_fails_even_when_route_matches() {
         let filter = DomainFilter::new("allowed.example");
         let routes = vec![mock_route("*", "mocked", 200)];
@@ -1602,6 +1688,68 @@ mod tests {
         assert_ne!(first.guid, second.guid);
         assert_eq!(first.suggested_filename.as_deref(), Some("first.txt"));
         assert_eq!(second.suggested_filename.as_deref(), Some("second.txt"));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_separates_overlapping_downloads_with_null_navigation() {
+        let (ff, tx, _) = fake_session().await;
+        let net = NetContext::default();
+        let downloads = net.downloads.clone();
+        let _dispatcher = spawn_dispatcher(
+            ff.bidi.clone(),
+            ff.rdp.clone(),
+            net,
+            ff.bidi.subscribe_buffered(),
+            ff.emulation.clone(),
+        );
+        for filename in ["first.txt", "second.txt"] {
+            tx.send(json!({
+                "type": "event",
+                "method": "browsingContext.downloadWillBegin",
+                "params": {
+                    "context": "ctx-active",
+                    "navigation": null,
+                    "url": "http://example.com/download",
+                    "suggestedFilename": filename,
+                },
+            }))
+            .unwrap();
+        }
+        for filename in ["first.txt", "second.txt"] {
+            tx.send(json!({
+                "type": "event",
+                "method": "browsingContext.downloadEnd",
+                "params": {
+                    "context": "ctx-active",
+                    "navigation": null,
+                    "url": "http://example.com/download",
+                    "status": "complete",
+                    "filepath": format!("/downloads/{filename}"),
+                },
+            }))
+            .unwrap();
+        }
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut claimed = Vec::new();
+            loop {
+                let mut ledger = downloads.lock().await;
+                if let Some(record) = ledger.claim_finished_since(0, &[]) {
+                    claimed.push(record);
+                    if claimed.len() == 2 {
+                        break claimed;
+                    }
+                }
+                drop(ledger);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatcher should record both overlapping downloads");
+        assert_eq!(claimed[0].suggested_filename.as_deref(), Some("first.txt"));
+        assert_eq!(
+            claimed[1].suggested_filename.as_deref(),
+            Some("second.txt")
+        );
     }
 
     #[tokio::test]
