@@ -16254,6 +16254,61 @@ async fn e2e_firefox_route_mock() {
     firefox_close(&mut state).await;
 }
 
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_navigate_networkidle_waits_for_delayed_request() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    let routed = firefox_command(
+        &mut state,
+        json!({
+            "id": "route",
+            "action": "route",
+            "url": "**/networkidle",
+            "response": {
+                "contentType": "text/html",
+                "body": "<script>fetch('/har-post', {method:'POST'}).then(() => { document.title = 'request-complete'; })</script>"
+            }
+        }),
+    )
+    .await;
+    assert_success(&routed);
+    let target = format!("{}networkidle", fixture.url);
+    let resp = firefox_command(
+        &mut state,
+        json!({
+            "id": "networkidle",
+            "action": "navigate",
+            "url": target,
+            "waitUntil": "networkidle",
+            "timeout": 5000
+        }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "request-complete");
+    assert!(fixture.hit_count("/har-post") > 0);
+
+    let resp = firefox_command(
+        &mut state,
+        json!({
+            "id": "networkidle-timeout",
+            "action": "navigate",
+            "url": target,
+            "waitUntil": "networkidle",
+            "timeout": 50
+        }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(resp["error"].as_str().unwrap_or("").contains("networkidle"));
+    firefox_close(&mut state).await;
+}
+
 /// PR3: allowed-domains blocks a cross-origin worker fetch and a WebSocket.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
