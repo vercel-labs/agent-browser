@@ -618,6 +618,8 @@ pub struct DaemonState {
     /// Bytes of response bodies embedded so far this recording; enforces
     /// [`HAR_MAX_TOTAL_BODY_BYTES`].
     pub har_body_total_bytes: usize,
+    /// When each recorded request last received its headers or body bytes.
+    pub har_progress: HashMap<String, std::time::Instant>,
     pub confirm_actions: Option<ConfirmActions>,
     pub inspect_server: Option<InspectServer>,
     pub routes: Arc<RwLock<Vec<RouteEntry>>>,
@@ -819,6 +821,7 @@ impl DaemonState {
             flow_stop: None,
             har_content_mode: HarContentMode::default(),
             har_body_total_bytes: 0,
+            har_progress: HashMap::new(),
             confirm_actions: security
                 .confirm_actions
                 .as_deref()
@@ -2060,6 +2063,23 @@ impl DaemonState {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("Other")
                                         .to_string();
+                                    // A redirect re-sends this request id; the hop it
+                                    // answers ends here, with the redirect response.
+                                    if let Some(redirect) = event.params.get("redirectResponse") {
+                                        if let Some(prev) = self
+                                            .har_entries
+                                            .iter_mut()
+                                            .rev()
+                                            .find(|e| e.request_id == request_id)
+                                        {
+                                            har_fill_response(prev, redirect);
+                                            prev.loading_finished_timestamp = event
+                                                .params
+                                                .get("timestamp")
+                                                .and_then(|v| v.as_f64())
+                                                .or(Some(0.0));
+                                        }
+                                    }
                                     self.har_entries.push(HarEntry {
                                         request_id: request_id.clone(),
                                         wall_time,
@@ -2084,6 +2104,16 @@ impl DaemonState {
                                     self.flow.tag(&request_id, wall_time);
                                 }
                                 if self.request_tracking {
+                                    if let Some(redirect) = event.params.get("redirectResponse") {
+                                        if let Some(prev) = self
+                                            .tracked_requests
+                                            .iter_mut()
+                                            .rev()
+                                            .find(|e| e.request_id == request_id)
+                                        {
+                                            tracked_fill_response(prev, redirect);
+                                        }
+                                    }
                                     let headers =
                                         request.get("headers").cloned().unwrap_or(json!({}));
                                     let resource_type = event
@@ -2123,67 +2153,35 @@ impl DaemonState {
                                     .get("requestId")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
-                                let status = response.get("status").and_then(|v| v.as_i64());
-                                let status_text = response
-                                    .get("statusText")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let mime_type = response
-                                    .get("mimeType")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let http_version = response
-                                    .get("protocol")
-                                    .and_then(|v| v.as_str())
-                                    .map(har_cdp_protocol_to_http_version)
-                                    .unwrap_or_else(|| "HTTP/1.1".to_string());
-                                let response_headers = har_extract_headers(response.get("headers"));
-                                let redirect_url = response_headers
-                                    .iter()
-                                    .find(|(k, _)| k.eq_ignore_ascii_case("location"))
-                                    .map(|(_, v)| v.clone())
-                                    .unwrap_or_default();
-                                let encoded_data_length = response
-                                    .get("encodedDataLength")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(-1);
-                                let cdp_timing = response.get("timing").cloned();
                                 if self.har_recording {
+                                    self.har_progress
+                                        .insert(request_id.to_string(), std::time::Instant::now());
                                     if let Some(entry) = self
                                         .har_entries
                                         .iter_mut()
                                         .rev()
                                         .find(|e| e.request_id == request_id)
                                     {
-                                        entry.status = status;
-                                        entry.status_text = status_text;
-                                        entry.mime_type = mime_type;
-                                        entry.http_version = http_version;
-                                        entry.response_headers = response_headers;
-                                        entry.redirect_url = redirect_url;
-                                        entry.response_body_size = encoded_data_length;
-                                        entry.cdp_timing = cdp_timing;
+                                        har_fill_response(entry, response);
                                     }
                                 }
                                 if self.request_tracking {
-                                    let resp_headers = response.get("headers").cloned();
-                                    let resp_mime = response
-                                        .get("mimeType")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
                                     if let Some(entry) = self
                                         .tracked_requests
                                         .iter_mut()
                                         .rev()
                                         .find(|e| e.request_id == request_id)
                                     {
-                                        entry.status = status;
-                                        entry.mime_type = resp_mime;
-                                        entry.response_headers = resp_headers;
+                                        tracked_fill_response(entry, response);
                                     }
                                 }
+                            }
+                        }
+                        "Network.dataReceived" if self.har_recording => {
+                            if let Some(id) = event.params.get("requestId").and_then(|v| v.as_str())
+                            {
+                                self.har_progress
+                                    .insert(id.to_string(), std::time::Instant::now());
                             }
                         }
                         "Network.loadingFinished" if self.har_recording => {
@@ -2969,7 +2967,13 @@ fn append_launch_policy_actions(
     }
 }
 
+/// The command future is large; boxing it keeps it off the caller's stack,
+/// which a debug-build test thread would otherwise overflow.
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    Box::pin(execute_command_flow(cmd, state)).await
+}
+
+async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
     let outer = state.flow.enter();
     let mut resp = execute_command_inner(cmd, state).await;
     if let Some(seq) = state.flow.exit(outer) {
@@ -6517,6 +6521,7 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
     let unsaved = if state.flow.active() {
         state.har_recording = false;
         state.har_entries.clear();
+        state.har_progress.clear();
         state.har_body_total_bytes = 0;
         state.flow.end_capture()
     } else {
@@ -12300,6 +12305,7 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     }
     state.har_recording = true;
     state.har_entries.clear();
+    state.har_progress.clear();
     state.har_content_mode = content_mode;
     state.har_body_total_bytes = 0;
     Ok(json!({ "started": true }))
@@ -12334,6 +12340,8 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     std::fs::write(&path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
 
     state.har_entries.clear();
+
+    state.har_progress.clear();
     state.har_recording = false;
     state.har_body_total_bytes = 0;
 
@@ -12377,8 +12385,35 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             .unwrap_or(false),
         None => false,
     };
+    // A request the range started may still be loading; let it finish so its
+    // body is on the entry. Bounded by the command timeout.
+    let from = cmd.get("from").and_then(|v| v.as_u64());
+    let to = cmd.get("to").and_then(|v| v.as_u64());
+    let deadline =
+        tokio::time::Instant::now() + tokio::time::Duration::from_millis(state.timeout_ms(cmd));
+    // A response with headers whose body gets no bytes for the network idle
+    // window is a stream or a long poll.
+    let idle = std::time::Duration::from_millis(super::browser::NETWORK_IDLE_MS);
+    loop {
+        state.drain_cdp_events_background().await?;
+        let stalled = |e: &HarEntry| {
+            state
+                .har_progress
+                .get(&e.request_id)
+                .is_some_and(|t| t.elapsed() >= idle)
+        };
+        if !state
+            .flow
+            .awaiting_response(from, to, &state.har_entries, &stalled)
+            || tokio::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    }
+    let still_loading = state.flow.loading_gaps(from, to, &state.har_entries);
     let entries = state.har_entries.clone();
-    state.flow.save(super::flow::SaveArgs {
+    let saved = state.flow.save(super::flow::SaveArgs {
         name: &name,
         from: cmd.get("from").and_then(|v| v.as_u64()),
         to: cmd.get("to").and_then(|v| v.as_u64()),
@@ -12387,7 +12422,33 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         output: cmd.get("output").and_then(|v| v.as_str()),
         entries: &entries,
         login_wall,
-    })
+    });
+    // A save that fails for want of requests names the ones still loading.
+    let mut report = match saved {
+        Ok(report) => report,
+        Err(e) if !still_loading.is_empty() => {
+            let loading: Vec<String> = still_loading
+                .iter()
+                .filter_map(|g| Some(format!("step {}: {}", g["step"], g["reason"].as_str()?)))
+                .collect();
+            return Err(format!("{e}; {}", loading.join("; ")));
+        }
+        Err(e) => return Err(e),
+    };
+    // Requests still loading at the deadline are not in the flow. The step
+    // that started one says so instead of the generic reason.
+    if let Some(gaps) = report["gaps"].as_array_mut() {
+        gaps.retain(|g| {
+            g["kind"] != "no-requests" || !still_loading.iter().any(|l| l["step"] == g["step"])
+        });
+        gaps.extend(still_loading);
+        for g in gaps.iter_mut() {
+            if let Some(g) = g.as_object_mut() {
+                g.remove("kind");
+            }
+        }
+    }
+    Ok(report)
 }
 
 /// The single write gate: the first write a run sends that `--allow-write`
@@ -12828,6 +12889,50 @@ fn har_parse_request_cookies(cookie_header: &str) -> Vec<Value> {
             Some(json!({ "name": name.trim(), "value": value.trim() }))
         })
         .collect()
+}
+
+/// Copies a CDP `Response` (from `responseReceived` or a `redirectResponse`)
+/// onto its tracked request.
+fn tracked_fill_response(entry: &mut TrackedRequest, response: &Value) {
+    entry.status = response.get("status").and_then(|v| v.as_i64());
+    entry.mime_type = response
+        .get("mimeType")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    entry.response_headers = response.get("headers").cloned();
+}
+
+/// Copies a CDP `Response` (from `responseReceived` or a `redirectResponse`)
+/// onto its HAR entry.
+fn har_fill_response(entry: &mut HarEntry, response: &Value) {
+    entry.status = response.get("status").and_then(|v| v.as_i64());
+    entry.status_text = response
+        .get("statusText")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    entry.mime_type = response
+        .get("mimeType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    entry.http_version = response
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .map(har_cdp_protocol_to_http_version)
+        .unwrap_or_else(|| "HTTP/1.1".to_string());
+    entry.response_headers = har_extract_headers(response.get("headers"));
+    entry.redirect_url = entry
+        .response_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    entry.response_body_size = response
+        .get("encodedDataLength")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+    entry.cdp_timing = response.get("timing").cloned();
 }
 
 /// Compute HAR `timings` and total `time` (ms) from a CDP `ResourceTiming`
@@ -13568,9 +13673,12 @@ async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<V
         .and_then(|v| v.as_str())
         .ok_or("Missing 'requestId' parameter")?;
 
+    // Redirect hops share a request id; the last one is the response a body
+    // belongs to.
     let entry = state
         .tracked_requests
         .iter()
+        .rev()
         .find(|r| r.request_id == request_id)
         .ok_or("Request not found")?;
 
