@@ -270,6 +270,8 @@ If HAR export fails, recording and captured requests remain available. Fix the d
 
 ## Saved flows
 
+Experimental. A run can fail on a page that changed or answers differently each time; when it does, the flow is marked unverified and you continue with the UI.
+
 ```bash
 agent-browser --capture flow open <url>               # Open a session that records its commands and requests
 agent-browser flow steps [--json]                     # Recorded steps: seq, command, URL, request count, ok or failed
