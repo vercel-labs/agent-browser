@@ -22959,7 +22959,7 @@ mod firefox_routing_tests {
         assert_eq!(resp["success"], false);
         let error = resp["error"].as_str().unwrap();
         assert!(
-            error.contains("--cdp is not supported with --engine firefox"),
+            error.contains("connect and --cdp are not supported with --engine firefox"),
             "{error}"
         );
         assert!(state.firefox.is_none());
