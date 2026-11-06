@@ -15630,17 +15630,25 @@ async fn e2e_firefox_smoke() {
     );
     firefox_open(&mut state, &fixture.url).await;
     firefox_eval(&mut state, "localStorage.setItem('visited', 'from-a')").await;
-    let ff = state.firefox.as_mut().unwrap();
-    let saved_path = super::bidi::storage::save_auto_state(ff, "firefox-smoke", "autosave")
-        .await
-        .unwrap();
-    let block = "Object.defineProperty(window,'localStorage',{get(){throw 0}})";
-    ff.eval(block).await.unwrap();
-    super::bidi::storage::save_auto_state(ff, "firefox-smoke", "autosave")
-        .await
-        .unwrap();
+    let saved_path = {
+        let ff = state.firefox.as_mut().unwrap();
+        let path = super::bidi::storage::save_auto_state(ff, "firefox-smoke", "autosave")
+            .await
+            .unwrap();
+        let block = "Object.defineProperty(window,'localStorage',{get(){throw 0}})";
+        ff.eval(block).await.unwrap();
+        super::bidi::storage::save_auto_state(ff, "firefox-smoke", "autosave")
+            .await
+            .unwrap();
+        path
+    };
     firefox_open(&mut state, &fixture.other).await;
     let ff = state.firefox.as_mut().unwrap();
+    let first_path = super::bidi::storage::save_auto_state(ff, "firefox-first", "autosave")
+        .await
+        .unwrap();
+    let first: Value = serde_json::from_str(&std::fs::read_to_string(&first_path).unwrap()).unwrap();
+    assert!(first["origins"].as_array().unwrap().iter().any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
     super::bidi::storage::save_auto_state(ff, "firefox-smoke", "autosave")
         .await
         .unwrap();
@@ -15651,6 +15659,11 @@ async fn e2e_firefox_smoke() {
         .unwrap()
         .iter()
         .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
+    let current = firefox_command(&mut state, json!({"id": "url", "action": "url"})).await;
+    assert_eq!(
+        url::Url::parse(get_data(&current)["url"].as_str().unwrap()).unwrap(),
+        url::Url::parse(&fixture.other).unwrap()
+    );
     firefox_open(&mut state, &fixture.url).await;
     firefox_eval(&mut state, "localStorage.clear()").await;
     firefox_open(&mut state, &fixture.other).await;
@@ -16129,6 +16142,11 @@ async fn e2e_firefox_iframe_and_shadow_root_refs() {
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
     firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "document.getElementById('host').removeAttribute('id'); 0",
+    )
+    .await;
 
     let shadow = firefox_ref(&mut state, "Shadow button").await;
     assert_success(&firefox_act(&mut state, "click", &shadow, json!({})).await);
@@ -16999,6 +17017,17 @@ async fn e2e_firefox_download() {
         std::fs::read_to_string(&repeated_dest).unwrap(),
         "downloaded"
     );
+
+    let inline_dest = out.path().join("inline.txt");
+    let resp = firefox_act(
+        &mut state,
+        "download",
+        "#dl-inline",
+        json!({ "path": inline_dest.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(std::fs::read_to_string(&inline_dest).unwrap(), "real");
     firefox_close(&mut state).await;
 }
 
@@ -17327,6 +17356,18 @@ async fn e2e_firefox_autosave_preserves_blocked_storage_and_clears_readable_empt
         .await;
     }
 
+    firefox_open(&mut state, "about:blank").await;
+    super::bidi::storage::save_auto_state(
+        state.firefox.as_mut().unwrap(),
+        "blocked-storage",
+        "autosave",
+    )
+    .await
+    .unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["origins"], before["origins"]);
+    firefox_open(&mut state, &format!("{origin}/")).await;
+
     firefox_eval(
         &mut state,
         "localStorage.clear(); sessionStorage.clear(); true",
@@ -17484,6 +17525,13 @@ async fn e2e_firefox_har_preserves_post_body_and_elapsed_time() {
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
     firefox_open(&mut state, &fixture.url).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "tracked-start", "action": "requests" }),
+        )
+        .await,
+    );
     let started = firefox_command(
         &mut state,
         json!({ "id": "har-start", "action": "har_start", "content": "all" }),
@@ -17517,6 +17565,28 @@ async fn e2e_firefox_har_preserves_post_body_and_elapsed_time() {
     assert!(entry["time"].as_f64().unwrap() >= 300.0);
     assert!(entry["timings"]["wait"].as_f64().unwrap() >= 300.0);
     assert!(entry["timings"]["send"].as_f64().unwrap() >= 0.0);
+    let tracked = firefox_command(
+        &mut state,
+        json!({ "id": "tracked", "action": "requests", "filter": "/har-post" }),
+    )
+    .await;
+    assert_success(&tracked);
+    let request = get_data(&tracked)["requests"]
+        .as_array()
+        .and_then(|requests| requests.first())
+        .expect("tracked requests must contain the HAR POST");
+    assert_eq!(request["postData"], "payload=har-probe");
+    let detail = firefox_command(
+        &mut state,
+        json!({
+            "id": "tracked-detail",
+            "action": "request_detail",
+            "requestId": request["requestId"],
+        }),
+    )
+    .await;
+    assert_success(&detail);
+    assert_eq!(get_data(&detail)["postData"], "payload=har-probe");
     firefox_close(&mut state).await;
 }
 

@@ -274,31 +274,29 @@ pub fn spawn_dispatcher(
             );
             if is_download {
                 if e["params"]["download"].as_str().is_none() {
-                    if let Some(navigation) = e["params"]["navigation"].as_str() {
-                        let key = (
-                            e["params"]["context"].as_str().map(str::to_owned),
-                            navigation.to_owned(),
-                            e["params"]["url"].as_str().map(str::to_owned),
-                        );
-                        let download = if e["method"] == "browsingContext.downloadWillBegin" {
-                            let (download, pending) = legacy_downloads
-                                .entry(key)
-                                .or_insert_with(|| (uuid::Uuid::new_v4().to_string(), 0usize));
-                            *pending += 1;
-                            Some(download.clone())
-                        } else if let Some((download, pending)) = legacy_downloads.get_mut(&key) {
-                            let download = download.clone();
-                            *pending -= 1;
-                            if *pending == 0 {
-                                legacy_downloads.remove(&key);
-                            }
-                            Some(download)
-                        } else {
-                            None
-                        };
-                        if let Some(download) = download {
-                            e["params"]["download"] = json!(download);
+                    let key = (
+                        e["params"]["context"].as_str().map(str::to_owned),
+                        e["params"]["navigation"].as_str().map(str::to_owned),
+                        e["params"]["url"].as_str().map(str::to_owned),
+                    );
+                    let download = if e["method"] == "browsingContext.downloadWillBegin" {
+                        let (download, pending) = legacy_downloads
+                            .entry(key)
+                            .or_insert_with(|| (uuid::Uuid::new_v4().to_string(), 0usize));
+                        *pending += 1;
+                        Some(download.clone())
+                    } else if let Some((download, pending)) = legacy_downloads.get_mut(&key) {
+                        let download = download.clone();
+                        *pending -= 1;
+                        if *pending == 0 {
+                            legacy_downloads.remove(&key);
                         }
+                        Some(download)
+                    } else {
+                        None
+                    };
+                    if let Some(download) = download {
+                        e["params"]["download"] = json!(download);
                     }
                 }
                 net.downloads
@@ -490,7 +488,7 @@ async fn apply_events(state: &mut DaemonState, events: Vec<Value>) {
                 if let Some(ff) = state.firefox.as_mut() {
                     ff.inflight.remove(id);
                 }
-                har_request_body(state, id).await;
+                request_body(state, id).await;
                 har_body(state, id).await;
             }
             "network.fetchError" => {
@@ -612,15 +610,26 @@ async fn data(bidi: &BidiClient, id: &str, data_type: &str) -> Result<(String, b
     Ok((r.bytes.raw().to_string(), r.bytes.is_base64()))
 }
 
-async fn har_request_body(state: &mut DaemonState, id: &str) {
-    let wanted = state.har_recording
+async fn request_body(state: &mut DaemonState, id: &str) {
+    let har_wanted = state.har_recording
         && state
             .har_entries
             .iter()
             .rev()
             .find(|e| e.request_id == id)
             .is_some_and(|e| e.post_data.is_none());
-    let Some(ff) = state.firefox.as_ref().filter(|_| wanted) else {
+    let tracked_wanted = state.request_tracking
+        && state
+            .tracked_requests
+            .iter()
+            .rev()
+            .find(|e| e.request_id == id)
+            .is_some_and(|e| e.post_data.is_none());
+    let Some(ff) = state
+        .firefox
+        .as_ref()
+        .filter(|_| har_wanted || tracked_wanted)
+    else {
         return;
     };
     let Ok((body, base64)) = data(&ff.bidi, id, "request").await else {
@@ -638,13 +647,25 @@ async fn har_request_body(state: &mut DaemonState, id: &str) {
     } else {
         body
     };
-    if let Some(entry) = state
-        .har_entries
-        .iter_mut()
-        .rev()
-        .find(|e| e.request_id == id)
-    {
-        entry.post_data = Some(body);
+    if har_wanted {
+        if let Some(entry) = state
+            .har_entries
+            .iter_mut()
+            .rev()
+            .find(|e| e.request_id == id)
+        {
+            entry.post_data = Some(body.clone());
+        }
+    }
+    if tracked_wanted && !body.is_empty() {
+        if let Some(entry) = state
+            .tracked_requests
+            .iter_mut()
+            .rev()
+            .find(|e| e.request_id == id)
+        {
+            entry.post_data = Some(body);
+        }
     }
 }
 
@@ -1262,6 +1283,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn storage_context_requests_receive_blank_page() {
+        let (ff, _tx, _, messages, _) =
+            crate::native::firefox::session::tests::fake_session_with_rdp().await;
+        let net = NetContext::default();
+        net.blank_contexts.write().await.insert("storage-tab".into());
+        before_request(
+            &ff.bidi,
+            &net,
+            &json!({"request": "r1", "url": "https://example.com/", "headers": []}),
+            Some("storage-tab"),
+        )
+        .await
+        .unwrap();
+        let sent = messages.lock().unwrap().last().unwrap().clone();
+        assert_eq!(sent["method"], "network.provideResponse");
+        assert_eq!(sent["params"]["body"]["value"], "PGh0bWw+PC9odG1sPg==");
+    }
+
+    #[tokio::test]
     async fn mocked_responses_preserve_json_cors_and_base64_over_bidi() {
         let (ff, _tx, _, messages, _) =
             crate::native::bidi::session::tests::fake_session_with_rdp().await;
@@ -1498,6 +1538,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatcher_tracks_repeated_downloads_with_null_navigation() {
+        let (ff, tx, _) = fake_session().await;
+        let net = NetContext::default();
+        let downloads = net.downloads.clone();
+        let _dispatcher = spawn_dispatcher(
+            ff.bidi.clone(),
+            ff.rdp.clone(),
+            net,
+            ff.bidi.subscribe_buffered(),
+            ff.emulation.clone(),
+        );
+        for filename in ["first.txt", "second.txt"] {
+            tx.send(json!({
+                "type": "event",
+                "method": "browsingContext.downloadWillBegin",
+                "params": {
+                    "context": "ctx-active",
+                    "navigation": null,
+                    "url": "http://example.com/download",
+                    "suggestedFilename": filename,
+                },
+            }))
+            .unwrap();
+            tx.send(json!({
+                "type": "event",
+                "method": "browsingContext.downloadEnd",
+                "params": {
+                    "context": "ctx-active",
+                    "navigation": null,
+                    "url": "http://example.com/download",
+                    "status": "complete",
+                    "filepath": format!("/downloads/{filename}"),
+                },
+            }))
+            .unwrap();
+        }
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut claimed = Vec::new();
+            loop {
+                let mut ledger = downloads.lock().await;
+                if let Some(record) = ledger.claim_finished_since(0, &[]) {
+                    claimed.push(record);
+                    if claimed.len() == 2 {
+                        break claimed;
+                    }
+                }
+                drop(ledger);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatcher should record both downloads");
+        let [first, second] = claimed.as_slice() else {
+            unreachable!("the timeout returned two claimed downloads");
+        };
+        assert_ne!(first.guid, second.guid);
+        assert_eq!(first.suggested_filename.as_deref(), Some("first.txt"));
+        assert_eq!(second.suggested_filename.as_deref(), Some("second.txt"));
+    }
+
+    #[tokio::test]
     async fn har_captures_request_body_and_bidi_timestamps() {
         let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(|v| {
             if v["params"]["dataType"] == "request" {
@@ -1557,6 +1658,54 @@ mod tests {
         assert!((entry.response_started_timestamp.unwrap() - 1_800_000_000.65).abs() < 0.00001);
         assert!((entry.response_completed_timestamp.unwrap() - 1_800_000_000.67).abs() < 0.00001);
         assert_eq!(entry.response_body.as_deref(), Some("har-response"));
+    }
+
+    #[tokio::test]
+    async fn tracked_requests_include_request_body() {
+        let (ff, _, _) = crate::native::firefox::session::tests::fake_session_with(|v| {
+            if v["params"]["dataType"] == "request" {
+                json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD10cmFja2Vk"}})
+            } else {
+                json!({"bytes": {"type": "string", "value": "response"}})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.request_tracking = true;
+        let request = json!({
+            "request": "r1",
+            "url": "http://example.com/probe",
+            "method": "POST",
+            "headers": [],
+            "bodySize": 14,
+            "initiatorType": "fetch",
+        });
+        let response = json!({"status": 200, "headers": [], "bodySize": 8});
+
+        apply_events(
+            &mut state,
+            vec![
+                json!({
+                    "method": "network.beforeRequestSent",
+                    "params": {"timestamp": 1000, "request": request},
+                }),
+                json!({
+                    "method": "network.responseCompleted",
+                    "params": {"timestamp": 2000, "request": request, "response": response},
+                }),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            state.tracked_requests[0].post_data.as_deref(),
+            Some("payload=tracked")
+        );
+        assert_eq!(
+            serde_json::to_value(&state.tracked_requests[0]).unwrap()["postData"],
+            json!("payload=tracked")
+        );
     }
 
     #[tokio::test]

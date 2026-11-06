@@ -404,7 +404,7 @@ async fn read_origins_in(
 /// Protocol failures abort the save; unavailable storage is omitted so autosave can keep its previous value.
 async fn collect_origins(
     ff: &mut FirefoxSession,
-) -> Result<(Vec<OriginStorage>, HashSet<String>), String> {
+) -> Result<(Vec<OriginStorage>, HashSet<String>, HashSet<String>), String> {
     let tree = ff.bidi.send("browsingContext.getTree", json!({})).await?;
     let contexts = tree["contexts"]
         .as_array()
@@ -414,6 +414,7 @@ async fn collect_origins(
     let mut open = HashSet::new();
     let mut read = HashSet::new();
     let mut seen = HashSet::new();
+    let mut temporary = HashSet::new();
     let mut origins = Vec::new();
     for (id, url) in ids {
         if let Ok(url) = url::Url::parse(&url) {
@@ -436,18 +437,20 @@ async fn collect_origins(
     let remaining: Vec<String> = ff
         .visited_origins
         .iter()
-        .filter(|o| o.starts_with("http") && !open.contains(*o))
+        .filter(|origin| (origin.starts_with("http://") || origin.starts_with("https://")) && !open.contains(*origin))
         .cloned()
         .collect();
     if !remaining.is_empty() {
-        for origin in collect_via_temp_context(ff, &remaining).await? {
+        for mut origin in collect_via_temp_context(ff, &remaining).await? {
             read.insert(origin.origin.clone());
+            temporary.insert(origin.origin.clone());
+            origin.session_storage.clear();
             if has_entries(&origin) && seen.insert(origin.origin.clone()) {
                 origins.push(origin);
             }
         }
     }
-    Ok((origins, read))
+    Ok((origins, read, temporary))
 }
 
 async fn write_state_to(
@@ -456,7 +459,7 @@ async fn write_state_to(
     previous_path: Option<&str>,
 ) -> Result<String, String> {
     let cookies = get_all_cookies(ff).await?;
-    let (origins, mut seen) = collect_origins(ff).await?;
+    let (origins, mut seen, temporary) = collect_origins(ff).await?;
     let mut state = StorageState { cookies, origins };
     if let Some(previous_path) = previous_path.filter(|path| {
         std::path::Path::new(path).exists() || std::path::Path::new(&format!("{path}.enc")).exists()
@@ -464,12 +467,25 @@ async fn write_state_to(
         let json = state::read_state_json(previous_path)?;
         let previous: StorageState =
             serde_json::from_str(&json).map_err(|e| format!("Invalid state file: {e}"))?;
-        state.origins.extend(
-            previous
-                .origins
-                .into_iter()
-                .filter(|origin| seen.insert(origin.origin.clone())),
-        );
+        for origin in previous.origins {
+            if temporary.contains(&origin.origin) {
+                if let Some(current) = state
+                    .origins
+                    .iter_mut()
+                    .find(|current| current.origin == origin.origin)
+                {
+                    current.session_storage = origin.session_storage;
+                } else if !origin.session_storage.is_empty() {
+                    state.origins.push(OriginStorage {
+                        origin: origin.origin,
+                        local_storage: Vec::new(),
+                        session_storage: origin.session_storage,
+                    });
+                }
+            } else if seen.insert(origin.origin.clone()) {
+                state.origins.push(origin);
+            }
+        }
     }
     let json = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("Failed to serialize state: {e}"))?;
@@ -507,6 +523,7 @@ pub async fn validate_restore(
 
 /// Saves cookies and origin storage in the `state.rs` JSON format, like Chrome's `handle_state_save`.
 pub async fn state_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    super::network::drain(state).await;
     let explicit_path = cmd.get("path").and_then(Value::as_str);
     let session_name = state.session_name.clone();
     let session_id = state.session_id.clone();
@@ -600,6 +617,8 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
             .map_err(|e| format!("Failed to restore storage for {}: {e}", origin.origin))?;
         if restored != json!(true) {
             skipped.push(origin.origin.clone());
+        } else {
+            ff.note_visit(&origin.origin);
         }
     }
 
@@ -613,6 +632,7 @@ pub async fn state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     chrome::ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
     let ff = session(state)?;
     let skipped = load_state_path(ff, path).await?;
+    crate::native::actions::mark_explicit_storage_state_loaded(state, path);
     Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
 }
 
@@ -660,7 +680,7 @@ mod tests {
         .await;
         std::mem::forget(tx);
 
-        let (origins, seen) = collect_origins(&mut ff).await.unwrap();
+        let (origins, seen, _) = collect_origins(&mut ff).await.unwrap();
 
         assert!(origins.is_empty());
         assert_eq!(seen, ff.visited_origins);
@@ -687,7 +707,7 @@ mod tests {
         .await;
         std::mem::forget(tx);
 
-        let (origins, seen) = collect_origins(&mut ff).await.unwrap();
+        let (origins, seen, _) = collect_origins(&mut ff).await.unwrap();
 
         assert!(origins.is_empty());
         assert!(seen.is_empty());
@@ -726,6 +746,24 @@ mod tests {
 
         assert!(error.contains("storage unavailable"), "{error}");
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "previous");
+    }
+
+    #[tokio::test]
+    async fn explicit_state_load_clears_failed_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"cookies":[],"origins":[]}"#).unwrap();
+        let mut state = DaemonState::new();
+        let (ff, _tx, _) = super::super::session::tests::fake_session().await;
+        state.firefox = Some(ff);
+        state.session_name = Some("test".into());
+        state.restore_load_failed = true;
+        state.restore_status = "failed".into();
+        state_load(&json!({"path": path}), &mut state)
+            .await
+            .unwrap();
+        assert!(!state.restore_load_failed);
+        assert_eq!(state.restore_status, "loaded");
     }
 
     #[test]

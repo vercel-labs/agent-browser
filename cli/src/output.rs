@@ -3604,7 +3604,8 @@ Automatic State Persistence:
   Use --restore to auto-save/restore state across restarts:
   agent-browser --session myapp --restore open https://example.com
   Or set AGENT_BROWSER_RESTORE environment variable.
-  Firefox auto-save collects active iframe origins and preserves saved origins it cannot read.
+  Firefox saves visited local storage and preserves previously saved session storage
+  for origins no longer open. It cannot recover unsaved session storage after navigation.
 
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.
@@ -4664,7 +4665,7 @@ Options:
   --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
                              (default: 1h; 0 disables; dashboard input resets the timer)
                              Values too large to convert to milliseconds produce a warning and are ignored
-  --engine <name>            Browser engine: chrome (default), lightpanda, firefox, obscura (experimental)
+  --engine <name>            Browser engine: chrome (default), lightpanda, obscura, firefox
                              (or AGENT_BROWSER_ENGINE); firefox requires Firefox 150 or newer;
                              Obscura rejects --proxy-bypass,
                              proxyBypass config, AGENT_BROWSER_PROXY_BYPASS, NO_PROXY/no_proxy,

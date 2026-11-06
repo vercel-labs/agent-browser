@@ -201,9 +201,10 @@ async fn frame_actor(
         }
         match tokio::time::timeout_at(deadline, watch.events.recv()).await {
             Ok(Ok(e)) => record_target(&mut watch.actors, &e),
-            Ok(Err(error)) => {
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
                 return Err(format!(
-                    "Firefox did not announce frame target {window}: {error}"
+                    "Firefox did not announce frame target {window}: event stream closed"
                 ));
             }
             Err(_) => {
@@ -547,6 +548,62 @@ mod tests {
 
         assert!(error.contains("child-context"), "{error}");
         assert!(error.contains("snapshot deadline"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn lagged_frame_events_do_not_abort_wait() {
+        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (tx, events) = broadcast::channel(1024);
+        ff.frames = Some(FrameWatch {
+            events,
+            actors: HashMap::new(),
+            tabs: HashSet::from(["tab".to_string()]),
+        });
+        let sender = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            for _ in 0..1024 {
+                tx.send(json!({})).unwrap();
+            }
+            tx.send(json!({
+                "target": {"browsingContextID": 42, "accessibilityActor": "frame-actor"}
+            }))
+            .unwrap();
+        });
+
+        let actor = frame_actor(
+            &mut ff,
+            "tab",
+            "42",
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        sender.await.unwrap();
+
+        assert_eq!(actor, "frame-actor");
+    }
+
+    #[tokio::test]
+    async fn closed_frame_events_report_a_terminal_error() {
+        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (tx, events) = broadcast::channel(1024);
+        drop(tx);
+        ff.frames = Some(FrameWatch {
+            events,
+            actors: HashMap::new(),
+            tabs: HashSet::from(["tab".to_string()]),
+        });
+
+        let error = frame_actor(
+            &mut ff,
+            "tab",
+            "child-context",
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("event stream closed"), "{error}");
     }
 
     fn tag_snapshot_nodes(node: &mut Value, context: &str, document_id: &str, is_root: bool) {

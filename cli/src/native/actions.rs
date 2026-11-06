@@ -5327,7 +5327,7 @@ async fn validate_restored_state(state: &DaemonState) -> Result<(), String> {
     Ok(())
 }
 
-fn mark_explicit_storage_state_loaded(state: &mut DaemonState, path: &str) {
+pub(crate) fn mark_explicit_storage_state_loaded(state: &mut DaemonState, path: &str) {
     if state.session_name.is_none() && state.restore_status == "not_configured" {
         return;
     }
@@ -5432,6 +5432,7 @@ pub(crate) async fn auto_save_restore_state(
     }
 
     let session_id = state.session_id.clone();
+    bidi::network::drain(state).await;
     if let Some(ff) = state.firefox.as_mut() {
         return match bidi::storage::save_auto_state(ff, &session_name, &session_id).await {
             Ok(path) => {
