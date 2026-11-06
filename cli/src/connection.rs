@@ -941,6 +941,12 @@ fn stop_existing_daemon_for_restart(session: &str) {
     }
 }
 
+/// Stops a session's daemon without a `close`, so the session's stored
+/// settings stay, the same way a restart stops it.
+pub fn stop_daemon(session: &str) {
+    stop_existing_daemon_for_restart(session);
+}
+
 /// Marks this process's stdout and stderr non-inheritable so a detached child cannot hold a reader's pipes open.
 #[cfg(windows)]
 pub(crate) fn prevent_stdio_handle_inheritance() {

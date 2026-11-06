@@ -322,10 +322,16 @@ impl Running {
     /// only fills in when there is none, and a seed that carries security
     /// settings is stored so the next start keeps them.
     pub fn boot(store: &dyn Store, session: &str) -> Result<Running, StoreError> {
-        let namespace = std::env::var("AGENT_BROWSER_NAMESPACE")
-            .ok()
-            .filter(|n| !n.trim().is_empty());
-        Running::boot_from(Running::from_env(), store, session, namespace.as_deref())
+        let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        let namespace = env("AGENT_BROWSER_NAMESPACE");
+        let socket_dir = env("AGENT_BROWSER_SOCKET_DIR");
+        Running::boot_from(
+            Running::from_env(),
+            store,
+            session,
+            namespace.as_deref(),
+            socket_dir.as_deref(),
+        )
     }
 
     pub(super) fn boot_from(
@@ -333,6 +339,7 @@ impl Running {
         store: &dyn Store,
         session: &str,
         namespace: Option<&str>,
+        socket_dir: Option<&str>,
     ) -> Result<Running, StoreError> {
         match store.load() {
             Ok(Some(view)) => seed.set_security(&view),
@@ -345,6 +352,11 @@ impl Running {
             Err(StoreError::SecuredUnreadable(why)) => {
                 // The parent shows at most 500 bytes of this, so the way out
                 // comes first and the detail is cut.
+                // The hinted `close` must reach the same socket dir and
+                // namespace as this daemon, or it clears nothing.
+                let socket_dir = socket_dir
+                    .map(|dir| format!("AGENT_BROWSER_SOCKET_DIR={} ", shell_arg(dir)))
+                    .unwrap_or_default();
                 let namespace = namespace
                     .map(|ns| format!(" --namespace {}", shell_arg(ns)))
                     .unwrap_or_default();
@@ -353,8 +365,9 @@ impl Running {
                     end -= 1;
                 }
                 return Err(StoreError::SecuredUnreadable(format!(
-                    "{}; to clear them run: agent-browser{} --session {} close. {}",
+                    "{}; to clear them run: {}agent-browser{} --session {} close. {}",
                     REFUSAL_PREFIX,
+                    socket_dir,
                     namespace,
                     shell_arg(session),
                     &why[..end]
@@ -547,7 +560,7 @@ mod tests {
         write_private(&dir.path().join("work.settings"), "{not json");
         let store = FsStore::new(dir.path(), "work");
 
-        let err = Running::boot_from(Running::defaults(), &store, "work", None).unwrap_err();
+        let err = Running::boot_from(Running::defaults(), &store, "work", None, None).unwrap_err();
 
         let StoreError::SecuredUnreadable(message) = err else {
             panic!("expected SecuredUnreadable, got {err:?}");
@@ -568,7 +581,7 @@ mod tests {
         )
         .unwrap();
         let store = FsStore::new(dir.path(), "s");
-        assert!(Running::boot_from(Running::defaults(), &store, "s", None).is_err());
+        assert!(Running::boot_from(Running::defaults(), &store, "s", None, None).is_err());
     }
 
     #[cfg(unix)]
@@ -581,7 +594,7 @@ mod tests {
         let path = dir.path().join("s.settings");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
-        let err = Running::boot_from(Running::defaults(), &store, "s", None).unwrap_err();
+        let err = Running::boot_from(Running::defaults(), &store, "s", None, None).unwrap_err();
 
         let StoreError::SecuredUnreadable(message) = err else {
             panic!("expected SecuredUnreadable, got {err:?}");
@@ -599,7 +612,7 @@ mod tests {
         write_private(&dir.join("work.settings"), "{not json");
         let store = FsStore::new(&dir, "work");
 
-        let err = Running::boot_from(Running::defaults(), &store, "work", None).unwrap_err();
+        let err = Running::boot_from(Running::defaults(), &store, "work", None, None).unwrap_err();
 
         let message = err.to_string();
         assert!(message.len() < 500, "{} bytes: {message}", message.len());
@@ -617,11 +630,35 @@ mod tests {
         write_private(&dir.path().join("s.settings"), "{not json");
         let store = FsStore::new(dir.path(), "s");
 
-        let err = Running::boot_from(Running::defaults(), &store, "s", Some("team a")).unwrap_err();
+        let err =
+            Running::boot_from(Running::defaults(), &store, "s", Some("team a"), None).unwrap_err();
 
         assert!(
             err.to_string()
                 .contains("agent-browser --namespace 'team a' --session s close"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_boot_refusal_names_the_socket_dir_when_one_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        write_private(&dir.path().join("s.settings"), "{not json");
+        let store = FsStore::new(dir.path(), "s");
+
+        let err = Running::boot_from(
+            Running::defaults(),
+            &store,
+            "s",
+            Some("team"),
+            Some("/tmp/ab sock"),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains(
+                "AGENT_BROWSER_SOCKET_DIR='/tmp/ab sock' agent-browser --namespace team --session s close"
+            ),
             "{err}"
         );
     }
@@ -726,7 +763,7 @@ mod tests {
             ("AGENT_BROWSER_CONFIRM_ACTIONS", "eval"),
         ]);
 
-        let running = Running::boot_from(seed, &store, "s", None).unwrap();
+        let running = Running::boot_from(seed, &store, "s", None, None).unwrap();
 
         assert_eq!(running.security(), full_view());
     }
@@ -742,7 +779,7 @@ mod tests {
             .unwrap();
         let seed = lookup(&[("AGENT_BROWSER_CONFIRM_ACTIONS", "eval")]);
 
-        let running = Running::boot_from(seed, &store, "s", None).unwrap();
+        let running = Running::boot_from(seed, &store, "s", None, None).unwrap();
 
         assert_eq!(running.security().confirm_actions, None);
         assert_eq!(
@@ -756,7 +793,7 @@ mod tests {
         let store = MemStore::default();
         let seed = lookup(&[("AGENT_BROWSER_ALLOWED_DOMAINS", "a.com, b.com")]);
 
-        let running = Running::boot_from(seed, &store, "s", None).unwrap();
+        let running = Running::boot_from(seed, &store, "s", None, None).unwrap();
 
         let expected = SecurityView {
             allowed_domains: Some(vec!["a.com".into(), "b.com".into()]),
@@ -771,7 +808,7 @@ mod tests {
         let store = MemStore::default();
         let seed = lookup(&[("AGENT_BROWSER_PROXY", "http://p:1")]);
 
-        Running::boot_from(seed, &store, "s", None).unwrap();
+        Running::boot_from(seed, &store, "s", None, None).unwrap();
 
         assert_eq!(store.stored(), None);
     }

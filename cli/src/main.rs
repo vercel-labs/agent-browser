@@ -1350,15 +1350,28 @@ fn run_close_all(flags: &Flags) {
                     .and_then(|d| d.get("confirmation_required"))
                     .and_then(|v| v.as_bool())
                     == Some(true);
-                let err = match (resp.error, waiting) {
+                let mut err = match (resp.error, waiting) {
                     (Some(err), _) => err,
                     (None, true) => "close is waiting for confirmation".to_string(),
                     (None, false) => "Unknown error".to_string(),
                 };
+                if pid.is_none() {
+                    // The daemon was started only to close this session; stop
+                    // it so the session is left as it was found, with its
+                    // stored settings. A parked confirmation goes with it.
+                    connection::stop_daemon(session);
+                    if waiting {
+                        err = format!(
+                            "close needs confirmation; run `agent-browser --session {} close` to confirm it",
+                            session
+                        );
+                    }
+                }
                 failed.push((session.clone(), err));
             }
             Err(e) if pid.is_none() => {
                 // A daemon started only to close this session did not answer.
+                connection::stop_daemon(session);
                 failed.push((session.clone(), e));
             }
             Err(_) => {
