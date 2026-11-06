@@ -688,7 +688,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script r
 --action-policy <path>   # Path to action policy JSON file
 --confirm-actions <list> # Action categories requiring confirmation
 --confirm-interactive    # Interactive confirmation prompts (auto-denies if stdin is not a TTY)
---engine <name>          # Browser engine: chrome (default), lightpanda, obscura (experimental)
+--engine <name>          # Browser engine: chrome (default), lightpanda, obscura, firefox
 --input-mode <mode>      # Pointer movement: instant (default), smooth, human
 --idle-timeout <time>    # Auto-shutdown daemon after inactivity (default: 1h; 0 disables)
 --no-auto-dialog         # Disable auto-accept for alert and beforeunload dialogs
@@ -701,6 +701,8 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script r
 ```
 
 In a `batch`, `--relaunch` relaunches the browser once: the first command that can launch a browser carries it. Commands that never launch one, such as `read`, and commands denied by policy or waiting for confirmation pass it on to the next command.
+
+Firefox rejects authenticated proxies, `--user-agent`, `--color-scheme`, and an initial streaming viewport.
 
 See [Configuration](/configuration) for config files and environment variables. See [Proxy](/proxy) for proxy server, bypass, and credential settings.
 

@@ -15330,13 +15330,6 @@ async fn e2e_firefox_smoke() {
     );
     firefox_open(&mut state, &fixture.url).await;
     firefox_eval(&mut state, "localStorage.setItem('visited', 'from-a')").await;
-    super::firefox::storage::save_auto_state(
-        state.firefox.as_ref().unwrap(),
-        "firefox-smoke",
-        "autosave",
-    )
-    .await
-    .unwrap();
     firefox_open(&mut state, &fixture.other).await;
     let saved_path = super::firefox::storage::save_auto_state(
         state.firefox.as_ref().unwrap(),
@@ -15352,6 +15345,11 @@ async fn e2e_firefox_smoke() {
         .unwrap()
         .iter()
         .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
+    let current = firefox_command(&mut state, json!({"id": "url", "action": "url"})).await;
+    assert_eq!(
+        url::Url::parse(get_data(&current)["url"].as_str().unwrap()).unwrap(),
+        url::Url::parse(&fixture.other).unwrap()
+    );
     let saved = firefox_command(
         &mut state,
         json!({ "id": "save-b", "action": "state_save", "path": saved_path }),
@@ -15360,7 +15358,11 @@ async fn e2e_firefox_smoke() {
     assert_success(&saved);
     let state_data: Value =
         serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
-    assert_eq!(state_data["origins"], json!([]));
+    assert!(state_data["origins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
     firefox_close(&mut state).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(
@@ -15617,6 +15619,18 @@ async fn e2e_firefox_autosave_preserves_blocked_storage_and_clears_readable_empt
         )
         .await;
     }
+
+    firefox_open(&mut state, "about:blank").await;
+    super::firefox::storage::save_auto_state(
+        state.firefox.as_ref().unwrap(),
+        "blocked-storage",
+        "autosave",
+    )
+    .await
+    .unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["origins"], before["origins"]);
+    firefox_open(&mut state, &format!("{origin}/")).await;
 
     firefox_eval(
         &mut state,

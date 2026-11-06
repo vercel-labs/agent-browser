@@ -59,7 +59,9 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
                         json!({"context": context, "url": url, "wait": "complete"}),
                     )
                     .await?;
-                nav["url"].as_str().unwrap_or(url).to_string()
+                let landed = nav["url"].as_str().unwrap_or(url).to_string();
+                ff.note_visit(&landed);
+                landed
             }
             None => "about:blank".to_string(),
         }

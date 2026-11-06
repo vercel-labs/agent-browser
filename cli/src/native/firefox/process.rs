@@ -79,6 +79,18 @@ pub fn validate_firefox_options(
     if options.ca_cert.is_some() {
         return unsupported("--ca-cert");
     }
+    if options.proxy_username.is_some() || options.proxy_password.is_some() {
+        return unsupported("authenticated proxy");
+    }
+    if options.user_agent.is_some() {
+        return unsupported("--user-agent");
+    }
+    if options.color_scheme.is_some() {
+        return unsupported("--color-scheme");
+    }
+    if options.viewport_size.is_some() {
+        return unsupported("initial viewport");
+    }
     if allowed_domains {
         return Err("allowed-domains is not yet supported on Firefox".to_string());
     }
@@ -407,6 +419,18 @@ mod tests {
         let mut o = ok();
         o.ca_cert = Some("c".into());
         assert!(err_of(&o).contains("--ca-cert"));
+        let mut o = ok();
+        o.proxy_username = Some("user".into());
+        assert!(err_of(&o).contains("authenticated proxy"));
+        let mut o = ok();
+        o.user_agent = Some("custom".into());
+        assert!(err_of(&o).contains("--user-agent"));
+        let mut o = ok();
+        o.color_scheme = Some("dark".into());
+        assert!(err_of(&o).contains("--color-scheme"));
+        let mut o = ok();
+        o.viewport_size = Some((800, 600));
+        assert!(err_of(&o).contains("initial viewport"));
         let e = validate_firefox_options(&ok(), Some("9222"), false, None, false).unwrap_err();
         assert!(e.contains("--cdp"));
         let e = validate_firefox_options(&ok(), None, true, None, false).unwrap_err();

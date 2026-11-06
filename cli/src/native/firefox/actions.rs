@@ -33,6 +33,7 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "storage_clear",
     "state_save",
     "state_load",
+    "dialog",
     "screenshot",
     "pdf",
     "close",
@@ -141,11 +142,46 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
         "storage_clear" => storage::storage_clear(cmd, state).await,
         "state_save" => storage::state_save(cmd, state).await,
         "state_load" => storage::state_load(cmd, state).await,
+        "dialog" => handle_dialog(cmd, state).await,
         "screenshot" => capture::screenshot(cmd, state).await,
         "pdf" => capture::pdf(cmd, state).await,
         "close" => chrome::handle_close(state).await,
         _ => chrome::handle_deny(cmd, state).await,
     }
+}
+
+async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let response = cmd.get("response").and_then(Value::as_str);
+    if response == Some("status") {
+        return Ok(match &state.pending_dialog {
+            Some(dialog) => {
+                let mut result = serde_json::json!({
+                    "hasDialog": true,
+                    "type": dialog.dialog_type,
+                    "message": dialog.message,
+                });
+                if let Some(prompt) = &dialog.default_prompt {
+                    result["defaultPrompt"] = serde_json::json!(prompt);
+                }
+                result
+            }
+            None => serde_json::json!({ "hasDialog": false }),
+        });
+    }
+    let accept = response
+        .map(|response| response == "accept")
+        .or_else(|| cmd.get("accept").and_then(Value::as_bool))
+        .unwrap_or(true);
+    let mut params = serde_json::json!({ "context": session(state)?.context, "accept": accept });
+    if let Some(text) = cmd.get("promptText").and_then(Value::as_str) {
+        params["userText"] = serde_json::json!(text);
+    }
+    session(state)?
+        .bidi
+        .send("browsingContext.handleUserPrompt", params)
+        .await?;
+    state.pending_dialog = None;
+    Ok(serde_json::json!({ "handled": true, "accepted": accept }))
 }
 
 #[cfg(test)]
@@ -207,5 +243,27 @@ mod tests {
         assert!(dialog_guard("tab_list", &state).is_ok());
         state.pending_dialog = Some(dialog("ctx-background"));
         assert!(dialog_guard("navigate", &state).is_ok());
+    }
+
+    #[tokio::test]
+    async fn dialog_command_reports_and_resolves_pending_prompt() {
+        let mut state = DaemonState::new();
+        let (ff, _tx, calls) = fake_session().await;
+        state.firefox = Some(ff);
+        state.pending_dialog = Some(dialog("ctx-active"));
+        let status = execute("dialog", &json!({"response": "status"}), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(status["type"], "confirm");
+        let result = execute("dialog", &json!({"response": "dismiss"}), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(result, json!({"handled": true, "accepted": false}));
+        assert!(state.pending_dialog.is_none());
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|method| method == "browsingContext.handleUserPrompt"));
     }
 }
