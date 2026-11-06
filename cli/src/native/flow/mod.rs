@@ -333,20 +333,25 @@ pub struct SaveInput<'a> {
     pub login_wall: bool,
     /// Hosts the browser reached only at non-public addresses, which still
     /// resolve only to non-public addresses at save time.
-    pub local_names: &'a [String],
+    pub local_names: &'a [(String, net::Reach)],
 }
 
 /// `Local` for a start host named by a domain that the recording reached
 /// only at non-public addresses; a host the URL already marks local, or a
 /// public one, records nothing.
-fn recorded_reach(start: &str, local_names: &[String]) -> Option<net::Reach> {
+fn recorded_reach(start: &str, local_names: &[(String, net::Reach)]) -> Option<net::Reach> {
     let host = url::Url::parse(start)
         .ok()?
         .host_str()?
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    (net::Reach::of_start(start) == net::Reach::Public && local_names.contains(&host))
-        .then_some(net::Reach::Local)
+    if net::Reach::of_start(start) != net::Reach::Public {
+        return None;
+    }
+    local_names
+        .iter()
+        .find(|(h, _)| *h == host)
+        .map(|(_, reach)| *reach)
 }
 
 fn start_url(commands: &[(u64, Value)]) -> Option<String> {
@@ -2113,19 +2118,22 @@ mod tests {
 
     #[test]
     fn a_start_host_reached_only_locally_records_a_local_reach() {
-        let names = vec!["lvh.me".to_string()];
+        let names = vec![("lvh.me".to_string(), net::Reach::Loopback)];
         assert_eq!(
             recorded_reach("http://lvh.me:3000/x", &names),
-            Some(net::Reach::Local)
+            Some(net::Reach::Loopback)
         );
         assert_eq!(
             recorded_reach("http://LVH.me.:3000/x", &names),
-            Some(net::Reach::Local)
+            Some(net::Reach::Loopback)
         );
         // A public start host, or one the URL already marks local, records none.
         assert_eq!(recorded_reach("https://app.example.com/", &names), None);
         assert_eq!(
-            recorded_reach("http://localhost:3000/", &["localhost".to_string()]),
+            recorded_reach(
+                "http://localhost:3000/",
+                &[("localhost".to_string(), net::Reach::Loopback)]
+            ),
             None
         );
     }

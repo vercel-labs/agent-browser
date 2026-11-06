@@ -16,14 +16,17 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 pub enum Reach {
     /// Public addresses only.
     Public,
-    /// Loopback, private and link-local addresses only: the flow was
-    /// recorded against a local target.
+    /// Loopback and private addresses only, never link-local or a cloud
+    /// metadata address: the flow was recorded against a local target.
     Local,
+    /// Loopback addresses only: the flow was recorded against this machine.
+    Loopback,
 }
 
 impl Reach {
-    /// A start URL on `localhost`, `*.localhost` or a non-public IP literal
-    /// was recorded against a local target; anything else is public.
+    /// A start URL on `localhost` or `*.localhost` was recorded against this
+    /// machine, one on a non-public IP literal against a local target;
+    /// anything else is public.
     pub fn of_start(start_url: &str) -> Reach {
         let Some(url) = url::Url::parse(start_url).ok() else {
             return Reach::Public;
@@ -31,7 +34,10 @@ impl Reach {
         let local = match url.host() {
             Some(url::Host::Domain(d)) => {
                 let d = d.trim_end_matches('.').to_ascii_lowercase();
-                d == "localhost" || d.ends_with(".localhost")
+                if d == "localhost" || d.ends_with(".localhost") {
+                    return Reach::Loopback;
+                }
+                false
             }
             Some(url::Host::Ipv4(ip)) => is_non_public(IpAddr::V4(ip)),
             Some(url::Host::Ipv6(ip)) => is_non_public(IpAddr::V6(ip)),
@@ -52,7 +58,11 @@ impl Reach {
     }
 
     fn admits(self, ip: IpAddr, non_public: fn(IpAddr) -> bool) -> bool {
-        non_public(ip) == (self == Reach::Local)
+        match self {
+            Reach::Public => !non_public(ip),
+            Reach::Local => non_public(ip) && !is_link_local_or_metadata(ip),
+            Reach::Loopback => is_loopback(ip),
+        }
     }
 
     fn refusal(self, host: &str, ip: IpAddr) -> String {
@@ -60,9 +70,33 @@ impl Reach {
             Reach::Public => format!(
                 "{host} resolved to a non-public address ({ip}); flow run does not send requests there"
             ),
+            _ if is_link_local_or_metadata(ip) => format!(
+                "{host} resolved to a link-local or cloud metadata address ({ip}); flow run never sends requests there"
+            ),
             Reach::Local => format!(
                 "{host} resolved to a public address ({ip}); a flow recorded against a local target runs only against local addresses"
             ),
+            Reach::Loopback => format!(
+                "{host} resolved to {ip}; a flow recorded against this machine runs only against loopback addresses"
+            ),
+        }
+    }
+}
+
+/// Loopback, including IPv4 loopback carried in IPv6.
+pub fn is_loopback(ip: IpAddr) -> bool {
+    ip.to_canonical().is_loopback()
+}
+
+/// Link-local addresses, where cloud instance metadata lives
+/// (169.254.169.254), and the metadata addresses outside that range: AWS
+/// IMDS over IPv6 (`fd00:ec2::254`) and Alibaba Cloud (`100.100.100.200`).
+pub fn is_link_local_or_metadata(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => v4.is_link_local() || v4 == Ipv4Addr::new(100, 100, 100, 200),
+        IpAddr::V6(v6) => {
+            (v6.segments()[0] & 0xffc0) == 0xfe80
+                || v6 == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)
         }
     }
 }
@@ -153,12 +187,14 @@ pub async fn recorded_local_host(host: &str, port: u16, recorded: &[SocketAddr])
 /// What a save learns about a start host's reach.
 #[derive(Debug, PartialEq)]
 pub enum RecordedReach {
-    /// Reached directly at the local addresses it resolves to.
-    Local,
-    /// Public, or nothing recorded: the start URL decides.
+    /// Reached directly at the local addresses it resolves to: `Loopback`
+    /// when every one is loopback, else `Local`.
+    Local(Reach),
+    /// Public, or local by name: the start URL decides.
     Unknown,
-    /// Both sides are local but do not match, as when the browser went
-    /// through a proxy: not recorded, and the save report says why.
+    /// The name resolves only to local addresses but the recording does not
+    /// show a direct connection to them (a proxy, a cached page, or a
+    /// link-local address): not recorded, and the save report says why.
     Unconfirmed(String),
 }
 
@@ -168,28 +204,47 @@ pub fn recorded_reach_of(
     recorded: &[SocketAddr],
     resolved: &[IpAddr],
 ) -> RecordedReach {
-    if local_recording(recorded, port, resolved) {
-        return RecordedReach::Local;
-    }
     let local_by_name = host == "localhost" || host.ends_with(".localhost");
-    let all_local =
-        |ips: Vec<IpAddr>| !ips.is_empty() && ips.iter().all(|ip| is_non_public(ip.to_canonical()));
-    if local_by_name
-        || !all_local(recorded.iter().map(|a| a.ip()).collect())
-        || !all_local(resolved.to_vec())
-    {
+    let resolves_locally =
+        !resolved.is_empty() && resolved.iter().all(|ip| is_non_public(ip.to_canonical()));
+    if local_by_name || !resolves_locally {
         return RecordedReach::Unknown;
     }
-    let mut seen: Vec<String> = recorded.iter().map(|a| a.to_string()).collect();
     let mut names: Vec<String> = resolved.iter().map(|ip| ip.to_string()).collect();
-    for list in [&mut seen, &mut names] {
-        list.sort();
-        list.dedup();
+    names.sort();
+    names.dedup();
+    let names = names.join(", ");
+    let not_local = "so the flow is not marked local and a direct `flow run` refuses it";
+    if let Some(ip) = resolved
+        .iter()
+        .map(|ip| ip.to_canonical())
+        .find(|ip| is_link_local_or_metadata(*ip))
+    {
+        return RecordedReach::Unconfirmed(format!(
+            "{host} resolves to {names}, and {ip} is a link-local or cloud metadata address, {not_local}"
+        ));
     }
+    if local_recording(recorded, port, resolved) {
+        let all_loopback = recorded.iter().all(|a| is_loopback(a.ip()));
+        return RecordedReach::Local(if all_loopback {
+            Reach::Loopback
+        } else {
+            Reach::Local
+        });
+    }
+    let mut seen: Vec<String> = recorded.iter().map(|a| a.to_string()).collect();
+    seen.sort();
+    seen.dedup();
+    let reached = if seen.is_empty() {
+        "the recording has no direct connection to it (a cached page records none)".to_string()
+    } else {
+        format!(
+            "the browser reached it at {}, as through a proxy",
+            seen.join(", ")
+        )
+    };
     RecordedReach::Unconfirmed(format!(
-        "{host} resolves to {} on port {port}, but the browser reached it at {}, as through a proxy, so the flow is not marked local and a direct `flow run` refuses it; save it again with the browser connecting directly",
-        names.join(", "),
-        seen.join(", ")
+        "{host} resolves to {names} on port {port}, but {reached}, {not_local}; save it again with the browser connecting directly and the page loaded fresh"
     ))
 }
 
@@ -543,9 +598,9 @@ mod tests {
         for (url, reach) in [
             ("https://shop.example.com/", Reach::Public),
             ("https://8.8.8.8/", Reach::Public),
-            ("http://localhost:3000/", Reach::Local),
-            ("http://LOCALHOST./", Reach::Local),
-            ("http://app.localhost:3000/", Reach::Local),
+            ("http://localhost:3000/", Reach::Loopback),
+            ("http://LOCALHOST./", Reach::Loopback),
+            ("http://app.localhost:3000/", Reach::Loopback),
             ("http://127.0.0.1:8080/", Reach::Local),
             ("http://192.168.1.20/", Reach::Local),
             ("http://[::1]:3000/", Reach::Local),
@@ -845,10 +900,11 @@ mod tests {
         );
         let res = run_http(&client, &request("http://localhost:1/"), None, None).await;
         assert!(!res.ok);
-        assert!(res
-            .reason
-            .unwrap()
-            .contains("resolved to a public address (8.8.8.8)"));
+        let reason = res.reason.unwrap();
+        assert!(
+            reason.contains("resolved to 8.8.8.8") && reason.contains("loopback"),
+            "{reason}"
+        );
     }
 
     fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
@@ -1209,9 +1265,10 @@ mod tests {
     #[tokio::test]
     async fn a_name_counts_as_local_only_if_it_still_resolves_locally() {
         let lo = vec!["127.0.0.1:3000".parse().unwrap()];
+        // localhost is local by its name, so the file needs no reach.
         assert_eq!(
             recorded_local_host("localhost", 3000, &lo).await,
-            RecordedReach::Local
+            RecordedReach::Unknown
         );
         // A public name reached through a local proxy records the proxy's
         // address but does not resolve to it.
@@ -1234,8 +1291,32 @@ mod tests {
         }
         assert_eq!(
             recorded_reach_of("lvh.me", 4719, &at("127.0.0.1:4719"), &lo),
-            RecordedReach::Local
+            RecordedReach::Local(Reach::Loopback)
         );
+        assert_eq!(
+            recorded_reach_of("wiki.corp", 443, &at("10.0.0.4:443"), &[ip("10.0.0.4")]),
+            RecordedReach::Local(Reach::Local)
+        );
+        // No direct connection recorded, or a proxy at a public address:
+        // the note still says why.
+        for recorded in [vec![], at("93.184.216.34:8080")] {
+            match recorded_reach_of("lvh.me", 4719, &recorded, &lo) {
+                RecordedReach::Unconfirmed(note) => {
+                    assert!(note.contains("connecting directly"), "{note}")
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        // A name that resolves to a metadata address is never local.
+        match recorded_reach_of(
+            "meta.test",
+            80,
+            &at("169.254.169.254:80"),
+            &[ip("169.254.169.254")],
+        ) {
+            RecordedReach::Unconfirmed(note) => assert!(note.contains("metadata"), "{note}"),
+            other => panic!("{other:?}"),
+        }
         // A public site through a local proxy is an ordinary public flow.
         assert_eq!(
             recorded_reach_of(
@@ -1246,13 +1327,9 @@ mod tests {
             ),
             RecordedReach::Unknown
         );
-        // localhost is local by name; nothing recorded says nothing.
+        // localhost is local by name.
         assert_eq!(
             recorded_reach_of("localhost", 3000, &at("127.0.0.1:8080"), &lo),
-            RecordedReach::Unknown
-        );
-        assert_eq!(
-            recorded_reach_of("lvh.me", 80, &[], &lo),
             RecordedReach::Unknown
         );
     }
@@ -1302,5 +1379,34 @@ mod tests {
         // how to record one.
         assert!(reason.contains(r#""reach": "local""#), "{reason}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn a_local_reach_never_admits_link_local_or_metadata_addresses() {
+        for meta in [
+            "169.254.169.254",
+            "169.254.0.1",
+            "fe80::1",
+            "fd00:ec2::254",
+            "100.100.100.200",
+            "::ffff:169.254.169.254",
+        ] {
+            assert!(!Reach::Local.admits(ip(meta), is_non_public), "{meta}");
+            assert!(!Reach::Loopback.admits(ip(meta), is_non_public), "{meta}");
+            assert!(Reach::Local
+                .refusal("a.test", ip(meta))
+                .contains("metadata"));
+        }
+        assert!(Reach::Local.admits(ip("10.0.0.4"), is_non_public));
+        assert!(Reach::Local.admits(ip("127.0.0.1"), is_non_public));
+        // A flow recorded against this machine reaches only loopback.
+        assert!(Reach::Loopback.admits(ip("127.0.0.1"), is_non_public));
+        assert!(Reach::Loopback.admits(ip("::1"), is_non_public));
+        assert!(Reach::Loopback.admits(ip("::ffff:127.0.0.1"), is_non_public));
+        assert!(!Reach::Loopback.admits(ip("10.0.0.4"), is_non_public));
+        assert!(!Reach::Loopback.admits(ip("93.184.216.34"), is_non_public));
+        assert_eq!(
+            serde_json::to_value(Reach::Loopback).unwrap(),
+            json!("loopback")
+        );
     }
 }

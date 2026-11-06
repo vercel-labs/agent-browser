@@ -37,7 +37,7 @@ pub struct SaveArgs<'a> {
     /// The page shows a password field at save time.
     pub login_wall: bool,
     /// See `SaveInput::local_names`.
-    pub local_names: &'a [String],
+    pub local_names: &'a [(String, super::net::Reach)],
 }
 
 /// What the recorder knows about a command besides its arguments.

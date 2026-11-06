@@ -12340,7 +12340,7 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let mut reach_note = None;
     if let Some((host, port, addrs)) = state.flow.start_host_addresses(from, to, &entries) {
         match super::flow::recorded_local_host(&host, port, &addrs).await {
-            super::flow::RecordedReach::Local => local_names.push(host),
+            super::flow::RecordedReach::Local(reach) => local_names.push((host, reach)),
             super::flow::RecordedReach::Unconfirmed(note) => reach_note = Some(note),
             super::flow::RecordedReach::Unknown => {}
         }
