@@ -137,7 +137,7 @@ fn non_public_v6(ip: Ipv6Addr) -> bool {
 /// to nothing else. Through any proxy (launch flag, system setting, an
 /// external Chrome) the browser records the proxy's address and port, so a
 /// host reached through one is never local.
-pub async fn recorded_local_host(host: &str, port: u16, recorded: &[SocketAddr]) -> Option<String> {
+pub async fn recorded_local_host(host: &str, port: u16, recorded: &[SocketAddr]) -> RecordedReach {
     let looked = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         tokio::net::lookup_host((host, 0)),
@@ -145,9 +145,52 @@ pub async fn recorded_local_host(host: &str, port: u16, recorded: &[SocketAddr])
     .await;
     let resolved: Vec<IpAddr> = match looked {
         Ok(Ok(addrs)) => addrs.map(|a| a.ip()).collect(),
-        _ => return None,
+        _ => Vec::new(),
     };
-    local_recording(recorded, port, &resolved).then(|| host.to_string())
+    recorded_reach_of(host, port, recorded, &resolved)
+}
+
+/// What a save learns about a start host's reach.
+#[derive(Debug, PartialEq)]
+pub enum RecordedReach {
+    /// Reached directly at the local addresses it resolves to.
+    Local,
+    /// Public, or nothing recorded: the start URL decides.
+    Unknown,
+    /// Both sides are local but do not match, as when the browser went
+    /// through a proxy: not recorded, and the save report says why.
+    Unconfirmed(String),
+}
+
+pub fn recorded_reach_of(
+    host: &str,
+    port: u16,
+    recorded: &[SocketAddr],
+    resolved: &[IpAddr],
+) -> RecordedReach {
+    if local_recording(recorded, port, resolved) {
+        return RecordedReach::Local;
+    }
+    let local_by_name = host == "localhost" || host.ends_with(".localhost");
+    let all_local =
+        |ips: Vec<IpAddr>| !ips.is_empty() && ips.iter().all(|ip| is_non_public(ip.to_canonical()));
+    if local_by_name
+        || !all_local(recorded.iter().map(|a| a.ip()).collect())
+        || !all_local(resolved.to_vec())
+    {
+        return RecordedReach::Unknown;
+    }
+    let mut seen: Vec<String> = recorded.iter().map(|a| a.to_string()).collect();
+    let mut names: Vec<String> = resolved.iter().map(|ip| ip.to_string()).collect();
+    for list in [&mut seen, &mut names] {
+        list.sort();
+        list.dedup();
+    }
+    RecordedReach::Unconfirmed(format!(
+        "{host} resolves to {} on port {port}, but the browser reached it at {}, as through a proxy, so the flow is not marked local and a direct `flow run` refuses it; save it again with the browser connecting directly",
+        names.join(", "),
+        seen.join(", ")
+    ))
 }
 
 /// Every recorded address is non-public, among `resolved` and on `port`, and
@@ -390,7 +433,7 @@ impl Resolve for ReachResolver {
 
 /// Added to a refusal when a flow without a recorded `reach` hits a local
 /// address: the file may predate the field.
-pub const RESAVE_FOR_LOCAL: &str = "if this flow was recorded against a local host, record it again with `flow save` so the file gets `\"reach\": \"local\"`";
+pub const RESAVE_FOR_LOCAL: &str = "if this flow was recorded against a local host, record it again with `flow save`, with the browser connecting directly rather than through a proxy, so the file gets `\"reach\": \"local\"`";
 
 struct SystemResolver;
 
@@ -1167,14 +1210,51 @@ mod tests {
     async fn a_name_counts_as_local_only_if_it_still_resolves_locally() {
         let lo = vec!["127.0.0.1:3000".parse().unwrap()];
         assert_eq!(
-            recorded_local_host("localhost", 3000, &lo).await.as_deref(),
-            Some("localhost")
+            recorded_local_host("localhost", 3000, &lo).await,
+            RecordedReach::Local
         );
         // A public name reached through a local proxy records the proxy's
         // address but does not resolve to it.
-        assert!(recorded_local_host("example.com", 3000, &lo)
-            .await
-            .is_none());
+        assert_eq!(
+            recorded_local_host("example.com", 3000, &lo).await,
+            RecordedReach::Unknown
+        );
+    }
+
+    #[test]
+    fn a_local_host_reached_through_a_proxy_says_why_it_is_not_local() {
+        let at = |a: &str| vec![a.parse::<SocketAddr>().unwrap()];
+        let lo = [ip("127.0.0.1")];
+        match recorded_reach_of("lvh.me", 4719, &at("127.0.0.1:4720"), &lo) {
+            RecordedReach::Unconfirmed(note) => {
+                assert!(note.contains("127.0.0.1:4720"), "{note}");
+                assert!(note.contains("connecting directly"), "{note}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            recorded_reach_of("lvh.me", 4719, &at("127.0.0.1:4719"), &lo),
+            RecordedReach::Local
+        );
+        // A public site through a local proxy is an ordinary public flow.
+        assert_eq!(
+            recorded_reach_of(
+                "example.com",
+                443,
+                &at("127.0.0.1:8080"),
+                &[ip("93.184.216.34")]
+            ),
+            RecordedReach::Unknown
+        );
+        // localhost is local by name; nothing recorded says nothing.
+        assert_eq!(
+            recorded_reach_of("localhost", 3000, &at("127.0.0.1:8080"), &lo),
+            RecordedReach::Unknown
+        );
+        assert_eq!(
+            recorded_reach_of("lvh.me", 80, &[], &lo),
+            RecordedReach::Unknown
+        );
     }
 
     #[test]

@@ -25,7 +25,7 @@ pub use hint::*;
 pub use hosts::*;
 pub use http::*;
 pub use model::*;
-pub use net::recorded_local_host;
+pub use net::{recorded_local_host, RecordedReach};
 pub use outcome::*;
 pub use recorder::*;
 pub use send::*;

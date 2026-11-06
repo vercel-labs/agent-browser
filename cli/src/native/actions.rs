@@ -12337,10 +12337,15 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let from = cmd.get("from").and_then(|v| v.as_u64());
     let to = cmd.get("to").and_then(|v| v.as_u64());
     let mut local_names = Vec::new();
+    let mut reach_note = None;
     if let Some((host, port, addrs)) = state.flow.start_host_addresses(from, to, &entries) {
-        local_names.extend(super::flow::recorded_local_host(&host, port, &addrs).await);
+        match super::flow::recorded_local_host(&host, port, &addrs).await {
+            super::flow::RecordedReach::Local => local_names.push(host),
+            super::flow::RecordedReach::Unconfirmed(note) => reach_note = Some(note),
+            super::flow::RecordedReach::Unknown => {}
+        }
     }
-    state.flow.save(super::flow::SaveArgs {
+    let mut report = state.flow.save(super::flow::SaveArgs {
         name: &name,
         from: cmd.get("from").and_then(|v| v.as_u64()),
         to: cmd.get("to").and_then(|v| v.as_u64()),
@@ -12350,7 +12355,11 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         entries: &entries,
         login_wall,
         local_names: &local_names,
-    })
+    })?;
+    if let Some(note) = reach_note {
+        report["reachNote"] = json!(note);
+    }
+    Ok(report)
 }
 
 /// The single write gate: the first write a run sends that `--allow-write`
