@@ -88,9 +88,6 @@ pub fn validate_firefox_options(
     if options.color_scheme.is_some() {
         return unsupported("--color-scheme");
     }
-    if options.viewport_size.is_some() {
-        return unsupported("initial viewport");
-    }
     if allowed_domains {
         return Err("allowed-domains is not yet supported on Firefox".to_string());
     }
@@ -428,9 +425,6 @@ mod tests {
         let mut o = ok();
         o.color_scheme = Some("dark".into());
         assert!(err_of(&o).contains("--color-scheme"));
-        let mut o = ok();
-        o.viewport_size = Some((800, 600));
-        assert!(err_of(&o).contains("initial viewport"));
         let e = validate_firefox_options(&ok(), Some("9222"), false, None, false).unwrap_err();
         assert!(e.contains("--cdp"));
         let e = validate_firefox_options(&ok(), None, true, None, false).unwrap_err();

@@ -47,6 +47,9 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(Value::as_str)
         .ok_or("Missing 'url' parameter")?;
     let wait = match cmd.get("waitUntil").and_then(Value::as_str) {
+        Some("networkidle") => {
+            return Err("networkidle is not supported with --engine firefox".into())
+        }
         Some("domcontentloaded") => "interactive",
         Some("none") => "none",
         _ => "complete",
@@ -148,12 +151,13 @@ pub async fn evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 }
 
 /// The expression Chrome polls for a `--load` state, or `None` when the state is `none`.
-fn load_state_check(load_state: &str) -> Option<&'static str> {
-    match load_state {
+fn load_state_check(load_state: &str) -> Result<Option<&'static str>, String> {
+    Ok(match load_state {
+        "networkidle" => return Err("networkidle is not supported with --engine firefox".into()),
         "none" => None,
         "domcontentloaded" => Some("document.readyState !== 'loading'"),
         _ => Some("document.readyState === 'complete'"),
-    }
+    })
 }
 
 /// The expression Chrome polls for a selector in one of its `wait` states.
@@ -268,7 +272,7 @@ pub async fn wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
     }
 
     if let Some(load_state) = cmd.get("loadState").and_then(Value::as_str) {
-        if let Some(check) = load_state_check(load_state) {
+        if let Some(check) = load_state_check(load_state)? {
             poll_until_true(ff, check, timeout_ms).await?;
         }
         return Ok(json!({ "waited": "load", "state": load_state }));
@@ -303,7 +307,7 @@ pub async fn waitforloadstate(cmd: &Value, state: &mut DaemonState) -> Result<Va
         .get("timeout")
         .and_then(Value::as_u64)
         .unwrap_or(state.default_timeout_ms);
-    if let Some(check) = load_state_check(load_state) {
+    if let Some(check) = load_state_check(load_state)? {
         let ff = session(state)?;
         poll_until_true_or_timeout(
             ff,
@@ -454,6 +458,36 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, "Timeout waiting for load state: load");
+    }
+
+    #[tokio::test]
+    async fn networkidle_is_rejected_for_navigation_and_waits() {
+        let mut state = DaemonState::new();
+        let (ff, _tx, calls) = fake_session().await;
+        state.firefox = Some(ff);
+        let error = "networkidle is not supported with --engine firefox";
+        assert_eq!(
+            navigate(
+                &json!({"url": "https://example.com", "waitUntil": "networkidle"}),
+                &mut state
+            )
+            .await
+            .unwrap_err(),
+            error
+        );
+        assert_eq!(
+            wait(&json!({"loadState": "networkidle"}), &mut state)
+                .await
+                .unwrap_err(),
+            error
+        );
+        assert_eq!(
+            waitforloadstate(&json!({"state": "networkidle"}), &mut state)
+                .await
+                .unwrap_err(),
+            error
+        );
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
