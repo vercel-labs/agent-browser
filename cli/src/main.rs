@@ -2049,7 +2049,7 @@ fn run_batch(
             continue;
         }
 
-        let mut parsed = match parse_command(cmd_args, flags) {
+        let mut parsed = match commands::parse_batch_command(cmd_args, flags) {
             Ok(mut c) => {
                 if flags.default_timeout.is_none() {
                     commands::inherit_wait_timeout(

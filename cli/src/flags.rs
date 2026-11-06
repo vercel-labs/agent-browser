@@ -1518,6 +1518,11 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     result
 }
 
+/// Reports whether a token is a global or top-level control flag.
+pub fn is_global_flag(arg: &str) -> bool {
+    matches!(arg, "--help" | "-h" | "--version" | "-V") || clean_args(&[arg.to_string()]).is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
