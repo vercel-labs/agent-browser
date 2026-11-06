@@ -108,9 +108,9 @@ The cookie directive creates a reusable `_vercel_jwt` cookie. Treat saved browse
 
 ## Feature flags
 
-To view a variant other than the one an environment serves, set an override cookie in this browser. Do not run `vc flags set`, `enable`, `disable`, `split`, or `rollout` for that: they change the variant for everyone using the environment.
+To view a variant other than the one an environment serves, set an override cookie in this browser. Do not use `vc flags set`, `enable`, `disable`, `split`, or `rollout` to view a variant, because they change it for everyone using the environment.
 
-Apps built with the [Flags SDK](https://flags-sdk.dev) read overrides from the `vercel-flag-overrides` cookie, encrypted with the project's `FLAGS_SECRET`. Find the flag key and its variants in the source or with `vc flags inspect <flag>`, then mint the cookie for the environment under test without printing the secret:
+Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api-reference/frameworks/next) apply overrides from the `vercel-flag-overrides` cookie. The cookie value is encrypted with the `FLAGS_SECRET` of the environment under test. Find the flag key and its variants in the source or with `vc flags inspect <flag>`, then mint the cookie without printing the secret:
 
 ```bash
 (
@@ -128,9 +128,11 @@ agent-browser reload
 agent-browser screenshot
 ```
 
-Run this in the same session as the protected `open`. Confirm in the screenshot that the requested variant rendered before reporting. To return to the served variant, delete the cookie or start a new session.
+Run this in the same session as the protected `open`, and confirm in the screenshot that the requested variant rendered before reporting. `agent-browser cookies clear` removes the override along with every other cookie, so repeat the protected `open` after clearing.
 
-If the app does not read `vercel-flag-overrides` (no Flags SDK, or another flag provider), there is no request-scoped path. Ask the user before changing the flag with `vc flags set`, record the original variant, restore it afterwards, and verify the restore with `vc flags inspect`.
+If `FLAGS_SECRET` is stored as a Secret, `vc env pull` returns it empty because Secret values are write-only, and the `test -n` check stops the script. Ask the user to export `FLAGS_SECRET` in your environment, then mint the cookie from that variable instead of pulling it.
+
+If the app evaluates flags without the Flags SDK or through another provider, the cookie has no effect and there is no request-scoped path. Ask the user before changing the flag with `vc flags set`, record the original variant, restore it afterwards, and verify the restore with `vc flags inspect`.
 
 ## Avoid dead ends
 
