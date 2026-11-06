@@ -67,7 +67,7 @@
       },
       {
         "from": "# Browser engine: chrome (default), lightpanda, obscura (experimental)",
-        "to": "# Browser engine: chrome (default), lightpanda, firefox, obscura (experimental)"
+        "to": "# Browser engine: chrome (default), lightpanda, obscura, firefox"
       }
     ],
     "/configuration": [
