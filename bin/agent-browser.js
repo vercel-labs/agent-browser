@@ -122,8 +122,13 @@ function main() {
     process.exit(1);
   });
 
-  child.on('close', (code) => {
-    process.exit(code ?? 0);
+  child.on('close', (code, signal) => {
+    // Preserve a native crash or termination for shells, CI, and MCP hosts.
+    if (signal) {
+      process.kill(process.pid, signal);
+      return;
+    }
+    process.exit(code ?? 1);
   });
 }
 
