@@ -47,6 +47,12 @@ agent-browser batch \
   "navigate http://localhost:3000/target"
 ```
 
+Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Keep command-specific options and literal command arguments inside each item:
+
+```bash
+agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
+```
+
 `open` with no URL gives you a clean launch so interception rules and cookies can take effect on the *first* real navigation. Pass `--init-script <path>` at launch to install a script before navigation. Use this flow for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
 
 With `--json`, `--omit-command` replaces each `command` array with a stable zero-based `index` field on success, failure, or `--bail`; default output is unchanged. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
@@ -460,6 +466,8 @@ The dashboard runs on port 4848 by default, independent of browser sessions. It 
 
 `agent-browser install` downloads Chrome for Testing. On macOS versions below 13, the command stops before the download and prints instructions to update macOS or install Chrome manually. If `sw_vers -productVersion` is unavailable, exits with an error, returns no version, or returns a malformed version, the command reports a detection error and stops before making a network request. On Linux, `--with-deps` also installs system dependencies and exits nonzero if the package manager cannot install every required browser library.
 
+At launch, agent-browser uses the browser from `agent-browser install` first. When that is missing, it falls back to a system Chrome (on macOS, Chrome, Chrome Canary, Chromium, and Brave in `/Applications`, then in `~/Applications`), then to the Puppeteer and Playwright caches.
+
 ## Diagnostics
 
 Run `doctor` first when a command fails unexpectedly (`Unknown command`, `Failed to connect`, stale daemons, version mismatches after `upgrade`, missing Chrome).
@@ -554,6 +562,7 @@ agent-browser --use-system-ca         # OS trust store for CLI requests (read, i
 agent-browser --hide-scrollbars false # Keep native scrollbars visible in headless Chromium screenshots
 agent-browser --engine <name> ...     # chrome (default), lightpanda, obscura (experimental)
 agent-browser --auto-connect ...      # Connect to an already-running Chrome
+agent-browser --no-auto-connect ...   # Return an --auto-connect session to a local launch
 agent-browser --profile <name|path>   # Use a Chrome profile (login state survives)
 agent-browser --state <path> ...      # Load saved auth state from JSON
 agent-browser --restore [name] ...    # Auto-save and restore session state; defaults to --session

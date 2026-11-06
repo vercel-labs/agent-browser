@@ -575,6 +575,11 @@ pub struct Flags {
     pub cli_headed: bool,
     pub cli_webgpu: bool,
     pub cli_no_webmcp: bool,
+    /// True when `--auto-connect` was passed on the command line.
+    pub cli_auto_connect: bool,
+    /// True when `--no-auto-connect` (or `--auto-connect false`) was passed:
+    /// the session returns to a local launch, whatever env or config say.
+    pub no_auto_connect: bool,
     pub cli_restore: bool,
     /// True when --pin-tab / --no-pin-tab was passed on the command line, so
     /// an explicit disable can be sent to the daemon (a bare `pin_tab: false`
@@ -837,6 +842,8 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         cli_headed: false,
         cli_webgpu: false,
         cli_no_webmcp: false,
+        cli_auto_connect: false,
+        no_auto_connect: false,
         cli_restore: false,
         cli_pin_tab: false,
         cli_input_mode: false,
@@ -1134,6 +1141,21 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             "--auto-connect" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.auto_connect = val;
+                if val {
+                    flags.cli_auto_connect = true;
+                } else {
+                    flags.no_auto_connect = true;
+                }
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--no-auto-connect" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                if val {
+                    flags.auto_connect = false;
+                    flags.no_auto_connect = true;
+                }
                 if consumed {
                     i += 1;
                 }
@@ -1353,6 +1375,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--allow-file-access",
         "--hide-scrollbars",
         "--auto-connect",
+        "--no-auto-connect",
         "--pin-tab",
         "--no-pin-tab",
         "--no-ca-cert",
@@ -1472,6 +1495,11 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         i += 1;
     }
     result
+}
+
+/// Reports whether a token is a global or top-level control flag.
+pub fn is_global_flag(arg: &str) -> bool {
+    matches!(arg, "--help" | "-h" | "--version" | "-V") || clean_args(&[arg.to_string()]).is_empty()
 }
 
 #[cfg(test)]
@@ -2750,6 +2778,95 @@ mod tests {
         ];
         let clean = clean_args(&input);
         assert_eq!(clean, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_no_auto_connect_flag() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let flags = parse_flags(&args("--no-auto-connect open example.com"));
+        assert!(flags.no_auto_connect);
+        assert!(!flags.auto_connect);
+        assert!(!flags.cli_auto_connect);
+        assert_eq!(
+            clean_args(&args("--no-auto-connect open example.com")),
+            args("open example.com")
+        );
+        assert_eq!(
+            clean_args(&args("--no-auto-connect true open example.com")),
+            args("open example.com")
+        );
+    }
+
+    #[test]
+    fn test_no_auto_connect_false_is_not_a_reset() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let flags = parse_flags(&args("--no-auto-connect false open"));
+        assert!(!flags.no_auto_connect);
+    }
+
+    #[test]
+    fn test_auto_connect_false_is_the_same_reset() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let flags = parse_flags(&args("--auto-connect false open"));
+        assert!(flags.no_auto_connect);
+        assert!(!flags.auto_connect);
+        assert!(!flags.cli_auto_connect);
+        let flags = parse_flags(&args("--auto-connect open"));
+        assert!(flags.auto_connect && flags.cli_auto_connect && !flags.no_auto_connect);
+    }
+
+    #[test]
+    fn test_no_auto_connect_beats_env_auto_connect() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.set("AGENT_BROWSER_AUTO_CONNECT", "1");
+        assert!(parse_flags(&args("open")).auto_connect);
+        let flags = parse_flags(&args("--no-auto-connect open"));
+        assert!(!flags.auto_connect);
+        assert!(flags.no_auto_connect);
+    }
+
+    #[test]
+    fn test_auto_connect_env_is_on_only_for_a_truthy_value() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        for (value, on) in [
+            ("1", true),
+            ("true", true),
+            ("0", false),
+            ("false", false),
+            ("no", false),
+            ("", false),
+        ] {
+            guard.set("AGENT_BROWSER_AUTO_CONNECT", value);
+            let patch = crate::session_settings::Patch::from_flags(&parse_flags(&args("open")));
+            let expected = on.then_some(serde_json::Value::Bool(true));
+            assert_eq!(
+                patch.value(crate::session_settings::Key::AutoConnect),
+                expected.as_ref(),
+                "AGENT_BROWSER_AUTO_CONNECT={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_no_auto_connect_beats_config_auto_connect() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"autoConnect": true}"#).unwrap();
+        let config = config.to_string_lossy().into_owned();
+        let with_config = |extra: &str| {
+            let mut a = vec!["--config".to_string(), config.clone()];
+            a.extend(args(extra));
+            parse_flags(&a)
+        };
+        assert!(with_config("open").auto_connect);
+        let flags = with_config("--no-auto-connect open");
+        assert!(!flags.auto_connect);
+        assert!(flags.no_auto_connect);
     }
 
     #[test]

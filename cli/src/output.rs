@@ -1390,9 +1390,22 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         // Errors
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
-            for err in errors {
-                let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                println!("{} {}", color::error_indicator(), msg);
+            if errors.is_empty() {
+                return;
+            }
+            let lines: Vec<String> = errors
+                .iter()
+                .map(|err| {
+                    let msg = err.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    format!("{} {}", color::error_indicator(), msg)
+                })
+                .collect();
+            if opts.content_boundaries {
+                print_with_boundaries(&lines.join("\n"), origin, opts);
+            } else {
+                for line in lines {
+                    println!("{line}");
+                }
             }
             return;
         }
@@ -1437,6 +1450,7 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                     Some("cookies_clear") => "Cookies cleared",
                     Some("console") => "Console log cleared",
                     Some("errors") => "Page errors cleared",
+                    Some("storage_clear") => "Storage cleared",
                     _ => "Request log cleared",
                 };
                 println!("{} {}", color::success_indicator(), label);
@@ -2047,6 +2061,8 @@ pub fn print_command_help(command: &str) -> bool {
 agent-browser open - Launch the browser, optionally navigate
 
 Usage: agent-browser open [url]
+
+On macOS, installed browsers are searched in /Applications, then ~/Applications.
 
 Without a URL, launches the browser but stays on about:blank. This lets
 you stage state (network routes, cookies, init scripts) before the first
@@ -4028,6 +4044,10 @@ Runs multiple commands in sequence. Commands can be passed as quoted
 arguments or piped as JSON via stdin. Results are printed in order,
 separated by blank lines (or as a JSON array with --json).
 
+Put global flags such as `--init-script` and `--enable` on the outer batch
+invocation. Keep command-specific options and literal command arguments inside
+each item.
+
 Options:
   --bail               Stop on first error (default: continue all commands)
   --json               Output results as a JSON array
@@ -4049,6 +4069,7 @@ Stdin Mode (JSON):
 
 Examples:
   agent-browser batch "open https://example.com" "screenshot"
+  agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
   agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
   echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
   echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
@@ -4640,6 +4661,8 @@ Options:
   --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
   --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
                              (or AGENT_BROWSER_NO_WEBMCP env)
+  --no-auto-connect          Return a session attached with --auto-connect to a local launch
+                             (or --auto-connect false; overrides AGENT_BROWSER_AUTO_CONNECT)
   --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
   --cdp-headers <json>       Headers for --cdp discovery and handshake, e.g. Authorization
                              (or AGENT_BROWSER_CDP_HEADERS env)
