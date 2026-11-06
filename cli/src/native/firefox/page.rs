@@ -382,7 +382,7 @@ mod tests {
         let seen = requests.clone();
         let (mut ff, _tx, _) = fake_session_with(move |request| {
             seen.lock().unwrap().push(request.clone());
-            json!({"type": "string", "value": "Page title"})
+            json!({"type": "success", "result": {"type": "string", "value": "Page title"}})
         })
         .await;
         ff.context = "ctx-frame".into();
