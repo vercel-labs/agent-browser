@@ -15906,6 +15906,86 @@ async fn e2e_har_finalizes_a_redirect_hop() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_flow_save_does_not_wait_on_a_long_poll() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for (id, sel) in [("c1", "#hang"), ("c2", "#slow")] {
+        assert_success(
+            &exec(
+                &json!({ "id": id, "action": "click", "selector": sel }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    fx.wait_until(|| fx.hits("GET /api/hang") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    // The JSON long poll has its headers; only /api/slow is waited on.
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "poll", "timeout": 10000 }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(3),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    assert!(saved["data"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["reason"] == "still loading at save: GET /api/hang"));
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_failure_names_the_request_still_loading() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#hang" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/hang") > 0).await;
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "only-hang", "timeout": 400 }),
+        &mut state,
+    )
+    .await;
+    let err = saved["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("still loading at save: GET /api/hang"),
+        "{saved}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_flow_save_reports_requests_still_loading_at_the_deadline() {
     let fx = flow_fixture().await;
     let dir = tempfile::tempdir().unwrap();

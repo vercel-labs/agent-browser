@@ -435,6 +435,30 @@ impl FlowRecorder {
         to: Option<u64>,
         entries: &[HarEntry],
     ) -> Vec<Value> {
+        self.gaps_of_loading(from, to, entries, None)
+    }
+
+    /// Whether a request of the range is still loading and not `stalled`:
+    /// one with no response yet, or whose body is still arriving.
+    pub fn awaiting_response(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+        stalled: &dyn Fn(&HarEntry) -> bool,
+    ) -> bool {
+        !self
+            .gaps_of_loading(from, to, entries, Some(stalled))
+            .is_empty()
+    }
+
+    fn gaps_of_loading(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+        stalled: Option<&dyn Fn(&HarEntry) -> bool>,
+    ) -> Vec<Value> {
         let Ok((first, last)) = self.resolve_range(from, to) else {
             return Vec::new();
         };
@@ -451,6 +475,7 @@ impl FlowRecorder {
         entries
             .iter()
             .filter(|e| e.loading_finished_timestamp.is_none() && may_become_candidate(e, &policy))
+            .filter(|e| e.status.is_none() || stalled.is_none_or(|s| !s(e)))
             .filter_map(|e| {
                 let seq = *self.request_tags.get(&e.request_id)?;
                 let index = commands.iter().position(|(s, _)| *s == seq)?;

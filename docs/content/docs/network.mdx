@@ -167,7 +167,7 @@ Saving does not stop or reset the capture, so one session can save several flows
 
 It never saves cookies, `authorization`, or token and CSRF headers. Each run reads cookies from the live session.
 
-Before it saves, `flow save` waits for first-party requests of the saved range that are still loading, up to the command timeout (`AGENT_BROWSER_DEFAULT_TIMEOUT`), and reports any it had to leave out as `still loading at save`.
+Before it saves, `flow save` waits for first-party requests of the saved range that have no response yet, up to the command timeout (`AGENT_BROWSER_DEFAULT_TIMEOUT`). A response whose body gets no bytes for 500 ms after its headers, such as a long poll, is not waited on (the same quiet window as `wait --load networkidle`). Requests left out are reported as `still loading at save`, also in the error when the save has nothing else to keep.
 
 The save report lists the requests it kept, the params, and any step it could not turn into a request, with the reason. When the recording stops at a sign-in form, the report says so.
 

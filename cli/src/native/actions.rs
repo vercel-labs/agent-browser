@@ -616,6 +616,8 @@ pub struct DaemonState {
     /// Bytes of response bodies embedded so far this recording; enforces
     /// [`HAR_MAX_TOTAL_BODY_BYTES`].
     pub har_body_total_bytes: usize,
+    /// When each recorded request last received its headers or body bytes.
+    pub har_progress: HashMap<String, std::time::Instant>,
     pub confirm_actions: Option<ConfirmActions>,
     pub inspect_server: Option<InspectServer>,
     pub routes: Arc<RwLock<Vec<RouteEntry>>>,
@@ -804,6 +806,7 @@ impl DaemonState {
             flow_stop: None,
             har_content_mode: HarContentMode::default(),
             har_body_total_bytes: 0,
+            har_progress: HashMap::new(),
             confirm_actions: security
                 .confirm_actions
                 .as_deref()
@@ -2133,6 +2136,8 @@ impl DaemonState {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
                                 if self.har_recording {
+                                    self.har_progress
+                                        .insert(request_id.to_string(), std::time::Instant::now());
                                     if let Some(entry) = self
                                         .har_entries
                                         .iter_mut()
@@ -2152,6 +2157,13 @@ impl DaemonState {
                                         tracked_fill_response(entry, response);
                                     }
                                 }
+                            }
+                        }
+                        "Network.dataReceived" if self.har_recording => {
+                            if let Some(id) = event.params.get("requestId").and_then(|v| v.as_str())
+                            {
+                                self.har_progress
+                                    .insert(id.to_string(), std::time::Instant::now());
                             }
                         }
                         "Network.loadingFinished" if self.har_recording => {
@@ -6447,6 +6459,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     let unsaved = if state.flow.active() {
         state.har_recording = false;
         state.har_entries.clear();
+        state.har_progress.clear();
         state.har_body_total_bytes = 0;
         state.flow.end_capture()
     } else {
@@ -12227,6 +12240,7 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     }
     state.har_recording = true;
     state.har_entries.clear();
+    state.har_progress.clear();
     state.har_content_mode = content_mode;
     state.har_body_total_bytes = 0;
     Ok(json!({ "started": true }))
@@ -12261,6 +12275,8 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     std::fs::write(&path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
 
     state.har_entries.clear();
+
+    state.har_progress.clear();
     state.har_recording = false;
     state.har_body_total_bytes = 0;
 
@@ -12304,23 +12320,35 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             .unwrap_or(false),
         None => false,
     };
-    // A request the last step started may still be loading; let it finish so
-    // its response body is on the entry. Bounded by the command timeout.
+    // A request the range started may still be loading; let it finish so its
+    // body is on the entry. Bounded by the command timeout.
     let from = cmd.get("from").and_then(|v| v.as_u64());
     let to = cmd.get("to").and_then(|v| v.as_u64());
     let deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_millis(state.timeout_ms(cmd));
-    let mut still_loading;
+    // A response with headers whose body gets no bytes for the network idle
+    // window is a stream or a long poll.
+    let idle = std::time::Duration::from_millis(super::browser::NETWORK_IDLE_MS);
     loop {
         state.drain_cdp_events_background().await?;
-        still_loading = state.flow.loading_gaps(from, to, &state.har_entries);
-        if still_loading.is_empty() || tokio::time::Instant::now() >= deadline {
+        let stalled = |e: &HarEntry| {
+            state
+                .har_progress
+                .get(&e.request_id)
+                .is_some_and(|t| t.elapsed() >= idle)
+        };
+        if !state
+            .flow
+            .awaiting_response(from, to, &state.har_entries, &stalled)
+            || tokio::time::Instant::now() >= deadline
+        {
             break;
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
     }
+    let still_loading = state.flow.loading_gaps(from, to, &state.har_entries);
     let entries = state.har_entries.clone();
-    let mut report = state.flow.save(super::flow::SaveArgs {
+    let saved = state.flow.save(super::flow::SaveArgs {
         name: &name,
         from: cmd.get("from").and_then(|v| v.as_u64()),
         to: cmd.get("to").and_then(|v| v.as_u64()),
@@ -12329,7 +12357,19 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         output: cmd.get("output").and_then(|v| v.as_str()),
         entries: &entries,
         login_wall,
-    })?;
+    });
+    // A save that fails for want of requests names the ones still loading.
+    let mut report = match saved {
+        Ok(report) => report,
+        Err(e) if !still_loading.is_empty() => {
+            let loading: Vec<String> = still_loading
+                .iter()
+                .filter_map(|g| Some(format!("step {}: {}", g["step"], g["reason"].as_str()?)))
+                .collect();
+            return Err(format!("{e}; {}", loading.join("; ")));
+        }
+        Err(e) => return Err(e),
+    };
     // Requests still loading at the deadline are not in the flow. The step
     // that started one says so instead of the generic reason.
     if let Some(gaps) = report["gaps"].as_array_mut() {
