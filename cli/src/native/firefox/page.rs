@@ -46,6 +46,13 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .get("url")
         .and_then(Value::as_str)
         .ok_or("Missing 'url' parameter")?;
+    if cmd
+        .get("headers")
+        .and_then(Value::as_object)
+        .is_some_and(|headers| !headers.is_empty())
+    {
+        return Err("--headers is not supported with --engine firefox".into());
+    }
     let wait = match cmd.get("waitUntil").and_then(Value::as_str) {
         Some("networkidle") => {
             return Err("networkidle is not supported with --engine firefox".into())
@@ -487,6 +494,24 @@ mod tests {
                 .unwrap_err(),
             error
         );
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn navigation_headers_are_rejected_before_navigation() {
+        let mut state = DaemonState::new();
+        let (ff, _tx, calls) = fake_session().await;
+        state.firefox = Some(ff);
+        let err = navigate(
+            &json!({
+                "url": "https://example.com",
+                "headers": {"Authorization": "Bearer token"}
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "--headers is not supported with --engine firefox");
         assert!(calls.lock().unwrap().is_empty());
     }
 
