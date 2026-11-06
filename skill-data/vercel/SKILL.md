@@ -1,7 +1,7 @@
 ---
 name: vercel
 description: Access and test Vercel deployments with agent-browser, behind Deployment Protection or at a different feature flag variant. Use when a preview or production URL redirects to a Vercel login page, returns a protection 401 or 403, needs short-lived Trusted Sources OIDC authentication instead of a static bypass secret or public exception, or must be viewed with a Vercel feature flag set to another variant.
-allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(vc:*), Bash(vercel:*), Bash(bun:*)
+allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(vc:*), Bash(vercel:*), Bash(node:*), Bash(npm:*)
 ---
 
 # Vercel deployments
@@ -110,13 +110,20 @@ The cookie directive creates a reusable `_vercel_jwt` cookie. Treat saved browse
 
 To view a variant other than the one an environment serves, set an override cookie in this browser. Do not use `vc flags set`, `enable`, `disable`, `split`, or `rollout` to view a variant, because they change it for everyone using the environment.
 
-Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api-reference/frameworks/next) apply overrides from the `vercel-flag-overrides` cookie. The cookie value is encrypted with the `FLAGS_SECRET` of the environment under test. Find the flag key and its variants in the source or with `vc flags inspect <flag>`, then mint the cookie without printing the secret. Pulling the secret with `--project` requires Vercel CLI `56.3.0` or newer; if the installed version is older, ask the user to upgrade it. Each environment has its own `FLAGS_SECRET`, so set `VERCEL_ENVIRONMENT` to the environment that serves the URL under test, such as `preview` or `production`.
+Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api-reference/frameworks/next) apply overrides from the `vercel-flag-overrides` cookie. The cookie value is encrypted with the `FLAGS_SECRET` of the environment under test. Find the flag key and its variants in the source or with `vc flags inspect <flag>`, then mint the cookie without printing the secret. Pulling the secret with `--project` requires Vercel CLI `56.3.0` or newer; if the installed version is older, ask the user to upgrade it. Each environment has its own `FLAGS_SECRET`, so set `VERCEL_ENVIRONMENT` to the environment that serves the URL under test, such as `preview` or `production`. Set `VERCEL_PREVIEW_URL`, `VERCEL_PROJECT`, and `VERCEL_SCOPE` as in [Same-project preview](#same-project-preview), including for a deployment without protection; the block stops when any of them is missing.
+
+The mint needs Node.js, npm, and network access to the npm registry, because it installs the `flags` package into a temporary directory on each run. If Node.js is not installed, ask the user to install it.
 
 ```bash
 (
   set -e
   : "${AGENT_BROWSER_SESSION:?set it to the session of the protected open}"
   : "${VERCEL_ENVIRONMENT:?set it to the environment that serves the URL}"
+  : "${VERCEL_PREVIEW_URL:?set it to the deployment URL}"
+  : "${VERCEL_PROJECT:?set it to the target project}"
+  : "${VERCEL_SCOPE:?set it to the target team scope}"
+  command -v node >/dev/null && command -v npm >/dev/null ||
+    { echo "Node.js and npm are required to mint the override" >&2; exit 1; }
   ENV_FILE="$(mktemp)"
   vc env pull "$ENV_FILE" --environment "$VERCEL_ENVIRONMENT" \
     --project "$VERCEL_PROJECT" --scope "$VERCEL_SCOPE" --yes >/dev/null
@@ -130,8 +137,8 @@ Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api
     "" | "[SENSITIVE]") echo "FLAGS_SECRET is not readable; ask the user for it" >&2; exit 1 ;;
   esac
   MINT_DIR="$(mktemp -d)"
-  (cd "$MINT_DIR" && bun add flags >/dev/null)
-  OVERRIDE="$(cd "$MINT_DIR" && FLAGS_SECRET="$FLAGS_SECRET" bun -e \
+  npm install --prefix "$MINT_DIR" --no-save --silent flags
+  OVERRIDE="$(cd "$MINT_DIR" && FLAGS_SECRET="$FLAGS_SECRET" node --input-type=module -e \
     'import { encryptOverrides } from "flags"; console.log(await encryptOverrides({ "my-flag": "variant-b" }))')"
   rm -rf "$MINT_DIR"
   test -n "$OVERRIDE"
