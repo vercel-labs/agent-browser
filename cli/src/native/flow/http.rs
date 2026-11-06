@@ -157,7 +157,7 @@ pub async fn http_client(
                 None => Err(format!("could not resolve proxy {host}")),
             },
         )?;
-    let mut resolver = ReachResolver::system(Reach::of_start(&flow.start_url));
+    let mut resolver = ReachResolver::system(Reach::of_flow(flow));
     resolver.trusted = names.trusted;
     resolver.unreachable = names.unreachable;
     http_client_with(filter, flow, Arc::new(resolver), proxies)

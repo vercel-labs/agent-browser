@@ -9,7 +9,8 @@ use std::sync::Arc;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// Which addresses a flow may send to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Reach {
     /// Public addresses only.
     Public,
@@ -39,6 +40,13 @@ impl Reach {
         } else {
             Reach::Public
         }
+    }
+
+    /// The reach of a saved flow: the one its recording found, else the
+    /// one its start URL names.
+    pub fn of_flow(flow: &super::Flow) -> Reach {
+        flow.reach
+            .unwrap_or_else(|| Reach::of_start(&flow.start_url))
     }
 
     fn admits(self, ip: IpAddr, non_public: fn(IpAddr) -> bool) -> bool {
@@ -131,6 +139,36 @@ pub fn pick_address(addrs: Vec<IpAddr>) -> Option<IpAddr> {
         .find(|a| a.is_ipv4())
         .or(addrs.first())
         .copied()
+}
+
+/// `host` when the browser reached it only at non-public addresses that the
+/// name still resolves to now, on the URL's own port, and the name resolves
+/// to nothing else. Through any proxy (launch flag, system setting, an
+/// external Chrome) the browser records the proxy's address and port, so a
+/// host reached through one is never local.
+pub async fn recorded_local_host(host: &str, port: u16, recorded: &[SocketAddr]) -> Option<String> {
+    let looked = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::net::lookup_host((host, 0)),
+    )
+    .await;
+    let resolved: Vec<IpAddr> = match looked {
+        Ok(Ok(addrs)) => addrs.map(|a| a.ip()).collect(),
+        _ => return None,
+    };
+    local_recording(recorded, port, &resolved).then(|| host.to_string())
+}
+
+/// Every recorded address is non-public, among `resolved` and on `port`, and
+/// every resolved address is non-public.
+pub fn local_recording(recorded: &[SocketAddr], port: u16, resolved: &[IpAddr]) -> bool {
+    !recorded.is_empty()
+        && !resolved.is_empty()
+        && resolved.iter().all(|ip| is_non_public(*ip))
+        && recorded.iter().all(|a| {
+            let ip = a.ip().to_canonical();
+            a.port() == port && is_non_public(ip) && resolved.contains(&ip)
+        })
 }
 
 /// Resolve the hostnames of the `http://` proxies, with `limit` as the time
@@ -1099,5 +1137,103 @@ mod tests {
             "{reason}"
         );
         assert!(!res.drift);
+    }
+    #[test]
+    fn a_recording_is_local_only_at_addresses_the_name_resolves_to() {
+        let r = |a: &[&str]| {
+            a.iter()
+                .map(|s| s.parse().unwrap())
+                .collect::<Vec<SocketAddr>>()
+        };
+        let lo = [ip("127.0.0.1"), ip("::1")];
+        assert!(local_recording(
+            &r(&["127.0.0.1:3000", "[::1]:3000"]),
+            3000,
+            &lo
+        ));
+        assert!(local_recording(
+            &r(&["10.0.0.4:443"]),
+            443,
+            &[ip("10.0.0.4")]
+        ));
+        // A proxy on loopback: the site's DNS answers 127.0.0.1, but the
+        // browser recorded the proxy's port, not the URL's.
+        assert!(!local_recording(&r(&["127.0.0.1:8080"]), 3000, &lo));
+        // A proxy elsewhere records an address the name does not resolve to.
+        assert!(!local_recording(
+            &r(&["127.0.0.1:3000"]),
+            3000,
+            &[ip("10.0.0.4")]
+        ));
+        assert!(!local_recording(&r(&["10.9.9.9:3000"]), 3000, &lo));
+        // A public address on either side, or nothing recorded, is not local.
+        assert!(!local_recording(
+            &r(&["93.184.216.34:443"]),
+            443,
+            &[ip("93.184.216.34")]
+        ));
+        assert!(!local_recording(
+            &r(&["127.0.0.1:80"]),
+            80,
+            &[ip("127.0.0.1"), ip("93.184.216.34")]
+        ));
+        assert!(!local_recording(&[], 80, &lo));
+        assert!(!local_recording(&r(&["127.0.0.1:80"]), 80, &[]));
+    }
+
+    #[tokio::test]
+    async fn a_name_counts_as_local_only_if_it_still_resolves_locally() {
+        let lo = vec!["127.0.0.1:3000".parse().unwrap()];
+        assert_eq!(
+            recorded_local_host("localhost", 3000, &lo).await.as_deref(),
+            Some("localhost")
+        );
+        // A public name reached through a local proxy records the proxy's
+        // address but does not resolve to it.
+        assert!(recorded_local_host("example.com", 3000, &lo)
+            .await
+            .is_none());
+    }
+
+    #[test]
+    fn the_recorded_reach_overrides_the_start_url() {
+        let local = flow_of(json!({ "startUrl": "http://lvh.me:3000/", "reach": "local" }));
+        assert_eq!(Reach::of_flow(&local), Reach::Local);
+        let old = flow_of(json!({ "startUrl": "http://lvh.me:3000/" }));
+        assert_eq!(Reach::of_flow(&old), Reach::Public);
+        assert_eq!(
+            serde_json::to_value(&local).unwrap()["reach"],
+            json!("local")
+        );
+        assert!(serde_json::to_value(&old).unwrap().get("reach").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_flow_recorded_against_a_name_resolving_to_loopback_runs() {
+        let (port, hits) = serve(OK.to_string()).await;
+        let url = format!("http://lvh.me:{port}/");
+        let client_for = |flow: &crate::native::flow::Flow| {
+            let resolver = ReachResolver {
+                inner: Arc::new(Fixed(vec![SocketAddr::new(ip("127.0.0.1"), port)])),
+                reach: Reach::of_flow(flow),
+                non_public: is_non_public,
+                trusted: vec![],
+                unreachable: vec![],
+            };
+            http_client_with(None, flow, Arc::new(resolver), vec![]).unwrap()
+        };
+        let recorded_local = flow_of(json!({ "startUrl": url, "reach": "local" }));
+        let res = run_http(&client_for(&recorded_local), &request(&url), None, None).await;
+        assert!(!res.reason.unwrap_or_default().contains("resolved to"));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A flow recorded against a public address is still refused when
+        // the name later resolves to loopback.
+        let recorded_public = flow_of(json!({ "startUrl": url }));
+        let res = run_http(&client_for(&recorded_public), &request(&url), None, None).await;
+        assert!(res
+            .reason
+            .unwrap_or_default()
+            .contains("resolved to a non-public address"));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

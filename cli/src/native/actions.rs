@@ -122,6 +122,9 @@ pub struct HarEntry {
     pub response_body: Option<String>,
     /// Whether `response_body` is base64-encoded (binary content).
     pub response_body_base64: bool,
+    /// The address and port the browser connected to (CDP
+    /// `remoteIPAddress` and `remotePort`).
+    pub remote_addr: Option<std::net::SocketAddr>,
 }
 
 /// Which response bodies to embed in HAR output as `content.text`.
@@ -2062,6 +2065,7 @@ impl DaemonState {
                                         loading_finished_timestamp: None,
                                         response_body: None,
                                         response_body_base64: false,
+                                        remote_addr: None,
                                     });
                                     self.flow.tag(&request_id, wall_time);
                                 }
@@ -2132,6 +2136,22 @@ impl DaemonState {
                                     .and_then(|v| v.as_i64())
                                     .unwrap_or(-1);
                                 let cdp_timing = response.get("timing").cloned();
+                                let remote_addr = response
+                                    .get("remoteIPAddress")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|ip| {
+                                        ip.trim_start_matches('[')
+                                            .trim_end_matches(']')
+                                            .parse::<std::net::IpAddr>()
+                                            .ok()
+                                    })
+                                    .zip(
+                                        response
+                                            .get("remotePort")
+                                            .and_then(|v| v.as_u64())
+                                            .and_then(|p| u16::try_from(p).ok()),
+                                    )
+                                    .map(|(ip, port)| std::net::SocketAddr::new(ip, port));
                                 if self.har_recording {
                                     if let Some(entry) = self
                                         .har_entries
@@ -2147,6 +2167,7 @@ impl DaemonState {
                                         entry.redirect_url = redirect_url;
                                         entry.response_body_size = encoded_data_length;
                                         entry.cdp_timing = cdp_timing;
+                                        entry.remote_addr = remote_addr;
                                     }
                                 }
                                 if self.request_tracking {
@@ -12313,6 +12334,12 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None => false,
     };
     let entries = state.har_entries.clone();
+    let from = cmd.get("from").and_then(|v| v.as_u64());
+    let to = cmd.get("to").and_then(|v| v.as_u64());
+    let mut local_names = Vec::new();
+    if let Some((host, port, addrs)) = state.flow.start_host_addresses(from, to, &entries) {
+        local_names.extend(super::flow::recorded_local_host(&host, port, &addrs).await);
+    }
     state.flow.save(super::flow::SaveArgs {
         name: &name,
         from: cmd.get("from").and_then(|v| v.as_u64()),
@@ -12322,6 +12349,7 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         output: cmd.get("output").and_then(|v| v.as_str()),
         entries: &entries,
         login_wall,
+        local_names: &local_names,
     })
 }
 
@@ -19507,6 +19535,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: None,
             response_body_base64: false,
+            remote_addr: None,
         };
 
         let har = har_entry_to_json(&entry);
@@ -19557,6 +19586,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: Some(r#"{"items":[1]}"#.to_string()),
             response_body_base64: false,
+            remote_addr: None,
         };
 
         let har = har_entry_to_json(&entry);
@@ -19653,6 +19683,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: None,
             response_body_base64: false,
+            remote_addr: None,
         };
         let har = har_entry_to_json(&entry);
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
@@ -19710,6 +19741,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: None,
             response_body_base64: false,
+            remote_addr: None,
         });
 
         let result = handle_har_stop(&json!({ "action": "har_stop" }), &mut state)
@@ -20450,6 +20482,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: Some(response_body.to_string()),
             response_body_base64: false,
+            remote_addr: None,
         });
 
         let error = handle_har_stop(
@@ -20521,6 +20554,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: None,
             response_body_base64: false,
+            remote_addr: None,
         });
 
         let result = execute_command(
