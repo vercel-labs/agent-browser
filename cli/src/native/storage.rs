@@ -23,12 +23,12 @@ pub async fn storage_get(
         let js = format!(
             r#"(() => {{
                 const s = {};
-                const data = {{}};
+                const entries = [];
                 for (let i = 0; i < s.length; i++) {{
                     const key = s.key(i);
-                    data[key] = s.getItem(key);
+                    entries.push([key, s.getItem(key)]);
                 }}
-                return data;
+                return Object.fromEntries(entries);
             }})()"#,
             st
         );
