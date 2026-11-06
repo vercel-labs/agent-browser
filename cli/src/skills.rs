@@ -127,17 +127,6 @@ fn parse_frontmatter(content: &str) -> Option<(String, String, bool)> {
 }
 
 /// Discover all skills across the given directories.
-/// Former skill names that still load their replacement.
-const RENAMED_SKILLS: &[(&str, &str)] = &[("protected-vercel-deployments", "vercel")];
-
-fn find_skill<'a>(skills: &'a [SkillInfo], name: &str) -> Option<&'a SkillInfo> {
-    let name = RENAMED_SKILLS
-        .iter()
-        .find(|(old, _)| *old == name)
-        .map_or(name, |(_, new)| new);
-    skills.iter().find(|s| s.name == name)
-}
-
 fn discover_skills(dirs: &[PathBuf]) -> Vec<SkillInfo> {
     let mut skills = Vec::new();
 
@@ -392,7 +381,7 @@ fn run_get(
                 );
                 continue;
             }
-            match find_skill(&all_skills, name) {
+            match all_skills.iter().find(|s| s.name == *name) {
                 Some(s) => targets.push(s),
                 None => {
                     if json_mode {
@@ -502,7 +491,7 @@ fn run_path(skills_dirs: &[PathBuf], name: Option<&str>, json_mode: bool) {
     match name {
         Some(name) => {
             let all_skills = discover_skills(skills_dirs);
-            match find_skill(&all_skills, name) {
+            match all_skills.iter().find(|s| s.name == name) {
                 Some(s) => {
                     let path = s.dir.to_string_lossy().to_string();
                     if json_mode {

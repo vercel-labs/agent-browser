@@ -116,7 +116,8 @@ Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api
 (
   if [ -z "$FLAGS_SECRET" ]; then
     ENV_FILE="$(mktemp)"
-    vc env pull "$ENV_FILE" --environment preview --yes >/dev/null
+    vc env pull "$ENV_FILE" --environment preview \
+      --project "$VERCEL_PROJECT" --scope "$VERCEL_SCOPE" --yes >/dev/null
     FLAGS_SECRET="$(grep '^FLAGS_SECRET=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')"
     rm "$ENV_FILE"
   fi
@@ -127,10 +128,9 @@ Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api
     'import { encryptOverrides } from "flags"; console.log(await encryptOverrides({ "my-flag": "variant-b" }))')"
   test -n "$OVERRIDE"
   agent-browser cookies set vercel-flag-overrides "$OVERRIDE" --url "$VERCEL_PREVIEW_URL"
+  agent-browser reload
+  agent-browser screenshot
 )
-
-agent-browser reload
-agent-browser screenshot
 ```
 
 Run this in the same session as the protected `open`, and confirm in the screenshot that the requested variant rendered before reporting. `agent-browser cookies clear` removes the override along with every other cookie, so repeat the protected `open` after clearing.

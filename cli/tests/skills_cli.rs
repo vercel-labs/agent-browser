@@ -122,28 +122,3 @@ fn skills_get_ref_loads_one_reference_through_cli_and_mcp() {
     let with_full = run(&["skills", "get", "core", "--full", "--ref", "commands"]);
     assert!(!with_full.status.success());
 }
-
-#[test]
-fn skills_get_loads_a_renamed_skill_by_its_former_name() {
-    let temp = tempfile::tempdir().unwrap();
-    let skill = temp.path().join("vercel/SKILL.md");
-    let marker = "renamed-skill-marker-2026";
-    fs::create_dir_all(skill.parent().unwrap()).unwrap();
-    fs::write(
-        &skill,
-        format!("---\nname: vercel\ndescription: test skill\n---\n{marker}\n"),
-    )
-    .unwrap();
-
-    let cli = Command::new(env!("CARGO_BIN_EXE_agent-browser"))
-        .args(["skills", "get", "protected-vercel-deployments"])
-        .env("AGENT_BROWSER_SKILLS_DIR", temp.path())
-        .output()
-        .unwrap();
-    assert!(
-        cli.status.success(),
-        "{}",
-        String::from_utf8_lossy(&cli.stderr)
-    );
-    assert!(String::from_utf8_lossy(&cli.stdout).contains(marker));
-}
