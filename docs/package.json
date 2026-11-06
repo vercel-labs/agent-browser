@@ -7,7 +7,7 @@
     "dev": "portless agent-browser next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
+    "lint": "oxlint",
     "postinstall": "fumadocs-mdx",
     "prebuild": "fumadocs-mdx",
     "type-check": "fumadocs-mdx && tsc --noEmit",
@@ -44,15 +44,16 @@
     "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {
+    "@babel/parser": "7.29.2",
     "@tailwindcss/postcss": "^4",
     "@types/mdx": "^2.0.13",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.4",
+    "esbuild": "0.27.7",
+    "oxlint": "^1.91.0",
     "tailwindcss": "^4",
     "tailwindcss-animate": "^1.0.7",
-    "typescript": "^5"
+    "typescript": "^7.0.2"
   }
 }
