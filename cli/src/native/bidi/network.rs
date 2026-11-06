@@ -1779,10 +1779,7 @@ mod tests {
         .await
         .expect("dispatcher should record both overlapping downloads");
         assert_eq!(claimed[0].suggested_filename.as_deref(), Some("first.txt"));
-        assert_eq!(
-            claimed[1].suggested_filename.as_deref(),
-            Some("second.txt")
-        );
+        assert_eq!(claimed[1].suggested_filename.as_deref(), Some("second.txt"));
     }
 
     #[tokio::test]
