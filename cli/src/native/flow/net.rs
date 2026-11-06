@@ -168,18 +168,37 @@ pub async fn resolve_proxy_hosts(
     found
 }
 
+/// Proxy hostnames the resolver treats apart from targets.
+#[derive(Debug, Default)]
+pub struct ProxyNames {
+    /// Proxies from the user's configuration: trusted, never filtered.
+    pub trusted: Vec<String>,
+    /// `http://` proxies whose name did not resolve, with the reason: a
+    /// request through one fails with it, and one `NO_PROXY` excludes runs.
+    pub unreachable: Vec<(String, String)>,
+}
+
 /// The reqwest proxies for the environment, honoring `NO_PROXY` for which
-/// targets use them, and the proxy hostnames the resolver must trust.
+/// targets use them, and the proxy hostnames the resolver handles apart.
 pub fn client_proxies(
     env: impl Fn(&str) -> Option<String>,
     no_proxy: Option<reqwest::NoProxy>,
     lookup: impl Fn(&str, u16) -> Result<IpAddr, String>,
-) -> Result<(Vec<reqwest::Proxy>, Vec<String>), String> {
+) -> Result<(Vec<reqwest::Proxy>, ProxyNames), String> {
     let mut proxies = Vec::new();
-    let mut trusted = Vec::new();
+    let mut names = ProxyNames::default();
     for p in env_proxies(env)? {
-        let (url, name) = pin_proxy(p.url, &lookup)?;
-        trusted.extend(name);
+        let (url, name) = match pin_proxy(p.url.clone(), &lookup) {
+            Ok(pinned) => pinned,
+            Err(reason) => {
+                let host = p.url.host_str().unwrap_or("");
+                names
+                    .unreachable
+                    .push((host.trim_end_matches('.').to_ascii_lowercase(), reason));
+                (p.url, None)
+            }
+        };
+        names.trusted.extend(name);
         let proxy = if p.for_https {
             reqwest::Proxy::https(url.as_str())
         } else {
@@ -188,7 +207,7 @@ pub fn client_proxies(
         .map_err(|e| format!("invalid proxy {}: {}", url, e))?;
         proxies.push(proxy.no_proxy(no_proxy.clone()));
     }
-    Ok((proxies, trusted))
+    Ok((proxies, names))
 }
 
 /// A destination the resolver refused.
@@ -245,6 +264,8 @@ pub struct ReachResolver {
     pub non_public: fn(IpAddr) -> bool,
     /// Proxy hosts from the user's configuration: trusted, never filtered.
     pub trusted: Vec<String>,
+    /// Proxy hosts that did not resolve, refused with the reason.
+    pub unreachable: Vec<(String, String)>,
 }
 
 impl ReachResolver {
@@ -254,6 +275,7 @@ impl ReachResolver {
             reach,
             non_public: is_non_public,
             trusted: Vec::new(),
+            unreachable: Vec::new(),
         }
     }
 }
@@ -326,6 +348,14 @@ impl Resolve for ReachResolver {
             .trusted
             .iter()
             .any(|t| t.eq_ignore_ascii_case(host.trim_end_matches('.')));
+        if let Some((_, reason)) = self
+            .unreachable
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(host.trim_end_matches('.')))
+        {
+            let refused = Refused(reason.clone());
+            return Box::pin(async move { Err(Box::new(refused) as Box<dyn Error + Send + Sync>) });
+        }
         let inner = self.inner.resolve(name);
         Box::pin(async move {
             let addrs: Vec<SocketAddr> = inner.await?.collect();
@@ -519,6 +549,7 @@ mod tests {
             reach: Reach::Public,
             non_public: is_non_public,
             trusted: vec![],
+            unreachable: vec![],
         };
         let err = match rebound.resolve(name()).await {
             Ok(_) => panic!("loopback must be refused"),
@@ -530,6 +561,7 @@ mod tests {
             reach: Reach::Public,
             non_public: is_non_public,
             trusted: vec![],
+            unreachable: vec![],
         };
         assert_eq!(ok.resolve(name()).await.unwrap().count(), 1);
     }
@@ -588,6 +620,7 @@ mod tests {
             reach: Reach::of_start(start),
             non_public,
             trusted: vec![],
+            unreachable: vec![],
         };
         http_client_with(None, &flow, Arc::new(resolver), vec![]).unwrap()
     }
@@ -688,6 +721,7 @@ mod tests {
             reach: Reach::Public,
             non_public: loopback_is_public,
             trusted: vec![],
+            unreachable: vec![],
         };
         let client = http_client_with(None, &flow, Arc::new(resolver), vec![]).unwrap();
         let res = run_http(
@@ -819,13 +853,17 @@ mod tests {
             err.starts_with("could not resolve proxy nope.corp"),
             "{err}"
         );
-        let err = client_proxies(
+        let (_, names) = client_proxies(
             env_of(&[("HTTP_PROXY", "http://nope.corp:80")]),
             None,
             |h, _| Err(format!("could not resolve proxy {h}: no such host")),
         )
-        .unwrap_err();
-        assert!(err.contains("could not resolve proxy nope.corp"), "{err}");
+        .unwrap();
+        assert_eq!(names.unreachable.len(), 1);
+        assert_eq!(names.unreachable[0].0, "nope.corp");
+        assert!(names.unreachable[0]
+            .1
+            .starts_with("could not resolve proxy nope.corp"));
     }
 
     #[test]
@@ -913,7 +951,7 @@ mod tests {
     ) -> crate::native::flow::HttpClients {
         let flow =
             flow_of(json!({ "startUrl": "https://app.example.com/", "origin": "example.com" }));
-        let (proxies, trusted) = client_proxies(
+        let (proxies, names) = client_proxies(
             env_of(proxy_env),
             reqwest::NoProxy::from_string(no_proxy),
             move |_, _| Ok(ip(proxy_ip)),
@@ -924,7 +962,8 @@ mod tests {
             inner: Arc::new(Fixed(vec![SocketAddr::new(ip("127.0.0.1"), port)])),
             reach: Reach::Public,
             non_public: is_non_public,
-            trusted,
+            trusted: names.trusted,
+            unreachable: names.unreachable,
         };
         http_client_with(None, &flow, Arc::new(resolver), proxies).unwrap()
     }
@@ -997,7 +1036,7 @@ mod tests {
     async fn a_local_flow_with_a_local_proxy_and_no_proxy_still_runs() {
         let (port, hits) = serve(OK.to_string()).await;
         let flow = flow_of(json!({ "startUrl": "http://127.0.0.1:3000/", "origin": "127.0.0.1" }));
-        let (proxies, trusted) = client_proxies(
+        let (proxies, names) = client_proxies(
             env_of(&[
                 ("HTTPS_PROXY", "http://127.0.0.1:7890"),
                 ("http_proxy", "http://127.0.0.1:7890"),
@@ -1010,7 +1049,8 @@ mod tests {
             inner: Arc::new(SystemResolver),
             reach: Reach::Local,
             non_public: is_non_public,
-            trusted,
+            trusted: names.trusted,
+            unreachable: names.unreachable,
         };
         let client = http_client_with(None, &flow, Arc::new(resolver), proxies).unwrap();
         let res = run_http(
@@ -1022,5 +1062,42 @@ mod tests {
         .await;
         assert!(!res.reason.unwrap_or_default().contains("proxy"));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn an_unreachable_proxy_fails_only_the_requests_that_use_it() {
+        let (port, hits) = serve(OK.to_string()).await;
+        let flow = flow_of(json!({ "startUrl": "http://127.0.0.1:3000/", "origin": "127.0.0.1" }));
+        let (proxies, names) = client_proxies(
+            env_of(&[("HTTP_PROXY", "http://proxy.offvpn.invalid:3128")]),
+            reqwest::NoProxy::from_string("127.0.0.1"),
+            |h, _| Err(format!("could not resolve proxy {h}: no such host")),
+        )
+        .unwrap();
+        let resolver = ReachResolver {
+            inner: Arc::new(SystemResolver),
+            reach: Reach::Local,
+            non_public: is_non_public,
+            trusted: names.trusted,
+            unreachable: names.unreachable,
+        };
+        let client = http_client_with(None, &flow, Arc::new(resolver), proxies).unwrap();
+        // NO_PROXY sends this one direct, so the dead proxy does not matter.
+        let res = run_http(
+            &client,
+            &request(&format!("http://127.0.0.1:{port}/")),
+            None,
+            None,
+        )
+        .await;
+        assert!(!res.reason.unwrap_or_default().contains("proxy"));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A target that would use the proxy fails with its reason.
+        let res = run_http(&client, &request("http://localhost:9/"), None, None).await;
+        let reason = res.reason.unwrap_or_default();
+        assert!(
+            reason.contains("could not resolve proxy proxy.offvpn.invalid"),
+            "{reason}"
+        );
+        assert!(!res.drift);
     }
 }

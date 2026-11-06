@@ -148,7 +148,7 @@ pub async fn http_client(
     let env = |k: &str| std::env::var(k).ok();
     let env_proxies = env_proxies(env)?;
     let addresses = resolve_proxy_hosts(&env_proxies, REQUEST_TIMEOUT).await;
-    let (proxies, trusted) =
+    let (proxies, names) =
         client_proxies(
             env,
             reqwest::NoProxy::from_env(),
@@ -158,7 +158,8 @@ pub async fn http_client(
             },
         )?;
     let mut resolver = ReachResolver::system(Reach::of_start(&flow.start_url));
-    resolver.trusted = trusted;
+    resolver.trusted = names.trusted;
+    resolver.unreachable = names.unreachable;
     http_client_with(filter, flow, Arc::new(resolver), proxies)
 }
 
