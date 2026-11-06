@@ -5668,6 +5668,9 @@ async fn launch_firefox(
     allowed_domains: Vec<String>,
     strict_state: bool,
 ) -> Result<Value, String> {
+    if state.settings.captures_flow() {
+        return Err("--capture flow is not supported with --engine firefox".to_string());
+    }
     firefox::process::validate_firefox_options(
         &options,
         cdp.as_deref(),
@@ -20742,6 +20745,29 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         // Later commands that repeat it or omit it leave the browser alone.
         assert!(plan.next.plan(&flow).is_empty());
         assert!(plan.next.plan(&Patch::default()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn firefox_rejects_flow_capture_before_launch() {
+        let mut state = DaemonState::new();
+        let capture = Patch::from_entries([(Key::Capture, Requested::Set(json!(["flow"])))]);
+        state.settings = state.settings.plan(&capture).next;
+        let error = launch_firefox(
+            &mut state,
+            LaunchOptions::default(),
+            None,
+            false,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "--capture flow is not supported with --engine firefox"
+        );
+        assert!(state.firefox.is_none());
     }
 
     #[tokio::test]
