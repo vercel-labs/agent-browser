@@ -101,7 +101,8 @@ for (const page of pages) {
   });
 
   test(`${page.path}: original prose, every table cell, code example and link are server rendered`, async () => {
-    const html = await htmlFor(page);
+    // The original introduction remains available at /docs.
+    const html = page.path === "/" ? await (await get("/docs")).text() : await htmlFor(page);
     assert.equal(tags(html, "main").length, 1);
     const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
     assert.ok(
@@ -402,7 +403,6 @@ test("trailing slashes keep permanent public paths and query strings", async () 
 
 for (const path of [
   "/missing-page",
-  "/docs",
   "/docs/commands",
   "/fr/commands",
   "/providers/missing",
@@ -794,4 +794,67 @@ test("Next static CSS, JavaScript and fonts remain binary/static resources for a
     assert.ok((await resource.arrayBuffer()).byteLength > 0);
     assert.equal(resource.headers.get("set-cookie"), null);
   }
+});
+
+test('homepage introduces both tools while keeping the original introduction reachable', async () => {
+  const html = await htmlFor(pageAt('/'));
+  const headings = [...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map((match) =>
+    text(match[1])
+  );
+  assert.equal(headings.length, 1);
+  assert.equal(headings[0], 'Browser automation built for agents');
+  for (const section of ['AgentUseCases', 'AgentTweetWall', 'AgentClosing'])
+    assert.ok(html.includes(`data-element="${section}"`), section);
+  assert.ok(!html.includes('data-element="GridSection"'));
+  assert.ok(!html.includes('data-element="FeatureSection"'));
+  assert.ok(!text(html).includes('The next step is in another app'));
+  assert.ok(!text(html).includes('From a code change to a checked result'));
+  // Real tweet bodies and attribution must be in the HTML without client fetching.
+  assert.equal([...html.matchAll(/<article\b[^>]*data-tweet-id=/g)].length, 8);
+  assert.ok(
+    text(html).includes('If you are not using agent-browser to close the loop on frontend')
+  );
+  assert.ok(
+    tags(html, 'a').some((a) => a.href === 'https://x.com/onusoz/status/2032700396955697218')
+  );
+  assert.ok(!html.includes('platform.twitter.com/widgets.js'));
+  assert.ok(text(html).includes('Teach your agent'));
+  assert.ok(tags(html, 'a').some((a) => a.href === '/docs'));
+  assert.ok(
+    text(html).includes('Desktop')
+  );
+  const docs = await get('/docs');
+  responseType(docs, 'text/html');
+  const intro = await docs.text();
+  assert.ok(
+    tags(intro, 'link').some((link) => link.rel === 'canonical' && link.href === `${origin}/docs`)
+  );
+  assert.ok(text(intro).includes('Browser automation CLI designed for AI agents'));
+  const search = await get('/api/search?query=agent-browser&locale=en');
+  assert.ok(
+    (await search.json()).some((result) => result.type === 'page' && result.url === '/docs')
+  );
+});
+
+for (const path of ['/components', '/components/hero', '/components/hero/browser', '/components/hero/desktop']) {
+  test(`${path}: removed design playground is not a public route`, async () => {
+    const response = await get(path);
+    assert.equal(response.status, 404);
+  });
+}
+
+test('marketing layout stays independent of a persisted docs chat session', async () => {
+  const response = await get('/', {
+    headers: { Cookie: 'docs-chat-open=true; docs-chat-width=600' },
+  });
+  responseType(response, 'text/html');
+  const html = await response.text();
+  assert.ok(!html.includes('body{padding-right:600px}'));
+  assert.ok(!html.includes('aria-label="Ask AI"'));
+  assert.ok(html.includes('data-geist-button'));
+  const docs = await get('/docs', {
+    headers: { Cookie: 'docs-chat-open=true; docs-chat-width=600' },
+  });
+  responseType(docs, 'text/html');
+  assert.ok((await docs.text()).includes('body{padding-right:600px}'));
 });

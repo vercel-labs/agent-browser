@@ -1,0 +1,76 @@
+/* The request right-aligned, the terminal left-aligned and off the foot.
+   Kept outside the upstream kit. */
+.ab-feature-scene .ab-performance {
+  /* The terminal runs off the foot; the stage owns that crop. */
+  & .ss-stage { --ss-control: 44px; overflow: hidden; }
+
+  /* Whole, a gutter from the right edge, as wide as the request needs */
+  & .ab-perf-input {
+    position: absolute;
+    top: 24px;
+    right: 24px;
+    /* The request (190px measured) plus the field's 11px sides: no slack */
+    width: 214px;
+  }
+  & .ab-perf-input .ss-field__box {
+    border-radius: 12px;
+    font-size: 14px;
+    box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ss-line), var(--ss-shadow-card);
+  }
+
+  /* A plain dark panel, the input's shape: a gutter from the left edge, its
+     longest line (264px measured) plus 28px sides, a gutter below the input,
+     off the foot. */
+  & .ab-perf-term {
+    position: absolute;
+    top: 92px;
+    left: 24px;
+    width: 320px;
+    height: 240px;
+    padding: 20px 28px;
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--ss-term-bg, #0a0a0a);
+    box-shadow: var(--ss-shadow-card);
+    font: 11px/20px var(--ss-mono);
+    font-variant-ligatures: none;
+  }
+
+  /* The text area (VIEW in the scene: 164px of room for the newest line,
+     ending a gutter above the stage's foot). Earlier lines stay on screen and
+     scroll up through the panel's top padding and out of its top edge, which
+     clips them, as a terminal scrolls. */
+  & .ab-perf-view {
+    position: relative;
+    height: 164px;
+  }
+  /* On its own layer for good, so its text never hops as a scroll settles.
+     It waits for leaving lines to fade before it moves, so no visible line is
+     cut by the panel's edge (the loop reset included). */
+  & .ab-perf-lines {
+    position: relative;
+    will-change: transform;
+    transition: transform .4s cubic-bezier(.45, 0, .1, 1) .16s;
+  }
+
+  /* Two styles on one left edge: commands bright, everything else gray. Blue
+     marks only the finding and the result. Lines just fade in. */
+  & .ab-perf-line {
+    position: absolute;
+    left: 0;
+    height: 20px;
+    white-space: pre;
+    color: var(--ss-term-dim, #8f8f8f);
+    opacity: 0;
+    transition: opacity .14s ease-out;
+  }
+  & .ab-perf-line[data-kind='cmd'] { color: var(--ss-term-text, #ededed); }
+  & .ab-perf-line[data-kind='key'] { color: var(--ss-term-agent, #47a8ff); }
+  & .ab-perf-line[data-on] { opacity: 1; transition-duration: .22s; }
+
+  & .ss-stage[data-layout='compact'] .ab-perf-term { width: 312px; padding-inline: 24px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ab-feature-scene .ab-performance :is(.ab-perf-line, .ab-perf-lines) { transition: none; }
+}

@@ -1,0 +1,58 @@
+/* The camera's zoom as an animatable number: it eases with the kit camera (same
+   curve, same 1100ms), so cursors and the browser's hairline divide by it and
+   keep one on-screen size through the zoom between scopes. */
+@property --ab-zoom { syntax: '<number>'; inherits: true; initial-value: 1; }
+
+/* Local composition. The upstream Stageshow kit stays unchanged. */
+.ab-hero-demo {
+  /* No layout shift on load: the Stage sizes its box in a layout effect (and
+     starts at its full design size), so reserve the final shape in CSS. The
+     container query is the Stage's own rule (compact below 560px of width). */
+  & > div[aria-hidden] { container-type: inline-size; }
+  & .ss-fit { height: auto !important; max-width: none !important; aspect-ratio: 1080 / 750; }
+  @container (max-width: 559.98px) { & .ss-fit { aspect-ratio: 960 / 1050; } }
+  /* Shown once measured (data-ready), so the first visible frame is final */
+  &[data-hero-scene] .ss-stage { opacity: 0; transition: opacity .15s ease-out; }
+  &[data-hero-scene][data-ready] .ss-stage { opacity: 1; }
+
+  margin: 0; width: 100%; color: var(--ds-gray-1000, #171717); font-family: var(--font-geist-sans), system-ui, sans-serif;
+  & .ab-scene .ss-stage { overflow: hidden; background: transparent; }
+  & .ab-world, & .ab-wallpaper { position: absolute; inset: 0; }
+  & .ab-wallpaper { background: var(--ds-background-200); }
+  /* The menu bar as skeletons: a mark, the menus, two status glyphs; sized for
+     the 1080-wide canvas (shown at about 0.6x) */
+  & .ab-menu { position: absolute; inset: 0 0 auto; height: 36px; display: flex; align-items: center; gap: 22px; padding: 0 24px; border-bottom: var(--ss-hairline, 1px) solid var(--ss-line); }
+  & .ab-menu-mark { width: 16px; height: 16px; border-radius: 50%; background: var(--ds-gray-500, #c9c9c9); }
+  & .ab-menu-right { margin-left: auto; display: flex; align-items: center; }
+  /* Other apps sit outside the browser and its initial camera crop.
+     Desktop reveals the retained world, without opacity transitions. */
+  /* A landscape browser that leads the desktop (560 × 360 of 720 × 500).
+     --ab-visible: how much of its width browser scope's crop shows, less a
+     gutter; pages keep everything that matters inside it, filler runs past. */
+  & .ab-world { --ab-hair: var(--ss-hairline, 1px); transition: --ab-zoom 1100ms cubic-bezier(.45, 0, .1, 1); }
+  @media (prefers-reduced-motion: reduce) { & .ab-world { transition: none; } }
+  /* The browser's strokes ignore the camera: its hairline is divided by the
+     zoom, so the window's edge (and every line inside it) stays one pixel */
+  & .ab-browser { --ss-hairline: calc(var(--ab-hair) / var(--ab-zoom, 1)); position: absolute; left: 24px; top: 72px; width: 560px; height: 360px; z-index: 2; box-shadow: 0 0 0 var(--ss-hairline) var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)), var(--ds-shadow-2xl); --ab-visible: 460px; }
+  & .ab-browser-body { position: relative; background: var(--ss-surface); }
+  /* The recording selection: dashed and gray while drawn, Geist blue while
+     recording with one small red dot, then it fades (the use-case marquee). */
+  & .ab-capture { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
+  & .ab-capture-selection { color: var(--ds-gray-700, #8f8f8f); transition: color .15s ease-out; }
+  & .ab-capture-selection path { fill: none; stroke: currentColor; stroke-width: 1; stroke-dasharray: 4 3; }
+  & .ab-capture-selection[data-recording] { color: var(--ds-blue-700, #006bff); }
+  /* Sits on the outline's top edge, ringed in the surface so the dashes stop around it */
+  & .ab-rec-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--ds-red-700, #fc0035); box-shadow: 0 0 0 2px var(--ss-surface); opacity: 0; transition: opacity .2s ease-out; }
+  & .ab-rec-dot[data-on] { opacity: 1; }
+  & button { border: 0; cursor: pointer; font: inherit; color: var(--ds-gray-900, #4d4d4d); background: transparent; padding: 7px 10px; border-radius: 6px; white-space: nowrap; }
+  & button[aria-pressed='true'] { background: var(--ds-background-100, #fff); color: var(--ds-gray-1000, #171717); box-shadow: var(--ds-shadow-border-small); }
+  & button:disabled { cursor: default; opacity: .45; }
+  & button:focus-visible, & input:focus-visible { outline: 2px solid var(--ds-blue-700, #0070f3); outline-offset: 3px; }
+  & .ab-scene-description { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  & .ss-stage[data-layout='compact'] {
+    & .ab-browser { left: 16px; top: 72px; width: 440px; height: 400px; --ab-visible: 280px; }
+  }
+  @media (width < 450px) {
+  }
+  @media (prefers-reduced-motion: reduce) { & *, & *::before, & *::after { animation: none !important; transition: none !important; } }
+}

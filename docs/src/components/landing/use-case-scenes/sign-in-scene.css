@@ -1,0 +1,68 @@
+/* Two fields and a button, after Stageshow's form-error. Kept outside the upstream kit. */
+.ab-feature-scene .ab-sign-in {
+  /* Geist's medium control: two inputs and a button alone need the size to read at card scale. */
+  & .ss-stage { --ss-control: 40px; }
+
+  & .ab-sign-in-form {
+    position: absolute;
+    top: 76px;
+    left: 56px;
+    width: 288px;
+    display: grid;
+    gap: 12px;
+  }
+
+  & .ss-field__box { font-size: 14px; }
+
+  /* Idle label and busy group: layers in one cell, crossfading in place */
+  & .ab-sign-in-submit {
+    margin-top: 8px;
+    display: grid;
+    grid-template-areas: 'stack';
+    place-items: center;
+    height: var(--ss-control);
+    border-radius: var(--ss-radius-md);
+    background: var(--ss-accent);
+    color: var(--ss-surface);
+    font: 500 14px/1 var(--ss-font);
+    transition: opacity .15s ease;
+  }
+  & .ab-sign-in-submit[data-pressed] { opacity: .86; }
+
+  & .ab-sign-in-layer {
+    grid-area: stack;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 0;
+    filter: blur(2px);
+    transition: opacity .25s ease, filter .25s ease;
+  }
+  & .ab-sign-in-layer[data-on] { opacity: 1; filter: none; transition-delay: .08s; }
+
+  & .ab-sign-in-labels { display: grid; justify-items: start; }
+  & .ab-sign-in-label { grid-area: 1 / 1; opacity: 0; filter: blur(2px); transition: opacity .25s ease, filter .25s ease; }
+  & .ab-sign-in-label[data-on] { opacity: 1; filter: none; transition-delay: .08s; }
+
+  /* The pending spinner reads on the black button. The completed check is
+     a white disc with a black tick. */
+  & .ab-sign-in-submit .ss-check__ring { stroke: color-mix(in srgb, var(--ss-surface) 45%, transparent); }
+  & .ab-sign-in-submit .ss-check__arc { stroke: var(--ss-surface); }
+  & .ab-sign-in-status { position: relative; display: grid; width: 14px; height: 14px; flex: none; }
+  & .ab-sign-in-spinner, & .ab-sign-in-done { grid-area: 1 / 1; display: grid; place-items: center; transition: opacity .2s ease, scale .3s cubic-bezier(.22, 1, .36, 1); }
+  & .ab-sign-in-spinner:not([data-on]) { opacity: 0; }
+  & .ab-sign-in-done { position: relative; color: var(--ss-surface); opacity: 0; scale: .6; }
+  & .ab-sign-in-done[data-on] { opacity: 1; scale: 1; }
+  & .ab-sign-in-done::before { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--ds-gray-1000, #171717); }
+  & .ab-sign-in-done svg { position: relative; display: block; }
+
+  & .ss-stage[data-layout='compact'] .ab-sign-in-form { left: 35px; }
+}
+
+/* The password is mid-entry in the resting frame, with a steady caret. */
+.ab-feature-scene:not(:hover) .ab-sign-in .ss-field__caret { animation: none; }
+.ab-feature-scene .ab-sign-in .ss-stage[data-mark='done'] .ss-field__caret { animation: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ab-feature-scene .ab-sign-in :is(.ab-sign-in-layer, .ab-sign-in-label, .ab-sign-in-spinner, .ab-sign-in-done) { transition: none; }
+}

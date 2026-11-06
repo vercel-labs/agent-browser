@@ -10,7 +10,7 @@ import { applyDocsResponseHeaders } from "@/lib/docs-response-headers";
 import { config as geistdocsConfig } from "@/lib/geistdocs/config";
 import { isPreviewDeployment } from "@/lib/site";
 
-const pages = new Set(allDocsPages.map((page) => page.href));
+const pages = new Set([...allDocsPages.map((page) => page.href), "/docs"]);
 const localeProxy = createI18nMiddleware({
   defaultLanguage: "en",
   languages: ["en"],
@@ -44,7 +44,10 @@ function notFoundResponse() {
 
 const geistdocsProxy = createProxy({
   config: geistdocsConfig,
-  markdownRoutes: [{ from: "/*path", to: "/api/docs-md/*path" }],
+  markdownRoutes: [
+    { from: "/docs", to: "/api/docs-md" },
+    { from: "/*path", to: "/api/docs-md/*path" },
+  ],
   before: async ({ request, context }) => {
     if (isFlightRequest(request)) {
       return (await localeProxy(request, context)) ?? NextResponse.next();

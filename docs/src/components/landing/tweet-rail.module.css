@@ -1,0 +1,129 @@
+/* Distance from the page column to the viewport edge; cqw resolves against the page container. */
+.rail {
+  --bleed: calc(50vw - 50cqw);
+  --text: calc(85cqw - 48px);
+  --pitch: calc(var(--text) + 96px);
+  --line-extension: 20px;
+  position: relative;
+  margin-inline: calc(var(--bleed) * -1);
+  timeline-scope: --rail;
+}
+.track {
+  position: relative;
+  display: flex;
+  list-style: none;
+  margin: calc(-1 * var(--line-extension)) 0;
+  padding-block: var(--line-extension);
+  padding-inline: var(--bleed);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-timeline: --rail x;
+  scrollbar-width: none;
+}
+.track::-webkit-scrollbar { display: none; }
+
+/* Hover intent: passing beneath the pointer should not flash a highlight.
+   Scroll activity cancels it immediately; keyboard focus stays independent. */
+.track [data-tweet-mention] {
+  transition: color 120ms ease-out;
+}
+@media (hover: hover) and (pointer: fine) {
+  .track:not([data-scrolling]) a:hover [data-tweet-mention] {
+    color: var(--ds-blue-700);
+    transition-delay: 120ms;
+  }
+  .track[data-scrolling] [data-tweet-mention] {
+    transition: none;
+  }
+}
+.track a:focus-visible [data-tweet-mention] {
+  color: var(--ds-blue-700);
+}
+@media (prefers-reduced-motion: reduce) {
+  .track [data-tweet-mention] {
+    transition: none;
+  }
+}
+
+.item {
+  --inset-start: 48px;
+  --inset-end: 48px;
+  position: relative;
+  flex: none;
+  width: var(--pitch);
+  padding-inline: var(--inset-start) var(--inset-end);
+}
+.item:first-child { --inset-start: 0px; width: calc(var(--text) + 48px); }
+.item:last-child { --inset-end: 0px; width: calc(var(--text) + 48px); }
+
+/* Rules travel in the gaps. The solid span aligns with the quote's first
+   cap height and the handle's baseline, with short fades beyond them. */
+.item + .item::before {
+  content: '';
+  position: absolute;
+  inset-block: calc(-1 * var(--line-extension));
+  left: 0;
+  width: 1px;
+  background: var(--ds-gray-alpha-400);
+  mask-image: linear-gradient(to bottom, transparent,
+      #000 calc(var(--line-extension) + 7px),
+      #000 calc(100% - var(--line-extension) - 4px), transparent);
+  pointer-events: none;
+}
+
+@container (min-width: 601px) {
+  .rail { --text: calc((100cqw + 24px) / 3 - 24px); }
+}
+@container (min-width: 961px) {
+  .rail { --text: calc((100cqw + 24px) / 4 - 24px); }
+}
+
+.scrim {
+  position: absolute;
+  inset-block: calc(-1 * var(--line-extension));
+  pointer-events: none;
+  background: var(--ds-background-200);
+  /* Eased alpha stops, so the fade has no visible start or end edge. */
+  --eased: #000, #000000bc 19%, #0000008a 34%, #00000061 47%, #00000047 56.5%, #00000031 65%,
+    #00000020 73%, #00000013 80.2%, #0000000b 86.1%, #00000005 91%, #00000002 95.2%, transparent;
+}
+.start {
+  left: 0;
+  /* Only soften content in the outer page gutter, never the reading column. */
+  width: var(--bleed);
+  mask-image: linear-gradient(to right, var(--eased));
+}
+.end {
+  right: 0;
+  /* Fade only at the viewport edge, independent of the page's outer gutter. */
+  width: clamp(64px, 8vw, 128px);
+  mask-image: linear-gradient(to left, var(--eased));
+}
+
+/* Scroll-driven: each scrim fades out as the rail reaches its edge. Without support,
+   the end scrim stays and the start scrim stays hidden. */
+.start {
+  opacity: 0;
+}
+@supports (animation-timeline: scroll()) {
+  .start,
+  .end {
+    animation: scrim-fade linear both;
+    animation-timeline: --rail;
+  }
+  .start {
+    animation-direction: reverse;
+    animation-range: 0 64px;
+  }
+  .end {
+    animation-range: calc(100% - 64px) 100%;
+  }
+}
+@keyframes scrim-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}

@@ -1,0 +1,14 @@
+.mark {
+  display: inline-block;
+  flex-shrink: 0;
+  background-color: currentColor;
+  mask-position: center;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+}
+
+.agent { mask-image: url('./assets/agent.svg'); }
+.claude { mask-image: url('./assets/claude.svg'); }
+.openai { mask-image: url('./assets/openai.svg'); }
+.gemini { mask-image: url('./assets/gemini.svg'); }
+.cursor { mask-image: url('./assets/cursor.svg'); }

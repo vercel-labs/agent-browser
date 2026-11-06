@@ -1,0 +1,3 @@
+/* Host integration only. Keep Tailwind preflight below the unmodified kit,
+   regardless of which Next route first loads the shared CSS chunk. */
+@layer theme, base, components, utilities, stageshow;
