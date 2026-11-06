@@ -399,6 +399,8 @@ pub fn apply_attach_launch_options(cmd: &mut Value, flags: &Flags) {
 }
 
 /// Stamps `timeout` on a wait-family command that has none.
+/// Stamps `timeout` on a wait-family command or `flow_save` that has none,
+/// so the client read timeout follows it.
 pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     let Some(timeout) = timeout else {
         return;
@@ -406,7 +408,7 @@ pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     let is_wait = cmd
         .get("action")
         .and_then(Value::as_str)
-        .is_some_and(|action| action.starts_with("wait"));
+        .is_some_and(|action| action.starts_with("wait") || action == "flow_save");
     if is_wait && cmd.get("timeout").is_none() {
         cmd["timeout"] = json!(timeout);
     }
@@ -2272,7 +2274,7 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     match rest.first().copied() {
         Some("steps") => Ok(json!({ "id": id, "action": "flow_steps" })),
         Some("save") => {
-            const SAVE_USAGE: &str = "flow save <name> [--from <seq>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>]";
+            const SAVE_USAGE: &str = "flow save <name> [--from <seq>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>] [--timeout <ms>]";
             let name = rest
                 .get(1)
                 .filter(|n| !n.starts_with("--"))
@@ -2305,6 +2307,18 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             }
             if let Some(description) = flag_value(rest, "--description") {
                 cmd["description"] = json!(description);
+            }
+            if rest.contains(&"--timeout") {
+                let raw =
+                    flag_value(rest, "--timeout").ok_or_else(|| ParseError::MissingArguments {
+                        context: "flow save --timeout".to_string(),
+                        usage: SAVE_USAGE,
+                    })?;
+                let n: u64 = raw.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --timeout '{}': expected a number in ms", raw),
+                    usage: SAVE_USAGE,
+                })?;
+                cmd["timeout"] = json!(n);
             }
             Ok(cmd)
         }
@@ -4704,6 +4718,10 @@ mod tests {
         assert!(parse_flow(&["save", "--from", "1"], "1").is_err());
         assert!(parse_flow(&["save", "a", "--from", "open"], "1").is_err());
         assert!(parse_flow(&["save", "a", "--to", "x"], "1").is_err());
+        let cmd = parse_flow(&["save", "a", "--timeout", "1500"], "1").unwrap();
+        assert_eq!(cmd["timeout"], 1500);
+        assert!(parse_flow(&["save", "a", "--timeout", "soon"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--timeout"], "1").is_err());
     }
 
     #[test]
@@ -6375,6 +6393,16 @@ mod tests {
         let mut f = default_flags();
         f.default_timeout = Some(ms);
         f
+    }
+
+    #[test]
+    fn test_flow_save_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(40000);
+        let cmd = parse_command(&args("flow save stoves"), &flags).unwrap();
+        assert_eq!(cmd["action"], "flow_save");
+        assert_eq!(cmd["timeout"], 40000);
+        let none = parse_command(&args("flow save stoves"), &default_flags()).unwrap();
+        assert!(none.get("timeout").is_none());
     }
 
     #[test]
