@@ -1,8 +1,10 @@
 //! Firefox tab and window commands. Tab ids are stable `t<N>` ids over BiDi browsing contexts.
 
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use super::actions::session;
+use super::bidi::{remote_to_json, BidiClient};
 use crate::native::actions::DaemonState;
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 
@@ -12,12 +14,7 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let url = cmd.get("url").and_then(Value::as_str);
     let label = cmd.get("label").and_then(Value::as_str);
     if let Some(label) = label {
-        if !is_valid_label(label) {
-            return Err(format!(
-                "Invalid tab label `{label}`; labels must start with a letter and contain only \
-                 letters, digits, `-`, and `_`"
-            ));
-        }
+        validate_tab_label(label)?;
         if session(state)?
             .tab_labels
             .values()
@@ -79,6 +76,38 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }))
 }
 
+fn validate_tab_label(label: &str) -> Result<(), String> {
+    if !is_valid_label(label) {
+        return Err(format!(
+            "Invalid tab label `{label}`; labels must start with a letter and contain only \
+             letters, digits, `-`, and `_`"
+        ));
+    }
+    if !matches!(TabRef::parse(label), Ok(TabRef::Label(_))) {
+        return Err(format!(
+            "Tab label `{label}` uses syntax reserved for tab IDs"
+        ));
+    }
+    Ok(())
+}
+
+async fn tab_title(bidi: &BidiClient, context: &str) -> Value {
+    bidi.send_timeout(
+        "script.callFunction",
+        json!({
+            "functionDeclaration": "() => document.title",
+            "target": {"context": context},
+            "arguments": [],
+            "awaitPromise": true,
+            "resultOwnership": "root",
+        }),
+        Duration::from_millis(250),
+    )
+    .await
+    .map(|result| remote_to_json(&result["result"]))
+    .unwrap_or(Value::Null)
+}
+
 /// Lists top-level tabs as `{tabs: [{tabId, targetId, label, title, url, type, active}]}`.
 pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
     let tree = session(state)?
@@ -86,15 +115,19 @@ pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
         .send("browsingContext.getTree", json!({"maxDepth": 0}))
         .await?;
     let contexts: Vec<Value> = tree["contexts"].as_array().cloned().unwrap_or_default();
+    let titles = {
+        let bidi = &session(state)?.bidi;
+        futures_util::future::join_all(
+            contexts
+                .iter()
+                .map(|c| tab_title(bidi, c["context"].as_str().unwrap_or_default())),
+        )
+        .await
+    };
     let mut tabs = Vec::with_capacity(contexts.len());
-    for c in &contexts {
+    for (c, title) in contexts.iter().zip(titles) {
         let context = c["context"].as_str().unwrap_or_default().to_string();
         let tab_id = session(state)?.tab_id(&context);
-        let title = session(state)?
-            .bidi
-            .call_function(&context, "() => document.title", None, vec![])
-            .await
-            .unwrap_or(Value::Null);
         let ff = session(state)?;
         let label = ff.tab_labels.get(&context).cloned();
         let active = context == ff.top_context;
@@ -357,6 +390,38 @@ mod tests {
             resolve_tab_ref(&tabs, &UUID_A.to_uppercase()).unwrap(),
             UUID_A
         );
+    }
+
+    #[test]
+    fn tab_labels_reject_stable_id_syntax() {
+        assert!(validate_tab_label("docs").is_ok());
+        for label in ["t1", "T1"] {
+            assert_eq!(
+                validate_tab_label(label).unwrap_err(),
+                format!("Tab label `{label}` uses syntax reserved for tab IDs")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_tab_title_lookup_is_bounded() {
+        use futures_util::StreamExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.next().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let bidi = BidiClient::connect(&url).await.unwrap();
+        let title = tokio::time::timeout(Duration::from_millis(500), tab_title(&bidi, "ctx"))
+            .await
+            .unwrap();
+        assert_eq!(title, Value::Null);
+        drop(bidi);
+        server.abort();
     }
 
     #[test]

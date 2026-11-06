@@ -182,7 +182,18 @@ impl FirefoxSession {
         if let Some(contexts) = tree["contexts"].as_array() {
             session.record_context_origins(contexts);
         }
+        if let Some(viewport) = options.viewport_size {
+            session.set_initial_viewport(viewport).await?;
+        }
         Ok(session)
+    }
+
+    async fn set_initial_viewport(&self, (width, height): (u32, u32)) -> Result<(), String> {
+        self.bidi.send(
+            "browsingContext.setViewport",
+            json!({"context": self.context, "viewport": {"width": width, "height": height}, "devicePixelRatio": 1}),
+        ).await?;
+        Ok(())
     }
 
     fn record_context_origins(&mut self, contexts: &[Value]) {
@@ -505,6 +516,13 @@ pub(crate) mod tests {
         assert_eq!(s.tab_id("ctx-new"), 2);
         assert_eq!(s.tab_id("ctx-active"), 1);
         assert_eq!(s.tab_id("ctx-later"), 3);
+    }
+
+    #[tokio::test]
+    async fn initial_viewport_is_sent_to_firefox() {
+        let (session, _tx, calls) = fake_session().await;
+        session.set_initial_viewport((800, 600)).await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), ["browsingContext.setViewport"]);
     }
 
     #[tokio::test]

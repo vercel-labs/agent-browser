@@ -629,12 +629,18 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
             continue;
         }
         let nav_url = format!("{}/", origin.origin.trim_end_matches('/'));
-        ff.bidi
+        if ff
+            .bidi
             .send(
                 "browsingContext.navigate",
                 json!({ "context": context, "url": nav_url, "wait": "complete" }),
             )
-            .await?;
+            .await
+            .is_err()
+        {
+            skipped.push(origin.origin.clone());
+            continue;
+        }
         ff.refs.clear();
 
         let payload = serde_json::to_string(origin).map_err(|e| e.to_string())?;
@@ -691,6 +697,56 @@ mod tests {
             .unwrap();
         assert!(!state.restore_load_failed);
         assert_eq!(state.restore_status, "loaded");
+    }
+
+    #[tokio::test]
+    async fn unreachable_origin_is_skipped_and_restore_continues() {
+        use super::super::session::tests::{fake_session_with_replies, FakeReply};
+
+        let (mut ff, _tx, _) = fake_session_with_replies(|request| {
+            if request["method"] == "browsingContext.navigate"
+                && request["params"]["url"] == "https://unreachable.example/"
+            {
+                FakeReply::Error {
+                    error: "unknown error",
+                    message: "unreachable",
+                }
+            } else if request["method"] == "script.callFunction" {
+                FakeReply::Result(json!({"type": "boolean", "value": true}))
+            } else {
+                FakeReply::Result(json!({}))
+            }
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "cookies": [],
+                "origins": [
+                    {
+                        "origin": "https://unreachable.example",
+                        "localStorage": [{"name": "a", "value": "1"}],
+                        "sessionStorage": []
+                    },
+                    {
+                        "origin": "https://reachable.example",
+                        "localStorage": [{"name": "b", "value": "2"}],
+                        "sessionStorage": []
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let skipped = load_state_path(&mut ff, path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(skipped, vec!["https://unreachable.example".to_string()]);
+        assert!(ff.visited_origins.contains("https://reachable.example"));
     }
 
     #[test]
