@@ -326,7 +326,13 @@ async fn resolve(bidi: Arc<BidiClient>, net: NetContext, event: Value) {
         .to_string();
     let (result, fallback, fallback_params) = match event["method"].as_str() {
         Some("network.beforeRequestSent") => (
-            before_request(&bidi, &net, &event["params"]["request"], event["params"]["context"].as_str()).await,
+            before_request(
+                &bidi,
+                &net,
+                &event["params"]["request"],
+                event["params"]["context"].as_str(),
+            )
+            .await,
             "network.failRequest",
             json!({"request": id}),
         ),
@@ -1297,7 +1303,10 @@ mod tests {
         let (ff, _tx, _, messages, _) =
             crate::native::firefox::session::tests::fake_session_with_rdp().await;
         let net = NetContext::default();
-        net.blank_contexts.write().await.insert("storage-tab".into());
+        net.blank_contexts
+            .write()
+            .await
+            .insert("storage-tab".into());
         before_request(
             &ff.bidi,
             &net,

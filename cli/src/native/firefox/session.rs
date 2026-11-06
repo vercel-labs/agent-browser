@@ -202,7 +202,9 @@ impl FirefoxSession {
             .ok_or("Firefox reported no browsing context")?
             .to_string();
         let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
-            viewport: options.viewport_size.map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
+            viewport: options
+                .viewport_size
+                .map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
             user_agent: options.user_agent.clone(),
             media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
                 media: None,
@@ -307,7 +309,10 @@ impl FirefoxSession {
             {
                 self.top_context.clear();
             }
-            if matches!(e["method"].as_str(), Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")) {
+            if matches!(
+                e["method"].as_str(),
+                Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
+            ) {
                 if let Some(url) = e["params"]["url"].as_str() {
                     self.note_visit(url);
                 }

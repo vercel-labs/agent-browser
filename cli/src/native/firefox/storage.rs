@@ -444,8 +444,16 @@ async fn collect_via_temp_context(
                     continue;
                 }
             }
-            ff.bidi.send("browsingContext.navigate", json!({"context": context, "url": format!("{origin}/"), "wait": "complete"})).await?;
-            let data = ff.bidi.call_function(&context, ORIGIN_STORAGE_JS, None, Vec::new()).await?;
+            ff.bidi
+                .send(
+                    "browsingContext.navigate",
+                    json!({"context": context, "url": format!("{origin}/"), "wait": "complete"}),
+                )
+                .await?;
+            let data = ff
+                .bidi
+                .call_function(&context, ORIGIN_STORAGE_JS, None, Vec::new())
+                .await?;
             if let Some(storage) = state::parse_origin_storage(&data) {
                 if storage.origin == *origin {
                     found.push(storage);
@@ -453,7 +461,8 @@ async fn collect_via_temp_context(
             }
         }
         Ok(found)
-    }.await;
+    }
+    .await;
     ff.net.blank_contexts.write().await.remove(&context);
     let _ = ff
         .bidi

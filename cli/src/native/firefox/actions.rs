@@ -424,5 +424,4 @@ mod tests {
         state.pending_dialog = Some(dialog("ctx-background", Some("ctx-background")));
         assert!(dialog_guard("navigate", &state).is_ok());
     }
-
 }
