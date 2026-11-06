@@ -206,7 +206,7 @@ fn append_context_urls(contexts: &[Value], urls: &mut Vec<url::Url>) {
 async fn cookie_urls(ff: &FirefoxSession) -> Result<Vec<url::Url>, String> {
     let tree = ff
         .bidi
-        .send("browsingContext.getTree", json!({"root": ff.context}))
+        .send("browsingContext.getTree", json!({"root": ff.top_context}))
         .await?;
     let contexts = tree["contexts"]
         .as_array()
@@ -680,6 +680,30 @@ pub async fn state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cookie_urls_use_the_top_page_and_its_frames() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let (mut ff, _tx, _) = super::super::session::tests::fake_session_with(move |request| {
+            seen.lock().unwrap().push(request.clone());
+            json!({"contexts": [{
+                "context": "ctx-page",
+                "url": "https://page.example/",
+                "children": [{"context": "ctx-frame", "url": "https://frame.example/"}]
+            }]})
+        })
+        .await;
+        ff.context = "ctx-frame".into();
+
+        let urls = cookie_urls(&ff).await.unwrap();
+
+        assert_eq!(
+            urls.iter().map(|url| url.as_str()).collect::<Vec<_>>(),
+            ["https://page.example/", "https://frame.example/"]
+        );
+        assert_eq!(requests.lock().unwrap()[0]["params"]["root"], "ctx-active");
+    }
 
     #[tokio::test]
     async fn explicit_state_load_clears_failed_restore() {
