@@ -702,7 +702,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script r
 
 In a `batch`, `--relaunch` relaunches the browser once: the first command that can launch a browser carries it. Commands that never launch one, such as `read`, and commands denied by policy or waiting for confirmation pass it on to the next command.
 
-Firefox rejects authenticated proxies, `--user-agent`, `--color-scheme`, and an initial streaming viewport.
+Firefox rejects authenticated proxies, `--user-agent`, `--color-scheme`, and `networkidle` waits.
 
 See [Configuration](/configuration) for config files and environment variables. See [Proxy](/proxy) for proxy server, bypass, and credential settings.
 
@@ -843,3 +843,5 @@ agent-browser screenshot output.png
 The `--allow-file-access` flag enables JavaScript to access other local files. Chromium only.
 
 See [Files & Clipboard](/files) for local files, uploads, downloads, screenshots, PDFs, and clipboard workflows.
+
+Firefox does not support `--capture flow`.
