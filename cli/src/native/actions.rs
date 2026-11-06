@@ -5241,7 +5241,7 @@ async fn validate_restored_state(state: &DaemonState) -> Result<(), String> {
     Ok(())
 }
 
-fn mark_explicit_storage_state_loaded(state: &mut DaemonState, path: &str) {
+pub(crate) fn mark_explicit_storage_state_loaded(state: &mut DaemonState, path: &str) {
     if state.session_name.is_none() && state.restore_status == "not_configured" {
         return;
     }
@@ -5346,6 +5346,9 @@ pub(crate) async fn auto_save_restore_state(
     }
 
     let session_id = state.session_id.clone();
+    if let Some(ff) = state.firefox.as_mut() {
+        ff.drain_events(&mut state.pending_dialog);
+    }
     if let Some(ff) = state.firefox.as_ref() {
         return match firefox::storage::save_auto_state(ff, &session_name, &session_id).await {
             Ok(path) => {

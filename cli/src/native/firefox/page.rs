@@ -69,6 +69,7 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     if let Some(msg) = neterror_message(landed) {
         return Err(format!("Navigation failed: {msg}"));
     }
+    ff.note_visit(landed);
     let title = ff.eval("document.title").await.unwrap_or(Value::Null);
     Ok(json!({ "url": landed, "title": title, "targetId": context }))
 }
@@ -88,6 +89,7 @@ async fn traverse_history(delta: i64, state: &mut DaemonState) -> Result<Value, 
     .map_err(|e| format!("History navigation failed: {e}"))?;
     reset_page_state(state);
     let url = session(state)?.url().await.unwrap_or_default();
+    session(state)?.note_visit(&url);
     Ok(json!({ "url": url }))
 }
 

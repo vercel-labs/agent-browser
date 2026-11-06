@@ -1,6 +1,6 @@
 //! A running Firefox: the owned process, both protocol clients and per-session state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::time::Duration;
 
@@ -16,11 +16,12 @@ use crate::native::cdp::chrome::LaunchOptions;
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-const SUBSCRIBED_EVENTS: [&str; 4] = [
-    "browsingContext.contextCreated",
-    "browsingContext.contextDestroyed",
+const SUBSCRIBED_EVENTS: [&str; 5] = [
     "browsingContext.userPromptOpened",
     "browsingContext.userPromptClosed",
+    "browsingContext.contextCreated",
+    "browsingContext.contextDestroyed",
+    "browsingContext.domContentLoaded",
 ];
 
 /** One launched Firefox. Dropping it kills the process tree and deletes the profile. */
@@ -49,6 +50,7 @@ pub struct FirefoxSession {
     pub touches: Vec<(f64, f64)>,
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
     pub shadow_ids: std::collections::HashSet<i64>,
+    pub visited_origins: HashSet<String>,
     events: broadcast::Receiver<Value>,
 }
 
@@ -156,7 +158,7 @@ impl FirefoxSession {
             .as_str()
             .ok_or("Firefox reported no browsing context")?
             .to_string();
-        Ok(Self {
+        let mut session = Self {
             process: Some(process),
             headless: options.headless,
             bidi,
@@ -174,8 +176,33 @@ impl FirefoxSession {
             tab_labels: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
+            visited_origins: HashSet::new(),
             events,
-        })
+        };
+        if let Some(contexts) = tree["contexts"].as_array() {
+            session.record_context_origins(contexts);
+        }
+        Ok(session)
+    }
+
+    fn record_context_origins(&mut self, contexts: &[Value]) {
+        for context in contexts {
+            if let Some(url) = context["url"].as_str() {
+                self.note_visit(url);
+            }
+            if let Some(children) = context["children"].as_array() {
+                self.record_context_origins(children);
+            }
+        }
+    }
+
+    pub fn note_visit(&mut self, url: &str) {
+        if let Ok(parsed) = url::Url::parse(url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" {
+                self.visited_origins.insert(origin);
+            }
+        }
     }
 
     /// Returns the stable `t<N>` id for `context`, assigning the next id the first time it is seen.
@@ -214,6 +241,14 @@ impl FirefoxSession {
                         && e["params"]["context"] == self.top_context
                     {
                         self.top_context.clear();
+                    }
+                    if matches!(
+                        e["method"].as_str(),
+                        Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
+                    ) {
+                        if let Some(url) = e["params"]["url"].as_str() {
+                            self.note_visit(url);
+                        }
                     }
                     apply_event(&e, dialog, &mut self.context_parents);
                 }
@@ -445,6 +480,7 @@ pub(crate) mod tests {
             tab_labels: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
+            visited_origins: HashSet::new(),
             events,
         };
         (session, tx, calls)
@@ -469,6 +505,23 @@ pub(crate) mod tests {
         assert_eq!(s.tab_id("ctx-new"), 2);
         assert_eq!(s.tab_id("ctx-active"), 1);
         assert_eq!(s.tab_id("ctx-later"), 3);
+    }
+
+    #[tokio::test]
+    async fn tracks_navigation_events_from_any_context() {
+        let (mut session, tx, _) = fake_session().await;
+        tx.send(json!({"type": "event", "method": "browsingContext.domContentLoaded", "params": {"context": "popup", "url": "https://example.com/page"}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                session.drain_events(&mut None);
+                if session.visited_origins.contains("https://example.com") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
