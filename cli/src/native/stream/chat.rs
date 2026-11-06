@@ -733,7 +733,7 @@ pub(super) async fn handle_chat_request(
     };
 
     let default_model = std::env::var("AI_GATEWAY_MODEL")
-        .unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string());
+        .unwrap_or_else(|_| "openai/gpt-6-luna-fast".to_string());
 
     let parsed: Value = match serde_json::from_str(body) {
         Ok(v) => v,
