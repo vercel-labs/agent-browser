@@ -482,7 +482,41 @@ fn close_all_on_a_dead_session_is_governed_by_its_stored_policy() {
         "{json}"
     );
     assert_eq!(fs::read_to_string(session.settings()).unwrap(), stored);
+    // The daemon started only for the close is stopped again.
+    assert!(!session.dir().join(format!("{SESSION}.pid")).exists());
+}
+
+#[test]
+fn close_all_on_a_dead_session_waiting_for_confirmation_leaves_no_daemon() {
+    let session = Session::new();
+    session.touch(&["--confirm-actions", "close"]);
+    let stored = fs::read_to_string(session.settings()).unwrap();
     session.kill_daemon();
+
+    let out = session.output(&["close", "--all"]);
+
+    assert!(!out.status.success(), "{}", text(&out));
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        json["data"]["failed"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("needs confirmation"),
+        "{json}"
+    );
+    assert_eq!(fs::read_to_string(session.settings()).unwrap(), stored);
+    assert!(!session.dir().join(format!("{SESSION}.pid")).exists());
+}
+
+#[test]
+fn close_clears_an_empty_directory_in_place_of_the_settings_file() {
+    let session = Session::new();
+    fs::create_dir_all(session.settings()).unwrap();
+
+    let out = session.output(&["close"]);
+
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!session.settings().exists());
 }
 
 #[test]
