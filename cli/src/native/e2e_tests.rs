@@ -16872,6 +16872,20 @@ async fn e2e_firefox_download() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["path"], json!(wait_dest.to_string_lossy()));
     assert_eq!(std::fs::read_to_string(&wait_dest).unwrap(), "downloaded");
+
+    let repeated_dest = out.path().join("repeated.txt");
+    let resp = firefox_act(
+        &mut state,
+        "download",
+        "#dl",
+        json!({ "path": repeated_dest.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        std::fs::read_to_string(&repeated_dest).unwrap(),
+        "downloaded"
+    );
     firefox_close(&mut state).await;
 }
 

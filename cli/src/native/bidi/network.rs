@@ -246,7 +246,8 @@ pub fn spawn_dispatcher(
 ) -> AbortOnDrop {
     AbortOnDrop(tokio::spawn(async move {
         let mut emulated_contexts = HashSet::new();
-        while let Some(e) = rx.recv().await {
+        let mut legacy_downloads = HashMap::new();
+        while let Some(mut e) = rx.recv().await {
             if e["method"] == "browsingContext.contextCreated" && e["params"]["parent"].is_null() {
                 if let Some(context) = e["params"]["context"].as_str() {
                     if emulated_contexts.insert(context.to_string()) {
@@ -272,6 +273,34 @@ pub fn spawn_dispatcher(
                 Some("browsingContext.downloadWillBegin" | "browsingContext.downloadEnd")
             );
             if is_download {
+                if e["params"]["download"].as_str().is_none() {
+                    if let Some(navigation) = e["params"]["navigation"].as_str() {
+                        let key = (
+                            e["params"]["context"].as_str().map(str::to_owned),
+                            navigation.to_owned(),
+                            e["params"]["url"].as_str().map(str::to_owned),
+                        );
+                        let download = if e["method"] == "browsingContext.downloadWillBegin" {
+                            let (download, pending) = legacy_downloads
+                                .entry(key)
+                                .or_insert_with(|| (uuid::Uuid::new_v4().to_string(), 0usize));
+                            *pending += 1;
+                            Some(download.clone())
+                        } else if let Some((download, pending)) = legacy_downloads.get_mut(&key) {
+                            let download = download.clone();
+                            *pending -= 1;
+                            if *pending == 0 {
+                                legacy_downloads.remove(&key);
+                            }
+                            Some(download)
+                        } else {
+                            None
+                        };
+                        if let Some(download) = download {
+                            e["params"]["download"] = json!(download);
+                        }
+                    }
+                }
                 net.downloads
                     .lock()
                     .await
