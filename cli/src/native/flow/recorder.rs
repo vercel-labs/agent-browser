@@ -39,6 +39,8 @@ pub struct SaveArgs<'a> {
     pub entries: &'a [HarEntry],
     /// The page shows a password field at save time.
     pub login_wall: bool,
+    /// See `SaveInput::local_names`.
+    pub local_names: &'a [(String, super::net::Reach)],
 }
 
 /// What the recorder knows about a command besides its arguments.
@@ -211,6 +213,7 @@ impl FlowRecorder {
             output: args.output,
             created_at: chrono::Utc::now().to_rfc3339(),
             login_wall: args.login_wall,
+            local_names: args.local_names,
         })?;
         let path = write_flow(&flow)?;
         self.mark_saved(last);
@@ -382,6 +385,47 @@ impl FlowRecorder {
     #[cfg(test)]
     pub(super) fn tag_now(&mut self, request_id: &str) {
         self.tag(request_id, now());
+    }
+
+    /// The start host of a save, when named by a domain, its port, and the
+    /// addresses the browser reached it at in the steps the save covers.
+    pub fn start_host_addresses(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+    ) -> Option<(String, u16, Vec<std::net::SocketAddr>)> {
+        let (first, last) = self.resolve_range(from, to).ok()?;
+        let commands: Vec<(u64, Value)> = self
+            .commands
+            .iter()
+            .filter(|(seq, _)| *seq >= first && *seq <= last)
+            .cloned()
+            .collect();
+        let start = super::save_start_url(&commands, self)?;
+        let start = url::Url::parse(&start).ok()?;
+        let Some(url::Host::Domain(host)) = start.host() else {
+            return None;
+        };
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let port = start.port_or_known_default()?;
+        let addrs = entries
+            .iter()
+            .filter(|e| {
+                self.request_tags
+                    .get(&e.request_id)
+                    .is_some_and(|seq| *seq >= first && *seq <= last)
+            })
+            .filter(|e| {
+                url::Url::parse(&e.url).ok().is_some_and(|u| {
+                    u.host_str()
+                        .is_some_and(|h| h.trim_end_matches('.').eq_ignore_ascii_case(&host))
+                        && u.port_or_known_default() == Some(port)
+                })
+            })
+            .filter_map(|e| e.remote_addr)
+            .collect();
+        Some((host, port, addrs))
     }
 
     /// The first and last step a save covers. Without `from` the save
