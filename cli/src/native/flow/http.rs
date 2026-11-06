@@ -2,8 +2,13 @@
 
 use std::sync::Arc;
 
-use super::net::{client_proxies, refusal_in, system_lookup, Reach, ReachResolver};
+use super::net::{
+    client_proxies, env_proxies, refusal_in, resolve_proxy_hosts, Reach, ReachResolver,
+};
 use super::*;
+
+/// How long a request, or the lookup of a proxy's address, may take.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A session route (`network route`) that matches the request answers it,
 /// so mocks apply to a run too.
@@ -136,15 +141,22 @@ impl HttpClients {
     }
 }
 
-pub fn http_client(
+pub async fn http_client(
     filter: Option<crate::native::network::DomainFilter>,
     flow: &Flow,
 ) -> Result<HttpClients, String> {
-    let (proxies, trusted) = client_proxies(
-        |k| std::env::var(k).ok(),
-        reqwest::NoProxy::from_env(),
-        system_lookup,
-    )?;
+    let env = |k: &str| std::env::var(k).ok();
+    let env_proxies = env_proxies(env)?;
+    let addresses = resolve_proxy_hosts(&env_proxies, REQUEST_TIMEOUT).await;
+    let (proxies, trusted) =
+        client_proxies(
+            env,
+            reqwest::NoProxy::from_env(),
+            |host, port| match addresses.get(&(host.to_string(), port)) {
+                Some(found) => found.clone(),
+                None => Err(format!("could not resolve proxy {host}")),
+            },
+        )?;
     let mut resolver = ReachResolver::system(Reach::of_start(&flow.start_url));
     resolver.trusted = trusted;
     http_client_with(filter, flow, Arc::new(resolver), proxies)
@@ -167,7 +179,7 @@ pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
         builder
             .redirect(policy)
             .dns_resolver(resolver.clone())
-            .timeout(Duration::from_secs(20))
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))
     };

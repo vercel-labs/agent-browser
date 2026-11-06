@@ -12384,7 +12384,7 @@ async fn handle_flow_run(
             .check(&prepared.url)
             .map_err(|e| format!("flow '{}' step {}: {}", name, prepared.step, e))?;
     }
-    let client = super::flow::http_client(filter.clone(), &flow)?;
+    let client = super::flow::http_client(filter.clone(), &flow).await?;
     let results = {
         let mut sender = HttpSender { state, client };
         let check = |req: &super::flow::PreparedRequest| -> Result<(), String> {

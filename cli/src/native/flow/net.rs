@@ -122,10 +122,50 @@ fn non_public_v6(ip: Ipv6Addr) -> bool {
         || (s[0] == 0x100 && s[1..4] == [0; 3])
 }
 
-/// Resolve a proxy hostname with the system resolver.
-pub fn system_lookup(host: &str, port: u16) -> Option<IpAddr> {
-    use std::net::ToSocketAddrs;
-    (host, port).to_socket_addrs().ok()?.next().map(|a| a.ip())
+/// The address to pin a proxy to: the first IPv4 address if there is one,
+/// else the first address. reqwest takes one host per proxy, so there is no
+/// failover between addresses.
+pub fn pick_address(addrs: Vec<IpAddr>) -> Option<IpAddr> {
+    addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or(addrs.first())
+        .copied()
+}
+
+/// Resolve the hostnames of the `http://` proxies, with `limit` as the time
+/// each lookup may take. A failure is kept per name so the build can fail
+/// closed with the proxy named.
+pub async fn resolve_proxy_hosts(
+    proxies: &[EnvProxy],
+    limit: std::time::Duration,
+) -> std::collections::HashMap<(String, u16), Result<IpAddr, String>> {
+    let mut found = std::collections::HashMap::new();
+    for p in proxies {
+        let Some(url::Host::Domain(name)) = p.url.host() else {
+            continue;
+        };
+        if p.url.scheme() != "http" {
+            continue;
+        }
+        let port = p.url.port_or_known_default().unwrap_or(80);
+        let key = (name.to_string(), port);
+        if found.contains_key(&key) {
+            continue;
+        }
+        let looked = tokio::time::timeout(limit, tokio::net::lookup_host((name, port))).await;
+        let result = match looked {
+            Ok(Ok(addrs)) => pick_address(addrs.map(|a| a.ip()).collect())
+                .ok_or_else(|| format!("could not resolve proxy {name}: no addresses")),
+            Ok(Err(e)) => Err(format!("could not resolve proxy {name}: {e}")),
+            Err(_) => Err(format!(
+                "could not resolve proxy {name}: no answer within {}s",
+                limit.as_secs()
+            )),
+        };
+        found.insert(key, result);
+    }
+    found
 }
 
 /// The reqwest proxies for the environment, honoring `NO_PROXY` for which
@@ -133,12 +173,12 @@ pub fn system_lookup(host: &str, port: u16) -> Option<IpAddr> {
 pub fn client_proxies(
     env: impl Fn(&str) -> Option<String>,
     no_proxy: Option<reqwest::NoProxy>,
-    lookup: impl Fn(&str, u16) -> Option<IpAddr>,
+    lookup: impl Fn(&str, u16) -> Result<IpAddr, String>,
 ) -> Result<(Vec<reqwest::Proxy>, Vec<String>), String> {
     let mut proxies = Vec::new();
     let mut trusted = Vec::new();
     for p in env_proxies(env)? {
-        let (url, name) = pin_proxy(p.url, &lookup);
+        let (url, name) = pin_proxy(p.url, &lookup)?;
         trusted.extend(name);
         let proxy = if p.for_https {
             reqwest::Proxy::https(url.as_str())
@@ -228,14 +268,17 @@ pub struct EnvProxy {
 /// The proxies `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` configure, as
 /// reqwest reads them: `ALL_PROXY` covers a scheme with no proxy of its own.
 pub fn env_proxies(env: impl Fn(&str) -> Option<String>) -> Result<Vec<EnvProxy>, String> {
+    // httpoxy: a CGI request can set HTTP_PROXY, so none is read there.
+    if env("REQUEST_METHOD").is_some() {
+        return Ok(Vec::new());
+    }
+    // As hyper-util reads them: the first variable set wins, even if empty.
     let get = |name: &str| {
         [name.to_ascii_uppercase(), name.to_ascii_lowercase()]
             .iter()
-            .find_map(|k| {
-                env(k)
-                    .map(|v| v.trim().to_string())
-                    .filter(|v| !v.is_empty())
-            })
+            .find_map(|k| env(k))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
     };
     let all = get("ALL_PROXY");
     let mut out = Vec::new();
@@ -260,20 +303,19 @@ pub fn env_proxies(env: impl Fn(&str) -> Option<String>) -> Result<Vec<EnvProxy>
 /// are returned unchanged, with the hostname the resolver must trust.
 pub fn pin_proxy(
     mut url: url::Url,
-    lookup: impl Fn(&str, u16) -> Option<IpAddr>,
-) -> (url::Url, Option<String>) {
+    lookup: impl Fn(&str, u16) -> Result<IpAddr, String>,
+) -> Result<(url::Url, Option<String>), String> {
     let Some(url::Host::Domain(name)) = url.host().map(|h| h.to_owned()) else {
-        return (url, None);
+        return Ok((url, None));
     };
     if url.scheme() != "http" {
         let trusted = name.trim_end_matches('.').to_ascii_lowercase();
-        return (url, Some(trusted));
+        return Ok((url, Some(trusted)));
     }
     let port = url.port_or_known_default().unwrap_or(80);
-    if let Some(ip) = lookup(&name, port) {
-        let _ = url.set_ip_host(ip);
-    }
-    (url, None)
+    let ip = lookup(&name, port)?;
+    let _ = url.set_ip_host(ip);
+    Ok((url, None))
 }
 
 impl Resolve for ReachResolver {
@@ -314,6 +356,7 @@ mod tests {
     use crate::native::flow::{flow_of, http_client_with, run_http, PreparedRequest};
     use serde_json::json;
     use std::str::FromStr;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn ip(s: &str) -> IpAddr {
@@ -739,33 +782,125 @@ mod tests {
     fn an_http_proxy_by_name_is_pinned_to_its_address() {
         let lookup = |h: &str, port: u16| {
             assert_eq!((h, port), ("proxy.corp", 3128));
-            Some(ip("10.1.2.3"))
+            Ok(ip("10.1.2.3"))
         };
         let u = url::Url::parse("http://user:pw@proxy.corp:3128").unwrap();
-        let (pinned, trusted) = pin_proxy(u, lookup);
+        let (pinned, trusted) = pin_proxy(u, lookup).unwrap();
         assert_eq!(pinned.as_str(), "http://user:pw@10.1.2.3:3128/");
         assert!(trusted.is_none());
         let (same, _) = pin_proxy(
             url::Url::parse("http://127.0.0.1:7890").unwrap(),
             |_, _| panic!(),
-        );
+        )
+        .unwrap();
         assert_eq!(same.as_str(), "http://127.0.0.1:7890/");
         let (v6, _) = pin_proxy(url::Url::parse("http://proxy.corp:80").unwrap(), |_, _| {
-            Some(ip("fd00::1"))
-        });
+            Ok(ip("fd00::1"))
+        })
+        .unwrap();
         assert_eq!(v6.host_str(), Some("[fd00::1]"));
         // https: the name stays for TLS, so the resolver trusts it.
         let (kept, trusted) = pin_proxy(
             url::Url::parse("https://proxy.corp:443").unwrap(),
             |_, _| panic!(),
-        );
+        )
+        .unwrap();
         assert_eq!(kept.host_str(), Some("proxy.corp"));
         assert_eq!(trusted.as_deref(), Some("proxy.corp"));
-        // A name that does not resolve is left to fail at connect.
-        let (kept, trusted) =
-            pin_proxy(url::Url::parse("http://nope.corp:80").unwrap(), |_, _| None);
-        assert_eq!(kept.host_str(), Some("nope.corp"));
-        assert!(trusted.is_none());
+    }
+
+    #[test]
+    fn a_proxy_that_does_not_resolve_fails_closed_with_its_own_message() {
+        let err = pin_proxy(url::Url::parse("http://nope.corp:80").unwrap(), |h, _| {
+            Err(format!("could not resolve proxy {h}: no such host"))
+        })
+        .unwrap_err();
+        assert!(
+            err.starts_with("could not resolve proxy nope.corp"),
+            "{err}"
+        );
+        let err = client_proxies(
+            env_of(&[("HTTP_PROXY", "http://nope.corp:80")]),
+            None,
+            |h, _| Err(format!("could not resolve proxy {h}: no such host")),
+        )
+        .unwrap_err();
+        assert!(err.contains("could not resolve proxy nope.corp"), "{err}");
+    }
+
+    #[test]
+    fn pinning_prefers_the_first_ipv4_address() {
+        let pick = |s: &[&str]| pick_address(s.iter().map(|a| ip(a)).collect());
+        assert_eq!(
+            pick(&["fd00::1", "10.0.0.1", "10.0.0.2"]),
+            Some(ip("10.0.0.1"))
+        );
+        assert_eq!(pick(&["fd00::1", "fd00::2"]), Some(ip("fd00::1")));
+        assert_eq!(pick(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn proxy_names_resolve_asynchronously_and_fail_closed() {
+        let proxies = env_proxies(env_of(&[
+            ("HTTP_PROXY", "http://localhost:3128"),
+            ("HTTPS_PROXY", "https://secure.corp:443"),
+        ]))
+        .unwrap();
+        let found = resolve_proxy_hosts(&proxies, Duration::from_secs(5)).await;
+        assert!(found.contains_key(&("localhost".to_string(), 3128)));
+        // https proxies keep their name and need no lookup.
+        assert_eq!(found.len(), 1);
+        let missing =
+            env_proxies(env_of(&[("HTTP_PROXY", "http://nonexistent.invalid:3128")])).unwrap();
+        let none = resolve_proxy_hosts(&missing, Duration::from_secs(5)).await;
+        let got = none
+            .get(&("nonexistent.invalid".to_string(), 3128))
+            .unwrap();
+        assert!(
+            got.as_ref()
+                .is_err_and(|e| e.starts_with("could not resolve proxy nonexistent.invalid")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_cgi_environment_has_no_proxies() {
+        let env = env_of(&[
+            ("REQUEST_METHOD", "GET"),
+            ("HTTP_PROXY", "http://attacker:1"),
+        ]);
+        assert!(env_proxies(env).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_first_variable_set_wins_even_when_empty() {
+        let got = |pairs: &'static [(&'static str, &'static str)]| {
+            env_proxies(env_of(pairs))
+                .unwrap()
+                .iter()
+                .map(|p| (p.for_https, p.url.host_str().unwrap().to_string()))
+                .collect::<Vec<_>>()
+        };
+        // An empty HTTP_PROXY hides http_proxy and falls to ALL_PROXY.
+        assert_eq!(
+            got(&[
+                ("HTTP_PROXY", ""),
+                ("http_proxy", "a.corp"),
+                ("ALL_PROXY", "all.corp")
+            ]),
+            vec![
+                (false, "all.corp".to_string()),
+                (true, "all.corp".to_string())
+            ]
+        );
+        assert_eq!(
+            got(&[("HTTP_PROXY", "a.corp"), ("http_proxy", "b.corp")]),
+            vec![(false, "a.corp".to_string())]
+        );
+        assert_eq!(
+            got(&[("http_proxy", "b.corp")]),
+            vec![(false, "b.corp".to_string())]
+        );
     }
 
     /// A public flow's client with a proxy at a private address, built the
@@ -781,7 +916,7 @@ mod tests {
         let (proxies, trusted) = client_proxies(
             env_of(proxy_env),
             reqwest::NoProxy::from_string(no_proxy),
-            move |_, _| Some(ip(proxy_ip)),
+            move |_, _| Ok(ip(proxy_ip)),
         )
         .unwrap();
         // Every name resolves to loopback, which a public flow may not use.
