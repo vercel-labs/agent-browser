@@ -4820,14 +4820,14 @@ async fn auto_launch_with(
     if matches!(connection, Connection::Cdp(_) | Connection::AutoConnect)
         || !matches!(&connection, Connection::Provider(provider) if provider_is_browser_use(provider))
     {
-        return auto_launch_inner(state, plugins, cmd, strict_state).await;
+        return Box::pin(auto_launch_inner(state, plugins, cmd, strict_state)).await;
     }
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
     let result = match tokio::time::timeout(
         BROWSER_USE_SETUP_DEADLINE,
-        auto_launch_inner(state, plugins, cmd, strict_state),
+        Box::pin(auto_launch_inner(state, plugins, cmd, strict_state)),
     )
     .await
     {
@@ -5703,16 +5703,17 @@ async fn handle_launch_for_target(
             .and_then(Value::as_str)
             .is_some_and(provider_is_browser_use)
     {
-        return handle_launch_inner(cmd, state).await;
+        return Box::pin(handle_launch_inner(cmd, state)).await;
     }
     let filter = state.domain_filter.read().await.clone();
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
-    let result = match tokio::time::timeout(deadline, handle_launch_inner(cmd, state)).await {
-        Ok(result) => result,
-        Err(_) => Err(browser_use_setup_timeout(state).await),
-    };
+    let result =
+        match tokio::time::timeout(deadline, Box::pin(handle_launch_inner(cmd, state))).await {
+            Ok(result) => result,
+            Err(_) => Err(browser_use_setup_timeout(state).await),
+        };
     if result.is_err() {
         restore_domain_filter(state, &filter).await;
         *state.proxy_credentials.write().await = credentials;
