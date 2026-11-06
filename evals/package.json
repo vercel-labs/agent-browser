@@ -4,14 +4,27 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "eval": "bun run run.ts",
-    "eval:claude": "bun run run.ts --provider claude",
-    "eval:codex": "bun run run.ts --provider codex",
+    "eval": "node sandbox/run.mjs run",
+    "eval:claude": "node sandbox/run.mjs run --provider claude",
+    "eval:codex": "node sandbox/run.mjs run --provider codex",
+    "eval:prompt": "bun run run.ts",
     "eval:context": "bun run context-footprint.ts",
     "eval:judge": "bun run run.ts --judge",
-    "eval:json": "bun run run.ts --json"
+    "eval:json": "bun run run.ts --json",
+    "eval:live": "node sandbox/run.mjs run",
+    "eval:paired": "node sandbox/run.mjs run --mode paired",
+    "eval:local": "python3 live-evals.py",
+    "sandbox:prepare": "node sandbox/run.mjs prepare",
+    "sandbox:check-auth": "node sandbox/check-auth.mjs",
+    "test:live": "python3 -m unittest discover -s live -p 'test_*.py'",
+    "test:sandbox": "node --test sandbox/*.test.mjs"
   },
   "devDependencies": {
     "bun-types": "^1.3.12"
+  },
+  "dependencies": {
+    "@agent-browser/sandbox": "0.38.0",
+    "@vercel/oidc": "3.2.0",
+    "@vercel/sandbox": "3.3.0"
   }
 }
