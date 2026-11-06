@@ -78,6 +78,8 @@ const TOOL_MOUSE_WHEEL: &str = "agent_browser_mouse_wheel";
 const TOOL_SET_VIEWPORT: &str = "agent_browser_set_viewport";
 const TOOL_SET_DEVICE: &str = "agent_browser_set_device";
 const TOOL_SET_GEO: &str = "agent_browser_set_geo";
+const TOOL_SET_TIMEZONE: &str = "agent_browser_set_timezone";
+const TOOL_SET_LOCALE: &str = "agent_browser_set_locale";
 const TOOL_SET_OFFLINE: &str = "agent_browser_set_offline";
 const TOOL_SET_HEADERS: &str = "agent_browser_set_headers";
 const TOOL_SET_CREDENTIALS: &str = "agent_browser_set_credentials";
@@ -273,7 +275,7 @@ impl ToolProfile {
             Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
             Self::Tabs => "Tab, window, frame, and JavaScript dialog management.",
             Self::React => "React tree inspection, render recording, Suspense inspection, Web Vitals, SPA pushstate, and init-script removal.",
-            Self::Mobile => "Viewport/device/geolocation/media emulation plus touch, swipe, and lower-level mouse tools.",
+            Self::Mobile => "Viewport/device/geolocation/timezone/locale/media emulation plus touch, swipe, and lower-level mouse tools.",
             Self::Webmcp => "Experimental page-provided WebMCP discovery, invocation, detached results, and cancellation.",
             Self::All => "Every MCP tool, including the full typed CLI parity surface.",
         }
@@ -508,6 +510,8 @@ const MOBILE_PROFILE_TOOLS: &[&str] = &[
     TOOL_SET_VIEWPORT,
     TOOL_SET_DEVICE,
     TOOL_SET_GEO,
+    TOOL_SET_TIMEZONE,
+    TOOL_SET_LOCALE,
     TOOL_SET_MEDIA,
     TOOL_TAP,
     TOOL_SWIPE,
@@ -1304,6 +1308,20 @@ fn parity_tools() -> Vec<Value> {
             "Set geolocation with finite latitude and longitude.",
             json!({ "latitude": number_schema(), "longitude": number_schema() }),
             &["latitude", "longitude"],
+        ),
+        tool(
+            TOOL_SET_TIMEZONE,
+            "Set timezone",
+            "Override Intl timezone for the current page and tabs opened later. Use off or default to clear.",
+            json!({ "timezoneId": { "type": "string", "description": "IANA timezone ID such as America/New_York or UTC. Use off or default to clear." } }),
+            &["timezoneId"],
+        ),
+        tool(
+            TOOL_SET_LOCALE,
+            "Set locale",
+            "Override navigator.language for the current page and tabs opened later. Use off or default to clear.",
+            json!({ "locale": { "type": "string", "description": "BCP 47 locale tag such as en-GB. Use off or default to clear." } }),
+            &["locale"],
         ),
         tool(
             TOOL_SET_OFFLINE,
@@ -2506,6 +2524,8 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SET_VIEWPORT => call_set_viewport(arguments),
         TOOL_SET_DEVICE => call_one_string(arguments, "set device", "device"),
         TOOL_SET_GEO => call_set_geo(arguments),
+        TOOL_SET_TIMEZONE => call_cli_tool(arguments, set_timezone_args(arguments)?, None),
+        TOOL_SET_LOCALE => call_cli_tool(arguments, set_locale_args(arguments)?, None),
         TOOL_SET_OFFLINE => call_set_bool(arguments, "offline", "enabled"),
         TOOL_SET_HEADERS => call_set_headers(arguments),
         TOOL_SET_CREDENTIALS => call_set_credentials(arguments),
@@ -3423,6 +3443,22 @@ fn call_set_geo(arguments: &Value) -> Result<Value, ProtocolError> {
         vec!["set".to_string(), "geo".to_string(), latitude, longitude],
         None,
     )
+}
+
+fn set_timezone_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    Ok(vec![
+        "set".to_string(),
+        "timezone".to_string(),
+        required_string(arguments, "timezoneId")?,
+    ])
+}
+
+fn set_locale_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    Ok(vec![
+        "set".to_string(),
+        "locale".to_string(),
+        required_string(arguments, "locale")?,
+    ])
 }
 
 fn call_set_bool(arguments: &Value, setting: &str, key: &str) -> Result<Value, ProtocolError> {
@@ -5582,6 +5618,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["set", "media", "dark", "reduced-motion"]);
+    }
+
+    #[test]
+    fn set_timezone_args_map_timezone_id() {
+        let args = set_timezone_args(&json!({ "timezoneId": "UTC" })).unwrap();
+        assert_eq!(args, vec!["set", "timezone", "UTC"]);
+    }
+
+    #[test]
+    fn set_locale_args_map_locale_tag() {
+        let args = set_locale_args(&json!({ "locale": "en-GB" })).unwrap();
+        assert_eq!(args, vec!["set", "locale", "en-GB"]);
+    }
+
+    #[test]
+    fn set_timezone_and_locale_are_on_mobile_profile() {
+        assert!(MOBILE_PROFILE_TOOLS.contains(&TOOL_SET_TIMEZONE));
+        assert!(MOBILE_PROFILE_TOOLS.contains(&TOOL_SET_LOCALE));
+        assert!(ToolProfile::Mobile.tools().contains(&TOOL_SET_TIMEZONE));
+        assert!(ToolProfile::Mobile.tools().contains(&TOOL_SET_LOCALE));
     }
 
     #[test]
