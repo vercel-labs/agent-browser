@@ -16505,6 +16505,17 @@ async fn e2e_firefox_download() {
         std::fs::read_to_string(&repeated_dest).unwrap(),
         "downloaded"
     );
+
+    let inline_dest = out.path().join("inline.txt");
+    let resp = firefox_act(
+        &mut state,
+        "download",
+        "#dl-inline",
+        json!({ "path": inline_dest.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(std::fs::read_to_string(&inline_dest).unwrap(), "real");
     firefox_close(&mut state).await;
 }
 
@@ -16952,6 +16963,13 @@ async fn e2e_firefox_har_preserves_post_body_and_elapsed_time() {
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
     firefox_open(&mut state, &fixture.url).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "tracked-start", "action": "requests" }),
+        )
+        .await,
+    );
     let started = firefox_command(
         &mut state,
         json!({ "id": "har-start", "action": "har_start", "content": "all" }),
@@ -16985,6 +17003,28 @@ async fn e2e_firefox_har_preserves_post_body_and_elapsed_time() {
     assert!(entry["time"].as_f64().unwrap() >= 300.0);
     assert!(entry["timings"]["wait"].as_f64().unwrap() >= 300.0);
     assert!(entry["timings"]["send"].as_f64().unwrap() >= 0.0);
+    let tracked = firefox_command(
+        &mut state,
+        json!({ "id": "tracked", "action": "requests", "filter": "/har-post" }),
+    )
+    .await;
+    assert_success(&tracked);
+    let request = get_data(&tracked)["requests"]
+        .as_array()
+        .and_then(|requests| requests.first())
+        .expect("tracked requests must contain the HAR POST");
+    assert_eq!(request["postData"], "payload=har-probe");
+    let detail = firefox_command(
+        &mut state,
+        json!({
+            "id": "tracked-detail",
+            "action": "request_detail",
+            "requestId": request["requestId"],
+        }),
+    )
+    .await;
+    assert_success(&detail);
+    assert_eq!(get_data(&detail)["postData"], "payload=har-probe");
     firefox_close(&mut state).await;
 }
 
