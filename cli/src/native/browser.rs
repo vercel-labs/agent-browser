@@ -1262,36 +1262,41 @@ impl BrowserManager {
     }
 
     /// Index of the lowest-numbered page whose renderer answers a liveness
-    /// probe, or `None` if every tab is discarded. The conventional active tab
-    /// (index 0) is almost always live, so it is probed first to keep the
-    /// common connect instant; only when it is discarded do we probe the rest
-    /// concurrently to pick a live tab to enable domains on, instead of hanging
-    /// on the dead first one (#1036). Probing is browser-safe: a `Runtime.evaluate`
+    /// probe, or `None` if every tab is discarded. Every tab is probed in a
+    /// single concurrent round and the lowest live index is returned as soon
+    /// as all lower indices have resolved, so connecting costs at most one
+    /// probe timeout (3 s) no matter how many tabs are discarded (#2431).
+    /// Probing one tab first and then the rest in a second round cost a full
+    /// timeout per discarded tab. The conventional active tab (index 0) is
+    /// almost always live, so it still answers in milliseconds and the common
+    /// connect stays instant. Probing is browser-safe: a `Runtime.evaluate`
     /// to a discarded session simply never answers (cleaned up when the probe
     /// times out) and does not reload or focus the tab.
     async fn find_live_page_index(&self, session_ids: &[String]) -> Option<usize> {
-        if let Some(first) = session_ids.first() {
-            if self
-                .renderer_responds(first, RENDERER_PROBE_TIMEOUT_MS)
-                .await
-            {
-                return Some(0);
-            }
-        }
-        let probes = session_ids
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+        let mut probes: FuturesUnordered<_> = session_ids
             .iter()
             .enumerate()
-            .skip(1)
             .map(|(index, session_id)| async move {
-                self.renderer_responds(session_id, RENDERER_PROBE_TIMEOUT_MS)
-                    .await
-                    .then_some(index)
-            });
-        futures_util::future::join_all(probes)
-            .await
-            .into_iter()
-            .flatten()
-            .min()
+                let live = self
+                    .renderer_responds(session_id, RENDERER_PROBE_TIMEOUT_MS)
+                    .await;
+                (index, live)
+            })
+            .collect();
+        // One concurrent round; still pick the lowest live index.
+        let mut results: Vec<Option<bool>> = vec![None; session_ids.len()];
+        while let Some((index, live)) = probes.next().await {
+            results[index] = Some(live);
+            for (i, result) in results.iter().enumerate() {
+                match result {
+                    Some(true) => return Some(i),
+                    Some(false) => continue,
+                    None => break,
+                }
+            }
+        }
+        None
     }
 
     async fn resume_if_waiting(&self, session_id: &str) -> Result<(), String> {
@@ -5488,6 +5493,42 @@ mod tests {
             activations.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "with a live tab available, connect must not reactivate (reload/focus) any tab"
+        );
+    }
+
+    /// Regression test for #2431: with two discarded tabs ahead of a live one,
+    /// connect must cost a single renderer-probe round (3 s), not one round
+    /// per discarded tab. The old code probed the first tab alone (3 s), then
+    /// probed the rest together (another 3 s for the second discarded tab),
+    /// so connect took ~6 s. One concurrent round bounds it at 3 s plus
+    /// overhead; 5 s leaves 2 s of slack on a loaded machine while the old
+    /// two-round path needs at least 6 s.
+    #[tokio::test]
+    async fn test_connect_two_discarded_tabs_costs_one_probe_round() {
+        let (url, activations) =
+            start_mock_cdp_connect(vec![("D1", false), ("D2", false), ("ALIVE", true)], false)
+                .await;
+
+        let started = std::time::Instant::now();
+        let mgr = tokio::time::timeout(Duration::from_secs(15), BrowserManager::connect_cdp(&url))
+            .await
+            .expect("connect must not hang with two discarded tabs ahead of a live one")
+            .expect("connect should succeed by selecting the live tab");
+        let elapsed = started.elapsed();
+
+        assert_eq!(mgr.pages.len(), 3, "all targets should still be listed");
+        assert_eq!(
+            mgr.active_page_index, 2,
+            "the live tab, not a discarded one, must become active"
+        );
+        assert_eq!(
+            activations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "with a live tab available, connect must not reactivate (reload/focus) any tab"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect with two discarded tabs took {elapsed:?}; probing must be one concurrent round, not one round per discarded tab"
         );
     }
 
