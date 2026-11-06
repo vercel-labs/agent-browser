@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
 use crate::session_files::SessionFile;
 use crate::session_settings::{
-    named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running,
+    named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running, Store,
 };
 use crate::validation::{is_valid_session_name, session_name_error};
 
@@ -612,6 +612,8 @@ pub struct DaemonState {
     pub session_id: String,
     /// The settings this session runs with.
     pub settings: Running,
+    /// Where the security settings are kept across daemon restarts.
+    store: Arc<dyn Store>,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
@@ -755,10 +757,21 @@ impl DaemonState {
         }
     }
 
+    /// A session seeded from the environment whose security settings are kept
+    /// in memory only.
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_store(
+            Running::from_env(),
+            Arc::new(crate::session_settings::MemStore::default()),
+        )
+    }
+
+    /// A session that starts with `settings` and keeps its security settings
+    /// in `store`.
+    pub fn with_store(settings: Running, store: Arc<dyn Store>) -> Self {
         let session_id =
             env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
-        let settings = Running::from_env();
         let security = settings.security();
         let restore = settings.restore();
         // A corrupt binding file is surfaced later, on attach; it does not
@@ -781,9 +794,11 @@ impl DaemonState {
             snapshot_revisions: HashMap::new(),
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
+                // An empty list is no filter, as when it is cleared live.
                 security
                     .allowed_domains
                     .as_ref()
+                    .filter(|domains| !domains.is_empty())
                     .map(|domains| DomainFilter::new(&domains.join(","))),
             )),
             event_tracker: EventTracker::new(),
@@ -867,6 +882,7 @@ impl DaemonState {
             pin_tab,
             last_persisted_binding: None,
             settings,
+            store,
         }
     }
 
@@ -902,11 +918,13 @@ impl DaemonState {
     /// Create state with an optional stream client slot and server instance
     /// (for daemon startup with stream server).
     pub fn new_with_stream(
+        settings: Running,
+        store: Arc<dyn Store>,
         stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
         stream_server: Option<Arc<StreamServer>>,
         idle_activity: Arc<IdleActivity>,
     ) -> Self {
-        let mut s = Self::new();
+        let mut s = Self::with_store(settings, store);
         if stream_server.is_some() {
             s.request_tracking = true;
         }
@@ -3164,7 +3182,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
-        let mut resp = match handle_close(state).await {
+        let mut resp = match close_session(state, false).await {
             Ok(data) => success_response(&id, data),
             Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
         };
@@ -3488,7 +3506,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     state.settings.connection(),
                     Connection::Cdp(_)
                 ));
-                rollback_launch_settings(state, &mut settings_outcome, &e).await;
+                let rollback = rollback_launch_settings(state, &mut settings_outcome, &e).await;
+                let e = with_rollback_error(&e, rollback);
                 let mut resp = error_response(&id, &format!("{}: {}", context, e));
                 attach_settings_outcome(&mut resp, &settings_outcome);
                 return resp;
@@ -3603,12 +3622,16 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 Ok(()) => handle_launch(cmd, state).await,
                 Err(e) => Err(e),
             };
-            if result.is_ok() {
-                state.webmcp_enabled = state.settings.webmcp();
-            } else if let Err(e) = &result {
-                rollback_launch_settings(state, &mut settings_outcome, e).await;
+            match result {
+                Ok(data) => {
+                    state.webmcp_enabled = state.settings.webmcp();
+                    Ok(data)
+                }
+                Err(e) => {
+                    let rollback = rollback_launch_settings(state, &mut settings_outcome, &e).await;
+                    Err(with_rollback_error(&e, rollback))
+                }
             }
-            result
         }
         "navigate" => handle_navigate(cmd, state).await,
         "read" => handle_read(cmd, state).await,
@@ -5959,14 +5982,14 @@ fn is_containment_rejection(error: &str) -> bool {
 /// start) never widens containment: the allowed domains the command asked for
 /// stay installed. A launch rejected because the allowed domains cannot be
 /// enforced for it is rejected whole, so they are put back too.
+///
+/// Returns why the stored security settings could not be put back, if so.
 async fn rollback_launch_settings(
     state: &mut DaemonState,
     outcome: &mut SettingsOutcome,
     error: &str,
-) {
-    let Some(pending) = outcome.pending.take() else {
-        return;
-    };
+) -> Option<String> {
+    let pending = outcome.pending.take()?;
     let rejected = is_containment_rejection(error);
     let restored: Vec<Key> = pending
         .keys
@@ -5987,6 +6010,22 @@ async fn rollback_launch_settings(
     state.cdp_headers = pending.cdp_headers;
     *state.proxy_credentials.write().await = pending.proxy_credentials;
     outcome.mark_rolled_back(&restored);
+    if rejected {
+        return state
+            .store
+            .save(&state.settings.security())
+            .err()
+            .map(|e| format!("the stored security settings could not be restored: {}", e));
+    }
+    None
+}
+
+/// The launch error with the rollback problem, if any, appended.
+fn with_rollback_error(error: &str, rollback: Option<String>) -> String {
+    match rollback {
+        Some(why) => format!("{} ({})", error, why),
+        None => error.to_string(),
+    }
 }
 
 /// CA trust is compared by content, not by path: the same certificates from
@@ -6068,6 +6107,16 @@ async fn apply_settings_patch(
     } else {
         None
     };
+
+    // Security settings are stored before they are applied, so a failed write
+    // leaves the session as it was and a stored setting never lags the running one.
+    let next_security = plan.next.security();
+    if next_security != state.settings.security() {
+        state
+            .store
+            .save(&next_security)
+            .map_err(|e| e.to_string())?;
+    }
 
     let had_browser = has_active_browser_session(state);
     let relaunched_browser = plan.relaunch && had_browser;
@@ -6297,8 +6346,8 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             Ok(result)
         }
         Err(e) => {
-            rollback_launch_settings(state, &mut outcome, &e).await;
-            Err(e)
+            let rollback = rollback_launch_settings(state, &mut outcome, &e).await;
+            Err(with_rollback_error(&e, rollback))
         }
     }
 }
@@ -6706,7 +6755,15 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     Ok(data)
 }
 
+/// A user `close`: the session is over, so its stored security settings go.
 pub(crate) async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
+    close_session(state, true).await
+}
+
+/// Closes the browser and what hangs off it. The stored security settings are
+/// forgotten only when `forget_settings` is set and the close succeeded: the
+/// daemon restarts the CLI asks for (upgrade, changed options) keep them.
+async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
     close_all_browser_backends(state).await?;
     state.attached_target = None;
@@ -6735,6 +6792,11 @@ pub(crate) async fn handle_close(state: &mut DaemonState) -> Result<Value, Strin
         }
         Ok(None) => None,
         Err(e) => Some(e),
+    };
+    let settings_clear_error = if forget_settings {
+        state.store.clear().err()
+    } else {
+        None
     };
     let unsaved = if state.flow.active() {
         state.har_recording = false;
@@ -6768,6 +6830,9 @@ pub(crate) async fn handle_close(state: &mut DaemonState) -> Result<Value, Strin
     }
     if let Some(err) = pin_release_error {
         reply["pinReleaseError"] = json!(err);
+    }
+    if let Some(err) = settings_clear_error {
+        reply["settingsClearError"] = json!(err.to_string());
     }
     Ok(reply)
 }
@@ -19136,9 +19201,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
         guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", " , ");
         let state = DaemonState::new();
-        let filter = state.domain_filter.try_read().unwrap();
-        let filter = filter.as_ref().expect("domain filter");
-        assert!(filter.is_allowed("any.test"));
+        // No filter at all, so direct-page providers are not refused either.
+        assert!(state.domain_filter.try_read().unwrap().is_none());
     }
 
     #[test]
@@ -22895,6 +22959,472 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(auto_launch(&mut state, Vec::new()).await.is_err());
 
         assert_eq!(state.engine, "chrome");
+    }
+
+    // === Security settings kept across daemon restarts ===
+
+    use crate::session_settings::{FsStore, MemStore, SecurityView, StoreError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A store that counts saves and can start failing them.
+    struct FlakyStore {
+        inner: MemStore,
+        saves: AtomicUsize,
+        fail_from: usize,
+    }
+
+    impl FlakyStore {
+        fn new(fail_from: usize) -> Arc<FlakyStore> {
+            Arc::new(FlakyStore {
+                inner: MemStore::default(),
+                saves: AtomicUsize::new(0),
+                fail_from,
+            })
+        }
+
+        fn counting() -> Arc<FlakyStore> {
+            FlakyStore::new(usize::MAX)
+        }
+
+        fn saves(&self) -> usize {
+            self.saves.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Store for FlakyStore {
+        fn load(&self) -> Result<Option<SecurityView>, StoreError> {
+            self.inner.load()
+        }
+
+        fn save(&self, view: &SecurityView) -> Result<(), StoreError> {
+            let attempt = self.saves.fetch_add(1, Ordering::SeqCst);
+            if attempt >= self.fail_from {
+                return Err(StoreError::PersistFailed("disk full".to_string()));
+            }
+            self.inner.save(view)
+        }
+
+        fn clear(&self) -> Result<(), StoreError> {
+            self.inner.clear()
+        }
+    }
+
+    fn write_private(path: &std::path::Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    /// A daemon start for `session`: the settings come from `store`, as in
+    /// `run_daemon`.
+    fn boot_state(store: Arc<dyn Store>, session: &str) -> DaemonState {
+        let settings = Running::boot(store.as_ref(), session).unwrap();
+        DaemonState::with_store(settings, store)
+    }
+
+    fn domains(list: &[&str]) -> (Key, Requested) {
+        set_to(Key::AllowedDomains, json!(list))
+    }
+
+    fn security_patch(policy_path: &str) -> Patch {
+        patch_with(vec![
+            domains(&["example.com"]),
+            set_to(Key::ActionPolicy, json!(policy_path)),
+            set_to(Key::ConfirmActions, json!("navigate,click")),
+        ])
+    }
+
+    #[tokio::test]
+    async fn test_a_stored_empty_domain_list_restores_as_no_filter() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        write_private(&dir.path().join("s.settings"), r#"{"allowedDomains":[]}"#);
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+
+        let state = boot_state(store, "s");
+
+        assert!(state.domain_filter.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_a_respawned_daemon_keeps_the_filter_policy_and_confirm_categories() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let policy = dir.path().join("policy.json");
+        fs::write(&policy, r#"{"default":"deny"}"#).unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = DaemonState::with_store(Running::defaults(), store.clone());
+        let patch = security_patch(policy.to_str().unwrap());
+        apply_settings_patch(&mut first, &patch, true)
+            .await
+            .unwrap();
+        drop(first);
+
+        // A new process over the same files, with no flags and an empty env.
+        let second = boot_state(store.clone(), "s");
+
+        assert_eq!(current_allowed_domains(&second).await, vec!["example.com"]);
+        assert!(second.policy.is_some(), "the action policy is back");
+        assert!(
+            second.confirm_actions.is_some(),
+            "the confirm categories are back"
+        );
+        assert_eq!(
+            second.settings.security().action_policy_path.as_deref(),
+            policy.to_str(),
+            "the policy path is kept as given"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_respawned_daemon_still_rejects_state_while_the_filter_is_active() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = DaemonState::with_store(Running::defaults(), store.clone());
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+        drop(first);
+
+        let mut second = boot_state(store, "s");
+
+        let replay = ensure_state_replay_supported_by_active_domain_filter(&second, "state load")
+            .await
+            .unwrap_err();
+        assert!(
+            replay.contains("--allowed-domains is not supported"),
+            "{replay}"
+        );
+        let launch = json!({ "action": "launch", "storageState": "/tmp/s.json" });
+        let err = handle_launch(&launch, &mut second).await.unwrap_err();
+        assert!(
+            err.contains("--allowed-domains is not supported with --state"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_restart_without_close_keeps_the_stored_settings() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = boot_state(store.clone(), "s");
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // Idle expiry, a crash and a kill all end the process without `close`.
+        drop(first);
+        drop(boot_state(store.clone(), "s"));
+        let third = boot_state(store.clone(), "s");
+
+        assert_eq!(current_allowed_domains(&third).await, vec!["example.com"]);
+        assert!(dir.path().join("s.settings").exists());
+    }
+
+    #[tokio::test]
+    async fn test_close_clears_the_stored_settings() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = boot_state(store.clone(), "s");
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(dir.path().join("s.settings").exists());
+
+        let reply = handle_close(&mut first).await.unwrap();
+
+        assert_eq!(reply["closed"], true, "{reply}");
+        assert!(reply.get("settingsClearError").is_none(), "{reply}");
+        assert!(!dir.path().join("s.settings").exists());
+        let next = boot_state(store, "s");
+        assert!(next.domain_filter.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_the_internal_shutdown_of_a_restart_keeps_the_stored_settings() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = boot_state(store.clone(), "s");
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // What ensure_daemon sends before it starts a replacement daemon.
+        let resp = execute_command(
+            &json!({ "id": "restart-close", "action": INTERNAL_DAEMON_SHUTDOWN_ACTION }),
+            &mut first,
+        )
+        .await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(dir.path().join("s.settings").exists());
+        let next = boot_state(store, "s");
+        assert_eq!(current_allowed_domains(&next).await, vec!["example.com"]);
+    }
+
+    /// A state holding an allowlist and a policy file with `policy`.
+    async fn contained_state_with_policy(
+        dir: &std::path::Path,
+        policy: &str,
+    ) -> (DaemonState, Arc<dyn Store>) {
+        let file = dir.join("policy.json");
+        fs::write(&file, policy).unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir, "s"));
+        let mut state = boot_state(store.clone(), "s");
+        let patch = patch_with(vec![
+            domains(&["example.com"]),
+            set_to(Key::ActionPolicy, json!(file.to_str().unwrap())),
+        ]);
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        (state, store)
+    }
+
+    #[tokio::test]
+    async fn test_a_close_denied_by_policy_keeps_the_stored_settings() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = contained_state_with_policy(dir.path(), r#"{"deny":["close"]}"#).await;
+
+        let resp = execute_command(&json!({ "id": "1", "action": "close" }), &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(dir.path().join("s.settings").exists());
+    }
+
+    #[tokio::test]
+    async fn test_a_close_parked_for_confirmation_keeps_the_settings_until_confirmed() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) =
+            contained_state_with_policy(dir.path(), r#"{"confirm":["close"]}"#).await;
+
+        let parked = execute_command(&json!({ "id": "1", "action": "close" }), &mut state).await;
+        assert_eq!(parked["data"]["confirmation_required"], true, "{parked}");
+        assert!(dir.path().join("s.settings").exists());
+
+        let confirmed =
+            execute_command(&json!({ "id": "2", "action": "confirm" }), &mut state).await;
+        assert_eq!(confirmed["success"], true, "{confirmed}");
+        assert!(!dir.path().join("s.settings").exists());
+    }
+
+    #[tokio::test]
+    async fn test_close_clears_a_file_the_daemon_could_not_read() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        write_private(&dir.path().join("s.settings"), "{not json");
+        assert!(Running::boot(store.as_ref(), "s").is_err());
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+
+        handle_close(&mut state).await.unwrap();
+
+        assert!(Running::boot(store.as_ref(), "s").is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_an_unchanged_value_does_not_write() {
+        let (_env, _) = isolated_state();
+        let store = FlakyStore::counting();
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+        let patch = patch_with(vec![domains(&["example.com"])]);
+
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        assert_eq!(store.saves(), 1);
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        apply_settings_patch(&mut state, &Patch::default(), true)
+            .await
+            .unwrap();
+        let other = patch_with(vec![set_to(Key::UserAgent, json!("ua"))]);
+        apply_settings_patch(&mut state, &other, true)
+            .await
+            .unwrap();
+
+        assert_eq!(store.saves(), 1, "only the first change was written");
+    }
+
+    #[tokio::test]
+    async fn test_a_launch_rejected_for_containment_restores_the_stored_value() {
+        let (_env, _) = isolated_state();
+        let store = FlakyStore::counting();
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+        apply_settings_patch(&mut state, &patch_with(vec![domains(&["a.com"])]), true)
+            .await
+            .unwrap();
+        let cmd = json!({
+            "action": "launch",
+            "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/test",
+            "allowedDomains": ["b.com"]
+        });
+
+        assert!(handle_launch(&cmd, &mut state).await.is_err());
+
+        assert_eq!(current_allowed_domains(&state).await, vec!["a.com"]);
+        let stored = store.load().unwrap().unwrap();
+        assert_eq!(stored.allowed_domains, Some(vec!["a.com".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_launch_that_is_not_a_rejection_keeps_the_new_stored_value() {
+        let (_env, _) = isolated_state();
+        let store = FlakyStore::counting();
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+        let cmd = json!({
+            "action": "launch",
+            "executablePath": "/nonexistent/chrome",
+            "allowedDomains": ["example.com"]
+        });
+
+        assert!(handle_launch(&cmd, &mut state).await.is_err());
+
+        let stored = store.load().unwrap().unwrap();
+        assert_eq!(
+            stored.allowed_domains,
+            Some(vec!["example.com".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_rejection_reports_a_stored_value_that_could_not_be_restored() {
+        let (_env, _) = isolated_state();
+        let store = FlakyStore::new(2);
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+        apply_settings_patch(&mut state, &patch_with(vec![domains(&["a.com"])]), true)
+            .await
+            .unwrap();
+        let cmd = json!({
+            "action": "launch",
+            "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/test",
+            "allowedDomains": ["b.com"]
+        });
+
+        let err = handle_launch(&cmd, &mut state).await.unwrap_err();
+
+        // Save 0 (a.com) and save 1 (b.com) succeed; the restore (save 2) fails.
+        assert!(
+            err.contains("the stored security settings could not be restored")
+                && err.contains("disk full"),
+            "{err}"
+        );
+        assert_eq!(store.saves(), 3, "the restore was attempted");
+        assert_eq!(current_allowed_domains(&state).await, vec!["a.com"]);
+    }
+
+    #[tokio::test]
+    async fn test_an_empty_list_clears_the_filter_and_the_clear_persists() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = boot_state(store.clone(), "s");
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+
+        apply_settings_patch(&mut first, &patch_with(vec![domains(&[])]), true)
+            .await
+            .unwrap();
+        assert!(first.domain_filter.read().await.is_none());
+        drop(first);
+
+        let second = boot_state(store, "s");
+        assert!(current_allowed_domains(&second).await.is_empty());
+        assert_eq!(second.settings.security().allowed_domains, Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn test_a_failing_store_leaves_the_session_untouched() {
+        let (_env, _) = isolated_state();
+        let store = FlakyStore::new(0);
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+        let before = state.settings.clone();
+
+        let err = apply_settings_patch(&mut state, &security_patch("/p.json"), true)
+            .await
+            .err()
+            .expect("the write fails");
+
+        assert!(err.contains("disk full"), "{err}");
+        assert!(state.domain_filter.read().await.is_none());
+        assert!(state.policy.is_none());
+        assert!(state.confirm_actions.is_none());
+        assert_eq!(state.settings, before);
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_a_failing_store_fails_the_command_before_it_runs() {
+        let (_env, _) = isolated_state();
+        let mut state = DaemonState::with_store(Running::defaults(), FlakyStore::new(0));
+        let cmd = json!({
+            "id": "1",
+            "action": "navigate",
+            "url": "about:blank",
+            "settings": { "allowed-domains": ["example.com"] }
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(
+            resp["error"].as_str().unwrap().contains("disk full"),
+            "{resp}"
+        );
+        assert!(state.domain_filter.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stores_in_other_namespaces_do_not_leak_settings() {
+        let (_env, _) = isolated_state();
+        let one = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(one.path(), "s"));
+        let mut state = boot_state(store, "s");
+        apply_settings_patch(
+            &mut state,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let elsewhere = boot_state(Arc::new(FsStore::new(other.path(), "s")), "s");
+        let sibling = boot_state(Arc::new(FsStore::new(one.path(), "t")), "t");
+
+        assert!(elsewhere.domain_filter.read().await.is_none());
+        assert!(sibling.domain_filter.read().await.is_none());
     }
 }
 
