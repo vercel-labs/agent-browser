@@ -1409,4 +1409,36 @@ mod tests {
             json!("loopback")
         );
     }
+    #[test]
+    fn a_link_local_literal_is_refused_before_the_resolver() {
+        for start in [
+            "http://169.254.169.254/latest/meta-data",
+            "http://[fe80::1]/",
+            "http://[fd00:ec2::254]/",
+            "http://100.100.100.200/",
+            "http://[::ffff:169.254.169.254]/",
+        ] {
+            let flow = flow_of(json!({ "startUrl": start }));
+            let err = crate::native::flow::HostPolicy::of(&flow)
+                .check(start)
+                .unwrap_err();
+            assert!(
+                err.contains("link-local or cloud metadata"),
+                "{start}: {err}"
+            );
+        }
+        for start in [
+            "http://10.0.0.5/",
+            "http://127.0.0.1:3000/",
+            "http://[::1]:3000/",
+        ] {
+            let flow = flow_of(json!({ "startUrl": start }));
+            assert!(
+                crate::native::flow::HostPolicy::of(&flow)
+                    .check(start)
+                    .is_ok(),
+                "{start}"
+            );
+        }
+    }
 }
