@@ -198,6 +198,9 @@ async fn install_domain_filter_runtime_script(
     if allowed_domains.is_empty() {
         return Ok(());
     }
+    if paused_before_document {
+        return Ok(());
+    }
 
     let script = domain_filter_script(allowed_domains);
     let evaluation = match client
@@ -209,14 +212,6 @@ async fn install_domain_filter_runtime_script(
         .await
     {
         Ok(evaluation) => evaluation,
-        // An auto-attached target is paused before its first document, so it
-        // has no context to patch; the new-document script above covers it.
-        Err(error)
-            if paused_before_document
-                && error.contains("Cannot find default execution context") =>
-        {
-            return Ok(())
-        }
         Err(error) => return Err(error),
     };
     if let Some(details) = evaluation.get("exceptionDetails") {
@@ -750,7 +745,7 @@ mod tests {
 
     #[tokio::test]
     async fn domain_filter_script_fails_closed_on_other_runtime_errors() {
-        let error = install_script_with_runtime_error("Execution context was destroyed.", true)
+        let error = install_script_with_runtime_error("Execution context was destroyed.", false)
             .await
             .unwrap_err();
         assert!(
