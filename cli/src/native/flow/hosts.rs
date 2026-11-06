@@ -97,6 +97,19 @@ impl HostPolicy {
         let host = parsed
             .host_str()
             .ok_or_else(|| format!("'{}' has no host", url))?;
+        // An IP literal never reaches the resolver, so the address is
+        // checked here.
+        let literal = match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => Some(std::net::IpAddr::V4(ip)),
+            Some(url::Host::Ipv6(ip)) => Some(std::net::IpAddr::V6(ip)),
+            _ => None,
+        };
+        if let Some(ip) = literal.filter(|ip| super::net::is_link_local_or_metadata(*ip)) {
+            return Err(format!(
+                "{} is a link-local or cloud metadata address; flow run never sends requests there",
+                ip.to_canonical()
+            ));
+        }
         if self.allows_host(host) {
             return Ok(());
         }

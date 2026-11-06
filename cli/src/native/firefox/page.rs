@@ -199,7 +199,7 @@ pub async fn url(state: &mut DaemonState) -> Result<Value, String> {
 
 /// Document title as `{title}`.
 pub async fn title(state: &mut DaemonState) -> Result<Value, String> {
-    Ok(json!({ "title": session(state)?.eval("document.title").await? }))
+    Ok(json!({ "title": session(state)?.eval_top("document.title").await? }))
 }
 
 /// Page HTML. Must return `{html, origin}` like Chrome's `handle_content`.
@@ -565,6 +565,29 @@ mod tests {
         state.firefox = Some(ff);
         let result = wait(&json!({"timeout": 5}), &mut state).await.unwrap();
         assert_eq!(result, json!({ "waited": "timeout", "ms": 5 }));
+    }
+
+    #[tokio::test]
+    async fn title_uses_the_top_context_when_a_frame_is_active() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let (mut ff, _tx, _) = fake_session_with(move |request| {
+            seen.lock().unwrap().push(request.clone());
+            json!({"type": "string", "value": "Page title"})
+        })
+        .await;
+        ff.context = "ctx-frame".into();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        assert_eq!(
+            title(&mut state).await.unwrap(),
+            json!({"title": "Page title"})
+        );
+        assert_eq!(
+            requests.lock().unwrap()[0]["params"]["target"]["context"],
+            "ctx-active"
+        );
     }
 
     #[tokio::test]
