@@ -23020,9 +23020,7 @@ mod firefox_routing_tests {
     async fn failed_firefox_launch_rolls_back_proxy_settings() {
         let _guard = clean_env();
         let (mut state, _calls) = firefox_state().await;
-        state
-            .settings
-            .set(Key::Proxy, json!("http://proxy:3128"));
+        state.settings.set(Key::Proxy, json!("http://proxy:3128"));
         state.settings.set(Key::ProxyUsername, json!("old"));
         state.settings.set(Key::ProxyPassword, json!("secret"));
         state.launch_identity = Some(state.settings.launch_identity());
