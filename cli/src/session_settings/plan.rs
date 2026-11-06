@@ -255,10 +255,14 @@ impl Running {
         // file to replay into it, no proxy credentials to answer challenges
         // with. Inherited values are dropped, and reported as such.
         if next.connection() != Connection::Local {
+            let engine = next.get(Key::Engine).and_then(Value::as_str);
             let drop_engine = matches!(
                 next.connection(),
                 Connection::Cdp(_) | Connection::AutoConnect
-            ) && next.get(Key::Engine).and_then(Value::as_str) != Some("firefox");
+            ) && engine != Some("firefox")
+                || engine == Some("firefox")
+                    && next.connection() != self.connection()
+                    && patch.value(Key::Engine).and_then(Value::as_str) != Some("firefox");
             let engine = drop_engine.then_some(Key::Engine);
             for key in DROPPED_FOR_EXTERNAL.into_iter().chain(engine) {
                 if let Some(current) = next.get(key).cloned() {
