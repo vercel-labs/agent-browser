@@ -110,14 +110,15 @@ The cookie directive creates a reusable `_vercel_jwt` cookie. Treat saved browse
 
 To view a variant other than the one an environment serves, set an override cookie in this browser. Do not use `vc flags set`, `enable`, `disable`, `split`, or `rollout` to view a variant, because they change it for everyone using the environment.
 
-Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api-reference/frameworks/next) apply overrides from the `vercel-flag-overrides` cookie. The cookie value is encrypted with the `FLAGS_SECRET` of the environment under test. Find the flag key and its variants in the source or with `vc flags inspect <flag>`, then mint the cookie without printing the secret. Pulling the secret with `--project` requires Vercel CLI `56.3.0` or newer; if the installed version is older, ask the user to upgrade it.
+Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api-reference/frameworks/next) apply overrides from the `vercel-flag-overrides` cookie. The cookie value is encrypted with the `FLAGS_SECRET` of the environment under test. Find the flag key and its variants in the source or with `vc flags inspect <flag>`, then mint the cookie without printing the secret. Pulling the secret with `--project` requires Vercel CLI `56.3.0` or newer; if the installed version is older, ask the user to upgrade it. Each environment has its own `FLAGS_SECRET`, so set `VERCEL_ENVIRONMENT` to the environment that serves the URL under test, such as `preview` or `production`.
 
 ```bash
 (
   set -e
+  test -n "$VERCEL_ENVIRONMENT"
   if [ -z "$FLAGS_SECRET" ]; then
     ENV_FILE="$(mktemp)"
-    vc env pull "$ENV_FILE" --environment preview \
+    vc env pull "$ENV_FILE" --environment "$VERCEL_ENVIRONMENT" \
       --project "$VERCEL_PROJECT" --scope "$VERCEL_SCOPE" --yes >/dev/null
     FLAGS_SECRET="$(grep '^FLAGS_SECRET=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')"
     rm "$ENV_FILE"
