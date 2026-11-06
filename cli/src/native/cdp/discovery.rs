@@ -59,6 +59,19 @@ pub async fn discover_cdp_url_with_timeout(
     discover(host, port, query, timeout, &[], false).await
 }
 
+/// Discover a CDP WebSocket URL using HTTP endpoints only.
+///
+/// This avoids opening a throwaway WebSocket when the caller intends to keep
+/// the first WebSocket connection, which matters for Chrome approval prompts.
+pub async fn discover_cdp_url_http_with_timeout(
+    host: &str,
+    port: u16,
+    query: Option<&str>,
+    timeout: Duration,
+) -> Result<String, (String, String)> {
+    discover_http(host, port, query, timeout, &[], false).await
+}
+
 /// HTTP and WebSocket schemes for discovery. `secure` preserves the
 /// encryption of the user-supplied CDP URL.
 fn discovery_schemes(secure: bool) -> (&'static str, &'static str) {
@@ -77,6 +90,33 @@ async fn discover(
     headers: &[(String, String)],
     secure: bool,
 ) -> Result<String, String> {
+    match discover_http(host, port, query, timeout, headers, secure).await {
+        Ok(ws_url) => Ok(ws_url),
+        Err((version_err, list_err)) => {
+            // Final fallback: direct WebSocket at /devtools/browser.
+            // Chrome 136+ with UI-based remote debugging (chrome://inspect) exposes
+            // CDP over WebSocket but does not serve HTTP discovery endpoints.
+            match discover_cdp_ws(host, port, timeout, headers, secure).await {
+                Ok(ws_url) => Ok(append_query(&ws_url, query)),
+                Err(ws_err) => Err(format!(
+                    "All CDP discovery methods failed for {}:{}: /json/version: {}; /json/list: {}; WebSocket: {}",
+                    host, port, version_err, list_err, ws_err
+                )),
+            }
+        }
+    }
+}
+
+/// HTTP discovery steps: `/json/version`, then `/json/list`. On failure,
+/// returns both step errors so the caller can report or extend them.
+async fn discover_http(
+    host: &str,
+    port: u16,
+    query: Option<&str>,
+    timeout: Duration,
+    headers: &[(String, String)],
+    secure: bool,
+) -> Result<String, (String, String)> {
     // Primary: /json/version (standard path)
     let version_err = match fetch_cdp_info(host, port, timeout, headers, secure).await {
         Ok(info) => {
@@ -105,16 +145,7 @@ async fn discover(
         Err(e) => e,
     };
 
-    // Final fallback: direct WebSocket at /devtools/browser.
-    // Chrome 136+ with UI-based remote debugging (chrome://inspect) exposes
-    // CDP over WebSocket but does not serve HTTP discovery endpoints.
-    match discover_cdp_ws(host, port, timeout, headers, secure).await {
-        Ok(ws_url) => Ok(append_query(&ws_url, query)),
-        Err(ws_err) => Err(format!(
-            "All CDP discovery methods failed for {}:{}: /json/version: {}; /json/list: {}; WebSocket: {}",
-            host, port, version_err, list_err, ws_err
-        )),
-    }
+    Err((version_err, list_err))
 }
 
 /// Bracket an IPv6 address for use in URLs. No-op for IPv4 or already-bracketed addresses.

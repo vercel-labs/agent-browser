@@ -774,9 +774,10 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
             "version": env!("CARGO_PKG_VERSION")
         },
         "instructions": format!(
-            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. When a navigation result lists saved flows that match the task, call agent_browser_flow_run instead of driving the page. Use agent_browser_tools_profiles to see available startup profiles. {}",
+            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. When a navigation result lists saved flows that match the task, call agent_browser_flow_run instead of driving the page. Use agent_browser_tools_profiles to see available startup profiles. {} {}",
             config.profile_names().join(", "),
-            SHARED_ARGUMENTS_INSTRUCTIONS
+            SHARED_ARGUMENTS_INSTRUCTIONS,
+            AUTO_CONNECT_TIMEOUT_INSTRUCTIONS
         )
     })
 }
@@ -2192,6 +2193,10 @@ fn shared_property(key: &str) -> Value {
         _ => unreachable!("shared argument {key} is not advertised"),
     }
 }
+
+/// `autoConnectTimeout` has no tool argument: the server's environment or
+/// config sets it, like the CLI's.
+const AUTO_CONNECT_TIMEOUT_INSTRUCTIONS: &str = "The auto-connect timeout is set only in the MCP server environment (AGENT_BROWSER_AUTO_CONNECT_TIMEOUT) or config (autoConnectTimeout). It bounds auto-connect discovery and the Chrome remote-debugging approval wait; when omitted its effective default is 20000ms, including for implicit recovery after a disconnect, and changing or omitting it reuses the existing daemon and browser connection.";
 
 const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool accepts these optional arguments even when its schema does not list them: session (isolated browser session name), restore (true or a key; restores and auto-saves browser state when the call launches the browser), allowedDomains (domain patterns that restrict browser and read traffic when the call launches the browser; also disables RTCPeerConnection in Chromium sessions, and is rejected when the server environment or config already sets allowed domains), capture (set to flow to record the session so flow steps and flow save can turn it into a reusable flow, when the call launches the browser), extraArgs (extra CLI arguments such as --engine; global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config, are rejected, so set those in the MCP server environment or config), timeoutMs (positive integer, maximum milliseconds to wait for the tool call), namespace (isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (conditions restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), idleTimeout (such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown), and relaunch (boolean, relaunch the session's browser even when no setting changed).";
 
@@ -4999,6 +5004,18 @@ mod tests {
         assert!(props.get("headed").is_some());
         assert!(props.get("webgpu").is_some());
         assert!(props.get("webmcp").is_some());
+    }
+
+    #[test]
+    fn initialize_instructions_describe_the_auto_connect_timeout() {
+        let result = initialize_result(None, &McpConfig::default());
+        let instructions = result["instructions"].as_str().unwrap();
+        assert!(instructions.contains("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"));
+        assert!(instructions.contains(&format!(
+            "effective default is {}ms",
+            crate::native::cdp::chrome::DEFAULT_AUTO_CONNECT_TIMEOUT_MS
+        )));
+        assert!(instructions.contains("implicit recovery after a disconnect"));
     }
 
     #[test]
