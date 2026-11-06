@@ -21,6 +21,8 @@ pub mod element;
 
 pub mod bidi;
 #[allow(dead_code)]
+pub mod flow;
+#[allow(dead_code)]
 pub mod inspect_server;
 #[allow(dead_code)]
 pub mod interaction;

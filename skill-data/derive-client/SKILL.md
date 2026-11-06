@@ -10,6 +10,8 @@ Driving a browser is the right tool for the first visit and the wrong tool for t
 
 The recording alone contains everything needed: agent-browser embeds text response bodies (JSON/HTML/JS) in the HAR by default, so endpoint shapes can be studied offline after the browser is closed.
 
+For a task the agent itself will repeat, `agent-browser flow start` and `flow save` do steps 1 to 4 in the core and `flow run` replays it without a browser. Use this skill when you need a standalone client outside agent-browser.
+
 ## Workflow
 
 ```

@@ -357,7 +357,7 @@ fn get_clock_domain() -> Option<&'static str> {
 }
 
 fn get_traces_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser").join("tmp").join("traces")
     } else {
         std::env::temp_dir().join("agent-browser").join("traces")
@@ -365,7 +365,7 @@ fn get_traces_dir() -> PathBuf {
 }
 
 fn get_profiles_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser").join("tmp").join("profiles")
     } else {
         std::env::temp_dir().join("agent-browser").join("profiles")
