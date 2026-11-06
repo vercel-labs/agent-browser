@@ -2047,7 +2047,9 @@ fn collect_writes(
                 e.url,
                 e.post_data.as_deref().unwrap_or("")
             );
-            if seen.contains(&key) {
+            // A repeat that only the replay sends is listed once; a saved
+            // request is always listed, or the flow would not load.
+            if kept.is_none() && seen.contains(&key) {
                 continue;
             }
             seen.push(key);
@@ -3666,6 +3668,65 @@ mod tests {
             flow_of(flow.clone()).replay_only_writes().len() == 1
                 && write_ids(&flow_of(flow.clone())).is_empty()
         );
+    }
+
+    #[test]
+    fn the_same_write_in_two_steps_is_listed_for_each_saved_request() {
+        let mut r = recorder();
+        r.tag_now("add1");
+        r.begin_command(
+            "click",
+            &json!({ "id": "3", "action": "click", "selector": "@e5" }),
+            None,
+            None,
+        );
+        r.tag_now("add2");
+        let post = |id: &str| {
+            let mut e = entry(
+                id,
+                "https://www.example.com.ar/api/cart",
+                "Fetch",
+                "application/json",
+                r#"{"cart":[7]}"#,
+            );
+            e.method = "POST".to_string();
+            e.post_data = Some(r#"{"id":7}"#.to_string());
+            e
+        };
+        let entries = vec![
+            entry(
+                "api",
+                "https://api.example.com.ar/movies",
+                "Fetch",
+                "application/json",
+                r#"{"movies":[]}"#,
+            ),
+            post("add1"),
+            post("add2"),
+        ];
+        let (value, _) = build_flow_value(SaveInput {
+            name: "f",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &entries,
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+            local_names: &[],
+        })
+        .unwrap();
+        let flow = flow_of(value.clone());
+        let posts: Vec<_> = flow.requests().filter(|r| r.method == "POST").collect();
+        assert_eq!(posts.len(), 2, "{value}");
+        for p in posts {
+            assert!(
+                flow.write(&p.id).is_some(),
+                "{} is not listed: {value}",
+                p.id
+            );
+        }
     }
 
     #[cfg(unix)]
