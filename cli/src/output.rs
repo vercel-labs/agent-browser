@@ -1975,9 +1975,37 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             return;
         }
 
+        if print_state_clear_result(data) {
+            return;
+        }
+
         // Default success
         println!("{} Done", color::success_indicator());
     }
+}
+
+fn print_state_clear_result(data: &serde_json::Value) -> bool {
+    let Some(deleted) = data.get("deleted").and_then(|v| v.as_u64()) else {
+        return false;
+    };
+    println!(
+        "{} Cleared {} saved state file(s)",
+        color::success_indicator(),
+        deleted
+    );
+    let skipped: Vec<&str> = data
+        .get("skipped")
+        .and_then(|v| v.as_array())
+        .map(|paths| paths.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    for path in skipped {
+        println!(
+            "{} Kept {} : another restore key could own this legacy file. Verify its owner before loading it.",
+            color::warning_indicator(),
+            path
+        );
+    }
+    true
 }
 
 fn print_lifecycle_note(data: &serde_json::Value) {
@@ -3597,13 +3625,17 @@ Operations:
   list                               List saved state files
   show <filename>                    Show state summary
   rename <old-name> <new-name>       Rename state file
-  clear [session-name] [--all]       Clear saved states
+  clear <session-name>               Clear saved states for one session name
+  clear --all                        Clear all saved states
   clean --older-than <days>          Delete expired state files
 
 Automatic State Persistence:
   Use --restore to auto-save/restore state across restarts:
   agent-browser --session myapp --restore open https://example.com
   Or set AGENT_BROWSER_RESTORE environment variable.
+
+Ambiguous legacy state files are skipped by automatic restore and block named clearing. Preserve
+the files, confirm their owners, and see https://agent-browser.dev/sessions for recovery steps.
 
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.
@@ -3617,8 +3649,9 @@ Examples:
   agent-browser state save ./auth-state.json
   agent-browser state load ./auth-state.json
   agent-browser state list
-  agent-browser state show myapp-default.json
+  agent-browser state show ~/.agent-browser/sessions/v2@.myapp.default.json
   agent-browser state rename old-name new-name
+  agent-browser state clear myapp
   agent-browser state clear --all
   agent-browser state clean --older-than 7
 "##

@@ -938,16 +938,52 @@ async fn create_restore_state_with_cookie(
     assert_eq!(get_data(&resp)["saveStatus"], "saved");
 }
 
+#[cfg(not(windows))]
+fn isolated_restore_home() -> (EnvGuard<'static>, tempfile::TempDir) {
+    let env = EnvGuard::new(&[
+        "HOME",
+        "AGENT_BROWSER_NAMESPACE",
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+    ]);
+    let chrome = std::env::var("AGENT_BROWSER_EXECUTABLE_PATH")
+        .ok()
+        .or_else(|| {
+            super::cdp::chrome::find_chrome().map(|path| path.to_string_lossy().into_owned())
+        });
+    let home = tempfile::tempdir().unwrap();
+    env.set("HOME", home.path().to_str().unwrap());
+    for key in [
+        "AGENT_BROWSER_NAMESPACE",
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+    ] {
+        env.remove(key);
+    }
+    if let Some(chrome) = chrome {
+        env.set("AGENT_BROWSER_EXECUTABLE_PATH", &chrome);
+    }
+    (env, home)
+}
+
 fn cleanup_restore_state_files(restore_key: &str) {
-    let Some(sessions_dir) = std::env::home_dir().map(|home| home.join(".agent-browser/sessions"))
-    else {
-        return;
-    };
+    let sessions_dir = super::state::get_sessions_dir();
 
     if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
-            if fname.starts_with(&format!("{}-", restore_key)) {
+            if fname.starts_with(&format!("v2@.{}.", restore_key)) {
                 let path = entry.path();
                 let _ = std::fs::remove_file(&path);
                 let _ = std::fs::remove_file(format!("{}.previous", path.to_string_lossy()));
@@ -12238,17 +12274,75 @@ async fn e2e_session_name_auto_restores_cookies() {
     }
 
     // Clean up auto-saved state files
-    let sessions_dir = std::env::home_dir()
-        .unwrap()
-        .join(".agent-browser")
-        .join("sessions");
-    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
-        for entry in entries.flatten() {
-            let fname = entry.file_name().to_string_lossy().to_string();
-            if fname.starts_with(&format!("{}-", session_name)) {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+    cleanup_restore_state_files(&session_name);
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+#[ignore]
+async fn e2e_ambiguous_legacy_state_is_skipped_and_migrated_to_v2_on_close() {
+    let (_env, _home) = isolated_restore_home();
+    let sessions = super::state::get_sessions_dir();
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ambiguous = sessions.join("my-session-default.json");
+    let original = r#"{"cookies":[{"name":"legacy","value":"secret","domain":".example.com","path":"/","expires":2000000000,"size":12,"httpOnly":false,"secure":false,"session":false,"sameSite":"Lax"}],"origins":[]}"#;
+    std::fs::write(&ambiguous, original).unwrap();
+
+    for key in ["my", "my-session"] {
+        let mut state = DaemonState::new();
+        let response = execute_command(
+            &json!({
+                "id": "launch", "action": "launch", "headless": true,
+                "restoreKey": key
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&response);
+        assert_eq!(state.restore_status, "skipped_ambiguous");
+        assert!(state
+            .restore_status_detail
+            .as_deref()
+            .unwrap()
+            .contains(ambiguous.to_str().unwrap()));
+        let cookies = execute_command(
+            &json!({ "id": "cookies", "action": "cookies_get" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&cookies);
+        assert!(get_data(&cookies)["cookies"].as_array().unwrap().is_empty());
+
+        let close = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
+        assert_success(&close);
+        assert_eq!(get_data(&close)["restoreStatus"], "skipped_ambiguous");
+        assert_eq!(get_data(&close)["saveStatus"], "saved");
+        let saved_path = std::path::Path::new(get_data(&close)["statePath"].as_str().unwrap());
+        assert!(saved_path.is_file());
+        assert!(saved_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!("v2@.{key}.")));
+        assert_eq!(std::fs::read_to_string(&ambiguous).unwrap(), original);
+
+        let mut reopened = DaemonState::new();
+        let response = execute_command(
+            &json!({
+                "id": "reopen", "action": "launch", "headless": true,
+                "restoreKey": key
+            }),
+            &mut reopened,
+        )
+        .await;
+        assert_success(&response);
+        assert_eq!(reopened.restore_status, "loaded");
+        let close = execute_command(
+            &json!({ "id": "close-reopened", "action": "close" }),
+            &mut reopened,
+        )
+        .await;
+        assert_success(&close);
     }
 }
 

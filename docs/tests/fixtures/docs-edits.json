@@ -14,6 +14,14 @@
         "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
       },
       {
+        "from": "agent-browser state clear [name]      # Clear states for session name",
+        "to": "agent-browser state clear <name>      # Clear saved states for one restore key"
+      },
+      {
+        "from": "agent-browser state clear --all       # Clear all saved states",
+        "to": "agent-browser state clear --all       # Clear all saved states (bare `state clear` is an error)"
+      },
+      {
         "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"cookies\",\"set\",\"--curl\",\"cookies.curl\",\"--domain\",\"localhost\"]' \\\n  '[\"navigate\",\"http://localhost:3000/target\"]'",
         "to": "agent-browser batch \\\n  \"open\" \\\n  \"network route * --abort --resource-type script\" \\\n  \"cookies set --curl cookies.curl --domain localhost\" \\\n  \"navigate http://localhost:3000/target\""
       },
@@ -307,6 +315,26 @@
       }
     ],
     "/sessions": [
+      {
+        "from": "State files are stored in",
+        "to": "Automatically saved state files are stored in"
+      },
+      {
+        "from": "sessions/` and automatically loaded",
+        "to": "sessions/` as `v2@.<restore-key>.<session-id>.json` and automatically loaded"
+      },
+      {
+        "from": "sessions/ and automatically loaded",
+        "to": "sessions/ as v2@.<restore-key>.<session-id>.json and automatically loaded"
+      },
+      {
+        "from": "agent-browser state show my-session-default.json",
+        "to": "agent-browser state show ~/.agent-browser/sessions/v2@.my-session.default.json"
+      },
+      {
+        "from": "# Clear states for a specific session name",
+        "to": "# Clear states for a specific restore key"
+      },
       {
         "from": "Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use `agent-browser session id` to generate a valid key:",
         "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, `café-東京_7` is valid, while `my session` is rejected because it contains a space.\n\nUse `agent-browser session id` to generate a valid key:"

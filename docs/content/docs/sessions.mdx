@@ -201,9 +201,18 @@ agent-browser --session "$SESSION" --restore click "#login"
 agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open twitter.com
 ```
 
-State files are stored in `~/.agent-browser/sessions/` and automatically loaded before navigation. With the default `--restore-save auto` policy, failed restore or failed validation skips auto-save.
+Automatically saved state files are stored in `~/.agent-browser/sessions/` as `v2@.<restore-key>.<session-id>.json` and automatically loaded before navigation. With the default `--restore-save auto` policy, failed restore or failed validation skips auto-save. Encrypted files use the `.json.enc` suffix. A namespace uses its own sessions directory instead.
 
 When `--restore` or another restore key is configured, state is saved when the browser closes (explicit `close`, idle timeout, or daemon shutdown) and also periodically while the browser is open, so a browser window you close by hand still leaves a recent save behind. A session ID by itself only isolates the daemon and does not enable persistence; without a restore key, shutdown discards transient browser state and open tabs. Periodic autosave waits for commands to settle, then saves at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (default 30000; set to `0` to save only on close). Idle sessions with configured persistence keep saving on the same interval, so changes the page makes on its own (token refreshes, background requests) are captured too. The daemon exits after one hour without commands or dashboard input by default; `--idle-timeout <time>` or `AGENT_BROWSER_IDLE_TIMEOUT_MS` tunes this, and `0` disables it. Headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default timeout; provider-owned cloud browsers are not. State saving respects the `--restore-save` policy.
+
+### Ambiguous legacy state files
+
+Some legacy filenames can belong to more than one restore key. For example, `auth-worker-one.json` could belong to `auth` or `auth-worker`. Automatic restore loads only unambiguous state files and skips ambiguous legacy files (`restoreStatus: "skipped_ambiguous"` when no unambiguous state file exists for the key), while still allowing the session to launch and save a new `v2@.<restore-key>.<session-id>.json` file. `state clear <name>` deletes only the files that `<name>` alone owns, keeps ambiguous legacy files and their `.previous` backups, and lists the kept paths in `skipped`.
+
+1. Preserve the files, including any backups. `session info --json` names the path restore skipped, and `state clear <name>` lists in `skipped` the paths it kept; with a namespace, those paths are in the namespace's sessions directory. Avoid cleanup commands while you determine ownership.
+2. Verify each file's owner from your own records. If you cannot confirm ownership, keep the file preserved and do not load it.
+3. Move each reported ambiguous file to a secure location outside the managed sessions directory, or remove every saved state with `state clear --all`. Keep its filename and suffix, including `.json.enc` or `.json.enc.previous` for encrypted files.
+4. After confirming ownership, use `agent-browser state load <path>` to load the preserved file into the intended browser session. Specify `--session <id>` and the namespace when needed. Encrypted files require the original `AGENT_BROWSER_ENCRYPTION_KEY` in the daemon's environment.
 
 ### Restore key rules
 
@@ -258,12 +267,12 @@ agent-browser state clean --older-than 7
 agent-browser state list
 
 # Show state summary (cookies, origins, domains)
-agent-browser state show my-session-default.json
+agent-browser state show ~/.agent-browser/sessions/v2@.my-session.default.json
 
 # Rename a state file
 agent-browser state rename old-name new-name
 
-# Clear states for a specific session name
+# Clear states for a specific restore key
 agent-browser state clear my-session
 
 # Clear all saved states

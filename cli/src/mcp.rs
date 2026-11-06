@@ -1704,7 +1704,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_CLEAR,
             "State clear",
-            "Clear saved state.",
+            "Clear saved state for one restore key, or every saved state with all=true. One is required. Legacy files another restore key could own are kept and listed in skipped.",
             json!({ "name": { "type": "string" }, "all": { "type": "boolean" } }),
             &[],
         ),
@@ -3716,6 +3716,10 @@ fn call_auth_login(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_state_clear(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, state_clear_args(arguments)?, None)
+}
+
+fn state_clear_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["state".to_string(), "clear".to_string()];
     if optional_bool(arguments, "all")?.unwrap_or(false) {
         args.push("--all".to_string());
@@ -3723,7 +3727,7 @@ fn call_state_clear(arguments: &Value) -> Result<Value, ProtocolError> {
     if let Some(name) = optional_string(arguments, "name")? {
         args.push(name);
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_state_clean(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -6252,6 +6256,22 @@ mod tests {
     fn required_string_reads_present_field() {
         let value = required_string(&json!({ "selector": "@e1" }), "selector").unwrap();
         assert_eq!(value, "@e1");
+    }
+
+    #[test]
+    fn state_clear_arguments_match_cli_parser() {
+        let parse = |arguments: Value| {
+            let args = state_clear_args(&arguments).unwrap();
+            crate::commands::parse_command(&args, &crate::flags::parse_flags(&[])).unwrap()
+        };
+        assert_eq!(parse(json!({"name": "auth"}))["sessionName"], "auth");
+        assert_eq!(parse(json!({"all": true}))["all"], true);
+        let bare = parse(json!({}));
+        assert!(bare.get("sessionName").is_none() && bare.get("all").is_none());
+        let err = crate::native::state::dispatch_state_command(&bare)
+            .unwrap()
+            .unwrap_err();
+        assert!(err.contains("needs a session name or --all"));
     }
 
     #[test]

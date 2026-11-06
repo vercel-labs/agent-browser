@@ -106,7 +106,13 @@ agent-browser --session "$SESSION" session info --json
 
 ### Manual State Files
 
-Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.
+Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions. New automatically saved files use `v2@.<restore-key>.<session-id>.json`, or `.json.enc` when encrypted. A namespace uses its own sessions directory. `state clear <name>` removes only that restore key's saved states, including backups; `state clear --all` removes every saved state, and bare `state clear` is an error.
+
+### Ambiguous legacy state files
+
+If a legacy filename has multiple plausible owners for a restore key, automatic restore skips it (`restoreStatus: "skipped_ambiguous"` when no unambiguous state file exists) and allows the session to launch and save a new `v2@.<restore-key>.<session-id>.json` file. Named `state clear <name>` deletes only the files that `<name>` alone owns, keeps ambiguous legacy files and their `.previous` backups, and lists the kept paths in `skipped`.
+
+Preserve the reported files in a secure location outside the managed sessions directory, keeping their filenames and suffixes. Verify each file's owner from your records; if you cannot confirm ownership, do not load it. After confirming ownership, use `agent-browser state load <path>` to load the preserved file into the intended session. Encrypted files require the original `AGENT_BROWSER_ENCRYPTION_KEY` in the daemon's environment.
 
 ## Common Patterns
 
