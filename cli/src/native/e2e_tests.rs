@@ -15264,6 +15264,37 @@ async fn e2e_firefox_html5_drag_drops_payload() {
         event["type"] == "drop" && event["target"] == "dest" && event["dropped"] == "probe"
     }));
 
+    for (selector, event, handler, capture) in [
+        ("#source", "dragstart", "event.preventDefault()", false),
+        (
+            "#dest",
+            "dragover",
+            "event.stopImmediatePropagation()",
+            true,
+        ),
+    ] {
+        firefox_eval(&mut state, &format!(
+            "window.__html5DragProbe.events.length = 0; document.querySelector('{selector}').addEventListener('{event}', event => {{ {handler}; }}, {{once: true, capture: {capture}}})"
+        )).await;
+        assert_success(&firefox_command(
+            &mut state,
+            json!({ "id": "cancelled-drag", "action": "drag", "source": "#source", "target": "#dest" }),
+        ).await);
+        let events = firefox_eval(&mut state, "window.__html5DragProbe.events").await;
+        assert!(!events
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "drop"));
+    }
+
+    firefox_eval(&mut state, "dest.style.cssText = 'position:absolute;top:1500px;z-index:2'; source.addEventListener('dragstart', event => { const rect = source.getBoundingClientRect(); window.__dragOffset = event.clientY - rect.top - rect.height / 2; }, {once:true})").await;
+    assert_success(&firefox_command(
+        &mut state,
+        json!({ "id": "offscreen-drag", "action": "drag", "source": "#source", "target": "#dest" }),
+    ).await);
+    assert_eq!(firefox_eval(&mut state, "window.__dragOffset").await, 0);
+
     firefox_close(&mut state).await;
 }
 
