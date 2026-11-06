@@ -55,6 +55,8 @@ Each launch uses a fresh temporary profile, so cookies and storage start clean u
 
 Navigation, tabs, `eval`, snapshots and refs (including iframes and open shadow roots), all element commands, `find`, frames, dialogs, screenshots (including `--annotate`), PDF, cookies, storage, state save and load with `--session-name` restore, `network route` and `network unroute`, requests, HAR and response bodies, extra headers, offline mode, HTTP auth, `--allowed-domains`, downloads, uploads, emulation (`set viewport`, `set geo`, `set media`, and `--user-agent`), `--proxy`, `--ignore-https-errors`, and the dashboard live view.
 
+On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
+
 Media emulation on Firefox supports only `prefers-color-scheme` and print media. Other media features return an error that lists the supported ones.
 
 `find text` and `find label` search the main document only, like Chrome. The dashboard live view polls screenshots of the active tab and forwards mouse and keyboard input, so it works without screencast.
