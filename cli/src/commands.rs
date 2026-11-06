@@ -2254,7 +2254,7 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     match rest.first().copied() {
         Some("steps") => Ok(json!({ "id": id, "action": "flow_steps" })),
         Some("save") => {
-            const SAVE_USAGE: &str = "flow save <name> [--from <seq>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>]";
+            const SAVE_USAGE: &str = "flow save <name> [--from <seq>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>] [--timeout <ms>]";
             let name = rest
                 .get(1)
                 .filter(|n| !n.starts_with("--"))
@@ -2287,6 +2287,18 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             }
             if let Some(description) = flag_value(rest, "--description") {
                 cmd["description"] = json!(description);
+            }
+            if rest.contains(&"--timeout") {
+                let raw =
+                    flag_value(rest, "--timeout").ok_or_else(|| ParseError::MissingArguments {
+                        context: "flow save --timeout".to_string(),
+                        usage: SAVE_USAGE,
+                    })?;
+                let n: u64 = raw.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --timeout '{}': expected a number in ms", raw),
+                    usage: SAVE_USAGE,
+                })?;
+                cmd["timeout"] = json!(n);
             }
             Ok(cmd)
         }
@@ -4686,6 +4698,10 @@ mod tests {
         assert!(parse_flow(&["save", "--from", "1"], "1").is_err());
         assert!(parse_flow(&["save", "a", "--from", "open"], "1").is_err());
         assert!(parse_flow(&["save", "a", "--to", "x"], "1").is_err());
+        let cmd = parse_flow(&["save", "a", "--timeout", "1500"], "1").unwrap();
+        assert_eq!(cmd["timeout"], 1500);
+        assert!(parse_flow(&["save", "a", "--timeout", "soon"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--timeout"], "1").is_err());
     }
 
     #[test]
