@@ -245,6 +245,12 @@ async fn invoke_plugin_process(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if protocol != PROTOCOL_VERSION {
+        if !expose_plugin_error {
+            return Err(format!(
+                "Plugin '{}' used unsupported protocol",
+                plugin.name
+            ));
+        }
         return Err(format!(
             "Plugin '{}' used unsupported protocol '{}'",
             plugin.name, protocol
@@ -623,7 +629,7 @@ fn validate_plugin_name(name: &str) -> Result<(), String> {
 fn config_path_for_scope(scope: &PluginConfigScope) -> Result<PathBuf, String> {
     match scope {
         PluginConfigScope::Project => Ok(PathBuf::from("agent-browser.json")),
-        PluginConfigScope::Global => dirs::home_dir()
+        PluginConfigScope::Global => std::env::home_dir()
             .map(|d| d.join(".agent-browser").join("config.json"))
             .ok_or_else(|| "Could not determine home directory".to_string()),
     }
@@ -1220,6 +1226,44 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":false,"error":"secr
 
         assert!(err.contains("success=false"));
         assert!(!err.contains("secret-token-value"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_protocol_error_obeys_redaction_setting() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("fixture-plugin");
+        std::fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{"protocol":"fixture-invalid-v0","success":false,"error":"fixture diagnostic"}'
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let plugin = PluginConfig {
+            name: "fixture".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            ..PluginConfig::default()
+        };
+        let redacted = invoke_plugin_process(&plugin, json!({}), 5, false)
+            .await
+            .unwrap_err();
+        let detailed = invoke_plugin_process(&plugin, json!({}), 5, true)
+            .await
+            .unwrap_err();
+
+        assert_eq!(redacted, "Plugin 'fixture' used unsupported protocol");
+        assert_eq!(
+            detailed,
+            "Plugin 'fixture' used unsupported protocol 'fixture-invalid-v0'"
+        );
     }
 
     #[cfg(unix)]
