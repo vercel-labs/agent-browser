@@ -1928,6 +1928,7 @@ agent-browser drag - Drag and drop
 Usage: agent-browser drag <source> <target> [--human]
 
 Drags an element from source to target location.
+On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
 
 Global Options:
   --json               Output as JSON

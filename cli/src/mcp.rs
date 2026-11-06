@@ -1059,7 +1059,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DRAG,
             "Drag and drop",
-            "Drag one element to another.",
+            "Drag one element to another. On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.",
             json!({ "source": selector_schema(), "target": selector_schema(), "human": { "type": "boolean", "default": false, "description": "Use seeded, curved mouse movement." } }),
             &["source", "target"],
         ),
