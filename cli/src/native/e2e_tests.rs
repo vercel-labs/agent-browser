@@ -12405,7 +12405,7 @@ async fn e2e_restore_loads_during_explicit_launch_before_navigation() {
         assert_eq!(get_data(&resp)["saveStatus"], "saved");
     }
 
-    let path = super::state::find_auto_state_file(&restore_key, "default")
+    let path = super::state::find_auto_state_file(&restore_key)
         .expect("first close should create restore state");
 
     {
@@ -12515,7 +12515,7 @@ async fn e2e_periodic_autosave_survives_abrupt_browser_exit() {
         maybe_autosave_restore_state(&mut state, 30_000).await;
         assert_eq!(state.restore_save_status, "not_attempted");
         assert!(
-            super::state::find_auto_state_file(&restore_key, "default").is_none(),
+            super::state::find_auto_state_file(&restore_key).is_none(),
             "autosave must not fire inside the post-command quiet period"
         );
 
@@ -12529,7 +12529,7 @@ async fn e2e_periodic_autosave_survives_abrupt_browser_exit() {
             "successful save should reset the periodic interval"
         );
         assert!(
-            super::state::find_auto_state_file(&restore_key, "default").is_some(),
+            super::state::find_auto_state_file(&restore_key).is_some(),
             "periodic autosave should write the session state file"
         );
 
@@ -12567,7 +12567,7 @@ async fn e2e_periodic_autosave_survives_abrupt_browser_exit() {
         let _ = close_current_browser(&mut state).await;
     }
 
-    let path = super::state::find_auto_state_file(&restore_key, "default")
+    let path = super::state::find_auto_state_file(&restore_key)
         .expect("autosaved state should survive the abrupt browser exit");
 
     {
@@ -12711,7 +12711,7 @@ async fn e2e_restore_preserves_cookie_login_after_close_and_reopen() {
         assert_eq!(get_data(&resp)["saveStatus"], "saved");
     }
 
-    let path = super::state::find_auto_state_file(&restore_key, "default")
+    let path = super::state::find_auto_state_file(&restore_key)
         .expect("close should save cookie-backed restore state");
 
     {
@@ -12795,7 +12795,7 @@ async fn e2e_restore_validation_failure_does_not_overwrite_state() {
         assert_eq!(get_data(&resp)["saveStatus"], "saved");
     }
 
-    let path = super::state::find_auto_state_file(&restore_key, "default")
+    let path = super::state::find_auto_state_file(&restore_key)
         .expect("first close should create restore state");
     let before = std::fs::read_to_string(&path).expect("state file should be readable");
 
@@ -12859,9 +12859,9 @@ async fn e2e_restore_key_switch_reloads_instead_of_reusing_live_browser() {
     create_restore_state_with_cookie(&restore_key_a, cookie_name, "value-a").await;
     create_restore_state_with_cookie(&restore_key_b, cookie_name, "value-b").await;
 
-    let path_a = super::state::find_auto_state_file(&restore_key_a, "default")
+    let path_a = super::state::find_auto_state_file(&restore_key_a)
         .expect("first restore key should have saved state");
-    let path_b = super::state::find_auto_state_file(&restore_key_b, "default")
+    let path_b = super::state::find_auto_state_file(&restore_key_b)
         .expect("second restore key should have saved state");
 
     let mut state = DaemonState::new();

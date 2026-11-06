@@ -1703,7 +1703,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_CLEAR,
             "State clear",
-            "Clear saved state for one restore key, or every saved state with all=true. One is required. Ambiguous legacy files prevent named clearing without deleting any files.",
+            "Clear saved state for one restore key, or every saved state with all=true. One is required. Legacy files another restore key could own are kept and listed in skipped.",
             json!({ "name": { "type": "string" }, "all": { "type": "boolean" } }),
             &[],
         ),
@@ -6267,7 +6267,7 @@ mod tests {
         assert_eq!(parse(json!({"all": true}))["all"], true);
         let bare = parse(json!({}));
         assert!(bare.get("sessionName").is_none() && bare.get("all").is_none());
-        let err = crate::native::state::dispatch_state_command(&bare, "default")
+        let err = crate::native::state::dispatch_state_command(&bare)
             .unwrap()
             .unwrap_err();
         assert!(err.contains("needs a session name or --all"));

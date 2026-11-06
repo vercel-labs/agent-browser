@@ -510,7 +510,7 @@ agent-browser state clear --all       # Clear all saved states (bare `state clea
 agent-browser state clean --older-than <days>  # Delete old states
 ```
 
-Legacy state files are named `<restore-key>-<session-id>.json` and both halves can contain hyphens, so one name can fit two restore keys. The running session ID decides: a legacy file whose session ID is the current session belongs to the key in front of it, so `auth` saved in session `worker-one` is restored and cleared from `worker-one` and never claimed by `auth-worker`. A legacy file from another session is ambiguous when its name fits several keys: automatic restore skips it (`restoreStatus: "skipped_ambiguous"` when no unambiguous state file exists) and named `state clear` fails without changing saved state files, including encrypted files and backups. Preserve those files and verify ownership before loading one. See [ambiguous legacy state files](/sessions#ambiguous-legacy-state-files) for recovery steps.
+When a matching legacy filename has multiple plausible owners for the requested key, automatic restore skips it (`restoreStatus: "skipped_ambiguous"` when no unambiguous state file exists) and named `state clear` deletes only the files that key alone owns, keeps the ambiguous ones including encrypted files and backups, and lists the kept paths in `skipped`. Preserve those files and verify ownership before loading one. See [ambiguous legacy state files](/sessions#ambiguous-legacy-state-files) for recovery steps.
 
 ## Sessions
 

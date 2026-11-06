@@ -1972,9 +1972,37 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             return;
         }
 
+        if print_state_clear_result(data) {
+            return;
+        }
+
         // Default success
         println!("{} Done", color::success_indicator());
     }
+}
+
+fn print_state_clear_result(data: &serde_json::Value) -> bool {
+    let Some(deleted) = data.get("deleted").and_then(|v| v.as_u64()) else {
+        return false;
+    };
+    println!(
+        "{} Cleared {} saved state file(s)",
+        color::success_indicator(),
+        deleted
+    );
+    let skipped: Vec<&str> = data
+        .get("skipped")
+        .and_then(|v| v.as_array())
+        .map(|paths| paths.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    for path in skipped {
+        println!(
+            "{} Kept {} : another restore key could own this legacy file. Verify its owner before loading it.",
+            color::warning_indicator(),
+            path
+        );
+    }
+    true
 }
 
 fn print_lifecycle_note(data: &serde_json::Value) {
