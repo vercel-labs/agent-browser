@@ -770,9 +770,11 @@ impl DaemonState {
             snapshot_revisions: HashMap::new(),
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
+                // An empty list is no filter, as when it is cleared live.
                 security
                     .allowed_domains
                     .as_ref()
+                    .filter(|domains| !domains.is_empty())
                     .map(|domains| DomainFilter::new(&domains.join(","))),
             )),
             event_tracker: EventTracker::new(),
@@ -22553,6 +22555,18 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::ActionPolicy, json!(policy_path)),
             set_to(Key::ConfirmActions, json!("navigate,click")),
         ])
+    }
+
+    #[tokio::test]
+    async fn test_a_stored_empty_domain_list_restores_as_no_filter() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        write_private(&dir.path().join("s.settings"), r#"{"allowedDomains":[]}"#);
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+
+        let state = boot_state(store, "s");
+
+        assert!(state.domain_filter.read().await.is_none());
     }
 
     #[tokio::test]
