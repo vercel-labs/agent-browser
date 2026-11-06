@@ -310,7 +310,9 @@ impl FirefoxSession {
             .clone();
         let next_tab_id = contexts.len() as u32 + 1;
         let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
-            viewport: options.viewport_size.map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
+            viewport: options
+                .viewport_size
+                .map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
             user_agent: options.user_agent.clone(),
             media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
                 media: None,
@@ -446,7 +448,10 @@ impl FirefoxSession {
                     }
                 }
             }
-            if matches!(e["method"].as_str(), Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")) {
+            if matches!(
+                e["method"].as_str(),
+                Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
+            ) {
                 if let Some(url) = e["params"]["url"].as_str() {
                     self.note_visit(url);
                 }

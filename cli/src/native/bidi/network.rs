@@ -1351,11 +1351,18 @@ mod tests {
         let (ff, _tx, _, messages, _) =
             crate::native::bidi::session::tests::fake_session_with_rdp().await;
         let net = NetContext::default();
-        net.blank_contexts.write().await.insert("storage-tab".into());
+        net.blank_contexts
+            .write()
+            .await
+            .insert("storage-tab".into());
         before_request(
             &ff.bidi,
             &net,
-            &RequestData { request: "r1".into(), url: "https://example.com/".into(), ..Default::default() },
+            &RequestData {
+                request: "r1".into(),
+                url: "https://example.com/".into(),
+                ..Default::default()
+            },
             Some("storage-tab"),
         )
         .await

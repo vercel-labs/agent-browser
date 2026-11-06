@@ -15892,8 +15892,13 @@ async fn e2e_firefox_smoke() {
     let first_path = super::bidi::storage::save_auto_state(ff, "firefox-first", "autosave")
         .await
         .unwrap();
-    let first: Value = serde_json::from_str(&std::fs::read_to_string(&first_path).unwrap()).unwrap();
-    assert!(first["origins"].as_array().unwrap().iter().any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
+    let first: Value =
+        serde_json::from_str(&std::fs::read_to_string(&first_path).unwrap()).unwrap();
+    assert!(first["origins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
     super::bidi::storage::save_auto_state(ff, "firefox-smoke", "autosave")
         .await
         .unwrap();
