@@ -723,7 +723,8 @@ mod tests {
         .await;
         drop(client);
         server.abort();
-        (result, methods.lock().unwrap().clone())
+        let recorded = methods.lock().unwrap().clone();
+        (result, recorded)
     }
 
     #[tokio::test]
