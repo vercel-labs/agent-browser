@@ -220,6 +220,9 @@ agent-browser set viewport 1920 1080          # Set viewport size
 agent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher res screenshots)
 agent-browser set device "iPhone 14"          # Emulate device
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
+agent-browser set permissions geolocation     # Grant geolocation so navigator.geolocation is not denied
+agent-browser set permissions camera microphone
+agent-browser set permissions clipboard-read --origin https://example.com
 agent-browser set offline on                  # Toggle offline mode
 agent-browser set headers '{"X-Key":"v"}'     # Extra HTTP headers
 agent-browser set credentials user pass       # HTTP basic auth for current and future tabs (alias: auth)
@@ -228,6 +231,8 @@ agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```
 
 Viewport scales and geolocation coordinates must be finite numbers.
+
+`set geo` sets coordinates only. Grant `geolocation` with `set permissions geolocation` so `navigator.geolocation.getCurrentPosition` is not denied in headless Chrome. The same pairing applies to clipboard APIs (`clipboard-read`). Names accept kebab aliases (`camera`, `clipboard-read`) and CDP names (`videoCapture`, `clipboardReadWrite`). `agent-browser set --help` lists the full alias table. Optional `--origin <url>` scopes the grant; omit it to grant for the whole browser context.
 
 ## Cookies and Storage
 
@@ -512,7 +517,7 @@ Profiles:
 - `debug` - Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
-- `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+- `mobile` - Viewport/device/geolocation/permissions/media, touch, swipe, mouse, keyboard
 - `all` - Every MCP tool, including the full typed CLI parity surface
 
 Common tools include:

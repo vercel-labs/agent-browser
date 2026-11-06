@@ -3598,6 +3598,42 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
+      "description": "Grant Chrome permission types (geolocation, notifications, clipboard, camera, microphone) so headless pages stop seeing PERMISSION_DENIED.",
+      "inputSchema": {
+        "properties": {
+          "origin": {
+            "description": "Origin to grant for. Omit to grant for the whole browser context.",
+            "type": "string"
+          },
+          "permissions": {
+            "description": "Chrome permission types. Kebab aliases such as camera and clipboard-read, or CDP names such as videoCapture.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "permissions"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_set_permissions",
+      "profiles": [
+        "mobile"
+      ],
+      "title": "Set permissions"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Set viewport size. The optional scale must be finite.",
       "inputSchema": {
         "properties": {
