@@ -3553,6 +3553,57 @@ fn parse_finite_f64(raw: &str, what: &str, usage: &'static str) -> Result<f64, P
         })
 }
 
+/// CLI permission tokens and the CDP `Browser.PermissionType` they map to.
+/// Each kebab alias and its CDP camelCase name is listed so both spellings parse.
+const PERMISSION_ALIASES: &[(&str, &str)] = &[
+    ("geolocation", "geolocation"),
+    ("notifications", "notifications"),
+    ("camera", "videoCapture"),
+    ("videoCapture", "videoCapture"),
+    ("microphone", "audioCapture"),
+    ("audioCapture", "audioCapture"),
+    ("clipboard-read", "clipboardReadWrite"),
+    ("clipboardReadWrite", "clipboardReadWrite"),
+    ("clipboard-write", "clipboardSanitizedWrite"),
+    ("clipboardSanitizedWrite", "clipboardSanitizedWrite"),
+    ("midi", "midi"),
+    ("midi-sysex", "midiSysex"),
+    ("midiSysex", "midiSysex"),
+    ("background-sync", "backgroundSync"),
+    ("backgroundSync", "backgroundSync"),
+    ("idle-detection", "idleDetection"),
+    ("idleDetection", "idleDetection"),
+    ("persistent-storage", "durableStorage"),
+    ("durableStorage", "durableStorage"),
+    ("payment-handler", "paymentHandler"),
+    ("paymentHandler", "paymentHandler"),
+    ("window-management", "windowManagement"),
+    ("windowManagement", "windowManagement"),
+    ("sensors", "sensors"),
+];
+
+const PERMISSION_USAGE: &str = "set permissions <name...> [--origin <url>]";
+
+/// Map a CLI permission token to a CDP `Browser.PermissionType`.
+/// Accepts kebab-case aliases and the CDP camelCase names.
+fn normalize_permission(name: &str) -> Result<String, ParseError> {
+    for (alias, cdp) in PERMISSION_ALIASES {
+        if *alias == name {
+            return Ok((*cdp).to_string());
+        }
+    }
+    let allowed: Vec<&str> = PERMISSION_ALIASES.iter().map(|(alias, _)| *alias).collect();
+    Err(ParseError::InvalidValue {
+        message: format!(
+            "Unknown permission '{}'. Allowed: {}",
+            name,
+            allowed.join(", ")
+        ),
+        usage: PERMISSION_USAGE,
+    })
+}
+
+/// Parse `set` subcommands. Permission names go through [`normalize_permission`].
 fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &[
         "viewport",
@@ -3564,6 +3615,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "credentials",
         "auth",
         "media",
+        "permissions",
     ];
 
     match rest.first().copied() {
@@ -3675,13 +3727,57 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 json!({ "id": id, "action": "emulatemedia", "colorScheme": color, "reducedMotion": reduced }),
             )
         }
+        Some("permissions") => {
+            let mut names: Vec<String> = Vec::new();
+            let mut origin: Option<&str> = None;
+            let mut i = 1;
+            while i < rest.len() {
+                let token = rest[i];
+                if token == "--origin" {
+                    let value = rest.get(i + 1).copied().filter(|v| !v.starts_with("--"));
+                    let Some(value) = value else {
+                        return Err(ParseError::MissingArguments {
+                            context: "set permissions --origin".to_string(),
+                            usage: PERMISSION_USAGE,
+                        });
+                    };
+                    origin = Some(value);
+                    i += 2;
+                    continue;
+                }
+                if token.starts_with("--") {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("Unknown flag '{}'", token),
+                        usage: PERMISSION_USAGE,
+                    });
+                }
+                names.push(normalize_permission(token)?);
+                i += 1;
+            }
+            if names.is_empty() {
+                return Err(ParseError::MissingArguments {
+                    context: "set permissions".to_string(),
+                    usage: PERMISSION_USAGE,
+                });
+            }
+            let mut cmd = json!({
+                "id": id,
+                "action": "permissions",
+                "permissions": names,
+            });
+            if let Some(origin) = origin {
+                cmd["origin"] = json!(origin);
+            }
+            Ok(cmd)
+        }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
             valid_options: VALID,
         }),
         None => Err(ParseError::MissingArguments {
             context: "set".to_string(),
-            usage: "set <viewport|device|geo|offline|headers|credentials|media> [args...]",
+            usage:
+                "set <viewport|device|geo|offline|headers|credentials|media|permissions> [args...]",
         }),
     }
 }
@@ -6244,6 +6340,133 @@ mod tests {
                 "command should reject non-finite value: {}",
                 command
             );
+        }
+    }
+
+    #[test]
+    fn test_set_permissions_geolocation() {
+        let cmd = parse_command(&args("set permissions geolocation"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "permissions");
+        assert_eq!(cmd["permissions"], json!(["geolocation"]));
+        assert!(cmd.get("origin").is_none());
+    }
+
+    #[test]
+    fn test_set_permissions_camera_microphone_maps_to_cdp() {
+        let cmd =
+            parse_command(&args("set permissions camera microphone"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "permissions");
+        assert_eq!(cmd["permissions"], json!(["videoCapture", "audioCapture"]));
+    }
+
+    #[test]
+    fn test_set_permissions_clipboard_read_with_origin() {
+        let cmd = parse_command(
+            &args("set permissions clipboard-read --origin https://example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "permissions");
+        assert_eq!(cmd["permissions"], json!(["clipboardReadWrite"]));
+        assert_eq!(cmd["origin"], "https://example.com");
+    }
+
+    #[test]
+    fn test_set_permissions_origin_before_names() {
+        let cmd = parse_command(
+            &args("set permissions --origin https://example.com geolocation notifications"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "permissions");
+        assert_eq!(cmd["permissions"], json!(["geolocation", "notifications"]));
+        assert_eq!(cmd["origin"], "https://example.com");
+    }
+
+    #[test]
+    fn test_set_permissions_unknown_flag() {
+        let err = parse_command(&args("set permissions geolocation --foo"), &default_flags())
+            .unwrap_err()
+            .format();
+        assert!(err.contains("--foo"), "{err}");
+    }
+
+    #[test]
+    fn test_set_permissions_origin_without_names() {
+        let result = parse_command(
+            &args("set permissions --origin https://example.com"),
+            &default_flags(),
+        );
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    #[test]
+    fn test_set_permissions_origin_without_value() {
+        let result = parse_command(
+            &args("set permissions geolocation --origin"),
+            &default_flags(),
+        );
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    #[test]
+    fn test_set_permissions_missing_names() {
+        let result = parse_command(&args("set permissions"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    #[test]
+    fn test_set_permissions_unknown_name_lists_allowlist() {
+        let err = parse_command(&args("set permissions not-a-perm"), &default_flags())
+            .unwrap_err()
+            .format();
+        assert!(err.contains("not-a-perm"));
+        assert!(err.contains("geolocation"));
+        assert!(err.contains("camera"));
+        assert!(err.contains("clipboard-read"));
+    }
+
+    #[test]
+    fn test_set_permissions_cdp_name_passthrough() {
+        let cmd = parse_command(
+            &args("set permissions clipboardReadWrite"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "permissions");
+        assert_eq!(cmd["permissions"], json!(["clipboardReadWrite"]));
+    }
+
+    #[test]
+    fn test_set_unknown_subcommand_lists_permissions() {
+        let err = parse_command(&args("set not-a-setting"), &default_flags())
+            .unwrap_err()
+            .format();
+        assert!(err.contains("permissions"));
+    }
+
+    #[test]
+    fn test_normalize_permission_aliases_and_cdp_names() {
+        assert_eq!(normalize_permission("camera").unwrap(), "videoCapture");
+        assert_eq!(
+            normalize_permission("videoCapture").unwrap(),
+            "videoCapture"
+        );
+        assert_eq!(
+            normalize_permission("clipboard-read").unwrap(),
+            "clipboardReadWrite"
+        );
+        assert_eq!(
+            normalize_permission("clipboardReadWrite").unwrap(),
+            "clipboardReadWrite"
+        );
+        let err = normalize_permission("not-a-perm").unwrap_err();
+        match err {
+            ParseError::InvalidValue { message, .. } => {
+                assert!(message.contains("geolocation"));
+                assert!(message.contains("camera"));
+            }
+            other => panic!("expected InvalidValue, got {:?}", other),
         }
     }
 

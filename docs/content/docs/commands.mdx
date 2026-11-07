@@ -212,6 +212,7 @@ See [Files & Clipboard](/files) for clipboard, upload, download, local file, scr
 agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)
 agent-browser set device <name>       # Emulate device ("iPhone 14")
 agent-browser set geo <lat> <lng>     # Set geolocation
+agent-browser set permissions <name...> [--origin <url>]  # Grant Chrome permission types
 agent-browser set offline [on|off]    # Toggle offline mode
 agent-browser set headers <json>      # Extra HTTP headers
 agent-browser set credentials <u> <p> # HTTP basic auth for current and future tabs
@@ -219,6 +220,30 @@ agent-browser set media [dark|light]  # Emulate color scheme (persists for sessi
 ```
 
 Viewport scales and geolocation coordinates must be finite numbers.
+
+`set geo` sets coordinates only. Grant `geolocation` with `set permissions geolocation` so `navigator.geolocation.getCurrentPosition` is not denied in headless Chrome. Names accept kebab aliases (`camera`, `clipboard-read`) and CDP names (`videoCapture`, `clipboardReadWrite`). Optional `--origin <url>` scopes the grant; omit it to grant for the whole browser context.
+
+<table>
+  <thead>
+    <tr><th>CLI name</th><th>CDP <code>Browser.PermissionType</code></th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>geolocation</code></td><td><code>geolocation</code></td></tr>
+    <tr><td><code>notifications</code></td><td><code>notifications</code></td></tr>
+    <tr><td><code>camera</code></td><td><code>videoCapture</code></td></tr>
+    <tr><td><code>microphone</code></td><td><code>audioCapture</code></td></tr>
+    <tr><td><code>clipboard-read</code></td><td><code>clipboardReadWrite</code></td></tr>
+    <tr><td><code>clipboard-write</code></td><td><code>clipboardSanitizedWrite</code></td></tr>
+    <tr><td><code>midi</code></td><td><code>midi</code></td></tr>
+    <tr><td><code>midi-sysex</code></td><td><code>midiSysex</code></td></tr>
+    <tr><td><code>background-sync</code></td><td><code>backgroundSync</code></td></tr>
+    <tr><td><code>idle-detection</code></td><td><code>idleDetection</code></td></tr>
+    <tr><td><code>persistent-storage</code></td><td><code>durableStorage</code></td></tr>
+    <tr><td><code>payment-handler</code></td><td><code>paymentHandler</code></td></tr>
+    <tr><td><code>window-management</code></td><td><code>windowManagement</code></td></tr>
+    <tr><td><code>sensors</code></td><td><code>sensors</code></td></tr>
+  </tbody>
+</table>
 
 Use `--color-scheme` for persistent dark/light mode across all commands:
 
@@ -773,7 +798,7 @@ Profiles:
 - `debug` - Console/errors, tracing, profiling, recording, accessibility audits, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
-- `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+- `mobile` - Viewport/device/geolocation/permissions/media, touch, swipe, mouse, keyboard
 - `all` - Every MCP tool, including the full typed CLI parity surface
 
 Example MCP client config:

@@ -2322,13 +2322,17 @@ impl BrowserManager {
         Ok(())
     }
 
-    pub async fn grant_permissions(&self, permissions: &[String]) -> Result<(), String> {
+    pub async fn grant_permissions(
+        &self,
+        permissions: &[String],
+        origin: Option<&str>,
+    ) -> Result<(), String> {
+        let mut params = json!({ "permissions": permissions });
+        if let Some(origin) = origin {
+            params["origin"] = json!(origin);
+        }
         self.client
-            .send_command(
-                "Browser.grantPermissions",
-                Some(json!({ "permissions": permissions })),
-                None,
-            )
+            .send_command("Browser.grantPermissions", Some(params), None)
             .await?;
         Ok(())
     }
