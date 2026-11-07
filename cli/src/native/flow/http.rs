@@ -129,8 +129,11 @@ pub async fn run_http(
                     Failure::unknown_outcome(format!("the write's answer did not arrive: {}", e))
                 } else if late {
                     Failure::transport(format!("the answer did not arrive in time: {}", e))
+                } else if req.write {
+                    // The site answered the write, so it may have applied it.
+                    Failure::unknown_outcome(format!("the write's answer could not be read: {}", e))
                 } else {
-                    Failure::new(true, Some(status), format!("could not read body: {}", e))
+                    Failure::transport(format!("could not read body: {}", e))
                 }
             })
         }

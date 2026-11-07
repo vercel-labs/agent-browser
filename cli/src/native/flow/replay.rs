@@ -496,11 +496,13 @@ pub async fn send(
         match capture(flow, params, browser, ctx.wanted, REPLAY_WAIT, run_deadline).await {
             Ok(captured) => *run = Some(captured),
             Err(Ok(reason)) => return fail(Failure::unavailable(reason)),
-            Err(Err(reason)) => return fail(Failure::drift(reason)),
+            // The browser or the capture could not start: a local failure,
+            // not a change on the site.
+            Err(Err(reason)) => return fail(Failure::unavailable(reason)),
         }
     }
     let Some(captured) = run.as_ref() else {
-        return fail(Failure::drift("the replay did not run".to_string()));
+        return fail(Failure::unavailable("the replay did not run".to_string()));
     };
     // The replay ran the commands that send a write, even when a later
     // command failed: the capture answers it, and no capture does not say

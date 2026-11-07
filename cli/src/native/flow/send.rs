@@ -69,7 +69,7 @@ pub fn next_tier(
     // site did not accept: its tokens may be stale and the page can send it once.
     // A read also goes on after a transport error, and after a 5xx once an
     // earlier tier saw the site change.
-    if !last.drift && !req.write {
+    if !last.drift && !last.skipped && !req.write {
         let server_error = matches!(last.status, Some(500..=599));
         let saw_drift = attempts.iter().any(|a| a.drift);
         if !(last.transport || (server_error && saw_drift)) {

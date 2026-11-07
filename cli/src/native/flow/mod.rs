@@ -4003,6 +4003,30 @@ mod tests {
     }
 
     #[test]
+    fn the_page_tier_never_follows_a_redirect() {
+        let flow = flow_of(json!({
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }]
+        }));
+        let req = prepare_all(&flow, &[]).unwrap().remove(0);
+        // The browser stops at the 3xx, so no hop is sent before a check.
+        assert!(page_fetch_script(&req).contains(r#""redirect":"manual""#));
+        let r = page::page_result(
+            &HostPolicy::of(&flow),
+            &req,
+            Instant::now(),
+            Ok(json!({ "status": 302, "redirected": true, "url": "", "text": "" })),
+        );
+        // A read goes on to the next tier without moving the tier memory.
+        assert!(r.skipped && !r.drift && r.stop.is_none(), "{:?}", r.reason);
+        let write = PreparedRequest {
+            write: true,
+            method: "POST".to_string(),
+            ..req
+        };
+        assert!(page_fetch_script(&write).contains(r#""redirect":"manual""#));
+    }
+
+    #[test]
     fn the_page_tier_without_a_tab_on_the_site_is_skipped() {
         let flow = flow_of(json!({
             "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }]
@@ -4012,7 +4036,8 @@ mod tests {
         let result = block_on(page::send(&flow, &mut browser, &req, far()));
         assert!(!result.ok);
         assert!(result.skipped, "{:?}", result.reason);
-        assert!(result.drift);
+        // Skipping a tier says nothing about the site.
+        assert!(!result.drift);
     }
 
     #[test]
@@ -6563,7 +6588,8 @@ mod tests {
             (429, "{}", Some((Some(Stop::RateLimited), false, false))),
             (400, "{}", Some((None, false, false))),
             (500, "{}", Some((None, false, false))),
-            (407, "{}", Some((None, true, false))),
+            // The proxy refused it: transport, not a change on the site.
+            (407, "{}", Some((None, false, false))),
         ];
         let req = prepared("s1r1");
         for (status, body, want) in cases {
@@ -7495,6 +7521,8 @@ mod tests {
         delay: Duration,
         /// Whether reading the tab's URL never returns in time.
         tab_hangs: bool,
+        /// Why the browser cannot start, if it cannot.
+        launch_error: Option<String>,
     }
 
     impl ScriptBrowser {
@@ -7508,7 +7536,13 @@ mod tests {
                 poll_each_run: None,
                 delay: Duration::ZERO,
                 tab_hangs: false,
+                launch_error: None,
             }
+        }
+
+        fn failing_launch(mut self, reason: &str) -> ScriptBrowser {
+            self.launch_error = Some(reason.to_string());
+            self
         }
 
         fn hanging_tab(mut self) -> ScriptBrowser {
@@ -7551,7 +7585,7 @@ mod tests {
             self.page.clone()
         }
         async fn ensure_browser(&mut self) -> Result<(), String> {
-            Ok(())
+            self.launch_error.clone().map_or(Ok(()), Err)
         }
         async fn begin_capture(&mut self) -> Result<usize, String> {
             Ok(0)
@@ -7645,6 +7679,19 @@ mod tests {
                 &ctx,
                 far(),
             ))
+        }
+
+        #[test]
+        fn a_browser_that_cannot_start_does_not_unverify_the_flow() {
+            let mut flow = cart_flow();
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new())
+                .failing_launch("Chrome exited before CDP was ready");
+            let r = send_write(&flow, &mut browser);
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+            assert!(r.stop.is_none(), "{:?}", r.stop);
+            flow.verified_at = Some("then".to_string());
+            finish_run(&mut flow, &[r], "now", 1, &Shape::default());
+            assert_eq!(flow.verified_at.as_deref(), Some("then"));
         }
 
         fn pending(url: &str) -> HarEntry {

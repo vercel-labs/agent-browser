@@ -128,7 +128,10 @@ pub struct Failure {
 }
 
 impl Failure {
-    /// The way failed in a way another way may not: try the next tier.
+    /// The site answered with something other than what was recorded: a
+    /// different shape, a page that is not JSON, a missing element in a
+    /// replayed command. The flow is unverified and the next tier is tried.
+    /// A local failure, a timeout or a skipped tier is never drift.
     pub fn drift(reason: String) -> Failure {
         Failure::new(true, None, reason)
     }
@@ -137,7 +140,7 @@ impl Failure {
     pub fn skipped(reason: String) -> Failure {
         Failure {
             skipped: true,
-            ..Failure::new(true, None, reason)
+            ..Failure::new(false, None, reason)
         }
     }
 
@@ -438,7 +441,12 @@ fn check_response_on(
                 "HTTP 429: the site is rate limiting this session".to_string(),
             ))
         }
-        407 => return Err(Failure::new(true, Some(status), format!("HTTP {}", status))),
+        // The proxy refused the request; the site never saw it.
+        407 => {
+            return Err(Failure::transport(format!(
+                "HTTP 407: the proxy requires authentication"
+            )))
+        }
         _ => {}
     }
     if !(200..300).contains(&status) {
