@@ -526,6 +526,15 @@ fn request_id(p: &Value) -> &str {
 }
 
 fn request_started(state: &mut DaemonState, p: &Value) {
+    if let Some(context) = p["context"].as_str() {
+        let active = state
+            .firefox
+            .as_ref()
+            .is_some_and(|ff| ff.context_is_in_active_tab(context));
+        if !active {
+            return;
+        }
+    }
     let request = &p["request"];
     let id = request_id(p).to_string();
     let url = request["url"].as_str().unwrap_or("").to_string();
@@ -1843,6 +1852,40 @@ mod tests {
             serde_json::to_value(&state.tracked_requests[0]).unwrap()["postData"],
             json!("payload=tracked")
         );
+    }
+
+    #[tokio::test]
+    async fn request_recording_excludes_background_tabs() {
+        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session_with(|_| {
+            json!({"bytes": {"type": "string", "value": "body"}})
+        })
+        .await;
+        ff.top_context = "active".into();
+        ff.context = "active".into();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.request_tracking = true;
+        state.har_recording = true;
+
+        for (id, context) in [("active", "active"), ("frame", "frame"), ("other", "other")] {
+            apply_events(
+                &mut state,
+                vec![json!({
+                    "method": "network.beforeRequestSent",
+                    "params": {
+                        "context": context,
+                        "timestamp": 1000,
+                        "request": {"request": id, "url": format!("https://{context}.test/"), "method": "GET", "headers": []},
+                    },
+                })],
+            )
+            .await;
+        }
+
+        assert_eq!(state.tracked_requests.len(), 1);
+        assert_eq!(state.tracked_requests[0].request_id, "active");
+        assert_eq!(state.har_entries.len(), 1);
+        assert_eq!(state.har_entries[0].request_id, "active");
     }
 
     #[tokio::test]
