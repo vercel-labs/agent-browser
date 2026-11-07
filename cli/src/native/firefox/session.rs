@@ -684,7 +684,7 @@ pub(crate) mod tests {
         let session = FirefoxSession {
             process: None,
             headless: true,
-            bidi: Arc::new(bidi),
+            bidi,
             auto_dialog: Arc::new(AtomicBool::new(false)),
             auto_dialog_changed: Arc::new(Notify::new()),
             rdp,
