@@ -12,7 +12,7 @@ use tokio::sync::{broadcast, oneshot};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-type Pending = Arc<Mutex<HashMap<String, VecDeque<(u64, oneshot::Sender<Value>)>>>>;
+type Pending = Arc<Mutex<HashMap<String, VecDeque<(u64, String, oneshot::Sender<Value>)>>>>;
 
 /** A connected DevTools protocol session; clones share the same connection. */
 #[derive(Clone)]
@@ -81,11 +81,12 @@ impl RdpClient {
                 let waiter = if is_event {
                     None
                 } else {
-                    p.lock()
-                        .unwrap()
-                        .get_mut(&from)
-                        .and_then(|q| q.pop_front())
-                        .map(|(_, sender)| sender)
+                    p.lock().unwrap().get_mut(&from).and_then(|q| {
+                        let expected = q.front().map(|(_, kind, _)| kind.clone())?;
+                        (msg["type"].as_str() == Some(expected.as_str()))
+                            .then(|| q.pop_front().map(|(_, _, sender)| sender))
+                            .flatten()
+                    })
                 };
                 match waiter {
                     Some(tx) => {
@@ -144,13 +145,13 @@ impl RdpClient {
                 .unwrap()
                 .entry(to.to_string())
                 .or_default()
-                .push_back((request_id, tx));
+                .push_back((request_id, kind.to_string(), tx));
             if let Err(e) = w
                 .write_all(format!("{}:{}", body.len(), body).as_bytes())
                 .await
             {
                 if let Some(q) = self.pending.lock().unwrap().get_mut(to) {
-                    q.retain(|(id, _)| *id != request_id);
+                    q.retain(|(id, _, _)| *id != request_id);
                 }
                 return Err(format!("DevTools send failed: {e}"));
             }
@@ -168,7 +169,7 @@ impl RdpClient {
             Ok(Err(_)) => Err("DevTools connection closed".to_string()),
             Err(_) => {
                 if let Some(q) = self.pending.lock().unwrap().get_mut(to) {
-                    q.retain(|(id, _)| *id != request_id);
+                    q.retain(|(id, _, _)| *id != request_id);
                 }
                 Err(format!("DevTools request {kind} to {to} timed out"))
             }
