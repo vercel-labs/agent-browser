@@ -15548,6 +15548,86 @@ async fn e2e_firefox_read_active_page() {
     firefox_close(&mut state).await;
 }
 
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_review_pointer_motion_and_wheel() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(&mut state, r#"document.body.innerHTML = '<div id="left" style="position:fixed;left:10px;top:10px;width:250px;height:250px"></div><div id="right" style="position:fixed;left:320px;top:20px;width:200px;height:200px"></div>'; window.moves=[]; window.wheels=[]; document.addEventListener('pointermove', e => moves.push([e.clientX,e.clientY])); document.addEventListener('wheel', e => { wheels.push([e.clientX,e.clientY,e.target.id]); e.preventDefault(); }, {passive:false}); true"#).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"start", "action":"mousemove", "x":40, "y":60}),
+        )
+        .await,
+    );
+    firefox_eval(&mut state, "moves=[]; true").await;
+    let started = std::time::Instant::now();
+    assert_success(&firefox_command(&mut state, json!({"id":"move", "action":"mousemove", "x":220, "y":60, "duration":180, "steps":6, "inputMode":"human", "seed":42})).await);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(140));
+    let moves = firefox_eval(&mut state, "moves").await;
+    let moves = moves.as_array().unwrap();
+    assert!(moves.len() > 2, "{moves:?}");
+    assert_eq!(moves.last().unwrap(), &json!([220, 60]));
+    assert!(moves.iter().any(|point| point[1] != 60), "{moves:?}");
+    for command in [
+        json!({"id":"wheel", "action":"wheel", "deltaY":20}),
+        json!({"id":"explicit", "action":"wheel", "x":420, "y":60, "deltaY":20}),
+        json!({"id":"tracked", "action":"wheel", "deltaY":20}),
+    ] {
+        assert_success(&firefox_command(&mut state, command).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, "wheels").await,
+        json!([[220, 60, "left"], [420, 60, "right"], [420, 60, "right"]])
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"hover", "action":"hover", "selector":"#right"}),
+        )
+        .await,
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"hover-wheel", "action":"wheel", "deltaY":20}),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "wheels.at(-1)").await,
+        json!([420, 120, "right"])
+    );
+    firefox_eval(&mut state, "document.querySelector('#right').style.cssText='position:fixed;left:-100px;top:0;width:300px;height:200px'; moves=[]; true").await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"clipped-hover", "action":"hover", "selector":"#right"}),
+        )
+        .await,
+    );
+    let actual_pointer = firefox_eval(&mut state, "moves.at(-1)").await;
+    assert_eq!(actual_pointer, json!([100, 100]));
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"clipped-wheel", "action":"wheel", "deltaY":20}),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "wheels.at(-1)").await,
+        json!([100, 100, "right"])
+    );
+    firefox_close(&mut state).await;
+}
+
 /// PR1: open, title, evaluate, Chrome-only error, and close leaves no process or profile.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
@@ -16787,6 +16867,118 @@ async fn e2e_firefox_auto_dialog() {
     firefox_close(&mut state).await;
 }
 
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_review_live_dialog_setting() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    let context = state.firefox.as_ref().unwrap().context.clone();
+    let before = firefox_command(&mut state, json!({"id":"before", "action":"session_info"})).await;
+    assert_success(&before);
+    for disabled in [true, false] {
+        let setting = if disabled { json!(true) } else { Value::Null };
+        let changed = firefox_command(
+            &mut state,
+            json!({"id":"setting", "action":"url", "settings":{"no-auto-dialog":setting}}),
+        )
+        .await;
+        assert_success(&changed);
+        firefox_eval(
+            &mut state,
+            "setTimeout(() => alert('live setting'), 50); true",
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let status = firefox_command(
+            &mut state,
+            json!({"id":"status", "action":"dialog", "response":"status"}),
+        )
+        .await;
+        assert_success(&status);
+        assert_eq!(get_data(&status)["hasDialog"], disabled, "{status}");
+        if disabled {
+            assert_success(
+                &firefox_command(
+                    &mut state,
+                    json!({"id":"enable", "action":"url", "settings":{"no-auto-dialog":null}}),
+                )
+                .await,
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let status = firefox_command(
+                        &mut state,
+                        json!({"id":"accepted", "action":"dialog", "response":"status"}),
+                    )
+                    .await;
+                    assert_success(&status);
+                    if get_data(&status)["hasDialog"] == false {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+        let after =
+            firefox_command(&mut state, json!({"id":"after", "action":"session_info"})).await;
+        assert_eq!(
+            get_data(&before)["launchHash"],
+            get_data(&after)["launchHash"]
+        );
+        assert_eq!(state.firefox.as_ref().unwrap().context, context);
+    }
+    firefox_eval(
+        &mut state,
+        "setTimeout(() => confirm('manual confirm'), 50); true",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let status = firefox_command(
+        &mut state,
+        json!({"id":"confirm", "action":"dialog", "response":"status"}),
+    )
+    .await;
+    assert_eq!(get_data(&status)["hasDialog"], true);
+    assert_eq!(get_data(&status)["type"], "confirm");
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"dismiss", "action":"dialog", "response":"dismiss"}),
+        )
+        .await,
+    );
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_review_session_page_count() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    for (expected, action) in [(1, Some("tab_new")), (2, Some("tab_close")), (1, None)] {
+        let info = firefox_command(&mut state, json!({"id":"info", "action":"session_info"})).await;
+        assert_success(&info);
+        assert_eq!(get_data(&info)["browserLaunched"], true);
+        assert_eq!(get_data(&info)["pageCount"], expected, "{info}");
+        if let Some(action) = action {
+            let result = firefox_command(&mut state, json!({"id":"tab", "action":action})).await;
+            assert_success(&result);
+        }
+    }
+    firefox_close(&mut state).await;
+}
+
 /// A cookie set without a path is stored at `/`, so it stays visible site-wide; an explicit path stays scoped.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
@@ -16797,7 +16989,7 @@ async fn e2e_firefox_cookie_default_path() {
     let fixture = firefox_fixture().await;
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
-    firefox_open(&mut state, &format!("{}one", fixture.url)).await;
+    firefox_open(&mut state, &format!("{}app/page", fixture.url)).await;
 
     let resp = firefox_command(
         &mut state,

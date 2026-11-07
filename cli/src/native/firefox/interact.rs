@@ -4,8 +4,8 @@ use serde_json::{json, Value};
 
 use super::actions::session;
 use super::input::{
-    pointer_click, pointer_down, pointer_hover, pointer_up, pointer_wheel, touch_event,
-    touch_swipe_path, touch_tap, Origin,
+    pointer_click, pointer_down, pointer_hover, pointer_mousemove, pointer_up, pointer_wheel,
+    touch_event, touch_swipe_path, touch_tap, Origin,
 };
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
@@ -17,22 +17,29 @@ use crate::native::interaction::{
     dispatch_event_js, CLICK_HREF_JS, FOCUS_JS, HIGHLIGHT_JS, SCROLL_BY_JS, SCROLL_INTO_VIEW_JS,
 };
 
-/// Scrolls `this` into view, then reports its center plus Chrome's actionability and blocker verdicts.
+/// Reports BiDi's in-view center plus the shared actionability and blocker verdicts.
 fn prepare_js() -> String {
     format!(
         r#"function() {{
             const el = this;
-            const inView = (r) => r.width > 0 && r.height > 0 &&
+            const inView = (r) => r && r.width > 0 && r.height > 0 &&
                 r.bottom > 0 && r.right > 0 &&
                 r.top < (window.innerHeight || document.documentElement.clientHeight) &&
                 r.left < (window.innerWidth || document.documentElement.clientWidth);
-            let rect = el.getBoundingClientRect();
+            let rect = el.getClientRects()[0];
             if (!inView(rect)) {{
                 el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-                rect = el.getBoundingClientRect();
+                rect = el.getClientRects()[0];
             }}
-            const x = rect.x + rect.width / 2;
-            const y = rect.y + rect.height / 2;
+            if (!rect || rect.width <= 0 || rect.height <= 0) {{
+                return {{ x: 0, y: 0, reason: 'not visible', blocker: null }};
+            }}
+            const left = Math.max(0, Math.min(rect.x, rect.x + rect.width));
+            const right = Math.min(window.innerWidth, Math.max(rect.x, rect.x + rect.width));
+            const top = Math.max(0, Math.min(rect.y, rect.y + rect.height));
+            const bottom = Math.min(window.innerHeight, Math.max(rect.y, rect.y + rect.height));
+            const x = Math.floor((left + right) / 2);
+            const y = Math.floor((top + bottom) / 2);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             return {{ x: x, y: y, reason: notActionable(document, el, x, y), blocker: blockerAt(document, el, x, y) }};
@@ -113,8 +120,13 @@ pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
     );
 
     let ff = session(state)?;
-    prepare(ff, &target, selector, true).await?;
-    if perform(ff, &target.context, actions).await? {
+    let position = prepare(ff, &target, selector, true).await?;
+    let same_context = target.context == ff.top_context;
+    let dialog_opened = perform(ff, &target.context, actions).await?;
+    if same_context && !dialog_opened {
+        (state.mouse_state.x, state.mouse_state.y) = position;
+    }
+    if dialog_opened {
         return Ok(json!({ "clicked": selector, "dialogOpened": true }));
     }
     Ok(json!({ "clicked": selector }))
@@ -151,8 +163,13 @@ pub async fn dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let actions = pointer_click(&Origin::Element(target.shared_id.clone()), "left", 2);
 
     let ff = session(state)?;
-    prepare(ff, &target, selector, true).await?;
-    if perform(ff, &target.context, actions).await? {
+    let position = prepare(ff, &target, selector, true).await?;
+    let same_context = target.context == ff.top_context;
+    let dialog_opened = perform(ff, &target.context, actions).await?;
+    if same_context && !dialog_opened {
+        (state.mouse_state.x, state.mouse_state.y) = position;
+    }
+    if dialog_opened {
         return Ok(json!({ "clicked": selector, "dialogOpened": true }));
     }
     Ok(json!({ "clicked": selector }))
@@ -168,8 +185,12 @@ pub async fn hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
     let actions = pointer_hover(&Origin::Element(target.shared_id.clone()));
 
     let ff = session(state)?;
-    prepare(ff, &target, selector, true).await?;
-    perform(ff, &target.context, actions).await?;
+    let position = prepare(ff, &target, selector, true).await?;
+    let same_context = target.context == ff.top_context;
+    let dialog_opened = perform(ff, &target.context, actions).await?;
+    if same_context && !dialog_opened {
+        (state.mouse_state.x, state.mouse_state.y) = position;
+    }
     Ok(json!({ "hovered": selector }))
 }
 
@@ -489,29 +510,45 @@ pub async fn mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         _ => pointer_hover(&origin),
     };
 
-    state.mouse_state.x = x;
-    state.mouse_state.y = y;
-    apply_button(state, event_type, button);
-
     let ff = session(state)?;
-    perform(ff, &ff.context.clone(), actions).await?;
+    if !perform(ff, &ff.context.clone(), actions).await? {
+        state.mouse_state.x = x;
+        state.mouse_state.y = y;
+        apply_button(state, event_type, button);
+    }
     Ok(json!({ "dispatched": event_type }))
 }
 
-/// Moves the mouse to viewport coordinates.
+/// Moves to viewport coordinates using the requested timing, steps and input mode.
 pub async fn mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let x = cmd.get("x").and_then(Value::as_f64).unwrap_or(0.0);
     let y = cmd.get("y").and_then(Value::as_f64).unwrap_or(0.0);
-    state.mouse_state.x = x;
-    state.mouse_state.y = y;
+    let duration = cmd.get("duration").and_then(Value::as_u64).unwrap_or(0);
+    let mut steps = cmd
+        .get("steps")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    let mode = cmd
+        .get("inputMode")
+        .and_then(Value::as_str)
+        .unwrap_or(&state.input_mode);
+    if mode == "instant" && duration == 0 && steps.is_none() {
+        steps = Some(1);
+    }
+    let actions = pointer_mousemove(
+        (state.mouse_state.x, state.mouse_state.y),
+        (x, y),
+        duration,
+        steps,
+        mode == "human",
+        cmd.get("seed").and_then(Value::as_u64).unwrap_or(0),
+    );
 
     let ff = session(state)?;
-    perform(
-        ff,
-        &ff.context.clone(),
-        pointer_hover(&Origin::Viewport { x, y }),
-    )
-    .await?;
+    if !perform(ff, &ff.context.clone(), actions).await? {
+        state.mouse_state.x = x;
+        state.mouse_state.y = y;
+    }
     Ok(json!({ "moved": true, "x": x, "y": y }))
 }
 
@@ -522,10 +559,10 @@ pub async fn mousedown(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         x: state.mouse_state.x,
         y: state.mouse_state.y,
     };
-    state.mouse_state.buttons |= button_mask(button);
-
     let ff = session(state)?;
-    perform(ff, &ff.context.clone(), pointer_down(&origin, button)).await?;
+    if !perform(ff, &ff.context.clone(), pointer_down(&origin, button)).await? {
+        state.mouse_state.buttons |= button_mask(button);
+    }
     Ok(json!({ "pressed": true }))
 }
 
@@ -536,23 +573,32 @@ pub async fn mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         x: state.mouse_state.x,
         y: state.mouse_state.y,
     };
-    state.mouse_state.buttons &= !button_mask(button);
-
     let ff = session(state)?;
-    perform(ff, &ff.context.clone(), pointer_up(&origin, button)).await?;
+    if !perform(ff, &ff.context.clone(), pointer_up(&origin, button)).await? {
+        state.mouse_state.buttons &= !button_mask(button);
+    }
     Ok(json!({ "released": true }))
 }
 
-/// Wheel scroll at viewport coordinates.
+/// Scrolls at explicit coordinates or the last accepted pointer position.
 pub async fn wheel(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let x = cmd.get("x").and_then(Value::as_f64).unwrap_or(0.0);
-    let y = cmd.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+    let x = cmd
+        .get("x")
+        .and_then(Value::as_f64)
+        .unwrap_or(state.mouse_state.x);
+    let y = cmd
+        .get("y")
+        .and_then(Value::as_f64)
+        .unwrap_or(state.mouse_state.y);
     let delta_x = cmd.get("deltaX").and_then(Value::as_f64).unwrap_or(0.0);
     let delta_y = cmd.get("deltaY").and_then(Value::as_f64).unwrap_or(0.0);
     let actions = pointer_wheel(&Origin::Viewport { x, y }, delta_x, delta_y);
 
     let ff = session(state)?;
-    perform(ff, &ff.context.clone(), actions).await?;
+    if !perform(ff, &ff.context.clone(), actions).await? {
+        state.mouse_state.x = x;
+        state.mouse_state.y = y;
+    }
     Ok(json!({ "scrolled": true, "deltaX": delta_x, "deltaY": delta_y }))
 }
 
@@ -585,12 +631,12 @@ pub async fn input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         _ => pointer_hover(&origin),
     };
 
-    state.mouse_state.x = x;
-    state.mouse_state.y = y;
-    apply_button(state, event_type, button);
-
     let ff = session(state)?;
-    perform(ff, &ff.context.clone(), actions).await?;
+    if !perform(ff, &ff.context.clone(), actions).await? {
+        state.mouse_state.x = x;
+        state.mouse_state.y = y;
+        apply_button(state, event_type, button);
+    }
     Ok(json!({ "dispatched": event_type }))
 }
 
@@ -686,7 +732,206 @@ fn dialog_status(dialog: Option<&PendingDialog>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session_with_script, Calls};
+    use crate::native::firefox::session::tests::{
+        fake_session_with, fake_session_with_script, Calls,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn mousemove_honors_session_modes_overrides_and_explicit_timing() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        for (mode, options, count, duration) in [
+            ("instant", json!({}), 1, 0),
+            ("smooth", json!({}), 10, 0),
+            ("human", json!({}), 10, 122),
+            ("human", json!({"inputMode": "instant"}), 1, 0),
+            (
+                "instant",
+                json!({"inputMode": "human", "seed": 42}),
+                10,
+                122,
+            ),
+            ("instant", json!({"steps": 3}), 3, 0),
+            ("instant", json!({"duration": 101}), 10, 101),
+            ("instant", json!({"duration": 101, "steps": 4}), 4, 101),
+        ] {
+            state.input_mode = mode.into();
+            state.mouse_state.x = 10.0;
+            state.mouse_state.y = 20.0;
+            state.mouse_state.buttons = 1;
+            let mut command = json!({"x": 130, "y": 20});
+            command
+                .as_object_mut()
+                .unwrap()
+                .extend(options.as_object().unwrap().clone());
+            mousemove(&command, &mut state).await.unwrap();
+            let request = requests.lock().unwrap().pop().unwrap();
+            let moves = request["params"]["actions"][0]["actions"]
+                .as_array()
+                .unwrap();
+            assert_eq!(moves.len(), count, "{mode}: {command}");
+            assert_eq!(
+                moves
+                    .iter()
+                    .map(|action| action["duration"].as_u64().unwrap())
+                    .sum::<u64>(),
+                duration
+            );
+            assert_eq!(moves.last().unwrap()["x"], json!(130.0));
+            assert_eq!(moves.last().unwrap()["y"], json!(20.0));
+            assert!(moves.iter().all(|action| action["type"] == "pointerMove"));
+            assert_eq!(
+                (
+                    state.mouse_state.x,
+                    state.mouse_state.y,
+                    state.mouse_state.buttons
+                ),
+                (130.0, 20.0, 1)
+            );
+            assert_eq!(state.input_mode, mode);
+        }
+    }
+
+    #[tokio::test]
+    async fn wheel_uses_and_commits_each_coordinate_independently() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.mouse_state.x = 17.0;
+        state.mouse_state.y = 23.0;
+        state.mouse_state.buttons = 1;
+        for (command, expected) in [
+            (json!({"deltaY": 12}), (17.0, 23.0)),
+            (json!({"x": 80, "deltaY": 12}), (80.0, 23.0)),
+            (json!({"y": 90, "deltaY": 12}), (80.0, 90.0)),
+            (json!({"deltaY": 12}), (80.0, 90.0)),
+        ] {
+            wheel(&command, &mut state).await.unwrap();
+            let request = requests.lock().unwrap().pop().unwrap();
+            let scroll = &request["params"]["actions"][0]["actions"][0];
+            assert_eq!(scroll["x"], json!(expected.0));
+            assert_eq!(scroll["y"], json!(expected.1));
+            assert_eq!(scroll["deltaY"], json!(12.0));
+            assert_eq!((state.mouse_state.x, state.mouse_state.y), expected);
+            assert_eq!(state.mouse_state.buttons, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_pointer_dispatches_preserve_coordinates_and_buttons() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (mut ff, _tx, _) = fake_session_with(|_| json!({})).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for _ in 0..6 {
+                let message = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                let request: Value = serde_json::from_str(&message).unwrap();
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "type": "error", "id": request["id"],
+                            "error": "invalid argument", "message": "rejected pointer action"
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        ff.bidi = super::super::bidi::BidiClient::connect(&address)
+            .await
+            .unwrap()
+            .into();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.mouse_state.x = 17.0;
+        state.mouse_state.y = 23.0;
+        state.mouse_state.buttons = 1;
+        let command = json!({"x": 80, "y": 90, "deltaY": 12, "button": "right", "eventType": "mousePressed", "type": "mousePressed"});
+        for action in [
+            "mouse",
+            "mousemove",
+            "wheel",
+            "input_mouse",
+            "mousedown",
+            "mouseup",
+        ] {
+            let result = match action {
+                "mouse" => mouse(&command, &mut state).await,
+                "mousemove" => mousemove(&command, &mut state).await,
+                "wheel" => wheel(&command, &mut state).await,
+                "input_mouse" => input_mouse(&command, &mut state).await,
+                "mousedown" => mousedown(&command, &mut state).await,
+                _ => mouseup(&json!({"button": "left"}), &mut state).await,
+            };
+            assert!(result.unwrap_err().contains("rejected pointer action"));
+            assert_eq!(
+                (
+                    state.mouse_state.x,
+                    state.mouse_state.y,
+                    state.mouse_state.buttons
+                ),
+                (17.0, 23.0, 1),
+                "{action}"
+            );
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn element_pointer_tracking_uses_only_top_level_coordinates() {
+        for action in ["click", "dblclick", "hover"] {
+            for (selected_context, target_context) in [
+                ("ctx-active", "ctx-active"),
+                ("ctx-active", "ctx-frame"),
+                ("ctx-frame", "ctx-frame"),
+                ("ctx-frame", "ctx-active"),
+            ] {
+                let (mut state, _) = state_with_refs(connected).await;
+                let ff = state.firefox.as_mut().unwrap();
+                ff.context = selected_context.into();
+                ff.refs.retain(|(_, shared_id), _| shared_id != "sid-1");
+                ff.refs.insert((target_context.into(), "sid-1".into()), 7);
+                state.mouse_state.x = 17.0;
+                state.mouse_state.y = 23.0;
+                let command = json!({"selector": "@e1"});
+                match action {
+                    "click" => click(&command, &mut state).await.unwrap(),
+                    "dblclick" => dblclick(&command, &mut state).await.unwrap(),
+                    _ => hover(&command, &mut state).await.unwrap(),
+                };
+                let expected = if target_context == "ctx-active" {
+                    (40.0, 50.0)
+                } else {
+                    (17.0, 23.0)
+                };
+                assert_eq!(
+                    (state.mouse_state.x, state.mouse_state.y),
+                    expected,
+                    "{action}: selected={selected_context}, target={target_context}"
+                );
+            }
+        }
+    }
 
     fn connected(params: &Value) -> Value {
         if params["functionDeclaration"]
