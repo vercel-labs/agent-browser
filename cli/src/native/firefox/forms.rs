@@ -7,8 +7,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::actions::session;
-use super::input::{key_chord_actions, key_event_actions, key_text_actions};
-use super::interact::perform;
+use super::input::{key_chord_actions, key_event_actions, key_text_actions, pointer_click, Origin};
+use super::interact::{perform, prepare};
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
 use crate::native::actions::DaemonState;
@@ -366,7 +366,13 @@ pub async fn check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
     let target = resolve_target(state, selector).await?;
     let ff = session(state)?;
     if run(ff, &target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(false)) {
-        run(ff, &target, CLICK_CHECKBOX_JS, vec![]).await?;
+        prepare(ff, &target, selector, true).await?;
+        perform(
+            ff,
+            &target.context,
+            pointer_click(&Origin::Element(target.shared_id.clone()), "left", 1),
+        )
+        .await?;
     }
     Ok(json!({ "checked": selector }))
 }
@@ -377,7 +383,13 @@ pub async fn uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let target = resolve_target(state, selector).await?;
     let ff = session(state)?;
     if run(ff, &target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(true)) {
-        run(ff, &target, CLICK_CHECKBOX_JS, vec![]).await?;
+        prepare(ff, &target, selector, true).await?;
+        perform(
+            ff,
+            &target.context,
+            pointer_click(&Origin::Element(target.shared_id.clone()), "left", 1),
+        )
+        .await?;
     }
     Ok(json!({ "unchecked": selector }))
 }
@@ -719,7 +731,7 @@ mod tests {
                 .unwrap(),
             json!({"checked": "#agree"})
         );
-        assert_eq!(calls.lock().unwrap().len(), 3);
+        assert_eq!(calls.lock().unwrap().len(), 4);
 
         let (ff, _tx, calls) = fake_session_with(checkbox_responder(true)).await;
         let mut state = state_with(ff);
@@ -739,7 +751,7 @@ mod tests {
                 .unwrap(),
             json!({"unchecked": "#agree"})
         );
-        assert_eq!(calls.lock().unwrap().len(), 3);
+        assert_eq!(calls.lock().unwrap().len(), 4);
     }
 
     #[tokio::test]
