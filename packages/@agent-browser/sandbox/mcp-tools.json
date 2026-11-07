@@ -1335,6 +1335,11 @@
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
           },
+          "timeout": {
+            "description": "Milliseconds the whole run may take, across every tier.",
+            "minimum": 1,
+            "type": "integer"
+          },
           "where": {
             "additionalProperties": {
               "type": "string"

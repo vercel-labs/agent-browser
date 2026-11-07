@@ -4511,7 +4511,7 @@ Saved flows (experimental, open the session with --capture flow):
                              and --timeout <ms>
   flow run <name>            Send the saved requests directly, then from the page, then by replaying
                              the recorded commands; accepts --param k=v, --where f=v, --fields a,b,
-                             --limit n, --origin <host>, and --allow-write <all|id,...>
+                             --limit n, --origin <host>, --allow-write <all|id,...>, and --timeout <ms>
   flow list [--origin <host>] Saved flows with params and verified state
 
 React (requires `open --enable react-devtools`):

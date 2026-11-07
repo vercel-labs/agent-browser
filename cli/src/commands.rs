@@ -2253,6 +2253,28 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             .and_then(|i| args.get(i + 1).copied())
     }
 
+    /// `--timeout <ms>`, which `flow save` and `flow run` both take.
+    fn timeout_flag(
+        args: &[&str],
+        cmd: &mut Value,
+        context: &str,
+        usage: &'static str,
+    ) -> Result<(), ParseError> {
+        if !args.contains(&"--timeout") {
+            return Ok(());
+        }
+        let raw = flag_value(args, "--timeout").ok_or_else(|| ParseError::MissingArguments {
+            context: context.to_string(),
+            usage,
+        })?;
+        let n: u64 = raw.parse().map_err(|_| ParseError::InvalidValue {
+            message: format!("Invalid --timeout '{}': expected a number in ms", raw),
+            usage,
+        })?;
+        cmd["timeout"] = json!(n);
+        Ok(())
+    }
+
     match rest.first().copied() {
         Some("steps") => Ok(json!({ "id": id, "action": "flow_steps" })),
         Some("save") => {
@@ -2290,18 +2312,7 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             if let Some(description) = flag_value(rest, "--description") {
                 cmd["description"] = json!(description);
             }
-            if rest.contains(&"--timeout") {
-                let raw =
-                    flag_value(rest, "--timeout").ok_or_else(|| ParseError::MissingArguments {
-                        context: "flow save --timeout".to_string(),
-                        usage: SAVE_USAGE,
-                    })?;
-                let n: u64 = raw.parse().map_err(|_| ParseError::InvalidValue {
-                    message: format!("Invalid --timeout '{}': expected a number in ms", raw),
-                    usage: SAVE_USAGE,
-                })?;
-                cmd["timeout"] = json!(n);
-            }
+            timeout_flag(rest, &mut cmd, "flow save --timeout", SAVE_USAGE)?;
             Ok(cmd)
         }
         Some("run") => {
@@ -2311,7 +2322,7 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 .ok_or_else(|| ParseError::MissingArguments {
                     context: "flow run".to_string(),
                     usage:
-                        "flow run <name> [--param name=value]... [--origin <host>] [--allow-write <all|id,...>]",
+                        "flow run <name> [--param name=value]... [--origin <host>] [--allow-write <all|id,...>] [--timeout <ms>]",
                 })?;
             let mut cmd = json!({
                 "id": id,
@@ -2364,6 +2375,12 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 })?;
                 cmd["limit"] = json!(n);
             }
+            timeout_flag(
+                rest,
+                &mut cmd,
+                "flow run --timeout",
+                "flow run <name> --timeout <ms>",
+            )?;
             Ok(cmd)
         }
         Some("list") => {
