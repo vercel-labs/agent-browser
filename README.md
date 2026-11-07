@@ -136,3 +136,5 @@ cargo test e2e -- --ignored --test-threads=1   # launches real headless Chrome
 ## License
 
 Apache-2.0
+
+[![Contributions](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](https://github.com/BAKOME-Hub)
