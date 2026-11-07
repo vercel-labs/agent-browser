@@ -2,6 +2,7 @@
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{
@@ -11,13 +12,14 @@ use tokio::sync::{broadcast, oneshot};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-type Pending = Arc<Mutex<HashMap<String, VecDeque<oneshot::Sender<Value>>>>>;
+type Pending = Arc<Mutex<HashMap<String, VecDeque<(u64, oneshot::Sender<Value>)>>>>;
 
 /** A connected DevTools protocol session; clones share the same connection. */
 #[derive(Clone)]
 pub struct RdpClient {
     writer: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     pending: Pending,
+    next_request: Arc<AtomicU64>,
     events: broadcast::Sender<Value>,
     greeting: Value,
     reader: Arc<AbortOnDrop>,
@@ -79,7 +81,11 @@ impl RdpClient {
                 let waiter = if is_event {
                     None
                 } else {
-                    p.lock().unwrap().get_mut(&from).and_then(|q| q.pop_front())
+                    p.lock()
+                        .unwrap()
+                        .get_mut(&from)
+                        .and_then(|q| q.pop_front())
+                        .map(|(_, sender)| sender)
                 };
                 match waiter {
                     Some(tx) => {
@@ -95,6 +101,7 @@ impl RdpClient {
         Ok(Self {
             writer: Arc::new(tokio::sync::Mutex::new(Box::new(wr))),
             pending,
+            next_request: Arc::new(AtomicU64::new(0)),
             events,
             greeting,
             reader: Arc::new(AbortOnDrop(reader)),
@@ -129,6 +136,7 @@ impl RdpClient {
         }
         let body = body.to_string();
         let (tx, rx) = oneshot::channel();
+        let request_id = self.next_request.fetch_add(1, Ordering::Relaxed);
         {
             let mut w = self.writer.lock().await;
             self.pending
@@ -136,13 +144,13 @@ impl RdpClient {
                 .unwrap()
                 .entry(to.to_string())
                 .or_default()
-                .push_back(tx);
+                .push_back((request_id, tx));
             if let Err(e) = w
                 .write_all(format!("{}:{}", body.len(), body).as_bytes())
                 .await
             {
                 if let Some(q) = self.pending.lock().unwrap().get_mut(to) {
-                    q.pop_back();
+                    q.retain(|(id, _)| *id != request_id);
                 }
                 return Err(format!("DevTools send failed: {e}"));
             }
@@ -158,7 +166,12 @@ impl RdpClient {
                 None => Ok(reply),
             },
             Ok(Err(_)) => Err("DevTools connection closed".to_string()),
-            Err(_) => Err(format!("DevTools request {kind} to {to} timed out")),
+            Err(_) => {
+                if let Some(q) = self.pending.lock().unwrap().get_mut(to) {
+                    q.retain(|(id, _)| *id != request_id);
+                }
+                Err(format!("DevTools request {kind} to {to} timed out"))
+            }
         }
     }
 }
@@ -214,6 +227,25 @@ mod tests {
         assert_eq!(r1.await.unwrap().unwrap()["n"], 1);
         assert_eq!(r2.await.unwrap().unwrap()["n"], 2);
         assert_eq!(ev.recv().await.unwrap()["type"], "tick");
+    }
+
+    #[tokio::test]
+    async fn timed_out_request_does_not_consume_the_next_reply() {
+        let (c, mut s) = pair().await;
+        let first = c.clone();
+        let first = tokio::spawn(async move {
+            first
+                .request_timeout("act1", "first", json!({}), Duration::from_millis(20))
+                .await
+        });
+        assert_eq!(get(&mut s).await["type"], "first");
+        assert!(first.await.unwrap().unwrap_err().contains("timed out"));
+
+        let second = c.clone();
+        let second = tokio::spawn(async move { second.request("act1", "second", json!({})).await });
+        assert_eq!(get(&mut s).await["type"], "second");
+        put(&mut s, json!({"from":"act1","n":2})).await;
+        assert_eq!(second.await.unwrap().unwrap()["n"], 2);
     }
 
     #[tokio::test]
