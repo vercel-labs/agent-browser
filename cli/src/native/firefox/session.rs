@@ -45,7 +45,7 @@ pub struct FirefoxSession {
     pub top_context: String,
     /// Stable `t<N>` ids keyed by BiDi context; assigned on first sight and never reused.
     pub tab_ids: HashMap<String, u32>,
-    context_parents: HashMap<String, String>,
+    pub(crate) context_parents: HashMap<String, String>,
     next_tab_id: u32,
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
