@@ -1080,7 +1080,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         })
         .collect();
 
-    let report = json!({
+    let mut report = json!({
         "name": input.name,
         "origin": host,
         "steps": input.commands.len(),
@@ -1094,7 +1094,32 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         "droppedHeaders": dropped_headers,
         "verified": false,
     });
+    // The report names commands from the recording; they pass the same
+    // scrub as the file.
+    if let Some(gaps) = report["gaps"].as_array_mut() {
+        for g in gaps {
+            if let Some(text) = g["command"].as_str() {
+                let clean = scrub_command_text(text, &input.recorder.secrets);
+                g["command"] = json!(clean);
+            }
+        }
+    }
     Ok((flow, report))
+}
+
+/// A `describe_command` line with its URL and any known secret scrubbed.
+fn scrub_command_text(text: &str, secrets: &[String]) -> String {
+    if holds_secret(text, secrets) {
+        let action = text.split(' ').next().unwrap_or("");
+        return format!("{action} {REDACTED}");
+    }
+    match text.split_once(' ') {
+        Some((action, target)) => match scrub_url(target) {
+            Some(clean) => format!("{action} {clean}"),
+            None => text.to_string(),
+        },
+        None => text.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1667,38 +1692,33 @@ pub fn write_flow(flow: &Flow) -> Result<PathBuf, String> {
 }
 
 /// The one pass over everything a flow file stores, run before it is
-/// written: a known secret, in any encoding, anywhere in a command or a
-/// request becomes `<redacted>`, and so does the value of a credential
-/// parameter in a URL a command or the start URL carries (a token in a
-/// navigation's query). A step it touches is marked redacted, so the
-/// command replay never sends it.
+/// written. A known secret, in any encoding, anywhere in a command, a
+/// request or a write becomes `<redacted>`. Credential query parameters
+/// (a token in a navigation's query) are redacted where the browser went,
+/// not where the run must send: in commands, the start URL, the Referer and
+/// Origin headers and the writes, never in a saved request's URL, which the
+/// run sends as recorded. A param named like a credential keeps no recorded
+/// value, so a run must pass it. A step whose command it touches is marked
+/// redacted, so the command replay never sends it.
 pub(super) fn scrub(flow: &mut Flow, secrets: &[String]) {
     flow.start_url = scrub_url(&flow.start_url).unwrap_or_else(|| flow.start_url.clone());
     for (index, step) in flow.steps.iter_mut().enumerate() {
-        let mut hit = scrub_strings(&mut step.command, secrets);
+        let hit = scrub_strings(&mut step.command, secrets);
         for r in &mut step.requests {
             if holds_secret(&r.url, secrets) {
                 r.url = REDACTED.to_string();
-                hit = true;
-            } else if let Some(clean) = scrub_url(&r.url) {
-                // The credential is not stored, as with an auth header the
-                // file does not keep: a 401 or 403 says so.
-                r.url = clean;
-                r.expect.stripped_auth = true;
-                hit = true;
             }
             if r.body.as_deref().is_some_and(|b| holds_secret(b, secrets)) {
                 r.body = Some(REDACTED.to_string());
-                hit = true;
             }
-            for v in r.headers.values_mut() {
+            for (name, v) in r.headers.iter_mut() {
                 if holds_secret(v, secrets) {
                     *v = REDACTED.to_string();
-                    hit = true;
-                } else if let Some(clean) = scrub_url(v) {
-                    // A URL in a header, such as the Referer.
-                    *v = clean;
-                    hit = true;
+                } else if matches!(name.to_ascii_lowercase().as_str(), "referer" | "origin") {
+                    // The page the browser was on, not something the run sends.
+                    if let Some(clean) = scrub_url(v) {
+                        *v = clean;
+                    }
                 }
             }
         }
@@ -1715,6 +1735,16 @@ pub(super) fn scrub(flow: &mut Flow, secrets: &[String]) {
             w.url = REDACTED.to_string();
         } else if let Some(clean) = scrub_url(&w.url) {
             w.url = clean;
+        }
+    }
+    for p in &mut flow.params {
+        if p.example.as_deref().is_some_and(|e| e != REDACTED)
+            && (is_credential_param(&p.name)
+                || p.example
+                    .as_deref()
+                    .is_some_and(|e| holds_secret(e, secrets)))
+        {
+            p.example = None;
         }
     }
 }
@@ -1758,30 +1788,66 @@ fn scrub_strings(v: &mut Value, secrets: &[String]) -> bool {
     }
 }
 
-/// The URL with credential parameter values redacted, if it had any. Only
-/// those values change; the rest of the query stays byte for byte, so a
-/// template (`{{name}}`, `{{@s1r1.token}}`), which a run fills, is kept.
+/// The URL with credential parameter values redacted, if it had any, in
+/// its query or in a fragment of `k=v` pairs (an OAuth implicit-grant
+/// callback). Only those values change; the rest stays byte for byte, so a
+/// template (`{{name}}`, `{{@s1r1.token}}`), which a run fills, is kept, and
+/// so is a name with no value.
 fn scrub_url(url: &str) -> Option<String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return None;
     }
-    let (head, rest) = url.split_once('?')?;
-    let (query, fragment) = match rest.split_once('#') {
-        Some((q, f)) => (q, Some(f)),
-        None => (rest, None),
+    let (before_fragment, fragment) = match url.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (url, None),
     };
+    let (head, query) = match before_fragment.split_once('?') {
+        Some((h, q)) => (h, Some(q)),
+        None => (before_fragment, None),
+    };
+    let query = query.map(scrub_pairs);
+    let fragment = fragment.map(|f| {
+        if f.contains('=') && !f.contains('/') {
+            scrub_pairs(f)
+        } else {
+            (f.to_string(), false)
+        }
+    });
+    let changed = query.as_ref().is_some_and(|q| q.1) || fragment.as_ref().is_some_and(|f| f.1);
+    changed.then(|| {
+        let mut out = head.to_string();
+        if let Some((q, _)) = query {
+            out.push('?');
+            out.push_str(&q);
+        }
+        if let Some((f, _)) = fragment {
+            out.push('#');
+            out.push_str(&f);
+        }
+        out
+    })
+}
+
+/// `k=v&k=v` with credential values redacted, and whether any were.
+fn scrub_pairs(pairs: &str) -> (String, bool) {
     let redacted = urlencoding::encode(REDACTED);
     let mut changed = false;
-    let parts: Vec<String> = query
+    let parts: Vec<String> = pairs
         .split('&')
         .map(|part| {
-            let (k, v) = part.split_once('=').unwrap_or((part, ""));
+            let Some((k, v)) = part.split_once('=') else {
+                return part.to_string();
+            };
             let name = url::form_urlencoded::parse(k.as_bytes())
                 .next()
                 .map(|(k, _)| k.into_owned())
                 .unwrap_or_default();
             let value = percent_decode_lossless(&v.replace('+', " "));
-            if is_credential_param(&name) && value != REDACTED && !value.contains("{{") {
+            if is_credential_param(&name)
+                && !value.is_empty()
+                && value != REDACTED
+                && !value.contains("{{")
+            {
                 changed = true;
                 format!("{k}={redacted}")
             } else {
@@ -1789,14 +1855,7 @@ fn scrub_url(url: &str) -> Option<String> {
             }
         })
         .collect();
-    changed.then(|| {
-        let mut out = format!("{head}?{}", parts.join("&"));
-        if let Some(f) = fragment {
-            out.push('#');
-            out.push_str(f);
-        }
-        out
-    })
+    (parts.join("&"), changed)
 }
 
 /// A query parameter that carries a credential: named like a credential
@@ -1804,7 +1863,8 @@ fn scrub_url(url: &str) -> Option<String> {
 /// pagination cursor (`pageToken`, `nextPageToken`, `continuation_token`), or
 /// one word of its name is a secret-field marker (`pass`, `secret`, `otp`,
 /// `pin`, `cvv`, `card`), `password`, or a common credential name (`auth`,
-/// `key`, `apikey`, `sig`, `signature`, `jwt`, `sid`). Words split on
+/// `apikey`, `signature`, `jwt`). Bare `key`, `sig` and `sid` are left out:
+/// publishable keys (Algolia, Google) ride in the query. Words split on
 /// punctuation and match whole, so `passengers` and `shipping` are not
 /// secrets.
 fn is_credential_param(name: &str) -> bool {
@@ -1826,10 +1886,7 @@ fn is_credential_param(name: &str) -> bool {
         .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|word| {
             recorder::SECRET_MARKERS.contains(&word)
-                || matches!(
-                    word,
-                    "password" | "auth" | "key" | "apikey" | "sig" | "signature" | "jwt" | "sid"
-                )
+                || matches!(word, "password" | "auth" | "apikey" | "signature" | "jwt")
         })
 }
 
@@ -4120,21 +4177,39 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_the_scrub_removed_is_never_sent_as_redacted() {
+    fn the_scrub_hides_where_the_browser_went_and_keeps_what_the_run_sends() {
         // A recording that began on an open page has no navigate step: the
         // replay opens the start URL, so it refuses one without its token.
         let mut flow = flow_of(json!({
             "startUrl": "https://a.test/inbox?access_token=zzz",
-            "writes": [{ "id": "s1w1", "method": "POST", "url": "https://a.test/api/send?sig=abc", "kind": "explicit", "step": 1 }],
-            "steps": [{ "command": { "action": "click", "selector": "#send" }, "requests": [{
-                "id": "s1r1", "method": "GET", "url": "https://a.test/api/me?access_token=zzz"
+            "params": [{ "name": "access_token", "example": "zzz", "source": "query" }],
+            "writes": [{ "id": "s1w1", "method": "POST", "url": "https://a.test/api/send?signature=abc", "kind": "explicit", "step": 1 }],
+            "steps": [{ "command": { "action": "click", "selector": "#a" }, "requests": [{
+                "id": "s1r1", "method": "GET",
+                "url": "https://a.test/1/indexes/q?x-algolia-api-key=pub123&x-algolia-application-id=APP",
+                "headers": { "Referer": "https://a.test/inbox?access_token=zzz" }
             }] }]
         }));
         scrub(&mut flow, &[]);
         let text = serde_json::to_string(&flow).unwrap();
         assert!(!text.contains("zzz") && !text.contains("abc"), "{text}");
+        // A saved request is sent as recorded: its publishable key stays,
+        // and a header the browser set does not mark the step redacted.
+        assert!(flow.steps[0].requests[0].url.contains("pub123"));
+        assert!(!flow.steps[0].requests[0].expect.stripped_auth);
+        assert!(flow.redacted_steps.is_empty(), "{:?}", flow.redacted_steps);
+        assert!(
+            is_redacted_url(&flow.writes[0].url),
+            "{}",
+            flow.writes[0].url
+        );
+        // A credential-named param keeps no recorded value.
+        assert_eq!(flow.params[0].example, None);
         let err = replay_commands(&flow, &[]).unwrap_err();
-        assert!(err.contains("start URL") || err.contains("secret"), "{err}");
+        assert!(
+            err.contains("start URL") || err.contains("access_token"),
+            "{err}"
+        );
         let mut only_start = flow_of(json!({
             "startUrl": "https://a.test/inbox?access_token=zzz",
             "steps": [{ "command": { "action": "click", "selector": "#a" } }]
@@ -4142,30 +4217,83 @@ mod tests {
         scrub(&mut only_start, &[]);
         let err = replay_commands(&only_start, &[]).unwrap_err();
         assert!(err.contains("start URL"), "{err}");
-        // The HTTP tier sends the request without its credential, so a 401 or
-        // 403 is credential_not_sendable, not auth_expired.
-        let req = &flow.steps[0].requests[0];
-        assert!(req.expect.stripped_auth);
-        assert!(
-            is_redacted_url(&flow.writes[0].url),
-            "{}",
-            flow.writes[0].url
+        // A token in an implicit-grant fragment, and a name with no value.
+        assert_eq!(
+            scrub_url("https://a.test/cb#access_token=t0k&token_type=bearer").as_deref(),
+            Some("https://a.test/cb#access_token=%3Credacted%3E&token_type=%3Credacted%3E")
         );
+        assert_eq!(scrub_url("https://a.test/x?auth&x=1"), None);
+        assert_eq!(scrub_url("https://a.test/#/login"), None);
+    }
+
+    #[test]
+    fn the_save_report_never_prints_a_credential_from_the_recording() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/welcome?magic_token=abc123" }),
+            None,
+            None,
+        );
+        r.tag_now("doc");
+        r.begin_command(
+            "click",
+            &json!({ "action": "click", "selector": "@e1" }),
+            None,
+            None,
+        );
+        r.tag_now("api");
+        let entries = vec![
+            entry(
+                "doc",
+                "https://www.example.com.ar/welcome?magic_token=abc123",
+                "Document",
+                "text/html",
+                "<html>",
+            ),
+            entry(
+                "api",
+                "https://api.example.com.ar/movies",
+                "Fetch",
+                "application/json",
+                r#"{"movies":[]}"#,
+            ),
+        ];
+        let (flow, report) = build_flow_value(SaveInput {
+            name: "f",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &entries,
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+            local_names: &[],
+        })
+        .unwrap();
+        // The navigation loaded only a page, so the report names it in a gap.
+        assert!(
+            report["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|g| g["command"].as_str().unwrap_or("").starts_with("navigate")),
+            "{report}"
+        );
+        assert!(!report.to_string().contains("abc123"), "{report}");
+        assert!(!flow.to_string().contains("abc123"), "{flow}");
     }
 
     #[test]
     fn credential_params_are_named_like_credentials() {
-        for name in [
-            "auth",
-            "api_key",
-            "apikey",
-            "key",
-            "sig",
-            "signature",
-            "jwt",
-            "sid",
-        ] {
+        for name in ["auth", "apikey", "signature", "jwt"] {
             assert!(is_credential_param(name), "{name}");
+        }
+        // Publishable keys ride in the query and are sent as recorded.
+        for name in ["key", "sig", "sid", "x-algolia-api-key", "sort_key"] {
+            assert!(!is_credential_param(name), "{name}");
         }
         for name in [
             "token",
