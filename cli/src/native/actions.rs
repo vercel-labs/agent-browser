@@ -15078,21 +15078,9 @@ async fn move_mouse_interpolated(
     let dx = target_x - start_x;
     let dy = target_y - start_y;
     let distance = dx.hypot(dy);
-    let duration_ms = if duration_ms == 0 && human {
-        (80.0 + distance * 0.35).clamp(100.0, 700.0) as u64
-    } else {
-        duration_ms
-    };
+    let duration_ms = interpolated_mouse_duration(distance, duration_ms, human);
     let steps = interpolated_mouse_steps(distance, duration_ms, requested_steps, human);
-    let bend = if human && distance > 0.0 {
-        let mixed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let unit = ((mixed >> 11) as f64) / ((1_u64 << 53) as f64);
-        (unit * 2.0 - 1.0) * (distance * 0.08).min(36.0)
-    } else {
-        0.0
-    };
+    let bend = interpolated_mouse_bend(distance, human, seed);
     let (perp_x, perp_y) = if distance > 0.0 {
         (-dy / distance, dx / distance)
     } else {
@@ -15138,7 +15126,27 @@ async fn move_mouse_interpolated(
     Ok(())
 }
 
-fn interpolated_mouse_steps(
+pub(super) fn interpolated_mouse_duration(distance: f64, duration_ms: u64, human: bool) -> u64 {
+    if duration_ms == 0 && human {
+        (80.0 + distance * 0.35).clamp(100.0, 700.0) as u64
+    } else {
+        duration_ms
+    }
+}
+
+pub(super) fn interpolated_mouse_bend(distance: f64, human: bool, seed: u64) -> f64 {
+    if human && distance > 0.0 {
+        let mixed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let unit = ((mixed >> 11) as f64) / ((1_u64 << 53) as f64);
+        (unit * 2.0 - 1.0) * (distance * 0.08).min(36.0)
+    } else {
+        0.0
+    }
+}
+
+pub(super) fn interpolated_mouse_steps(
     distance: f64,
     duration_ms: u64,
     requested_steps: Option<usize>,
@@ -15157,7 +15165,7 @@ fn interpolated_mouse_steps(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn interpolated_mouse_point(
+pub(super) fn interpolated_mouse_point(
     start_x: f64,
     start_y: f64,
     target_x: f64,
