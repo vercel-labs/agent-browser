@@ -484,6 +484,10 @@ pub async fn select_option(
                 .replace(/\s+/g, ' ')
                 .trim();
             const options = Array.from(this.options);
+            const describe = (opt) => opt.value + ' ("' + normalize(opt.label) + '")';
+            const ambiguous = (value, matches, suffix) =>
+                'Multiple options matched ' + JSON.stringify(value) + suffix + ': ' +
+                matches.map(describe).join(', ') + '. Pass a value or label that matches exactly one option instead.';
             const wanted = new Set();
             for (const value of vals) {
                 let matches = options.filter((opt) =>
@@ -491,23 +495,26 @@ pub async fn select_option(
                     value === opt.label.trim() ||
                     value === opt.textContent.trim()
                 );
+                if (matches.length > 1) {
+                    return { error: ambiguous(value, matches, '') };
+                }
                 if (matches.length === 0) {
                     const normalizedValue = normalize(value);
                     matches = options.filter((opt) =>
                         normalize(opt.label) === normalizedValue
                     );
                     if (matches.length > 1) {
-                        return { error: 'Multiple options matched ' + JSON.stringify(value) + ' after whitespace normalization' };
+                        return { error: ambiguous(value, matches, ' after whitespace normalization') };
                     }
                 }
                 if (matches.length === 0) {
-                    const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
+                    const available = options.map(describe).join(', ');
                     return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
                 }
                 for (const opt of matches) wanted.add(opt);
             }
             if (wanted.size === 0) {
-                const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
+                const available = options.map(describe).join(', ');
                 return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
             }
             for (const opt of options) opt.selected = wanted.has(opt);

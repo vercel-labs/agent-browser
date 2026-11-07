@@ -2445,6 +2445,13 @@ async fn e2e_select_option_normalized_names() {
         add(collision, 'nbsp', 'Alpha\u00A0Beta');
         document.body.appendChild(collision);
 
+        const valueCollision = document.createElement('select');
+        valueCollision.id = 'value-collision';
+        add(valueCollision, 'a', 'Alpha', true);
+        add(valueCollision, 'b', 'Beta');
+        add(valueCollision, 'Alpha', 'TrickyValueIsAlpha');
+        document.body.appendChild(valueCollision);
+
         const cases = document.createElement('select');
         cases.id = 'cases';
         add(cases, 'US', 'Upper');
@@ -2503,6 +2510,45 @@ async fn e2e_select_option_normalized_names() {
         .unwrap()
         .contains("Multiple options matched"));
     assert_evaluate(&mut state, "12", "collision.value", json!("ascii")).await;
+
+    // A value can match one option's value and another option's label. The
+    // match is ambiguous, so select must fail and name both candidates instead
+    // of silently keeping whichever option the browser sees last.
+    let resp = select_values(
+        &mut state,
+        "value-collision-1",
+        "#value-collision",
+        &["Alpha"],
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    let error = resp["error"].as_str().unwrap();
+    assert!(error.contains("Multiple options matched"));
+    assert!(error.contains("TrickyValueIsAlpha"));
+    assert_evaluate(
+        &mut state,
+        "value-collision-2",
+        "document.querySelector('#value-collision').value",
+        json!("a"),
+    )
+    .await;
+
+    // The unambiguous label still selects the third option.
+    let resp = select_values(
+        &mut state,
+        "value-collision-3",
+        "#value-collision",
+        &["TrickyValueIsAlpha"],
+    )
+    .await;
+    assert_success(&resp);
+    assert_evaluate(
+        &mut state,
+        "value-collision-4",
+        "document.querySelector('#value-collision').value",
+        json!("Alpha"),
+    )
+    .await;
 
     let resp = select_values(&mut state, "13", "#cases", &["us"]).await;
     assert_success(&resp);
