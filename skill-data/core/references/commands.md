@@ -232,7 +232,7 @@ Viewport scales and geolocation coordinates must be finite numbers.
 ## Cookies and Storage
 
 ```bash
-agent-browser cookies                     # Get all cookies
+agent-browser cookies                     # Get cookies (Firefox defaults to active page and frames)
 agent-browser cookies set name value      # Set cookie
 agent-browser cookies clear               # Clear cookies
 agent-browser storage local               # Get all localStorage
@@ -564,7 +564,7 @@ agent-browser --ca-cert <path>        # Trust a CA for CLI requests, and in loca
 agent-browser --no-ca-cert            # Clear CA trust retained by the running session
 agent-browser --use-system-ca         # OS trust store for CLI requests (read, install, upgrade, doctor)
 agent-browser --hide-scrollbars false # Keep native scrollbars visible in headless Chromium screenshots
-agent-browser --engine <name> ...     # chrome (default), lightpanda, obscura (experimental)
+agent-browser --engine <name> ...     # chrome (default), lightpanda, obscura, firefox
 agent-browser --auto-connect ...      # Connect to an already-running Chrome
 agent-browser --no-auto-connect ...   # Return an --auto-connect session to a local launch
 agent-browser --profile <name|path>   # Use a Chrome profile (login state survives)
@@ -578,6 +578,8 @@ agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
 ```
+
+Firefox rejects authenticated proxies, `--user-agent`, `--color-scheme`, and `networkidle` waits.
 
 ## Debugging
 
@@ -684,3 +686,5 @@ AGENT_BROWSER_PLUGINS='[{"name":"vault","command":"agent-browser-plugin-vault","
 ```
 
 Browser Use Cloud lifecycle: setup is bounded to 18s plus up to 4s for timeout cleanup (10s create, 8s CDP attach, 4s stop). `close` succeeds only after the Cloud session acknowledges it stopped; a failed stop returns an error, keeps the session id for retrying `close`, and blocks a new launch until released. If create fails before an id arrives, the outcome is unknown; inspect the Browser Use Cloud dashboard before retrying. If the daemon exits before a successful stop, inspect and stop the browser in Cloud.
+
+Firefox does not support `--capture flow`.

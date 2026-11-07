@@ -241,6 +241,8 @@ agent-browser storage local clear     # Clear all
 agent-browser storage session         # Same for sessionStorage
 ```
 
+When no URLs are supplied, Firefox returns cookies that apply to the active page and its frames.
+
 Reads accept at most one key, sets require one key and one value, and clears take no operands. A bare key is shorthand for a one-key read.
 
 Cookie operations are `get` (the default), `set`, and `clear`; unknown operations return an error. Cookie attributes use kebab-case flags such as `--http-only` and `--same-site`. The legacy `--httpOnly` and `--sameSite` spellings remain accepted. When setting one cookie, unknown flags and extra arguments return an error.
@@ -686,7 +688,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script r
 --action-policy <path>   # Path to action policy JSON file
 --confirm-actions <list> # Action categories requiring confirmation
 --confirm-interactive    # Interactive confirmation prompts (auto-denies if stdin is not a TTY)
---engine <name>          # Browser engine: chrome (default), lightpanda, obscura (experimental)
+--engine <name>          # Browser engine: chrome (default), lightpanda, obscura, firefox
 --input-mode <mode>      # Pointer movement: instant (default), smooth, human
 --idle-timeout <time>    # Auto-shutdown daemon after inactivity (default: 1h; 0 disables)
 --no-auto-dialog         # Disable auto-accept for alert and beforeunload dialogs
@@ -699,6 +701,8 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script r
 ```
 
 In a `batch`, `--relaunch` relaunches the browser once: the first command that can launch a browser carries it. Commands that never launch one, such as `read`, and commands denied by policy or waiting for confirmation pass it on to the next command.
+
+Firefox rejects authenticated proxies, `--user-agent`, `--color-scheme`, and `networkidle` waits.
 
 See [Configuration](/configuration) for config files and environment variables. See [Proxy](/proxy) for proxy server, bypass, and credential settings.
 
@@ -839,3 +843,5 @@ agent-browser screenshot output.png
 The `--allow-file-access` flag enables JavaScript to access other local files. Chromium only.
 
 See [Files & Clipboard](/files) for local files, uploads, downloads, screenshots, PDFs, and clipboard workflows.
+
+Firefox does not support `--capture flow`.

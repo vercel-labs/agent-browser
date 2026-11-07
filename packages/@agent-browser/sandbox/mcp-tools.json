@@ -587,7 +587,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get cookies.",
+      "description": "Get cookies. When URLs are omitted, Firefox filters to the active page and its frames.",
       "inputSchema": {
         "properties": {
           "session": {
@@ -2434,7 +2434,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3909,7 +3909,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Save cookies and storage state.",
+      "description": "Save cookies and storage state, overwriting the target file.",
       "inputSchema": {
         "properties": {
           "path": {
@@ -4254,7 +4254,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
