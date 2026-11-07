@@ -197,6 +197,15 @@ impl FirefoxSession {
         rdp.request(&accessibility_actor, "enable", json!({}))
             .await?;
 
+        let rdp = connect_devtools(&process.devtools).await?;
+        let root = rdp.request("root", "getRoot", json!({})).await?;
+        let accessibility_actor = root["parentAccessibilityActor"]
+            .as_str()
+            .ok_or("Firefox DevTools did not expose the accessibility actor")?
+            .to_string();
+        rdp.request(&accessibility_actor, "enable", json!({}))
+            .await?;
+
         let tree = bidi.send("browsingContext.getTree", json!({})).await?;
         let context = tree["contexts"][0]["context"]
             .as_str()
@@ -603,6 +612,7 @@ fn context_contains<'a>(
 pub(crate) mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
+    use tokio::io::AsyncWriteExt;
     use tokio_tungstenite::tungstenite::Message;
 
     pub(crate) type Calls = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
