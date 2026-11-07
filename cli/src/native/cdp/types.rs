@@ -137,10 +137,19 @@ pub struct SetDiscoverTargetsParams {
     pub discover: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTargetParams {
     pub url: String,
+    /// Create the target without foregrounding it. Left unset (and not sent)
+    /// unless a caller needs it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
+    /// Create a hidden target: reachable over CDP but absent from the tab
+    /// strip. Experimental in the protocol and only valid with `background:
+    /// true`, so callers must be ready for the browser to reject it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -583,4 +592,31 @@ pub struct BrowserVersionInfo {
 #[allow(clippy::upper_case_acronyms)]
 pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/cdp_generated.rs"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_target_params_send_only_what_is_set() {
+        let plain = CreateTargetParams {
+            url: "about:blank".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"url":"about:blank"}"#
+        );
+
+        let hidden = CreateTargetParams {
+            url: "about:blank".to_string(),
+            background: Some(true),
+            hidden: Some(true),
+        };
+        assert_eq!(
+            serde_json::to_string(&hidden).unwrap(),
+            r#"{"url":"about:blank","background":true,"hidden":true}"#
+        );
+    }
 }
