@@ -592,15 +592,25 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(p) = opts.proxy {
         cmd.env("AGENT_BROWSER_PROXY", p);
+        match opts.proxy_username {
+            Some(proxy_username) => {
+                cmd.env("AGENT_BROWSER_PROXY_USERNAME", proxy_username);
+            }
+            None => {
+                cmd.env_remove("AGENT_BROWSER_PROXY_USERNAME");
+            }
+        }
+        match opts.proxy_password {
+            Some(proxy_password) => {
+                cmd.env("AGENT_BROWSER_PROXY_PASSWORD", proxy_password);
+            }
+            None => {
+                cmd.env_remove("AGENT_BROWSER_PROXY_PASSWORD");
+            }
+        }
     }
     if let Some(pb) = opts.proxy_bypass {
         cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
-    }
-    if let Some(pu) = opts.proxy_username {
-        cmd.env("AGENT_BROWSER_PROXY_USERNAME", pu);
-    }
-    if let Some(pp) = opts.proxy_password {
-        cmd.env("AGENT_BROWSER_PROXY_PASSWORD", pp);
     }
     if opts.ignore_https_errors {
         cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
