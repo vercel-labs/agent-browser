@@ -592,15 +592,25 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(p) = opts.proxy {
         cmd.env("AGENT_BROWSER_PROXY", p);
+        match opts.proxy_username {
+            Some(proxy_username) => {
+                cmd.env("AGENT_BROWSER_PROXY_USERNAME", proxy_username);
+            }
+            None => {
+                cmd.env_remove("AGENT_BROWSER_PROXY_USERNAME");
+            }
+        }
+        match opts.proxy_password {
+            Some(proxy_password) => {
+                cmd.env("AGENT_BROWSER_PROXY_PASSWORD", proxy_password);
+            }
+            None => {
+                cmd.env_remove("AGENT_BROWSER_PROXY_PASSWORD");
+            }
+        }
     }
     if let Some(pb) = opts.proxy_bypass {
         cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
-    }
-    if let Some(pu) = opts.proxy_username {
-        cmd.env("AGENT_BROWSER_PROXY_USERNAME", pu);
-    }
-    if let Some(pp) = opts.proxy_password {
-        cmd.env("AGENT_BROWSER_PROXY_PASSWORD", pp);
     }
     if opts.ignore_https_errors {
         cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
@@ -1780,6 +1790,27 @@ mod tests {
             daemon_config_fingerprint(&base),
             daemon_config_fingerprint(&domains_changed),
             "allowed domains are browser launch state, not daemon identity"
+        );
+    }
+
+    #[test]
+    fn daemon_proxy_credentials_are_scoped_to_the_effective_proxy() {
+        let mut opts = test_daemon_options(None, false, None);
+        opts.proxy = Some("http://new-proxy:8080");
+        let mut cmd = Command::new("agent-browser");
+        apply_daemon_env(&mut cmd, "session", &opts);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("AGENT_BROWSER_PROXY")),
+            Some(&Some(std::ffi::OsStr::new("http://new-proxy:8080")))
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("AGENT_BROWSER_PROXY_USERNAME")),
+            Some(&None)
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("AGENT_BROWSER_PROXY_PASSWORD")),
+            Some(&None)
         );
     }
 

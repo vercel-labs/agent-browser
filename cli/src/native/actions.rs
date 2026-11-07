@@ -6382,18 +6382,6 @@ fn attach_settings_outcome(resp: &mut Value, outcome: &SettingsOutcome) {
     }
 }
 
-fn should_use_env_proxy_credentials(
-    command_proxy: Option<&Value>,
-    env_proxy: Option<&str>,
-) -> bool {
-    command_proxy.is_none_or(|proxy| {
-        proxy
-            .as_str()
-            .or_else(|| proxy.get("server").and_then(Value::as_str))
-            .is_some_and(|server| Some(server) == env_proxy)
-    })
-}
-
 async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let engine = cmd
         .get("engine")
@@ -19315,20 +19303,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert!(!opts.allow_file_access);
         assert!(opts.hide_scrollbars);
         assert!(!opts.restrict_webrtc);
-    }
-
-    #[test]
-    fn launch_proxy_uses_env_credentials_only_for_the_same_server() {
-        let proxy = json!({ "server": "http://proxy.example:8080" });
-        assert!(super::should_use_env_proxy_credentials(
-            Some(&proxy),
-            Some("http://proxy.example:8080")
-        ));
-        assert!(!super::should_use_env_proxy_credentials(
-            Some(&proxy),
-            Some("http://other-proxy.example:8080")
-        ));
-        assert!(super::should_use_env_proxy_credentials(None, None));
     }
 
     #[test]

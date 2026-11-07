@@ -527,6 +527,15 @@ async fn apply_events(state: &mut DaemonState, events: Vec<Value>) {
 }
 
 fn request_started(state: &mut DaemonState, p: &NetworkEvent) {
+    if let Some(context) = p.context.as_deref() {
+        let active = state
+            .firefox
+            .as_ref()
+            .is_some_and(|ff| ff.context_is_in_active_tab(context));
+        if !active {
+            return;
+        }
+    }
     let request = &p.request;
     let id = request.request.clone();
     let url = request.url.clone();
@@ -1873,6 +1882,43 @@ mod tests {
             serde_json::to_value(&state.tracked_requests[0]).unwrap()["postData"],
             json!("payload=tracked")
         );
+    }
+
+    #[tokio::test]
+    async fn request_recording_excludes_background_tabs() {
+        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session_with(|_| {
+            json!({"bytes": {"type": "string", "value": "body"}})
+        })
+        .await;
+        ff.top_context = "active".into();
+        ff.context = "active".into();
+        ff.context_parents.insert("frame".into(), "active".into());
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.request_tracking = true;
+        state.har_recording = true;
+
+        for (id, context) in [("active", "active"), ("frame", "frame"), ("other", "other")] {
+            apply_events(
+                &mut state,
+                vec![json!({
+                    "method": "network.beforeRequestSent",
+                    "params": {
+                        "context": context,
+                        "timestamp": 1000,
+                        "request": {"request": id, "url": format!("https://{context}.test/"), "method": "GET", "headers": []},
+                    },
+                })],
+            )
+            .await;
+        }
+
+        assert_eq!(state.tracked_requests.len(), 2);
+        assert_eq!(state.tracked_requests[0].request_id, "active");
+        assert_eq!(state.tracked_requests[1].request_id, "frame");
+        assert_eq!(state.har_entries.len(), 2);
+        assert_eq!(state.har_entries[0].request_id, "active");
+        assert_eq!(state.har_entries[1].request_id, "frame");
     }
 
     #[tokio::test]
