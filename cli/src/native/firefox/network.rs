@@ -1862,6 +1862,7 @@ mod tests {
         .await;
         ff.top_context = "active".into();
         ff.context = "active".into();
+        ff.context_parents.insert("frame".into(), "active".into());
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.request_tracking = true;
@@ -1882,10 +1883,12 @@ mod tests {
             .await;
         }
 
-        assert_eq!(state.tracked_requests.len(), 1);
+        assert_eq!(state.tracked_requests.len(), 2);
         assert_eq!(state.tracked_requests[0].request_id, "active");
-        assert_eq!(state.har_entries.len(), 1);
+        assert_eq!(state.tracked_requests[1].request_id, "frame");
+        assert_eq!(state.har_entries.len(), 2);
         assert_eq!(state.har_entries[0].request_id, "active");
+        assert_eq!(state.har_entries[1].request_id, "frame");
     }
 
     #[tokio::test]
