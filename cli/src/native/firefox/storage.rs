@@ -759,7 +759,10 @@ mod tests {
             }
         });
         let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
-        ff.bidi = super::super::bidi::BidiClient::connect(&url).await.unwrap();
+        ff.bidi = super::super::bidi::BidiClient::connect(&url)
+            .await
+            .unwrap()
+            .into();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(

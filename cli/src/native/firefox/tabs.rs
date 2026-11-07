@@ -65,7 +65,7 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         }
     };
     reset_refs(state);
-    let total = tab_count(state).await?;
+    let total = tab_count(session(state)?).await?;
 
     Ok(json!({
         "tabId": format_tab_id(tab_id),
@@ -254,7 +254,7 @@ pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         ff.top_context = context.clone();
     }
     reset_refs(state);
-    let total = tab_count(state).await?;
+    let total = tab_count(session(state)?).await?;
 
     Ok(json!({
         "tabId": format_tab_id(tab_id),
@@ -274,12 +274,15 @@ pub(crate) fn reset_refs(state: &mut DaemonState) {
 }
 
 /// Number of top-level browsing contexts (tabs and windows).
-async fn tab_count(state: &mut DaemonState) -> Result<usize, String> {
-    let tree = session(state)?
+pub(crate) async fn tab_count(ff: &super::session::FirefoxSession) -> Result<usize, String> {
+    let tree = ff
         .bidi
         .send("browsingContext.getTree", json!({"maxDepth": 0}))
         .await?;
-    Ok(tree["contexts"].as_array().map_or(0, Vec::len))
+    tree["contexts"]
+        .as_array()
+        .map(Vec::len)
+        .ok_or_else(|| "Firefox did not return browsing contexts".to_string())
 }
 
 /// A context id has the shape of a UUID, which `TabRef`'s hex target-id heuristic does not accept.

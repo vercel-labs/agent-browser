@@ -17,22 +17,29 @@ use crate::native::interaction::{
     dispatch_event_js, CLICK_HREF_JS, FOCUS_JS, HIGHLIGHT_JS, SCROLL_BY_JS, SCROLL_INTO_VIEW_JS,
 };
 
-/// Scrolls `this` into view, then reports its center plus Chrome's actionability and blocker verdicts.
+/// Reports BiDi's in-view center plus the shared actionability and blocker verdicts.
 fn prepare_js() -> String {
     format!(
         r#"function() {{
             const el = this;
-            const inView = (r) => r.width > 0 && r.height > 0 &&
+            const inView = (r) => r && r.width > 0 && r.height > 0 &&
                 r.bottom > 0 && r.right > 0 &&
                 r.top < (window.innerHeight || document.documentElement.clientHeight) &&
                 r.left < (window.innerWidth || document.documentElement.clientWidth);
-            let rect = el.getBoundingClientRect();
+            let rect = el.getClientRects()[0];
             if (!inView(rect)) {{
                 el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-                rect = el.getBoundingClientRect();
+                rect = el.getClientRects()[0];
             }}
-            const x = rect.x + rect.width / 2;
-            const y = rect.y + rect.height / 2;
+            if (!rect || rect.width <= 0 || rect.height <= 0) {{
+                return {{ x: 0, y: 0, reason: 'not visible', blocker: null }};
+            }}
+            const left = Math.max(0, Math.min(rect.x, rect.x + rect.width));
+            const right = Math.min(window.innerWidth, Math.max(rect.x, rect.x + rect.width));
+            const top = Math.max(0, Math.min(rect.y, rect.y + rect.height));
+            const bottom = Math.min(window.innerHeight, Math.max(rect.y, rect.y + rect.height));
+            const x = Math.floor((left + right) / 2);
+            const y = Math.floor((top + bottom) / 2);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             return {{ x: x, y: y, reason: notActionable(document, el, x, y), blocker: blockerAt(document, el, x, y) }};
@@ -852,7 +859,8 @@ mod tests {
         });
         ff.bidi = super::super::bidi::BidiClient::connect(&address)
             .await
-            .unwrap();
+            .unwrap()
+            .into();
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.mouse_state.x = 17.0;
