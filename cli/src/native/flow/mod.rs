@@ -1713,12 +1713,22 @@ fn scrub_strings(v: &mut Value, secrets: &[String]) -> bool {
             *s = REDACTED.to_string();
             true
         }
-        Value::Array(items) => items
-            .iter_mut()
-            .fold(false, |hit, item| scrub_strings(item, secrets) || hit),
-        Value::Object(map) => map
-            .values_mut()
-            .fold(false, |hit, item| scrub_strings(item, secrets) || hit),
+        // Every item is visited: stopping at the first hit would leave the
+        // rest unscrubbed.
+        Value::Array(items) => {
+            let mut hit = false;
+            for item in items {
+                hit |= scrub_strings(item, secrets);
+            }
+            hit
+        }
+        Value::Object(map) => {
+            let mut hit = false;
+            for item in map.values_mut() {
+                hit |= scrub_strings(item, secrets);
+            }
+            hit
+        }
         _ => false,
     }
 }
