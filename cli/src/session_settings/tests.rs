@@ -1466,6 +1466,36 @@ fn external_connections_drop_inherited_engines_and_preserve_explicit_firefox() {
 }
 
 #[test]
+fn external_firefox_can_switch_to_the_default_engine() {
+    let endpoint = "http://127.0.0.1:9333";
+    let running = running_with(&[(Key::Cdp, json!(endpoint)), (Key::Engine, json!("firefox"))]);
+    for requested in [Requested::Set(json!("chrome")), Requested::Default] {
+        for target in [endpoint, "http://127.0.0.1:9444"] {
+            let patch = patch_of(&[
+                is(Key::Cdp, json!(target)),
+                (Key::Engine, requested.clone()),
+            ]);
+            let plan = running.plan(&patch);
+            assert!(plan.relaunch);
+            assert_eq!(plan.next.engine(), None);
+            assert_eq!(plan.next.connection(), Connection::Cdp(target.to_string()));
+            assert!(plan.changes.iter().any(|change| change.key == Key::Engine));
+            assert!(plan.next.plan(&patch).is_empty());
+        }
+    }
+    let same = running.plan(&patch_of(&[is(Key::Engine, json!("firefox"))]));
+    assert!(same.is_empty());
+    assert_eq!(same.next, running);
+
+    let generic = running_with(&[(Key::Cdp, json!(endpoint))]);
+    let plan = generic.plan(&patch_of(&[is(Key::Engine, json!("chrome"))]));
+    assert!(plan.is_empty());
+    assert_eq!(plan.next, generic);
+    assert_eq!(plan.ignored.len(), 1);
+    assert_eq!(plan.ignored[0].key, Key::Engine);
+}
+
+#[test]
 fn local_only_settings_apply_to_a_local_session() {
     let plan = Running::defaults().plan(&patch_of(&[is(Key::Args, json!(["--x"]))]));
     assert!(plan.relaunch && plan.ignored.is_empty());

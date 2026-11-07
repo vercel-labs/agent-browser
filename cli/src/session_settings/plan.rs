@@ -175,7 +175,9 @@ impl Running {
                     {
                         continue;
                     }
-                    let external_firefox = key == Key::Engine && value.as_str() == Some("firefox");
+                    let external_firefox = key == Key::Engine
+                        && (value.as_str() == Some("firefox")
+                            || next.get(Key::Engine).and_then(Value::as_str) == Some("firefox"));
                     if is_local_only(key)
                         && next.connection() != Connection::Local
                         && !external_firefox
@@ -232,7 +234,10 @@ impl Running {
                     if default_value(key).as_ref() == Some(current) {
                         continue;
                     }
-                    if is_local_only(key) && next.connection() != Connection::Local {
+                    if is_local_only(key)
+                        && next.connection() != Connection::Local
+                        && !(key == Key::Engine && current.as_str() == Some("firefox"))
+                    {
                         ignored.push(Change {
                             key,
                             requested: Requested::Default,

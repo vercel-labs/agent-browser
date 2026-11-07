@@ -39,6 +39,10 @@ A saved flow (experimental) is a task recorded once that now runs over HTTP, wit
 
 Install once with `npm i -g agent-browser && agent-browser install` (on Linux, `agent-browser install --with-deps` also installs browser libraries). The browser stays running between commands. Run `agent-browser close` when you're done.
 
+### Attach to a running browser
+
+Use `connect <port|url>` or `--cdp <port|url>` to attach to a browser you started. Chrome uses CDP; Firefox 150 or newer uses WebDriver BiDi. Firefox auto-detection probes after CDP discovery fails, and a `/session` WebSocket URL selects BiDi directly. `--auto-connect` does not support Firefox, and Firefox allows one BiDi client at a time. See [CDP mode](https://agent-browser.dev/cdp-mode) for setup and remote-port security.
+
 ## Load more when you need it
 
 Load one reference without the rest by passing its path, file name, or stem to `--ref`:

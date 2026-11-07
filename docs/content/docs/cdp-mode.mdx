@@ -49,6 +49,25 @@ For an `https://` CDP URL, discovery keeps the encryption of the input: requests
 
 Root WebSocket endpoints accept query strings with or without an explicit slash, so both `wss://browser-service.com?token=...` and `wss://browser-service.com/?token=...` work.
 
+## Attach to Firefox
+
+Firefox 150 or newer exposes WebDriver BiDi. Enable its remote debugging preferences in the profile's `user.js`, then start Firefox with both debugging ports:
+
+```js
+user_pref("devtools.debugger.remote-enabled", true);
+user_pref("devtools.chrome.enabled", true);
+user_pref("devtools.debugger.prompt-connection", false);
+```
+
+```bash
+firefox --remote-debugging-port 9222 --start-debugger-server 6000 -profile <dir>
+agent-browser connect 9222
+```
+
+A WebSocket URL whose path is `/session` is treated as Firefox BiDi. Other targets try CDP first, then probe for Firefox. Pass `--engine firefox` to skip the CDP attempt. Firefox uses DevTools port 6000 unless the URL sets `?devtools=<port>`. `close` ends the BiDi session but leaves Firefox running. Firefox allows one BiDi client at a time, and `--auto-connect` does not support Firefox.
+
+The Firefox DevTools companion uses unencrypted RDP. For remote Firefox, forward both ports through an encrypted tunnel and connect to `127.0.0.1`. Firefox attach rejects `--allowed-domains` and `--pin-tab`; launch-only options such as `--headed`, `--executable-path`, and `--profile` do not apply to an already-running browser.
+
 ## Auto-Connect
 
 Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:
@@ -146,10 +165,10 @@ This enables control of:
     <tr><td><code>--name, -n</code></td><td>Locator name filter</td></tr>
     <tr><td><code>--exact</code></td><td>Exact, case-sensitive match (accessible name for role)</td></tr>
     <tr><td><code>--headed</code></td><td>Show browser window</td></tr>
-    <tr><td><code>{"--cdp <port|url>"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>
+    <tr><td><code>--cdp &lt;port|url&gt;</code></td><td>CDP or Firefox WebDriver BiDi connection (port or WebSocket URL; Firefox accepts <code>?devtools=&lt;port&gt;</code>)</td></tr>
     <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
     <tr><td><code>--no-auto-connect</code></td><td>Return a session attached with <code>--auto-connect</code> to a local launch; also <code>--auto-connect false</code>. Overrides <code>AGENT_BROWSER_AUTO_CONNECT</code> and config <code>autoConnect</code></td></tr>
-    <tr><td><code>--pin-tab</code></td><td>Pin the session to its bound tab (strict tab binding)</td></tr>
+    <tr><td><code>--pin-tab</code></td><td>Pin the session to its bound tab (CDP only; Firefox attach rejects it)</td></tr>
     <tr><td><code>--no-pin-tab</code></td><td>Disable a sticky pin previously enabled with <code>--pin-tab</code></td></tr>
     <tr><td><code>--color-scheme &lt;scheme&gt;</code></td><td>Persistent color scheme (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>--debug</code></td><td>Debug output</td></tr>

@@ -1,3 +1,4 @@
+use super::network::AbortOnDrop;
 use super::types::{LocalValue, RemoteValue};
 use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
@@ -14,6 +15,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 type WsSink = futures_util::stream::SplitSink<
@@ -27,21 +29,15 @@ pub struct BidiClient {
     pending: Pending,
     buffered_events: Arc<Mutex<Vec<mpsc::Sender<Value>>>>,
     next_id: AtomicU64,
-    pub(crate) reader: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for BidiClient {
-    fn drop(&mut self) {
-        self.reader.abort();
-    }
+    reader: AbortOnDrop,
 }
 
 impl BidiClient {
     /// Connects to a BiDi WebSocket URL and starts the reader task.
     pub async fn connect(url: &str) -> Result<Self, String> {
         let config = WebSocketConfig {
-            max_message_size: None,
-            max_frame_size: None,
+            max_message_size: Some(MAX_MESSAGE_SIZE),
+            max_frame_size: Some(MAX_MESSAGE_SIZE),
             ..Default::default()
         };
         let (ws, _) = tokio_tungstenite::connect_async_with_config(url, Some(config), false)
@@ -93,7 +89,7 @@ impl BidiClient {
             pending,
             buffered_events,
             next_id: AtomicU64::new(1),
-            reader,
+            reader: AbortOnDrop(reader),
         })
     }
 
@@ -104,9 +100,9 @@ impl BidiClient {
         rx
     }
 
-    /// True once the socket reader has stopped, so no command can be answered.
+    /// Returns whether the BiDi WebSocket reader has stopped.
     pub fn is_closed(&self) -> bool {
-        self.reader.is_finished()
+        self.reader.0.is_finished()
     }
 
     /// Sends a command with the default 30s timeout and returns its `result`.
@@ -124,7 +120,7 @@ impl BidiClient {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
-        if self.reader.is_finished() {
+        if self.is_closed() {
             self.pending.lock().unwrap().remove(&id);
             return Err("BiDi connection closed".to_string());
         }
@@ -146,7 +142,7 @@ impl BidiClient {
     /// Sends a command without registering a response waiter.
     pub async fn send_no_wait(&self, method: &str, params: Value) -> Result<(), String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        if self.reader.is_finished() {
+        if self.is_closed() {
             return Err("BiDi connection closed".to_string());
         }
         let body = json!({"id": id, "method": method, "params": params}).to_string();
@@ -254,6 +250,7 @@ mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -332,6 +329,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.contains("timed out"), "{e}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn oversized_incoming_message_closes_connection() {
+        let (url, listener) = mock().await;
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let mut frame = vec![0x81, 0x7f];
+            frame.extend_from_slice(&(MAX_MESSAGE_SIZE as u64 + 1).to_be_bytes());
+            websocket.get_mut().write_all(&frame).await.unwrap();
+            std::future::pending::<()>().await;
+            drop(websocket);
+        });
+        let client = BidiClient::connect(&url).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !client.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         server.abort();
     }
 
