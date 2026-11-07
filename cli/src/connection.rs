@@ -1794,6 +1794,27 @@ mod tests {
     }
 
     #[test]
+    fn daemon_proxy_credentials_are_scoped_to_the_effective_proxy() {
+        let mut opts = test_daemon_options(None, false, None);
+        opts.proxy = Some("http://new-proxy:8080");
+        let mut cmd = Command::new("agent-browser");
+        apply_daemon_env(&mut cmd, "session", &opts);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("AGENT_BROWSER_PROXY")),
+            Some(&Some(std::ffi::OsStr::new("http://new-proxy:8080")))
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("AGENT_BROWSER_PROXY_USERNAME")),
+            Some(&None)
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("AGENT_BROWSER_PROXY_PASSWORD")),
+            Some(&None)
+        );
+    }
+
+    #[test]
     fn test_spawn_race_loser_does_not_overwrite_winner_config() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
         let dir = tempfile::tempdir().unwrap();
