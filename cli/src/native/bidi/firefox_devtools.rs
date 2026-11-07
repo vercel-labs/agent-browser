@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{
@@ -18,6 +18,7 @@ pub struct RdpClient {
     writer: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     pending: Pending,
     next_request: Arc<AtomicU64>,
+    failed: Arc<AtomicBool>,
     events: broadcast::Sender<Value>,
     reader: Arc<AbortOnDrop>,
 }
@@ -100,6 +101,7 @@ impl RdpClient {
             writer: Arc::new(tokio::sync::Mutex::new(Box::new(wr))),
             pending,
             next_request: Arc::new(AtomicU64::new(0)),
+            failed: Arc::new(AtomicBool::new(false)),
             events,
             reader: Arc::new(AbortOnDrop(reader)),
         })
@@ -122,6 +124,9 @@ impl RdpClient {
         extra: Value,
         timeout: Duration,
     ) -> Result<Value, String> {
+        if self.failed.load(Ordering::Acquire) {
+            return Err("DevTools connection is unusable after a request timeout".to_string());
+        }
         let mut body = json!({"to": to, "type": kind});
         if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
             b.extend(e.clone());
@@ -159,9 +164,8 @@ impl RdpClient {
             },
             Ok(Err(_)) => Err("DevTools connection closed".to_string()),
             Err(_) => {
-                if let Some(q) = self.pending.lock().unwrap().get_mut(to) {
-                    q.retain(|(id, _, _)| *id != request_id);
-                }
+                self.failed.store(true, Ordering::Release);
+                self.pending.lock().unwrap().clear();
                 Err(format!("DevTools request {kind} to {to} timed out"))
             }
         }
@@ -233,11 +237,8 @@ mod tests {
         assert_eq!(get(&mut s).await["type"], "first");
         assert!(first.await.unwrap().unwrap_err().contains("timed out"));
 
-        let second = c.clone();
-        let second = tokio::spawn(async move { second.request("act1", "second", json!({})).await });
-        assert_eq!(get(&mut s).await["type"], "second");
-        put(&mut s, json!({"from":"act1","n":2})).await;
-        assert_eq!(second.await.unwrap().unwrap()["n"], 2);
+        let error = c.request("act1", "second", json!({})).await.unwrap_err();
+        assert!(error.contains("unusable after a request timeout"), "{error}");
     }
 
     #[tokio::test]
@@ -277,11 +278,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(get(&mut s).await["type"], "first");
-        let c2 = c.clone();
-        let r2 = tokio::spawn(async move { c2.request("act1", "second", json!({})).await });
-        assert_eq!(get(&mut s).await["type"], "second");
-        put(&mut s, json!({"from":"act1","n":"late"})).await;
-        put(&mut s, json!({"from":"act1","n":"second"})).await;
-        assert_eq!(r2.await.unwrap().unwrap()["n"], "second");
+        let error = c.request("act1", "second", json!({})).await.unwrap_err();
+        assert!(error.contains("unusable after a request timeout"), "{error}");
     }
 }
