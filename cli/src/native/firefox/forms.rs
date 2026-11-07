@@ -14,7 +14,7 @@ use super::target::{resolve_target, Target};
 use crate::native::actions::DaemonState;
 use crate::native::element::ELEMENT_CHECKED_JS;
 use crate::native::interaction::{
-    CLEAR_INPUT_JS, CLEAR_VALUE_JS, CLICK_CHECKBOX_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
+    CLEAR_INPUT_JS, CLEAR_VALUE_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
 };
 
 const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
