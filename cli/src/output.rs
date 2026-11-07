@@ -946,6 +946,13 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         if let Some(ref warning) = resp.warning {
             eprintln!("{} {}", color::warning_indicator(), warning);
         }
+        if let Some(effect) = resp.data.as_ref().and_then(format_delivery) {
+            eprintln!(
+                "{} The page changed after this error ({}). It may have run: check the page before retrying.",
+                color::warning_indicator(),
+                effect
+            );
+        }
         return;
     }
 
@@ -954,6 +961,10 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
 
     if let Some(data) = &resp.data {
         print_lifecycle_note(data);
+        if let Some(effect) = format_delivery(data) {
+            println!("{} {}", color::success_indicator(), effect);
+            return;
+        }
 
         // Dialog status response
         if action == Some("dialog") {
@@ -1980,6 +1991,68 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
     }
 }
 
+/// Summarize an action's `disposition` and `effect` in one line, or `None` when the response has no disposition.
+fn format_delivery(data: &serde_json::Value) -> Option<String> {
+    let delivery = data.get("disposition")?.get("delivery")?.as_str()?;
+    let effect = data.get("effect");
+    let field = |key: &str| effect.and_then(|e| e.get(key));
+    let text = |key: &str| field(key).and_then(|v| v.as_str());
+    let mut parts = Vec::new();
+    if data.get("dialogOpened").and_then(|v| v.as_bool()) == Some(true) {
+        parts.push("a dialog opened".to_string());
+    }
+    if data.get("newTab").and_then(|v| v.as_bool()) == Some(true) {
+        parts.push("opened a new tab".to_string());
+    }
+    if field("navigated").and_then(|v| v.as_bool()) == Some(true) {
+        let state = match text("readyState") {
+            Some("complete") => "loaded",
+            _ => "still loading",
+        };
+        parts.push(format!(
+            "navigated to {} ({})",
+            text("url").unwrap_or("a new page"),
+            state
+        ));
+    } else if let Some(url) = text("url") {
+        parts.push(format!("URL changed to {}", url));
+    }
+    if let Some(title) = text("title") {
+        parts.push(format!("title is {:?}", title));
+    }
+    if let Some(state) = field("postState") {
+        if data
+            .get("disposition")
+            .and_then(|d| d.get("reason"))
+            .and_then(|r| r.as_str())
+            == Some("postcondition_mismatch")
+        {
+            parts.push("the element does not show the requested state".to_string());
+        }
+        if let Some(checked) = state.get("checked").and_then(|v| v.as_bool()) {
+            parts.push(if checked { "checked" } else { "unchecked" }.to_string());
+        }
+        if let Some(selected) = state.get("selectedLabels").and_then(|v| v.as_array()) {
+            let labels: Vec<&str> = selected.iter().filter_map(|v| v.as_str()).collect();
+            parts.push(format!("selected {:?}", labels.join(", ")));
+        } else if delivery == "delivered_verified" && state.get("checked").is_none() {
+            parts.push("value set".to_string());
+        }
+    }
+    if field("navigationPending").and_then(|v| v.as_bool()) == Some(true) {
+        parts.push("a navigation started but the new page has not loaded yet".to_string());
+    }
+    if field("unreadable").and_then(|v| v.as_bool()) == Some(true) {
+        parts.push("the page stopped responding to reads".to_string());
+    }
+    match field("mutations").and_then(|v| v.as_u64()) {
+        Some(n) if n > 0 => parts.push(format!("page changed ({} DOM mutations)", n)),
+        Some(_) if parts.is_empty() => parts.push("no page change observed".to_string()),
+        _ => {}
+    }
+    Some(format!("{}: {}", delivery, parts.join("; ")))
+}
+
 fn print_lifecycle_note(data: &serde_json::Value) {
     let Some(lifecycle) = data.get("lifecycle") else {
         return;
@@ -2719,7 +2792,11 @@ Options:
   -u, --urls           Include href URLs for link elements
   -c, --compact        Remove empty structural elements
   -d, --depth <n>      Limit tree depth
-  -s, --selector <sel> Scope snapshot to CSS selector
+  -s, --selector <sel> Scope snapshot to a CSS selector or a ref (@e12)
+                       A ref scope keeps the refs outside it usable
+      --skeleton       Shallow map (depth 3 unless -d is set): refs and the
+                       containers above them. A branch cut at the depth limit
+                       shows hidden=N refs and a ref to drill into with -s
       --delta          Return full state once, then unchanged or structural deltas
                        Deltas include ref changes and an exact treeChange line splice
       --full           Force full state and update the delta baseline
@@ -2738,6 +2815,8 @@ Examples:
   agent-browser snapshot -i --urls
   agent-browser snapshot --compact --depth 5
   agent-browser snapshot -s "#main-content"
+  agent-browser snapshot --skeleton
+  agent-browser snapshot -i -s @e12
   agent-browser snapshot --delta
   agent-browser snapshot --delta --full
 "##

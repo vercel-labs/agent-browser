@@ -6,7 +6,9 @@ use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
 };
-use super::element::{normalize_ax_role, resolve_ax_session, RefMap};
+use super::element::{
+    normalize_ax_role, parse_ref, resolve_ax_session, resolve_element_object_id, RefMap,
+};
 
 #[cfg(test)]
 mod document_identity_regressions {
@@ -184,6 +186,7 @@ pub struct SnapshotOptions {
     pub compact: bool,
     pub depth: Option<usize>,
     pub urls: bool,
+    pub skeleton: bool,
 }
 
 struct TreeNode {
@@ -336,41 +339,47 @@ pub async fn take_snapshot(
     // set to pick the right AX subtree root(s) later.
     let selector_backend_ids: Option<std::collections::HashSet<i64>> =
         if let Some(ref selector) = options.selector {
-            let js = format!(
-                "document.querySelector({})",
-                serde_json::to_string(selector).unwrap_or_default()
-            );
-            let result: EvaluateResult = client
-                .send_command_typed(
-                    "Runtime.evaluate",
-                    &EvaluateParams {
-                        expression: js,
-                        return_by_value: Some(false),
-                        await_promise: Some(false),
-                    },
-                    Some(session_id),
-                )
-                .await?;
+            let object_id = if parse_ref(selector).is_some() {
+                resolve_element_object_id(client, session_id, ref_map, selector, iframe_sessions)
+                    .await?
+                    .0
+            } else {
+                let js = format!(
+                    "document.querySelector({})",
+                    serde_json::to_string(selector).unwrap_or_default()
+                );
+                let result: EvaluateResult = client
+                    .send_command_typed(
+                        "Runtime.evaluate",
+                        &EvaluateParams {
+                            expression: js,
+                            return_by_value: Some(false),
+                            await_promise: Some(false),
+                        },
+                        Some(session_id),
+                    )
+                    .await?;
 
-            // A throwing evaluation (e.g. an invalid CSS selector like a
-            // snapshot ref "@e1") still yields an objectId — for the
-            // exception object. Passing that to DOM.describeNode produces the
-            // cryptic "Object id doesn't reference a Node"; fail clearly
-            // instead, and only accept results that are actually DOM nodes.
-            if let Some(exception) = result.exception_details {
-                let detail = exception
-                    .exception
-                    .and_then(|e| e.description)
-                    .unwrap_or(exception.text);
-                return Err(format!("Invalid selector '{}': {}", selector, detail));
-            }
-            if result.result.subtype.as_deref() != Some("node") {
-                return Err(format!("Selector '{}' did not match any element", selector));
-            }
-            let object_id = result
-                .result
-                .object_id
-                .ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
+                // A throwing evaluation (e.g. an invalid CSS selector like a
+                // snapshot ref "@e1") still yields an objectId — for the
+                // exception object. Passing that to DOM.describeNode produces the
+                // cryptic "Object id doesn't reference a Node"; fail clearly
+                // instead, and only accept results that are actually DOM nodes.
+                if let Some(exception) = result.exception_details {
+                    let detail = exception
+                        .exception
+                        .and_then(|e| e.description)
+                        .unwrap_or(exception.text);
+                    return Err(format!("Invalid selector '{}': {}", selector, detail));
+                }
+                if result.result.subtype.as_deref() != Some("node") {
+                    return Err(format!("Selector '{}' did not match any element", selector));
+                }
+                result
+                    .result
+                    .object_id
+                    .ok_or_else(|| format!("Selector '{}' did not match any element", selector))?
+            };
 
             // Request the full DOM subtree (depth: -1), including shadow roots
             // (pierce), so we can collect all backendNodeIds that live under
@@ -511,6 +520,29 @@ pub async fn take_snapshot(
         }
     }
 
+    if options.skeleton {
+        for (idx, _) in &nodes_with_refs {
+            tree_nodes[*idx].has_ref = true;
+        }
+        let mut cuts = Vec::new();
+        for &root_idx in &effective_roots {
+            render_tree(
+                &tree_nodes,
+                root_idx,
+                0,
+                &mut String::new(),
+                options,
+                &mut cuts,
+            );
+        }
+        for idx in cuts {
+            if !tree_nodes[idx].has_ref {
+                let nth = tracker.track(&tree_nodes[idx].role, &tree_nodes[idx].name, idx);
+                nodes_with_refs.push((idx, nth));
+            }
+        }
+    }
+
     let duplicates = tracker.get_duplicates();
 
     for (idx, nth) in &nodes_with_refs {
@@ -635,7 +667,14 @@ pub async fn take_snapshot(
 
     let mut output = String::new();
     for &root_idx in &effective_roots {
-        render_tree(&tree_nodes, root_idx, 0, &mut output, options);
+        render_tree(
+            &tree_nodes,
+            root_idx,
+            0,
+            &mut output,
+            options,
+            &mut Vec::new(),
+        );
     }
 
     // Recurse into child iframes: for each Iframe node with a backend_node_id,
@@ -708,7 +747,7 @@ pub async fn take_snapshot(
     }
 
     if options.compact {
-        output = compact_tree(&output, options.interactive);
+        output = compact_tree(&output, options.interactive || options.skeleton);
     }
 
     let trimmed = output.trim().to_string();
@@ -1219,12 +1258,14 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
     (tree_nodes, root_indices)
 }
 
+/// Render one node and its subtree. In skeleton mode, unnamed generic wrappers take no depth and each node at the depth limit with hidden refs is pushed onto `cuts` and rendered with a `hidden=N` count instead of its children.
 fn render_tree(
     nodes: &[TreeNode],
     idx: usize,
     indent: usize,
     output: &mut String,
     options: &SnapshotOptions,
+    cuts: &mut Vec<usize>,
 ) {
     let node = &nodes[idx];
 
@@ -1232,10 +1273,11 @@ fn render_tree(
     if node.role.is_empty()
         || (node.role == "generic" && !node.has_ref && node.children.len() <= 1)
         || (node.role == "StaticText" && normalize_snapshot_name(&node.name).trim().is_empty())
+        || (options.skeleton && node.role == "generic" && !node.has_ref && node.name.is_empty())
     {
         // Ignored node -- still render children
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
+            render_tree(nodes, child, indent, output, options, cuts);
         }
         return;
     }
@@ -1251,7 +1293,7 @@ fn render_tree(
     // Skip root WebArea wrapper
     if role == "RootWebArea" || role == "WebArea" {
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
+            render_tree(nodes, child, indent, output, options, cuts);
         }
         return;
     }
@@ -1259,7 +1301,7 @@ fn render_tree(
     if options.interactive && !node.has_ref {
         // In interactive mode, skip non-interactive but render children
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
+            render_tree(nodes, child, indent, output, options, cuts);
         }
         return;
     }
@@ -1319,6 +1361,16 @@ fn render_tree(
         attrs.push(format!("ref={}", ref_id));
     }
 
+    let hidden = if options.skeleton && options.depth == Some(indent) {
+        count_ref_descendants(nodes, idx)
+    } else {
+        0
+    };
+    if hidden > 0 {
+        cuts.push(idx);
+        attrs.push(format!("hidden={}", hidden));
+    }
+
     if let Some(ref url) = node.url {
         attrs.push(format!("url={}", url));
     }
@@ -1346,9 +1398,21 @@ fn render_tree(
     output.push_str(&line);
     output.push('\n');
 
-    for &child in &node.children {
-        render_tree(nodes, child, indent + 1, output, options);
+    if hidden > 0 {
+        return;
     }
+    for &child in &node.children {
+        render_tree(nodes, child, indent + 1, output, options, cuts);
+    }
+}
+
+/// Count descendants of `idx` that carry a ref.
+fn count_ref_descendants(nodes: &[TreeNode], idx: usize) -> usize {
+    nodes[idx]
+        .children
+        .iter()
+        .map(|&child| usize::from(nodes[child].has_ref) + count_ref_descendants(nodes, child))
+        .sum()
 }
 
 /// Retain matching content and its direct ancestor chain, including visible text in noninteractive snapshots.

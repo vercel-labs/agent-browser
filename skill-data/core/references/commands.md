@@ -65,9 +65,13 @@ agent-browser snapshot -i         # Interactive elements only (recommended)
 agent-browser snapshot -c         # Compact output
 agent-browser snapshot -d 3       # Limit depth to 3
 agent-browser snapshot -s "#main" # Scope to CSS selector
+agent-browser snapshot --skeleton  # Shallow map; cut branches show hidden=N and a ref
+agent-browser snapshot -i -s @e12  # Drill into one branch of the map
 agent-browser snapshot --delta     # Full state once, then bounded structural deltas
 agent-browser snapshot --delta --full # Force full state and refresh baseline
 ```
+
+`--skeleton` renders refs and the containers above them to depth 3 (`-d` changes it). Unnamed generic wrappers take no depth. A branch cut at the limit becomes one line such as `- table "Files" [ref=e436, hidden=227]`: 227 refs sit below it. Drill in with `snapshot -i -s @e436`. A ref scope keeps the refs outside it usable, so you can still act on the map's refs after drilling.
 
 Delta history is per tab and option set. Responses are `full`, `unchanged`, or `delta`; URL changes or large deltas return full state. For a delta, apply `changes` (`add`, `remove`, `replace`) to ref metadata. Split the previous tree on newlines, splice `treeChange.lines` at zero-based `startLine`, replacing `deleteCount` lines, then join with newlines. Apply both parts to `baseRevision` before advancing to `revision`; use `--full` if the baseline is unavailable.
 
@@ -98,6 +102,17 @@ agent-browser upload @e1 file.pdf # Upload files
 For `fill` and `type`, put options before the optional `--` marker. Text after the marker is literal, including values that look like flags. For example, `agent-browser fill @e2 -- --json` fills with `--json`, and `agent-browser type @e2 --clear --delay 10 -- --clear` clears the field, then types `--clear`. MCP `agent_browser_fill` and `agent_browser_type` pass typed `text` values literally, so they do not need the marker.
 
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
+
+`click`, `dblclick`, `fill`, `type`, `press`, `select`, `check`, `uncheck`, and `find` with `click`, `fill`, or `check` wait for the page to settle (up to 1.5 s, or 5 s for a page load), then report what happened:
+
+```
+✓ delivered_verified: navigated to https://example.com/done (loaded); title is "Done"
+✓ delivered_verified: page changed (12 DOM mutations)
+✓ delivered_verified: checked
+✓ delivered_unverified: no page change observed
+```
+
+`--json` carries the same as `disposition` (`delivery`, `retry`) and `effect` (`navigated`, `readyState`, `url`, `title`, `mutations`, `postState`). `delivered_verified` means a change was observed after the action, not that the action caused it. `delivered_unverified` means the input was sent and nothing observable changed; with `reason: "postcondition_mismatch"` the element does not show the requested value or state (an input that rewrites its value, for example). Read the result before taking a screenshot to check an action. Password values are never echoed. Every delivered action has `retry: "unsafe"`: repeating it can click or submit twice. A failed action carries a disposition only when the page changed afterwards; then it may have run, so check the page before retrying.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
 

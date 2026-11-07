@@ -17,6 +17,8 @@ agent-browser snapshot -i                 # Interactive elements only (recommend
 agent-browser snapshot -c                 # Compact (remove empty elements)
 agent-browser snapshot -d 3               # Limit depth to 3 levels
 agent-browser snapshot -s "#main"         # Scope to CSS selector
+agent-browser snapshot --skeleton         # Shallow map with drill refs
+agent-browser snapshot -i -s @e12         # Drill into one branch
 agent-browser snapshot -i -c -d 5         # Combine options
 ```
 
@@ -29,7 +31,8 @@ agent-browser snapshot -i -c -d 5         # Combine options
     <tr><td><code>-u, --urls</code></td><td>Include href URLs for link elements</td></tr>
     <tr><td><code>-c, --compact</code></td><td>Remove empty structural elements</td></tr>
     <tr><td><code>-d, --depth</code></td><td>Limit tree depth</td></tr>
-    <tr><td><code>-s, --selector</code></td><td>Scope to CSS selector</td></tr>
+    <tr><td><code>-s, --selector</code></td><td>Scope to a CSS selector or a ref such as <code>@e12</code>. A ref scope keeps the refs outside it usable</td></tr>
+    <tr><td><code>--skeleton</code></td><td>Refs and the containers above them to depth 3 (<code>-d</code> changes it). A branch cut at the limit shows a ref and <code>hidden=N</code>, the refs below it</td></tr>
   </tbody>
 </table>
 
@@ -119,7 +122,7 @@ agent-browser frame main        # Return to main frame
 1. Use `-i` to reduce output to actionable elements
 2. Re-snapshot after page changes to get updated refs
 3. Scope with `-s` for specific page sections
-4. Use `-d` to limit depth on complex pages
+4. Use `--skeleton` on large pages, then drill into one branch with `-s @ref`
 5. Use `screenshot --annotate` when visual context is needed alongside refs
 
 ## JSON output

@@ -28,6 +28,7 @@ use super::cdp::types::{
     TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
 };
 use super::cookies;
+use super::delivery;
 use super::diff;
 use super::downloads::{DownloadLedger, DownloadState};
 use super::element::RefMap;
@@ -3499,6 +3500,25 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    let delivery_action = if FIND_SUBACTION_COMMANDS.contains(&action) {
+        Some(
+            cmd.get("subaction")
+                .and_then(Value::as_str)
+                .unwrap_or("click"),
+        )
+        .filter(|sub| matches!(*sub, "click" | "fill" | "check"))
+    } else {
+        Some(action).filter(|a| delivery::DELIVERY_ACTIONS.contains(a))
+    };
+    let delivery_session = match (&state.browser, &state.webdriver_backend, delivery_action) {
+        (Some(mgr), None, Some(_)) => mgr.active_session_id().ok().map(str::to_string),
+        _ => None,
+    };
+    let delivery_before = match (&state.browser, &delivery_session) {
+        (Some(mgr), Some(sid)) => delivery::arm(&mgr.client, sid).await,
+        _ => None,
+    };
+
     let mut result = match action {
         "launch" => {
             let applied = match launch_patch.as_ref() {
@@ -3697,6 +3717,23 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         _ => Err(format!("Not yet implemented: {}", action)),
     };
 
+    let mut delivery_error_data = None;
+    if let (Some(before), Some(sid), Some(mgr)) =
+        (delivery_before, &delivery_session, state.browser.as_ref())
+    {
+        delivery_error_data = delivery::report(
+            &mgr.client,
+            sid,
+            &state.ref_map,
+            &state.iframe_sessions,
+            delivery_action.unwrap_or(action),
+            cmd,
+            before,
+            &mut result,
+        )
+        .await;
+    }
+
     if result.is_ok() && should_validate_restore_after_action(action) {
         validate_restore_if_pending(state).await;
     }
@@ -3758,7 +3795,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             resp
         }
         (Ok(data), None) => success_response(&id, data),
-        (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
+        (Err(e), None) => {
+            let mut resp = error_response(&id, &super::browser::to_ai_friendly_error(&e));
+            if let Some(data) = delivery_error_data {
+                resp["data"] = data;
+            }
+            resp
+        }
     };
     attach_tab_gone_data(&mut resp, state);
     attach_flow_stop(&mut resp, state);
@@ -6570,28 +6613,43 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
+    let skeleton = cmd
+        .get("skeleton")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let options = SnapshotOptions {
         selector: cmd
             .get("selector")
             .and_then(|v| v.as_str())
             .map(String::from),
-        interactive: cmd
-            .get("interactive")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        compact: cmd
-            .get("compact")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        interactive: !skeleton
+            && cmd
+                .get("interactive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        compact: skeleton
+            || cmd
+                .get("compact")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         depth: cmd
             .get("maxDepth")
             .and_then(|v| v.as_u64())
-            .map(|d| d as usize),
+            .map(|d| d as usize)
+            .or(skeleton.then_some(3)),
         urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
+        skeleton,
     };
 
     let previous_refs = state.ref_map.ref_ids();
-    state.ref_map.begin_snapshot();
+    let drill = options
+        .selector
+        .as_deref()
+        .and_then(super::element::parse_ref)
+        .is_some();
+    if !drill {
+        state.ref_map.begin_snapshot();
+    }
     let tree = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
@@ -6640,6 +6698,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         "compact": options.compact,
         "depth": options.depth,
         "urls": options.urls,
+        "skeleton": options.skeleton,
     }))
     .unwrap_or_default();
     let previous = state.snapshot_revisions.get(&session_id).cloned();

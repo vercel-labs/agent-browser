@@ -965,7 +965,8 @@ fn tools() -> Vec<Value> {
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text." },
                 "depth": { "type": "integer", "minimum": 0, "description": "Limit tree depth." },
-                "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector." },
+                "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector or a ref such as @e12. A ref scope keeps the refs outside it." },
+                "skeleton": { "type": "boolean", "default": false, "description": "Return a shallow structural map (depth 3 unless depth is set). Each cut branch shows hidden=N refs beneath it and a ref to drill into with selector." },
                 "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." },
                 "delta": { "type": "boolean", "default": false, "description": "Return full state once, then unchanged or bounded structural deltas. Apply changes to refs and treeChange (zero-based startLine, deleteCount, lines) to the previous tree." },
                 "full": { "type": "boolean", "default": false, "description": "Force full state while updating the delta baseline." }
@@ -3075,6 +3076,9 @@ fn snapshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError
     if let Some(selector) = optional_string(arguments, "selector")? {
         args.push("-s".to_string());
         args.push(selector);
+    }
+    if optional_bool(arguments, "skeleton")?.unwrap_or(false) {
+        args.push("--skeleton".to_string());
     }
     if optional_bool(arguments, "delta")?.unwrap_or(false) {
         args.push("--delta".to_string());
@@ -6648,5 +6652,13 @@ mod snapshot_delta_schema_tests {
             crate::commands::parse_command(&args, &flags).unwrap()["delta"],
             true
         );
+    }
+    #[test]
+    fn skeleton_argument_reaches_the_cli_parser() {
+        let args = snapshot_command_args(&json!({ "skeleton": true, "selector": "@e3" })).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let cmd = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(cmd["skeleton"], true);
+        assert_eq!(cmd["selector"], "@e3");
     }
 }

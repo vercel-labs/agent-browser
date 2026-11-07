@@ -323,6 +323,24 @@ agent-browser click @e3         # uses docs's refs
 
 Browsers discard background tabs to save memory, leaving a tab with no renderer to drive. Switching to a discarded tab reactivates it, which reloads the page and resets its unsaved state; the switch result adds `"revived": true` so the reload is visible rather than silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `"dialogBlocked": true`. Resolve the dialog with `dialog accept` or `dialog dismiss` and the tab keeps its state. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
 
+### Snapshot skeleton
+
+```bash
+agent-browser snapshot --skeleton
+agent-browser snapshot -i -s @e436
+```
+
+`snapshot --skeleton` returns refs and the containers above them to depth 3 (`-d` changes it). Unnamed generic wrappers take no depth. A branch cut at the depth limit becomes one line with a ref and `hidden=N`, the number of refs below it. Pass that ref to `-s` to drill into the branch. A ref scope keeps the refs outside it usable.
+
+### Action delivery
+
+`click`, `dblclick`, `fill`, `type`, `press`, `select`, `check`, `uncheck`, and `find` with `click`, `fill`, or `check` wait for the page to settle, then report a `disposition` and an `effect`. `delivery` is `delivered_verified` when a change was observed after the action (navigation, a URL or title change, DOM mutations, or the element showing the requested value or state) and `delivered_unverified` when nothing observable changed. `retry` is `unsafe` for every delivered action. A failed action carries a disposition only when the page changed afterwards.
+
+```
+✓ delivered_verified: navigated to https://example.com/done (loaded); title is "Done"
+✓ delivered_unverified: no page change observed
+```
+
 ### Snapshot deltas
 
 ```bash

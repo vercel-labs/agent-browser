@@ -1046,6 +1046,9 @@ fn parse_command_inner(
                             i += 1;
                         }
                     }
+                    "--skeleton" => {
+                        obj.insert("skeleton".to_string(), json!(true));
+                    }
                     "--delta" => {
                         obj.insert("delta".to_string(), json!(true));
                     }

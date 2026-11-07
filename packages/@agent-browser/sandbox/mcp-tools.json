@@ -3754,12 +3754,17 @@
             "type": "boolean"
           },
           "selector": {
-            "description": "Scope the snapshot to a CSS selector.",
+            "description": "Scope the snapshot to a CSS selector or a ref such as @e12. A ref scope keeps the refs outside it.",
             "type": "string"
           },
           "session": {
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
+          },
+          "skeleton": {
+            "default": false,
+            "description": "Return a shallow structural map (depth 3 unless depth is set). Each cut branch shows hidden=N refs beneath it and a ref to drill into with selector.",
+            "type": "boolean"
           }
         },
         "type": "object"
