@@ -16802,6 +16802,52 @@ async fn e2e_firefox_emulation() {
         .await,
         json!(true)
     );
+
+    let original = state.firefox.as_ref().unwrap().top_context.clone();
+    let created = state
+        .firefox
+        .as_ref()
+        .unwrap()
+        .bidi
+        .send(
+            "browsingContext.create",
+            json!({"type": "tab", "background": true}),
+        )
+        .await
+        .unwrap();
+    let background = created["context"].as_str().unwrap().to_string();
+    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+    let tabs = state
+        .firefox
+        .as_ref()
+        .unwrap()
+        .rdp
+        .request("root", "listTabs", json!({}))
+        .await
+        .unwrap();
+    assert!(tabs["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tab| tab["selected"] == true && tab["url"] == fixture.url));
+    assert_eq!(state.firefox.as_ref().unwrap().top_context, original);
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "background", "action": "tab_switch", "tabId": background}),
+        )
+        .await,
+    );
+    firefox_open(&mut state, &fixture.other).await;
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "matchMedia('(prefers-color-scheme: dark)').matches"
+        )
+        .await,
+        json!(true)
+    );
     firefox_close(&mut state).await;
 }
 
