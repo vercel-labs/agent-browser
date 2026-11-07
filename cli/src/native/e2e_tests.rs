@@ -16106,6 +16106,45 @@ async fn e2e_firefox_smoke_full_page_annotations() {
 
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_element_screenshot_below_viewport() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+
+    let url = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(
+            "<body style='margin:0'><div style='height:1600px'></div><button id='box' style='display:block;width:200px;height:200px;border:0;background:#c00'>box</button>"
+        )
+    );
+    firefox_open(&mut state, &url).await;
+    assert_eq!(firefox_eval(&mut state, "window.scrollY").await, json!(0));
+    assert!(
+        firefox_eval(&mut state, "document.querySelector('#box').getBoundingClientRect().top")
+            .await
+            .as_f64()
+            .unwrap()
+            > 600.0
+    );
+
+    let path = tmp.path().join("below-viewport.png");
+    let response = firefox_command(
+        &mut state,
+        json!({"id": "shot", "action": "screenshot", "selector": "#box", "path": path}),
+    )
+    .await;
+    assert_success(&response);
+    let (width, height, red) = red_fraction(path.to_str().unwrap());
+    firefox_close(&mut state).await;
+
+    assert_eq!((width, height), (200, 200));
+    assert!(red > 0.99, "only {:.0}% of the clip is the element", red * 100.0);
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_screenshot_annotate_excludes_iframe_overlays() {
     required_firefox_binary();
     let tmp = tempfile::tempdir().unwrap();
