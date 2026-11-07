@@ -447,12 +447,18 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
                 }
                 None => "verified".to_string(),
             };
+            let saved = data
+                .get("saveError")
+                .and_then(|e| e.as_str())
+                .map(|e| format!("\nThe flow file was not updated: {}", e))
+                .unwrap_or_default();
             Some(format!(
-                "Flow '{}' ran in {}ms ({}), {}\n{}",
+                "Flow '{}' ran in {}ms ({}), {}{}\n{}",
                 data.get("name")?.as_str()?,
                 data.get("ms")?,
                 tiers.join(", "),
                 status,
+                saved,
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             ))
         }

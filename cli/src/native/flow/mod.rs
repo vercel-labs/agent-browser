@@ -1681,7 +1681,10 @@ pub(super) fn scrub(flow: &mut Flow, secrets: &[String]) {
                 r.url = REDACTED.to_string();
                 hit = true;
             } else if let Some(clean) = scrub_url(&r.url) {
+                // The credential is not stored, as with an auth header the
+                // file does not keep: a 401 or 403 says so.
                 r.url = clean;
+                r.expect.stripped_auth = true;
                 hit = true;
             }
             if r.body.as_deref().is_some_and(|b| holds_secret(b, secrets)) {
@@ -1707,6 +1710,18 @@ pub(super) fn scrub(flow: &mut Flow, secrets: &[String]) {
         }
     }
     flow.redacted_steps.sort_unstable();
+    for w in &mut flow.writes {
+        if holds_secret(&w.url, secrets) {
+            w.url = REDACTED.to_string();
+        } else if let Some(clean) = scrub_url(&w.url) {
+            w.url = clean;
+        }
+    }
+}
+
+/// Whether a URL had a credential parameter redacted by the scrub.
+pub(super) fn is_redacted_url(url: &str) -> bool {
+    url.contains(REDACTED) || url.contains(urlencoding::encode(REDACTED).as_ref())
 }
 
 /// Replace every string under `v` that holds a secret; true if any did.
@@ -1785,17 +1800,37 @@ fn scrub_url(url: &str) -> Option<String> {
 }
 
 /// A query parameter that carries a credential: named like a credential
-/// header (`authorization`, anything with `token` or `csrf`), or one word of
-/// its name is a secret-field marker (`pass`, `secret`, `otp`, `pin`, `cvv`,
-/// `card`) or `password`. Words split on punctuation and match whole, so
-/// `passengers` and `shipping` are not secrets.
+/// header (`authorization`, anything with `token` or `csrf`) except a
+/// pagination cursor (`pageToken`, `nextPageToken`, `continuation_token`), or
+/// one word of its name is a secret-field marker (`pass`, `secret`, `otp`,
+/// `pin`, `cvv`, `card`), `password`, or a common credential name (`auth`,
+/// `key`, `apikey`, `sig`, `signature`, `jwt`, `sid`). Words split on
+/// punctuation and match whole, so `passengers` and `shipping` are not
+/// secrets.
 fn is_credential_param(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let squashed: String = lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let cursor = squashed.ends_with("pagetoken")
+        || squashed.contains("continuation")
+        || squashed.contains("cursor");
+    if cursor {
+        return false;
+    }
     if classify_header(name) == HeaderClass::Credential {
         return true;
     }
-    name.to_ascii_lowercase()
+    lower
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| word == "password" || recorder::SECRET_MARKERS.contains(&word))
+        .any(|word| {
+            recorder::SECRET_MARKERS.contains(&word)
+                || matches!(
+                    word,
+                    "password" | "auth" | "key" | "apikey" | "sig" | "signature" | "jwt" | "sid"
+                )
+        })
 }
 
 /// A flow file on disk, with the directory it was found in.
@@ -4085,7 +4120,53 @@ mod tests {
     }
 
     #[test]
+    fn a_credential_the_scrub_removed_is_never_sent_as_redacted() {
+        // A recording that began on an open page has no navigate step: the
+        // replay opens the start URL, so it refuses one without its token.
+        let mut flow = flow_of(json!({
+            "startUrl": "https://a.test/inbox?access_token=zzz",
+            "writes": [{ "id": "s1w1", "method": "POST", "url": "https://a.test/api/send?sig=abc", "kind": "explicit", "step": 1 }],
+            "steps": [{ "command": { "action": "click", "selector": "#send" }, "requests": [{
+                "id": "s1r1", "method": "GET", "url": "https://a.test/api/me?access_token=zzz"
+            }] }]
+        }));
+        scrub(&mut flow, &[]);
+        let text = serde_json::to_string(&flow).unwrap();
+        assert!(!text.contains("zzz") && !text.contains("abc"), "{text}");
+        let err = replay_commands(&flow, &[]).unwrap_err();
+        assert!(err.contains("start URL") || err.contains("secret"), "{err}");
+        let mut only_start = flow_of(json!({
+            "startUrl": "https://a.test/inbox?access_token=zzz",
+            "steps": [{ "command": { "action": "click", "selector": "#a" } }]
+        }));
+        scrub(&mut only_start, &[]);
+        let err = replay_commands(&only_start, &[]).unwrap_err();
+        assert!(err.contains("start URL"), "{err}");
+        // The HTTP tier sends the request without its credential, so a 401 or
+        // 403 is credential_not_sendable, not auth_expired.
+        let req = &flow.steps[0].requests[0];
+        assert!(req.expect.stripped_auth);
+        assert!(
+            is_redacted_url(&flow.writes[0].url),
+            "{}",
+            flow.writes[0].url
+        );
+    }
+
+    #[test]
     fn credential_params_are_named_like_credentials() {
+        for name in [
+            "auth",
+            "api_key",
+            "apikey",
+            "key",
+            "sig",
+            "signature",
+            "jwt",
+            "sid",
+        ] {
+            assert!(is_credential_param(name), "{name}");
+        }
         for name in [
             "token",
             "access_token",
@@ -4111,6 +4192,12 @@ mod tests {
             "page",
             "lang",
             "spinner",
+            "pageToken",
+            "nextPageToken",
+            "continuation_token",
+            "cursor",
+            "keyword",
+            "monkey",
         ] {
             assert!(!is_credential_param(name), "{name}");
         }

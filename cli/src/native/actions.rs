@@ -12619,7 +12619,8 @@ fn with_save_error(data: Option<Value>, saved: Option<&str>) -> Option<Value> {
             data["saveError"] = json!(e);
             Some(data)
         }
-        (data, _) => data,
+        (None, Some(e)) => Some(json!({ "saveError": e })),
+        (data, None) => data,
     }
 }
 

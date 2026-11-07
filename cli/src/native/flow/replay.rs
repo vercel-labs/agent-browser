@@ -74,6 +74,14 @@ pub fn replay_commands(flow: &Flow, cmd_params: &[(String, String)]) -> Result<V
                 .to_string(),
         );
     }
+    // The replay opens the start URL itself; one whose credential was not
+    // stored would land on a login or error page.
+    if start.is_some() && is_redacted_url(&flow.start_url) {
+        return Err(
+            "the start URL carried a credential, which is not stored, so the commands cannot be replayed"
+                .to_string(),
+        );
+    }
     Ok(start
         .into_iter()
         .chain(
