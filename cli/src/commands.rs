@@ -6372,6 +6372,35 @@ mod tests {
     }
 
     #[test]
+    fn test_set_permissions_origin_before_names() {
+        let cmd = parse_command(
+            &args("set permissions --origin https://example.com geolocation notifications"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "permissions");
+        assert_eq!(cmd["permissions"], json!(["geolocation", "notifications"]));
+        assert_eq!(cmd["origin"], "https://example.com");
+    }
+
+    #[test]
+    fn test_set_permissions_unknown_flag() {
+        let err = parse_command(&args("set permissions geolocation --foo"), &default_flags())
+            .unwrap_err()
+            .format();
+        assert!(err.contains("--foo"), "{err}");
+    }
+
+    #[test]
+    fn test_set_permissions_origin_without_names() {
+        let result = parse_command(
+            &args("set permissions --origin https://example.com"),
+            &default_flags(),
+        );
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    #[test]
     fn test_set_permissions_origin_without_value() {
         let result = parse_command(
             &args("set permissions geolocation --origin"),

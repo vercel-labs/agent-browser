@@ -232,7 +232,7 @@ agent-browser set media light reduced-motion  # Light mode + reduced motion
 
 Viewport scales and geolocation coordinates must be finite numbers.
 
-`set geo` sets coordinates only. Grant `geolocation` with `set permissions geolocation` so `navigator.geolocation.getCurrentPosition` is not denied in headless Chrome. The same pairing applies to clipboard APIs (`clipboard-read`). Names accept kebab aliases (`camera`, `clipboard-read`) and CDP names (`videoCapture`, `clipboardReadWrite`). `agent-browser set --help` lists the full alias table. Optional `--origin <url>` scopes the grant; omit it to grant for the whole browser context.
+`set geo` sets coordinates only. Grant `geolocation` with `set permissions geolocation` so `navigator.geolocation.getCurrentPosition` is not denied in headless Chrome. The same pairing applies to clipboard APIs (`clipboard-read`). Names accept kebab aliases and CDP names. CLI to CDP: `camera` to `videoCapture`, `microphone` to `audioCapture`, `clipboard-read` to `clipboardReadWrite`, `clipboard-write` to `clipboardSanitizedWrite`, `midi-sysex` to `midiSysex`, `background-sync` to `backgroundSync`, `idle-detection` to `idleDetection`, `persistent-storage` to `durableStorage`, `payment-handler` to `paymentHandler`, `window-management` to `windowManagement`. Identity names: `geolocation`, `notifications`, `midi`, `sensors`. `agent-browser set --help` lists the same aliases. Optional `--origin <url>` scopes the grant; omit it to grant for the whole browser context.
 
 ## Cookies and Storage
 

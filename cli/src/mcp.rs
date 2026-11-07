@@ -1338,7 +1338,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SET_PERMISSIONS,
             "Set permissions",
-            "Grant Chrome permission types (geolocation, notifications, clipboard, camera, microphone) so headless pages stop seeing PERMISSION_DENIED.",
+            "Grant Chrome permission types (geolocation, notifications, clipboard, camera, microphone). Pair geolocation with set geo. Optional origin scopes the grant.",
             json!({
                 "permissions": string_array_schema("Chrome permission types. Kebab aliases such as camera and clipboard-read, or CDP names such as videoCapture."),
                 "origin": { "type": "string", "description": "Origin to grant for. Omit to grant for the whole browser context." }
@@ -5637,6 +5637,13 @@ mod tests {
                 "https://example.com"
             ]
         );
+
+        let args = set_permissions_args(&json!({
+            "permissions": ["geolocation"],
+            "origin": ""
+        }))
+        .unwrap();
+        assert_eq!(args, vec!["set", "permissions", "geolocation"]);
     }
 
     #[test]

@@ -3598,7 +3598,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Grant Chrome permission types (geolocation, notifications, clipboard, camera, microphone) so headless pages stop seeing PERMISSION_DENIED.",
+      "description": "Grant Chrome permission types (geolocation, notifications, clipboard, camera, microphone). Pair geolocation with set geo. Optional origin scopes the grant.",
       "inputSchema": {
         "properties": {
           "origin": {

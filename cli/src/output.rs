@@ -2994,10 +2994,18 @@ Settings:
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
         [reduced-motion]     Enable reduced motion
-  permissions <name...>      Grant Chrome permission types (geolocation, notifications,
-                             camera, microphone, clipboard-read, and others). Optional
-                             --origin <url> scopes the grant; omit it for the whole
-                             browser context. Accepts kebab aliases and CDP names.
+  permissions <name...>      Grant Chrome permission types. Optional --origin <url>
+                             scopes the grant; omit it for the whole browser context.
+                             Names (kebab = CDP): geolocation, notifications,
+                             camera=videoCapture, microphone=audioCapture,
+                             clipboard-read=clipboardReadWrite,
+                             clipboard-write=clipboardSanitizedWrite, midi,
+                             midi-sysex=midiSysex, background-sync=backgroundSync,
+                             idle-detection=idleDetection,
+                             persistent-storage=durableStorage,
+                             payment-handler=paymentHandler,
+                             window-management=windowManagement, sensors
+                             Identity CDP names also parse (videoCapture, ...).
 
 Global Options:
   --json               Output as JSON
