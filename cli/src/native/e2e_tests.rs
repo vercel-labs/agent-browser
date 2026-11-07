@@ -15585,11 +15585,26 @@ async fn e2e_firefox_review_pointer_motion_and_wheel() {
         json!([420, 120, "right"])
     );
     firefox_eval(&mut state, "document.querySelector('#right').style.cssText='position:fixed;left:-100px;top:0;width:300px;height:200px'; moves=[]; true").await;
-    assert_success(&firefox_command(&mut state, json!({"id":"clipped-hover", "action":"hover", "selector":"#right"})).await);
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"clipped-hover", "action":"hover", "selector":"#right"}),
+        )
+        .await,
+    );
     let actual_pointer = firefox_eval(&mut state, "moves.at(-1)").await;
     assert_eq!(actual_pointer, json!([100, 100]));
-    assert_success(&firefox_command(&mut state, json!({"id":"clipped-wheel", "action":"wheel", "deltaY":20})).await);
-    assert_eq!(firefox_eval(&mut state, "wheels.at(-1)").await, json!([100, 100, "right"]));
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"clipped-wheel", "action":"wheel", "deltaY":20}),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "wheels.at(-1)").await,
+        json!([100, 100, "right"])
+    );
     firefox_close(&mut state).await;
 }
 
