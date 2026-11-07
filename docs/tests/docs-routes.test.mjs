@@ -33,10 +33,41 @@ assert.ok(
 const noindex = process.env.DOCS_EXPECT_NOINDEX === "1";
 const query = "?utm_source=route-test&value=a%2Fb&value=two";
 const agent = { "user-agent": "ClaudeBot/1.0", accept: "text/markdown" };
+const indexedPages = [
+  ...pages,
+  {
+    path: "/providers/baizhi-cloud-browser",
+    markdownTitle: "Baizhi Cloud Browser",
+  },
+];
 const pageAt = (path) => pages.find((page) => page.path === path);
 const legacyPath = (path) =>
   `/api/docs-markdown?path=${encodeURIComponent(path)}`;
 const htmlCache = new Map();
+test("Baizhi Cloud Browser is discoverable in HTML, Markdown, search and agent indexes", async () => {
+  const path = "/providers/baizhi-cloud-browser";
+  const htmlResponse = await get(path);
+  assert.equal(htmlResponse.status, 200);
+  const html = await htmlResponse.text();
+  assert.match(html, /<title>Baizhi Cloud Browser \| agent-browser<\/title>/);
+  assert.ok(tags(html, "a").some((link) => link.href === path));
+  assert.deepEqual(meta(html, "og:title"), ["Baizhi Cloud Browser | agent-browser"]);
+  const markdownResponse = await get(`${path}.md`);
+  assert.equal(markdownResponse.status, 200);
+  responseType(markdownResponse, "text/markdown");
+  const markdown = await markdownResponse.text();
+  assert.match(markdown, /# Baizhi Cloud Browser/);
+  assert.ok(markdown.includes("agent-browser-plugin-capybrowser"));
+  for (const index of ["/sitemap.xml", "/llms.txt", "/sitemap.md"]) {
+    const response = await get(index);
+    assert.equal(response.status, 200, index);
+    assert.ok((await response.text()).includes(canonical(path)), index);
+  }
+  const searchResponse = await get("/api/search?q=Baizhi");
+  assert.equal(searchResponse.status, 200);
+  const search = await searchResponse.json();
+  assert.ok(search.results.some((result) => result.href === path));
+});
 async function htmlFor(page) {
   if (!htmlCache.has(page.path))
     htmlCache.set(
@@ -641,7 +672,7 @@ test("native search empty and unmatched queries return arrays, not legacy object
   }
 });
 
-test("sitemap contains exactly the 39 canonical production URLs", async () => {
+test("sitemap contains the original 39 canonical URLs plus Baizhi Cloud Browser exactly once", async () => {
   const response = await get("/sitemap.xml", { headers: agent });
   responseType(response, "application/xml");
   indexing(response);
@@ -652,7 +683,7 @@ test("sitemap contains exactly the 39 canonical production URLs", async () => {
   );
   assert.deepEqual(
     locations.sort(),
-    pages.map((page) => canonical(page.path)).sort(),
+    indexedPages.map((page) => canonical(page.path)).sort(),
   );
   assert.ok(
     !xml.includes("/en/") &&
@@ -662,7 +693,7 @@ test("sitemap contains exactly the 39 canonical production URLs", async () => {
 });
 
 for (const path of ["/llms.txt", "/sitemap.md"]) {
-  test(`${path}: agent index exposes all 39 public pages and Markdown alternatives exactly once`, async () => {
+  test(`${path}: agent index exposes the original 39 pages plus Baizhi Cloud Browser and Markdown alternatives exactly once`, async () => {
     const response = await get(path, { headers: agent });
     responseType(
       response,
@@ -675,7 +706,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       links.sort((a, b) => a[1].localeCompare(b[1])),
-      pages
+      indexedPages
         .map((page) => [page.markdownTitle, canonical(page.path)])
         .sort((a, b) => a[1].localeCompare(b[1])),
     );
@@ -684,7 +715,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       markdownLinks.sort(),
-      pages.map((page) => `${origin}${markdownPath(page.path)}`).sort(),
+      indexedPages.map((page) => `${origin}${markdownPath(page.path)}`).sort(),
     );
     assert.ok(
       !body.includes("/en/") &&

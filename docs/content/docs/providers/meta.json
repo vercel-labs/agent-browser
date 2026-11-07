@@ -2,6 +2,7 @@
   "title": "Providers",
   "pages": [
     "agentcore",
+    "baizhi-cloud-browser",
     "browser-use",
     "browserbase",
     "browserless",
