@@ -1856,9 +1856,9 @@ mod tests {
 
     #[tokio::test]
     async fn request_recording_excludes_background_tabs() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session_with(|_| {
-            json!({"bytes": {"type": "string", "value": "body"}})
-        })
+        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session_with(
+            |_| json!({"bytes": {"type": "string", "value": "body"}}),
+        )
         .await;
         ff.top_context = "active".into();
         ff.context = "active".into();
