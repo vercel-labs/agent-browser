@@ -230,6 +230,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timed_out_request_does_not_consume_the_next_reply() {
+        let (c, mut s) = pair().await;
+        let first = c.clone();
+        let first = tokio::spawn(async move {
+            first
+                .request_timeout("act1", "first", json!({}), Duration::from_millis(20))
+                .await
+        });
+        assert_eq!(get(&mut s).await["type"], "first");
+        assert!(first.await.unwrap().unwrap_err().contains("timed out"));
+
+        let second = c.clone();
+        let second = tokio::spawn(async move { second.request("act1", "second", json!({})).await });
+        assert_eq!(get(&mut s).await["type"], "second");
+        put(&mut s, json!({"from":"act1","n":2})).await;
+        assert_eq!(second.await.unwrap().unwrap()["n"], 2);
+    }
+
+    #[tokio::test]
     async fn event_before_enable_reply_does_not_consume_request() {
         let (c, mut s) = pair().await;
         let mut ev = c.subscribe();
