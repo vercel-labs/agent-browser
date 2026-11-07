@@ -19,7 +19,7 @@ use crate::test_utils::EnvGuard;
 use super::actions::{
     close_current_browser, execute_command, maybe_autosave_restore_state, DaemonState,
 };
-use super::firefox::target::{resolve_target, Target};
+use super::bidi::target::{resolve_target, Target};
 
 fn assert_success(resp: &Value) {
     assert_eq!(
@@ -15479,6 +15479,31 @@ async fn e2e_firefox_form_entry() {
         );
     }
 
+    firefox_eval(&mut state, "document.getElementById('notes').focus()").await;
+    let inserted = firefox_command(
+        &mut state,
+        json!({ "id": "insert-notes", "action": "inserttext", "text": "a\tb" }),
+    )
+    .await;
+    assert_success(&inserted);
+    assert_eq!(
+        firefox_eval(&mut state, "document.getElementById('notes').value").await,
+        "a\tb"
+    );
+
+    let nested_input = "document.getElementById('nest-host').shadowRoot.querySelector('div').shadowRoot.querySelector('input')";
+    firefox_eval(&mut state, &format!("{nested_input}.focus()")).await;
+    let inserted = firefox_command(
+        &mut state,
+        json!({ "id": "insert-nested", "action": "inserttext", "text": "shadow" }),
+    )
+    .await;
+    assert_success(&inserted);
+    assert_eq!(
+        firefox_eval(&mut state, &format!("{nested_input}.value")).await,
+        "shadow"
+    );
+
     assert_eq!(
         firefox_eval(
             &mut state,
@@ -15687,19 +15712,19 @@ async fn e2e_firefox_smoke() {
     firefox_eval(&mut state, "localStorage.setItem('visited', 'from-a')").await;
     let saved_path = {
         let ff = state.firefox.as_mut().unwrap();
-        let path = super::firefox::storage::save_auto_state(ff, "firefox-smoke", "autosave")
+        let path = super::bidi::storage::save_auto_state(ff, "firefox-smoke", "autosave")
             .await
             .unwrap();
         let block = "Object.defineProperty(window,'localStorage',{get(){throw 0}})";
         ff.eval(block).await.unwrap();
-        super::firefox::storage::save_auto_state(ff, "firefox-smoke", "autosave")
+        super::bidi::storage::save_auto_state(ff, "firefox-smoke", "autosave")
             .await
             .unwrap();
         path
     };
     firefox_open(&mut state, &fixture.other).await;
     let ff = state.firefox.as_mut().unwrap();
-    let first_path = super::firefox::storage::save_auto_state(ff, "firefox-first", "autosave")
+    let first_path = super::bidi::storage::save_auto_state(ff, "firefox-first", "autosave")
         .await
         .unwrap();
     let first: Value =
@@ -15709,7 +15734,7 @@ async fn e2e_firefox_smoke() {
         .unwrap()
         .iter()
         .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
-    super::firefox::storage::save_auto_state(ff, "firefox-smoke", "autosave")
+    super::bidi::storage::save_auto_state(ff, "firefox-smoke", "autosave")
         .await
         .unwrap();
     let state_data: Value =
@@ -15724,6 +15749,9 @@ async fn e2e_firefox_smoke() {
         url::Url::parse(get_data(&current)["url"].as_str().unwrap()).unwrap(),
         url::Url::parse(&fixture.other).unwrap()
     );
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(&mut state, "localStorage.clear()").await;
+    firefox_open(&mut state, &fixture.other).await;
     let saved = firefox_command(
         &mut state,
         json!({ "id": "save-b", "action": "state_save", "path": saved_path }),
@@ -15732,11 +15760,7 @@ async fn e2e_firefox_smoke() {
     assert_success(&saved);
     let state_data: Value =
         serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
-    assert!(state_data["origins"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
+    assert_eq!(state_data["origins"], json!([]));
     firefox_close(&mut state).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(
@@ -15791,6 +15815,16 @@ async fn e2e_firefox_core_flow_and_ref_stability() {
     .await;
     assert_success(&firefox_act(&mut state, "click", &second, json!({})).await);
     assert_eq!(firefox_title(&mut state).await, "clicked-second");
+
+    let covered = "data:text/html,<body style='margin:0'><button onclick=\"document.title='hit'\" style='position:absolute;top:-100px;left:50px;width:200px;height:400px'>Target</button><div style='position:fixed;top:140px;left:50px;width:200px;height:20px'></div>";
+    firefox_open(&mut state, covered).await;
+    let target = firefox_ref(&mut state, "Target").await;
+    let refused = firefox_act(&mut state, "click", &target, json!({})).await;
+    assert!(
+        refused["error"].as_str().unwrap().contains("is covered by"),
+        "{refused}"
+    );
+    assert_ne!(firefox_title(&mut state).await, "hit");
 
     firefox_close(&mut state).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -15909,6 +15943,225 @@ async fn e2e_firefox_drag_scrolls_destination_and_releases_on_failure() {
     firefox_close(&mut state).await;
 }
 
+/// Dashboard modifier masks hold Shift across keys and apply it before pointer input.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_stream_modifier_masks() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        r#"document.body.innerHTML = '<button style="position:fixed;left:0;top:0;width:100px;height:80px">Probe</button>';
+        window.__streamKeys = [];
+        for (const type of ['keydown', 'keyup', 'click']) {
+            window.addEventListener(type, e => {
+                window.__streamKeys.push([e.type, e.key || '', e.shiftKey]);
+                e.preventDefault();
+            });
+        }"#,
+    )
+    .await;
+    let ff = state.firefox.as_ref().unwrap();
+    let live = super::bidi::stream::FirefoxLive {
+        bidi: Arc::clone(&ff.bidi),
+        context: ff.top_context.clone(),
+        contexts: ff.context_parents.clone(),
+        modifiers: Default::default(),
+    };
+    for (key, modifiers) in [("K", 8), ("J", 8), ("a", 0)] {
+        for event in ["keyDown", "keyUp"] {
+            super::bidi::stream::dispatch_input(
+                &live,
+                "input_keyboard",
+                &json!({"eventType": event, "key": key, "modifiers": modifiers}),
+            )
+            .await;
+        }
+    }
+    for (event, modifiers) in [("mousePressed", 8), ("mouseReleased", 8), ("mouseMoved", 0)] {
+        super::bidi::stream::dispatch_input(
+            &live,
+            "input_mouse",
+            &json!({"eventType": event, "x": 20, "y": 20, "button": "left", "modifiers": modifiers}),
+        )
+        .await;
+    }
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "input-ready", "action": "wait", "function": "window.__streamKeys.length >= 11", "timeout": 5000}),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "window.__streamKeys").await,
+        json!([
+            ["keydown", "Shift", true],
+            ["keydown", "K", true],
+            ["keyup", "K", true],
+            ["keydown", "J", true],
+            ["keyup", "J", true],
+            ["keyup", "Shift", false],
+            ["keydown", "a", false],
+            ["keyup", "a", false],
+            ["keydown", "Shift", true],
+            ["click", "", true],
+            ["keyup", "Shift", false],
+        ])
+    );
+    firefox_close(&mut state).await;
+}
+
+/// Firefox publishes the same tab data to the stream endpoint as its tab commands return.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_stream_tabs_follow_tab_commands() {
+    async fn stream_tabs(port: u16) -> Value {
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        socket
+            .write_all(
+                format!(
+                    "GET /api/tabs HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+        serde_json::from_str(body).unwrap()
+    }
+
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    let (server, client_slot) = crate::native::stream::StreamServer::start_without_client(
+        0,
+        "firefox-tabs".to_string(),
+        true,
+        state.idle_activity.clone(),
+    )
+    .await
+    .unwrap();
+    let server = Arc::new(server);
+    state.stream_client = Some(client_slot);
+    state.stream_server = Some(Arc::clone(&server));
+    launch_firefox(&mut state, json!({})).await;
+    let tabs = stream_tabs(server.port()).await;
+    assert_eq!(tabs.as_array().unwrap().len(), 1);
+    assert_eq!(tabs[0]["tabId"], "t1");
+    assert_eq!(tabs[0]["active"], true);
+
+    firefox_open(&mut state, &fixture.url).await;
+    let created = firefox_command(
+        &mut state,
+        json!({"id":"new", "action":"tab_new", "label":"docs", "url":fixture.url}),
+    )
+    .await;
+    assert_success(&created);
+    let tabs = stream_tabs(server.port()).await;
+    assert_eq!(tabs.as_array().unwrap().len(), 2);
+    assert_eq!(tabs[1]["tabId"], get_data(&created)["tabId"]);
+    assert_eq!(tabs[1]["label"], "docs");
+    assert_eq!(tabs[1]["active"], true);
+    let listed = firefox_command(&mut state, json!({"id":"list", "action":"tab_list"})).await;
+    assert_success(&listed);
+    assert_eq!(get_data(&listed)["tabs"], stream_tabs(server.port()).await);
+
+    let switched = firefox_command(
+        &mut state,
+        json!({"id":"switch", "action":"tab_switch", "tabId":"t1"}),
+    )
+    .await;
+    assert_success(&switched);
+    assert_eq!(stream_tabs(server.port()).await[0]["active"], true);
+    let closed = firefox_command(
+        &mut state,
+        json!({"id":"close-tab", "action":"tab_close", "tabId":"docs"}),
+    )
+    .await;
+    assert_success(&closed);
+    assert_eq!(
+        stream_tabs(server.port()).await.as_array().unwrap().len(),
+        1
+    );
+    firefox_close(&mut state).await;
+    server.shutdown().await;
+}
+
+/// `click --new-tab` moves the Firefox live view to the opened tab, even when its navigation fails.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_click_new_tab_retargets_live_view() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    let (server, client_slot) = crate::native::stream::StreamServer::start_without_client(
+        0,
+        "firefox-live".to_string(),
+        true,
+        state.idle_activity.clone(),
+    )
+    .await
+    .unwrap();
+    let server = Arc::new(server);
+    state.stream_client = Some(client_slot);
+    state.stream_server = Some(Arc::clone(&server));
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    let first = state.firefox.as_ref().unwrap().top_context.clone();
+    assert_eq!(
+        server.firefox_live_context().await.as_deref(),
+        Some(first.as_str())
+    );
+
+    firefox_eval(
+        &mut state,
+        "document.body.insertAdjacentHTML('beforeend', '<a href=\"http://127.0.0.1:1/\">Broken tab</a>')",
+    )
+    .await;
+    let broken = firefox_ref(&mut state, "Broken tab").await;
+    let failed = firefox_act(&mut state, "click", &broken, json!({ "newTab": true })).await;
+    assert_eq!(failed["success"], false, "{failed}");
+    let second = state.firefox.as_ref().unwrap().top_context.clone();
+    assert_ne!(second, first);
+    assert_eq!(
+        server.firefox_live_context().await.as_deref(),
+        Some(second.as_str())
+    );
+
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "document.body.insertAdjacentHTML('beforeend', '<a href=\"/frame.html\">Live tab</a>')",
+    )
+    .await;
+    let link = firefox_ref(&mut state, "Live tab").await;
+    assert_success(&firefox_act(&mut state, "click", &link, json!({ "newTab": true })).await);
+    let third = state.firefox.as_ref().unwrap().top_context.clone();
+    assert_ne!(third, second);
+    assert_eq!(
+        server.firefox_live_context().await.as_deref(),
+        Some(third.as_str())
+    );
+
+    firefox_close(&mut state).await;
+    server.shutdown().await;
+}
+
 /// PR2: a confirm() dialog is resolved with `dialog accept`.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
@@ -15930,6 +16183,36 @@ async fn e2e_firefox_dialog() {
     .await;
     assert_success(&resp);
     assert_eq!(firefox_title(&mut state).await, "confirmed");
+    firefox_close(&mut state).await;
+}
+
+/// Alerts and beforeunload prompts are auto-accepted, so they never block the next command.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_auto_dialog() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    let alert = firefox_ref(&mut state, "Alert").await;
+    assert_success(&firefox_act(&mut state, "click", &alert, json!({})).await);
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+
+    firefox_eval(&mut state, "window.onbeforeunload = () => 'leave?'").await;
+    firefox_open(&mut state, &fixture.other).await;
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+
+    let status = firefox_command(
+        &mut state,
+        json!({ "id": "d", "action": "dialog", "response": "status" }),
+    )
+    .await;
+    assert_success(&status);
+    assert_eq!(get_data(&status)["hasDialog"], false);
     firefox_close(&mut state).await;
 }
 
@@ -15997,6 +16280,41 @@ async fn e2e_firefox_iframe_and_shadow_root_refs() {
     let session = state.firefox.as_ref().unwrap();
     assert_eq!(session.context, session.top_context);
     assert_eq!(firefox_title(&mut state).await, "Frame");
+    firefox_close(&mut state).await;
+}
+
+/// A selector shared by light and shadow trees still gives the shadow control a usable ref.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_shadow_ref_survives_a_shared_selector() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        r#"(() => {
+  const markup = name => `<section class="mirror"><button id="shared">${name}</button></section>`;
+  document.body.innerHTML = markup('Light button');
+  const host = document.createElement('div');
+  document.body.append(host);
+  const shadow = host.attachShadow({ mode: 'open' });
+  shadow.innerHTML = markup('Shadow button');
+  document.querySelector('button').onclick = () => document.title = 'light-clicked';
+  shadow.querySelector('button').onclick = () => document.title = 'shadow-clicked';
+  return true;
+})()"#,
+    )
+    .await;
+
+    let light = firefox_ref(&mut state, "Light button").await;
+    let shadow = firefox_ref(&mut state, "Shadow button").await;
+    assert_ne!(light, shadow);
+    assert_success(&firefox_act(&mut state, "click", &shadow, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "shadow-clicked");
     firefox_close(&mut state).await;
 }
 
@@ -16083,9 +16401,48 @@ async fn e2e_firefox_frame_dialog_does_not_block_new_tab() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["accepted"], false, "{resp}");
+    let resp = firefox_command(&mut state, json!({ "id": "third", "action": "tab_new" })).await;
+    assert_success(&resp);
+    let opener_context = state.firefox.as_ref().unwrap().top_context.clone();
+    assert_eq!(
+        firefox_eval(&mut state, "window.open('about:blank'); 'opened'").await,
+        "opened"
+    );
+    for _ in 0..100 {
+        state.drain_cdp_events_background().await.unwrap();
+        if state.firefox.as_ref().unwrap().top_context != opener_context {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+    let popup_context = state.firefox.as_ref().unwrap().top_context.clone();
+    assert_ne!(popup_context, opener_context);
+    assert_eq!(state.firefox.as_ref().unwrap().context, popup_context);
+
     assert_eq!(firefox_eval(&mut state, "window.close(); 1").await, 1);
+    for _ in 0..100 {
+        state.drain_cdp_events_background().await.unwrap();
+        if state.firefox.as_ref().unwrap().top_context == opener_context {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(state.firefox.as_ref().unwrap().top_context, opener_context);
+    assert_eq!(state.firefox.as_ref().unwrap().context, opener_context);
     assert_eq!(firefox_eval(&mut state, "1 + 1").await, 2);
-    assert_eq!(state.firefox.as_ref().unwrap().top_context, owner_context);
+
+    assert_eq!(firefox_eval(&mut state, "window.close(); 1").await, 1);
+    for _ in 0..100 {
+        state.drain_cdp_events_background().await.unwrap();
+        if state.firefox.as_ref().unwrap().top_context != opener_context {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, 2);
+    let ff = state.firefox.as_ref().unwrap();
+    assert_ne!(ff.top_context, opener_context);
+    assert_eq!(ff.context, ff.top_context);
     firefox_close(&mut state).await;
 }
 
@@ -16349,7 +16706,7 @@ async fn e2e_firefox_resolve_target() {
     tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
     let gone = resolve_target(&mut state, &go).await.unwrap_err();
     assert!(
-        gone.contains("Could not locate element with role=button name=Go"),
+        gone.contains("the page changed since the snapshot"),
         "{gone}"
     );
 
@@ -16548,6 +16905,174 @@ async fn e2e_firefox_allowed_domains_block_worker_and_websocket() {
         0,
         "blocked requests must never reach the disallowed origin"
     );
+
+    for url in [
+        format!("{}/blocked-open", fixture.other),
+        "file:///etc/hosts".to_string(),
+    ] {
+        let resp = firefox_command(
+            &mut state,
+            json!({ "id": "nav", "action": "navigate", "url": url }),
+        )
+        .await;
+        assert!(resp["error"].as_str().is_some(), "{resp}");
+        let resp = firefox_command(
+            &mut state,
+            json!({ "id": "tab", "action": "tab_new", "url": url }),
+        )
+        .await;
+        assert!(resp["error"].as_str().is_some(), "{resp}");
+    }
+    assert_eq!(fixture.hit_count("/blocked-open"), 0);
+    firefox_close(&mut state).await;
+}
+
+/// A save after visiting two origins keeps both origins' storage, and a load restores both.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_state_keeps_every_visited_origin() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let state_path = tmp.path().join("state.json").to_string_lossy().to_string();
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    for (url, value) in [(fixture.url.clone(), "A"), (fixture.other.clone(), "B")] {
+        firefox_open(&mut state, &url).await;
+        firefox_eval(
+            &mut state,
+            &format!("localStorage.setItem('k', '{value}'); 0"),
+        )
+        .await;
+    }
+    let saved = firefox_command(
+        &mut state,
+        json!({ "id": "save", "action": "state_save", "path": &state_path }),
+    )
+    .await;
+    assert_success(&saved);
+    firefox_close(&mut state).await;
+
+    launch_firefox(&mut state, json!({})).await;
+    let loaded = firefox_command(
+        &mut state,
+        json!({ "id": "load", "action": "state_load", "path": &state_path }),
+    )
+    .await;
+    assert_success(&loaded);
+    for (url, value) in [(fixture.url.clone(), "A"), (fixture.other.clone(), "B")] {
+        firefox_open(&mut state, &url).await;
+        assert_eq!(
+            firefox_eval(&mut state, "localStorage.getItem('k')").await,
+            json!(value)
+        );
+    }
+    firefox_close(&mut state).await;
+}
+
+/// Restore must not expose secrets to page hooks, including after a cross-origin redirect.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_state_restore_isolated_from_page_hooks() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let path = tmp.path().join("state.json");
+    let origin = fixture.url.trim_end_matches('/');
+    std::fs::write(
+        &path,
+        json!({
+            "cookies": [],
+            "origins": [{
+                "origin": origin,
+                "localStorage": [{"name": "token", "value": "synthetic-local-secret"}],
+                "sessionStorage": [{"name": "token", "value": "synthetic-session-secret"}]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let hostile_page = r#"<!doctype html><script>
+        window.stolen = [];
+        const parse = JSON.parse;
+        JSON.parse = function(payload) {
+            window.stolen.push(payload);
+            return parse(payload);
+        };
+        const setItem = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+            window.stolen.push(value);
+            return setItem.call(this, key, value);
+        };
+        window.hooksInstalled = true;
+    </script>"#;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+
+    for redirect in [false, true] {
+        assert_success(
+            &firefox_command(&mut state, json!({"id": "unroute", "action": "unroute"})).await,
+        );
+        let destination = format!("{}/restore-hook.html", fixture.other);
+        let response = if redirect {
+            json!({"status": 302, "headers": {"Location": destination}, "body": ""})
+        } else {
+            json!({"contentType": "text/html", "body": hostile_page})
+        };
+        assert_success(
+            &firefox_command(
+                &mut state,
+                json!({
+                    "id": "route-origin", "action": "route", "url": fixture.url,
+                    "response": response
+                }),
+            )
+            .await,
+        );
+        assert_success(
+            &firefox_command(
+                &mut state,
+                json!({
+                    "id": "route-destination", "action": "route", "url": destination,
+                    "response": {"contentType": "text/html", "body": hostile_page}
+                }),
+            )
+            .await,
+        );
+
+        let loaded = firefox_command(
+            &mut state,
+            json!({
+                "id": "load", "action": "state_load", "path": path.to_str().unwrap()
+            }),
+        )
+        .await;
+        assert_success(&loaded);
+        assert_eq!(
+            get_data(&loaded)["skippedOrigins"],
+            if redirect { json!([origin]) } else { json!([]) }
+        );
+        assert_eq!(
+            firefox_eval(&mut state, "window.hooksInstalled").await,
+            json!(true)
+        );
+        assert_eq!(firefox_eval(&mut state, "window.stolen").await, json!([]));
+        let storage = firefox_eval(
+            &mut state,
+            "[localStorage.getItem('token'), sessionStorage.getItem('token')]",
+        )
+        .await;
+        assert_eq!(
+            storage,
+            if redirect {
+                json!([null, null])
+            } else {
+                json!(["synthetic-local-secret", "synthetic-session-secret"])
+            }
+        );
+    }
     firefox_close(&mut state).await;
 }
 
@@ -16897,6 +17422,75 @@ async fn e2e_firefox_emulation() {
     firefox_close(&mut state).await;
 }
 
+/// A page asking for geolocation after `geolocation` is set gets a prompt-free denial instead of hanging.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_geolocation_request_does_not_hang() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "g", "action": "geolocation", "latitude": 37.7, "longitude": -122.4 }),
+    )
+    .await;
+    assert_success(&resp);
+    let result = firefox_eval(
+        &mut state,
+        "new Promise(r => navigator.geolocation.getCurrentPosition(() => r('ok'), e => r('err')))",
+    )
+    .await;
+    assert_eq!(result, json!("err"));
+    firefox_close(&mut state).await;
+}
+
+/// The launch-time user agent reaches page scripts on Firefox.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_launch_user_agent() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({ "userAgent": "DogfoodUA/1" })).await;
+    firefox_open(&mut state, &fixture.url).await;
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        json!("DogfoodUA/1")
+    );
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_relaunch_keeps_engine_when_options_change() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    let relaunch = execute_command(
+        &json!({ "id": "relaunch", "action": "launch", "colorScheme": "dark" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(relaunch["success"], json!(true), "{relaunch}");
+    assert_eq!(state.engine, "firefox");
+    firefox_open(&mut state, &fixture.url).await;
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent.includes('Firefox')").await,
+        json!(true)
+    );
+    firefox_close(&mut state).await;
+}
+
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_full_page_screenshot_larger_than_64mb() {
@@ -16925,37 +17519,6 @@ async fn e2e_firefox_full_page_screenshot_larger_than_64mb() {
     assert_eq!(shot["success"], json!(true), "{shot}");
     assert!(std::fs::metadata(&path).unwrap().len() > 48 * 1024 * 1024);
     assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
-    firefox_close(&mut state).await;
-}
-
-/// Alerts and beforeunload prompts are auto-accepted, so they never block the next command.
-#[tokio::test]
-#[ignore = "requires FIREFOX_BIN; run serially"]
-async fn e2e_firefox_auto_dialog() {
-    required_firefox_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let _env = firefox_test_environment(tmp.path());
-    let fixture = firefox_fixture().await;
-    let mut state = DaemonState::new();
-    launch_firefox(&mut state, json!({})).await;
-    firefox_open(&mut state, &fixture.url).await;
-
-    assert_eq!(
-        firefox_eval(&mut state, "alert('Heads up'); 1").await,
-        json!(1)
-    );
-    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
-
-    firefox_eval(&mut state, "window.onbeforeunload = () => 'leave?'").await;
-    firefox_open(&mut state, &fixture.other).await;
-    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
-
-    state
-        .firefox
-        .as_mut()
-        .unwrap()
-        .drain_events(&mut state.pending_dialog);
-    assert!(state.pending_dialog.is_none());
     firefox_close(&mut state).await;
 }
 
@@ -17071,7 +17634,7 @@ async fn e2e_firefox_review_session_page_count() {
     firefox_close(&mut state).await;
 }
 
-/// A cookie set without a path is stored at `/`, so it stays visible site-wide; an explicit path stays scoped.
+/// A cookie set without a path uses the RFC 6265 default-path; an explicit path stays scoped.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_cookie_default_path() {
@@ -17211,7 +17774,7 @@ async fn e2e_firefox_autosave_preserves_blocked_storage_and_clears_readable_empt
         "localStorage.setItem('local', 'saved'); sessionStorage.setItem('session', 'saved'); true",
     )
     .await;
-    let path = super::firefox::storage::save_auto_state(
+    let path = super::bidi::storage::save_auto_state(
         state.firefox.as_mut().unwrap(),
         "blocked-storage",
         "autosave",
@@ -17237,7 +17800,7 @@ async fn e2e_firefox_autosave_preserves_blocked_storage_and_clears_readable_empt
             ),
         )
         .await;
-        super::firefox::storage::save_auto_state(
+        super::bidi::storage::save_auto_state(
             state.firefox.as_mut().unwrap(),
             "blocked-storage",
             "autosave",
@@ -17254,7 +17817,7 @@ async fn e2e_firefox_autosave_preserves_blocked_storage_and_clears_readable_empt
     }
 
     firefox_open(&mut state, "about:blank").await;
-    super::firefox::storage::save_auto_state(
+    super::bidi::storage::save_auto_state(
         state.firefox.as_mut().unwrap(),
         "blocked-storage",
         "autosave",
@@ -17270,7 +17833,7 @@ async fn e2e_firefox_autosave_preserves_blocked_storage_and_clears_readable_empt
         "localStorage.clear(); sessionStorage.clear(); true",
     )
     .await;
-    super::firefox::storage::save_auto_state(
+    super::bidi::storage::save_auto_state(
         state.firefox.as_mut().unwrap(),
         "blocked-storage",
         "autosave",

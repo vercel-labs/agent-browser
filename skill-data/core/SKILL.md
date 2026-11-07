@@ -6,7 +6,9 @@ allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*)
 
 # agent-browser core
 
-agent-browser drives Chrome over CDP from the command line. A snapshot returns the page's accessibility tree with a compact `@eN` ref for each element, and you act on those refs. This guide covers the loop and the common web tasks. Detailed flags, edge cases, and specialized workflows live in references and other skills; [Load more when you need it](#load-more-when-you-need-it) says which one to load for what.
+agent-browser drives Chrome over CDP or Firefox over WebDriver BiDi from the command line. A snapshot returns the page's accessibility tree with a compact `@eN` ref for each element, and you act on those refs. This guide covers the loop and the common web tasks. Detailed flags, edge cases, and specialized workflows live in references and other skills; [Load more when you need it](#load-more-when-you-need-it) says which one to load for what.
+
+Pass `--engine firefox` when opening a session to use Firefox 150 or newer. See the [Firefox engine guide](https://agent-browser.dev/engines/firefox).
 
 ## Always use your own session
 

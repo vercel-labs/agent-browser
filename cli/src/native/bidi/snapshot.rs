@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
-use super::rdp::RdpClient;
+use super::firefox_devtools::RdpClient;
 use super::session::FirefoxSession;
 use super::target::find_element;
 use crate::native::actions::{self as chrome, DaemonState};
@@ -19,24 +19,50 @@ const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(30);
 const SETTLE_JS: &str =
     "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(0))))";
 
-/// Batch-resolves a pruned `[selector, role, children]` tree to `[node, contentWindow, inShadowRoot]` triples in document order.
-/// Children of an open shadow host resolve inside its shadow root first.
+/// Resolves selectors across all open roots, marking collisions for exact accessible-actor lookup.
 const RESOLVE_JS: &str = r#"(tree) => {
-  const out = [];
-  const find = (roots, sel) => {
-    for (const r of roots) {
-      try { const e = r.querySelector(sel); if (e) return e; } catch (_) {}
+  const roots = [document];
+  for (let i = 0; i < roots.length; i++) {
+    for (const el of roots[i].querySelectorAll('*')) {
+      if (el.shadowRoot) roots.push(el.shadowRoot);
     }
-    return null;
+  }
+  const out = [];
+  const walk = ([sel, role, kids]) => {
+    let el = role === 'document' ? document : null;
+    let ambiguous = false;
+    if (role !== 'document' && sel && !sel.endsWith('#text')) {
+      for (const root of roots) {
+        try {
+          const hit = root.querySelector(sel);
+          if (hit) {
+            if (el) { el = null; ambiguous = true; break; }
+            el = hit;
+          }
+        } catch (_) {}
+      }
+    }
+    out.push([el, role === 'internal frame' && el ? el.contentWindow : null, !!el && el.getRootNode() instanceof ShadowRoot, ambiguous]);
+    for (const k of kids) walk(k);
   };
-  const walk = ([sel, role, kids], roots) => {
-    const el = role === 'document' ? roots[0] : sel && !sel.endsWith('#text') ? find(roots, sel) : null;
-    out.push([el, role === 'internal frame' && el ? el.contentWindow : null, !!el && el.getRootNode() instanceof ShadowRoot]);
-    const next = role !== 'document' && el && el.shadowRoot ? [el.shadowRoot, ...roots] : roots;
-    for (const k of kids) walk(k, next);
-  };
-  walk(JSON.parse(tree), [document]);
+  walk(JSON.parse(tree));
   return out;
+}"#;
+
+/// Resolves an exact sequence of root-local selectors through shadow hosts.
+const RESOLVE_CHAIN_JS: &str = r#"(input) => {
+  const [chain, role] = JSON.parse(input);
+  let root = document;
+  let el = null;
+  for (let i = 0; i < chain.length; i++) {
+    el = root.querySelector(chain[i]);
+    if (!el) throw new Error('Snapshot DOM node disappeared');
+    if (i + 1 < chain.length) {
+      root = el.shadowRoot;
+      if (!root) throw new Error('Snapshot shadow root disappeared');
+    }
+  }
+  return [el, role === 'internal frame' ? el.contentWindow : null, el.getRootNode() instanceof ShadowRoot];
 }"#;
 
 /// Converts a Firefox DevTools `accessible.snapshot` tree into Chrome-shaped accessibility nodes.
@@ -132,8 +158,21 @@ fn push_node(
     id
 }
 
-/// Fetches the DevTools accessibility snapshot of the document behind an accessibility actor.
-async fn document_snapshot(rdp: &RdpClient, accessibility: &str) -> Result<Value, String> {
+#[derive(Clone)]
+struct AccessibleSource {
+    actor: String,
+    inspector: String,
+    path: Vec<usize>,
+}
+
+/// Fetches a document snapshot and retains its actor for exact DOM-node lookup.
+async fn document_snapshot(
+    rdp: &RdpClient,
+    target: &Value,
+) -> Result<(Value, AccessibleSource), String> {
+    let accessibility = target["accessibilityActor"]
+        .as_str()
+        .ok_or("Firefox DevTools returned no accessibility actor")?;
     let walker = rdp.request(accessibility, "getWalker", json!({})).await?;
     let walker = walker["walker"]["actor"]
         .as_str()
@@ -143,33 +182,40 @@ async fn document_snapshot(rdp: &RdpClient, accessibility: &str) -> Result<Value
         .as_str()
         .ok_or("Firefox DevTools returned no document accessible")?;
     let snapshot = rdp.request(document, "snapshot", json!({})).await?;
-    Ok(snapshot.get("snapshot").cloned().unwrap_or(snapshot))
+    Ok((
+        snapshot.get("snapshot").cloned().unwrap_or(snapshot),
+        AccessibleSource {
+            actor: document.to_string(),
+            inspector: target["inspectorActor"].as_str().unwrap_or("").to_string(),
+            path: Vec::new(),
+        },
+    ))
 }
 
-/// Frame targets seen through the tab watchers: browsing context id to accessibility actor.
+/// Frame targets seen through the tab watchers, indexed by browsing context id.
 /// A watcher only announces existing frames the first time it watches, so the events are kept for later snapshots.
 pub struct FrameWatch {
     events: broadcast::Receiver<Value>,
-    actors: HashMap<String, String>,
+    actors: HashMap<String, Value>,
     tabs: HashSet<String>,
 }
 
-fn record_target(actors: &mut HashMap<String, String>, event: &Value) {
-    if let (Some(id), Some(actor)) = (
+fn record_target(actors: &mut HashMap<String, Value>, event: &Value) {
+    if let (Some(id), Some(_)) = (
         event["target"]["browsingContextID"].as_u64(),
         event["target"]["accessibilityActor"].as_str(),
     ) {
-        actors.insert(id.to_string(), actor.to_string());
+        actors.insert(id.to_string(), event["target"].clone());
     }
 }
 
-/// Returns the accessibility actor of the cross-process frame whose BiDi context is `window`.
+/// Returns the target of the cross-process frame whose BiDi context is `window`.
 async fn frame_actor(
     ff: &mut FirefoxSession,
     tab: &str,
     window: &str,
     deadline: tokio::time::Instant,
-) -> Result<String, String> {
+) -> Result<Value, String> {
     let rdp = ff.rdp.clone();
     let watch = ff.frames.get_or_insert_with(|| FrameWatch {
         events: rdp.subscribe(),
@@ -222,6 +268,166 @@ fn shape(node: &Value) -> Value {
         (_, Some(c)) => c.iter().map(shape).collect(),
     };
     json!([node["nodeCssSelector"].as_str().unwrap_or(""), role, kids])
+}
+
+fn resolution_paths(node: &Value, path: &mut Vec<usize>, paths: &mut Vec<Vec<usize>>) {
+    paths.push(path.clone());
+    if node["role"] != "internal frame" {
+        if let Some(children) = node["children"].as_array() {
+            for (i, child) in children.iter().enumerate() {
+                path.push(i);
+                resolution_paths(child, path, paths);
+                path.pop();
+            }
+        }
+    }
+}
+
+async fn accessible_at(
+    rdp: &RdpClient,
+    source: &AccessibleSource,
+    path: &[usize],
+    children: &mut HashMap<String, Vec<Value>>,
+) -> Result<String, String> {
+    let mut actor = source.actor.clone();
+    for &index in source.path.iter().chain(path) {
+        if !children.contains_key(&actor) {
+            let response = rdp.request(&actor, "children", json!({})).await?;
+            children.insert(
+                actor.clone(),
+                response["children"].as_array().cloned().unwrap_or_default(),
+            );
+        }
+        actor = children[&actor]
+            .get(index)
+            .and_then(|node| node["actor"].as_str())
+            .ok_or("Firefox accessibility tree changed during snapshot")?
+            .to_string();
+    }
+    Ok(actor)
+}
+
+async fn attached_node(
+    rdp: &RdpClient,
+    walker: &str,
+    actor: &str,
+    path: Value,
+    nodes: &mut HashMap<String, Value>,
+) -> Result<Value, String> {
+    let response = rdp
+        .request(
+            walker,
+            "getNodeFromActor",
+            json!({"actorID": actor, "path": path}),
+        )
+        .await?;
+    let attached = &response["node"];
+    for node in attached["newParents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(std::iter::once(&attached["node"]))
+    {
+        if let Some(actor) = node["actor"].as_str() {
+            nodes.insert(actor.to_string(), node.clone());
+        }
+    }
+    if attached["node"]["actor"].as_str().is_none() {
+        return Err("Firefox could not locate the snapshot DOM node".to_string());
+    }
+    Ok(attached["node"].clone())
+}
+
+async fn selector_chain(
+    rdp: &RdpClient,
+    walker: &str,
+    accessible: &str,
+    nodes: &mut HashMap<String, Value>,
+) -> Result<Vec<String>, String> {
+    let mut node = attached_node(
+        rdp,
+        walker,
+        accessible,
+        json!(["rawAccessible", "DOMNode"]),
+        nodes,
+    )
+    .await?;
+    let actor = node["actor"].as_str().ok_or("Missing DOM actor")?;
+    let selector = rdp.request(actor, "getUniqueSelector", json!({})).await?;
+    let mut chain = vec![selector["value"]
+        .as_str()
+        .ok_or("Firefox returned no unique selector")?
+        .to_string()];
+    let mut visited = HashSet::new();
+    while node["nodeType"] != 9 {
+        let parent = if node["isShadowRoot"] == true {
+            node["host"].as_str()
+        } else {
+            node["parent"].as_str()
+        }
+        .ok_or("Firefox returned an incomplete DOM ancestry")?
+        .to_string();
+        if !visited.insert(parent.clone()) {
+            return Err("Firefox returned a cyclic DOM ancestry".to_string());
+        }
+        let host = node["isShadowRoot"] == true;
+        node = match nodes.get(&parent) {
+            Some(node) => node.clone(),
+            None => attached_node(rdp, walker, &parent, json!(["rawNode"]), nodes).await?,
+        };
+        if host {
+            let selector = rdp.request(&parent, "getUniqueSelector", json!({})).await?;
+            chain.push(
+                selector["value"]
+                    .as_str()
+                    .ok_or("Firefox returned no shadow-host selector")?
+                    .to_string(),
+            );
+        }
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+async fn resolve_collisions(
+    ff: &FirefoxSession,
+    context: &str,
+    doc: &mut Value,
+    source: &AccessibleSource,
+    results: &mut [Value],
+) -> Result<(), String> {
+    if !results.iter().any(|result| result[3] == true) {
+        return Ok(());
+    }
+    let walker = ff
+        .rdp
+        .request(&source.inspector, "getWalker", json!({}))
+        .await?;
+    let walker = walker["walker"]["actor"]
+        .as_str()
+        .ok_or("Firefox DevTools returned no inspector walker")?;
+    let mut paths = Vec::new();
+    resolution_paths(doc, &mut Vec::new(), &mut paths);
+    let mut children = HashMap::new();
+    let mut nodes = HashMap::new();
+    for (path, result) in paths.iter().zip(results.iter_mut()) {
+        if result[3] != true {
+            continue;
+        }
+        let actor = accessible_at(&ff.rdp, source, path, &mut children).await?;
+        let chain = selector_chain(&ff.rdp, walker, &actor, &mut nodes).await?;
+        let role = node_at(doc, path)["role"].clone();
+        *result = ff
+            .bidi
+            .call_function(
+                context,
+                RESOLVE_CHAIN_JS,
+                None,
+                vec![json!({"type": "string", "value": json!([chain, role]).to_string()})],
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 fn apply(
@@ -281,6 +487,7 @@ async fn annotate(
     ff: &mut FirefoxSession,
     context: &str,
     doc: &mut Value,
+    source: &AccessibleSource,
     tab: &str,
     deadline: tokio::time::Instant,
 ) -> Result<(), String> {
@@ -289,7 +496,8 @@ async fn annotate(
         .bidi
         .call_function(context, RESOLVE_JS, None, vec![arg])
         .await?;
-    let results = resolved.as_array().cloned().unwrap_or_default();
+    let mut results = resolved.as_array().cloned().unwrap_or_default();
+    resolve_collisions(ff, context, doc, source, &mut results).await?;
     let mut frames = Vec::new();
     apply(
         doc,
@@ -309,16 +517,78 @@ async fn annotate(
         }
     }
     for (path, window) in frames {
-        if node_at(doc, &path)["useChildTargetToFetchChildren"] == true {
-            let actor = frame_actor(ff, tab, &window, deadline).await?;
-            let frame = node_at(doc, &path);
-            frame["children"] = json!([document_snapshot(&ff.rdp, &actor).await?]);
-        }
+        let child_source = if node_at(doc, &path)["useChildTargetToFetchChildren"] == true {
+            let target = frame_actor(ff, tab, &window, deadline).await?;
+            let (snapshot, source) = document_snapshot(&ff.rdp, &target).await?;
+            node_at(doc, &path)["children"] = json!([snapshot]);
+            source
+        } else {
+            let mut child_source = source.clone();
+            child_source.path.extend_from_slice(&path);
+            child_source.path.push(0);
+            child_source
+        };
         if let Some(child) = node_at(doc, &path)["children"].get_mut(0) {
-            Box::pin(annotate(ff, &window, child, tab, deadline)).await?;
+            Box::pin(annotate(ff, &window, child, &child_source, tab, deadline)).await?;
         }
     }
     Ok(())
+}
+
+/// Per-context ref and document tracking captured before a snapshot so it can be committed or rolled back.
+struct SnapshotCheckpoint {
+    documents: HashMap<String, String>,
+    refs: HashMap<(String, String), i64>,
+    next_node_id: i64,
+    shadow_ids: HashSet<i64>,
+}
+
+impl SnapshotCheckpoint {
+    fn capture(ff: &FirefoxSession) -> Self {
+        Self {
+            documents: ff.documents.clone(),
+            refs: ff.refs.clone(),
+            next_node_id: ff.next_node_id,
+            shadow_ids: ff.shadow_ids.clone(),
+        }
+    }
+
+    /// Restores tracking when no document changed, otherwise drops the refs of every changed document.
+    /// Returns whether a document change invalidated old refs.
+    fn restore(self, ff: &mut FirefoxSession) -> bool {
+        let changed: HashSet<String> = ff
+            .documents
+            .iter()
+            .filter(|(context, document)| self.documents.get(*context) != Some(*document))
+            .map(|(context, _)| context.clone())
+            .collect();
+        if changed.is_empty() {
+            ff.documents = self.documents;
+            ff.refs = self.refs;
+            ff.next_node_id = self.next_node_id;
+            ff.shadow_ids = self.shadow_ids;
+            return false;
+        }
+        let stale: HashSet<i64> = self
+            .refs
+            .iter()
+            .filter(|((context, _), _)| changed.contains(context))
+            .map(|(_, id)| *id)
+            .collect();
+        ff.shadow_ids.retain(|id| !stale.contains(id));
+        ff.refs.retain(|(context, _), _| !changed.contains(context));
+        true
+    }
+}
+
+fn recover_failed_capture(
+    ff: &mut FirefoxSession,
+    ref_map: &mut RefMap,
+    checkpoint: SnapshotCheckpoint,
+) {
+    if checkpoint.restore(ff) {
+        ref_map.invalidate_all_documents();
+    }
 }
 
 pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Result<Value, String> {
@@ -340,11 +610,8 @@ pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Resu
         .ok_or("Firefox DevTools reported no selected tab")?
         .to_string();
     let target = ff.rdp.request(&tab, "getTarget", json!({})).await?;
-    let accessibility = target["frame"]["accessibilityActor"]
-        .as_str()
-        .ok_or("Firefox DevTools returned no accessibility actor for the tab")?;
-    let mut doc = document_snapshot(&ff.rdp, accessibility).await?;
-    Box::pin(annotate(ff, &top, &mut doc, &tab, deadline)).await?;
+    let (mut doc, source) = document_snapshot(&ff.rdp, &target["frame"]).await?;
+    Box::pin(annotate(ff, &top, &mut doc, &source, &tab, deadline)).await?;
     if context == top {
         return Ok(doc);
     }
@@ -413,8 +680,17 @@ pub async fn snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let options = chrome::snapshot_options(cmd);
     let ff = state.firefox.as_mut().ok_or("Browser not launched")?;
     let previous_refs = state.ref_map.ref_ids();
-    state.ref_map.begin_snapshot();
-    let tree = Box::pin(take_snapshot(ff, &options, &mut state.ref_map)).await?;
+    let mut staged_ref_map = state.ref_map.clone();
+    staged_ref_map.begin_snapshot();
+    let checkpoint = SnapshotCheckpoint::capture(ff);
+    let tree = match Box::pin(take_snapshot(ff, &options, &mut staged_ref_map)).await {
+        Ok(tree) => tree,
+        Err(error) => {
+            recover_failed_capture(ff, &mut state.ref_map, checkpoint);
+            return Err(error);
+        }
+    };
+    state.ref_map = staged_ref_map;
     let url = ff.url().await.unwrap_or_default();
     let session_id = ff.top_context.clone();
     chrome::snapshot_response(cmd, state, session_id, &options, previous_refs, tree, url)
@@ -428,10 +704,23 @@ pub async fn diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
         ..chrome::snapshot_options(cmd)
     };
     let ff = state.firefox.as_mut().ok_or("Browser not launched")?;
+    let checkpoint = SnapshotCheckpoint::capture(ff);
     let mut current_ref_map = state.ref_map.clone();
     current_ref_map.begin_snapshot();
-    let current = Box::pin(take_snapshot(ff, &options, &mut current_ref_map)).await?;
-    chrome::diff_snapshot_response(cmd, state, current, current_ref_map)
+    let current = match Box::pin(take_snapshot(ff, &options, &mut current_ref_map)).await {
+        Ok(current) => current,
+        Err(error) => {
+            recover_failed_capture(ff, &mut state.ref_map, checkpoint);
+            return Err(error);
+        }
+    };
+    let result = chrome::diff_snapshot_response(cmd, state, current, current_ref_map);
+    if result.is_err() {
+        if let Some(ff) = state.firefox.as_mut() {
+            recover_failed_capture(ff, &mut state.ref_map, checkpoint);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -451,7 +740,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_frame_actor_fails_before_snapshot_returns_partial_tree() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         ff.frames = Some(FrameWatch {
             events: ff.rdp.subscribe(),
             actors: HashMap::new(),
@@ -473,7 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn lagged_frame_events_do_not_abort_wait() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         let (tx, events) = broadcast::channel(1024);
         ff.frames = Some(FrameWatch {
             events,
@@ -501,12 +790,12 @@ mod tests {
         .unwrap();
         sender.await.unwrap();
 
-        assert_eq!(actor, "frame-actor");
+        assert_eq!(actor["accessibilityActor"], "frame-actor");
     }
 
     #[tokio::test]
     async fn closed_frame_events_report_a_terminal_error() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         let (tx, events) = broadcast::channel(1024);
         drop(tx);
         ff.frames = Some(FrameWatch {
@@ -677,7 +966,7 @@ mod tests {
         let mut state = DaemonState::new();
         state.ref_map = map;
         let error =
-            crate::native::firefox::target::resolve_target(&mut state, &format!("@{stale_ref}"))
+            crate::native::bidi::target::resolve_target(&mut state, &format!("@{stale_ref}"))
                 .await
                 .unwrap_err();
         assert_eq!(error, format!("Unknown ref: {stale_ref}"));
@@ -737,5 +1026,55 @@ mod tests {
             render(true),
             "- link \"Docs\" [ref=e1, url=https://x.test/docs]"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_capture_without_a_document_change_rolls_back_tracking() {
+        let (mut ff, tx, _) = crate::native::bidi::session::tests::fake_session().await;
+        std::mem::forget(tx);
+        ff.documents.insert("ctx-active".into(), "loader-1".into());
+        ff.refs.insert(("ctx-active".into(), "node-1".into()), 7);
+        ff.next_node_id = 7;
+        ff.shadow_ids.insert(7);
+
+        let checkpoint = SnapshotCheckpoint::capture(&ff);
+        ff.refs.insert(("ctx-active".into(), "node-2".into()), 8);
+        ff.next_node_id = 8;
+        ff.shadow_ids.insert(8);
+
+        let mut map = RefMap::new();
+        recover_failed_capture(&mut ff, &mut map, checkpoint);
+
+        assert_eq!(ff.refs.len(), 1);
+        assert_eq!(
+            ff.refs[&("ctx-active".to_string(), "node-1".to_string())],
+            7
+        );
+        assert_eq!(ff.next_node_id, 7);
+        assert_eq!(ff.shadow_ids, HashSet::from([7]));
+        assert_eq!(ff.documents["ctx-active"], "loader-1");
+    }
+
+    #[tokio::test]
+    async fn failed_capture_after_a_document_change_invalidates_old_refs() {
+        let (mut ff, tx, _) = crate::native::bidi::session::tests::fake_session().await;
+        std::mem::forget(tx);
+        ff.documents.insert("ctx-active".into(), "loader-1".into());
+        ff.refs.insert(("ctx-active".into(), "node-1".into()), 7);
+        ff.shadow_ids.insert(7);
+
+        let checkpoint = SnapshotCheckpoint::capture(&ff);
+        ff.documents.insert("ctx-active".into(), "loader-2".into());
+        ff.refs.insert(("ctx-active".into(), "node-2".into()), 8);
+
+        let mut map = RefMap::new();
+        map.add("e1".into(), Some(7), "button", "OK", None);
+        map.observe_document("ctx-active", None, "ctx-active", Some("loader-1"));
+        recover_failed_capture(&mut ff, &mut map, checkpoint);
+
+        assert!(ff.refs.is_empty());
+        assert!(!ff.shadow_ids.contains(&7));
+        assert_eq!(ff.documents["ctx-active"], "loader-2");
+        assert!(map.get("e1").is_none());
     }
 }

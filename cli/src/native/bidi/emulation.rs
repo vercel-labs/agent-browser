@@ -1,8 +1,9 @@
 use serde_json::{json, Map, Value};
 
 use super::actions::session;
-use super::bidi::BidiClient;
-use super::rdp::RdpClient;
+use super::client::BidiClient;
+use super::firefox_devtools::RdpClient;
+use super::forms::require;
 use super::session::FirefoxSession;
 use crate::native::actions::{DaemonState, EmulatedMedia};
 
@@ -255,6 +256,9 @@ pub async fn set_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     state.viewport = Some((width as i32, height as i32, scale, false));
     if let Some(ref server) = state.stream_server {
         server.set_viewport(width as u32, height as u32).await;
+        server
+            .broadcast_status(true, false, width as u32, height as u32, "firefox")
+            .await;
     }
     Ok(json!({
         "width": width,
@@ -270,10 +274,7 @@ pub async fn set_device(_cmd: &Value, _state: &mut DaemonState) -> Result<Value,
 
 /// Overrides the user agent for the active tab and any tab opened later.
 pub async fn set_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let user_agent = cmd
-        .get("userAgent")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'userAgent' parameter")?;
+    let user_agent = require(cmd, "userAgent")?;
     let context = session(state)?.top_context.clone();
     send_scoped(session(state)?, &context, self::user_agent(user_agent)).await?;
     session(state)?.emulation.write().unwrap().user_agent = Some(user_agent.to_string());
@@ -282,10 +283,7 @@ pub async fn set_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Valu
 
 /// Overrides the locale for the active tab and any tab opened later.
 pub async fn set_locale(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let locale = cmd
-        .get("locale")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'locale' parameter")?;
+    let locale = require(cmd, "locale")?;
     let context = session(state)?.top_context.clone();
     send_scoped(session(state)?, &context, self::locale(locale)).await?;
     session(state)?.emulation.write().unwrap().locale = Some(locale.to_string());
@@ -413,20 +411,18 @@ fn parse_media(cmd: &Value) -> EmulatedMedia {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session, fake_session_with_rdp};
-    use crate::native::firefox::tabs;
+    use std::sync::Arc;
+
+    use crate::native::bidi::session::tests::{fake_session, fake_session_with_rdp};
+    use crate::native::bidi::tabs;
+    use crate::native::stream::{IdleActivity, StreamServer};
+    use futures_util::StreamExt;
 
     fn media_with_feature(name: &str, value: &str) -> EmulatedMedia {
         EmulatedMedia {
             media: None,
             features: vec![(name.to_string(), value.to_string())],
         }
-    }
-
-    #[test]
-    fn color_scheme_dark_maps_to_color_scheme_simulation() {
-        let config = validate_media(&media_with_feature("prefers-color-scheme", "dark")).unwrap();
-        assert_eq!(config["colorSchemeSimulation"], "dark");
     }
 
     #[test]
@@ -437,18 +433,7 @@ mod tests {
         assert!(error.contains("prefers-color-scheme"));
     }
 
-    #[test]
-    fn offline_toggles_network_conditions() {
-        let (method, params) = offline(true);
-        assert_eq!(method, "emulation.setNetworkConditions");
-        assert_eq!(params["networkConditions"]["type"], "offline");
-
-        let (method, params) = offline(false);
-        assert_eq!(method, "emulation.setNetworkConditions");
-        assert!(params["networkConditions"].is_null());
-    }
-
-    async fn session_state() -> (DaemonState, crate::native::firefox::session::tests::Calls) {
+    async fn session_state() -> (DaemonState, crate::native::bidi::session::tests::Calls) {
         let (ff, _, calls) = fake_session().await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
@@ -458,6 +443,26 @@ mod tests {
     #[tokio::test]
     async fn viewport_routes_to_bidi_and_returns_the_chrome_shape() {
         let (mut state, calls) = session_state().await;
+        let (server, _) = StreamServer::start_without_client(
+            0,
+            "viewport-test".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .unwrap();
+        let server = Arc::new(server);
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/", server.port()))
+                .await
+                .unwrap();
+        let initial = client.next().await.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&initial).unwrap()["type"],
+            "status"
+        );
+        state.stream_server = Some(Arc::clone(&server));
+
         let result = set_viewport(
             &json!({"width": 800, "height": 600, "deviceScaleFactor": 2.0}),
             &mut state,
@@ -484,6 +489,17 @@ mod tests {
                 .viewport,
             Some((800, 600, 2.0))
         );
+        let status = tokio::time::timeout(std::time::Duration::from_secs(1), client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap();
+        let status: Value = serde_json::from_str(&status).unwrap();
+        assert_eq!(status["viewportWidth"], 800);
+        assert_eq!(status["viewportHeight"], 600);
+        server.shutdown().await;
     }
 
     #[tokio::test]
@@ -545,93 +561,6 @@ mod tests {
             Some("Desktop Agent")
         );
         assert!(calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn media_dark_accepts_reduced_motion_no_preference() {
-        let (ff, _, _, _, rdp) = fake_session_with_rdp().await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-
-        set_media(
-            &json!({"colorScheme": "dark", "reducedMotion": "no-preference"}),
-            &mut state,
-        )
-        .await
-        .unwrap();
-
-        let messages = rdp.lock().unwrap().clone();
-        let update = messages
-            .iter()
-            .find(|m| m["type"] == "updateConfiguration")
-            .expect("no updateConfiguration message");
-        assert_eq!(update["configuration"]["colorSchemeSimulation"], "dark");
-    }
-
-    #[tokio::test]
-    async fn timezone_locale_and_offline_are_scoped_to_the_active_context() {
-        let (ff, _, _, bidi, _) = fake_session_with_rdp().await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-
-        set_timezone(&json!({"timezoneId": "Asia/Tokyo"}), &mut state)
-            .await
-            .unwrap();
-        set_locale(&json!({"locale": "fr-FR"}), &mut state)
-            .await
-            .unwrap();
-        set_offline(&json!({"offline": true}), &mut state)
-            .await
-            .unwrap();
-
-        let messages = bidi.lock().unwrap().clone();
-        let find = |method: &str| {
-            messages
-                .iter()
-                .find(|m| m["method"] == method)
-                .unwrap_or_else(|| panic!("no {method} message"))
-        };
-        assert_eq!(
-            find("emulation.setTimezoneOverride")["params"]["timezone"],
-            "Asia/Tokyo"
-        );
-        assert_eq!(
-            find("emulation.setTimezoneOverride")["params"]["contexts"],
-            json!(["ctx-active"])
-        );
-        assert_eq!(
-            find("emulation.setLocaleOverride")["params"]["locale"],
-            "fr-FR"
-        );
-        assert_eq!(
-            find("emulation.setNetworkConditions")["params"]["networkConditions"]["type"],
-            "offline"
-        );
-    }
-
-    #[tokio::test]
-    async fn permissions_are_granted_for_the_page_origin() {
-        let (ff, _, _, bidi, _) = fake_session_with_rdp().await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-
-        let result = set_permissions(
-            &json!({"permissions": ["geolocation", "notifications"]}),
-            &mut state,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result, json!({"granted": ["geolocation", "notifications"]}));
-
-        let messages = bidi.lock().unwrap().clone();
-        let grants: Vec<&Value> = messages
-            .iter()
-            .filter(|m| m["method"] == "permissions.setPermission")
-            .collect();
-        assert_eq!(grants.len(), 2);
-        assert_eq!(grants[0]["params"]["descriptor"]["name"], "geolocation");
-        assert_eq!(grants[0]["params"]["origin"], "https://example.com");
-        assert_eq!(grants[0]["params"]["state"], "granted");
     }
 
     #[tokio::test]

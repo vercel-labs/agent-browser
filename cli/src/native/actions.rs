@@ -19,6 +19,7 @@ use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
 use super::auth;
+use super::bidi;
 use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::CdpClient;
@@ -31,7 +32,6 @@ use super::cookies;
 use super::diff;
 use super::downloads::{DownloadLedger, DownloadState};
 use super::element::RefMap;
-use super::firefox;
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
@@ -39,7 +39,7 @@ use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
 use super::react;
 use super::recording::{self, RecordingState};
-use super::screenshot::{self, ScreenshotOptions};
+use super::screenshot::{self, screenshot_options, ScreenshotOptions};
 use super::snapshot::{self, SnapshotOptions};
 use super::state;
 use super::storage;
@@ -47,7 +47,7 @@ use super::stream::{self, IdleActivity, StreamServer};
 use super::tab_binding;
 use super::tracing::{self as native_tracing, TracingState};
 use super::webdriver::appium::AppiumManager;
-use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSUPPORTED_ACTIONS};
+use super::webdriver::backend::{WebDriverBackend, WEBDRIVER_UNSUPPORTED_ACTIONS};
 use super::webdriver::ios;
 use super::webdriver::safari;
 use super::webmcp;
@@ -580,7 +580,10 @@ pub struct DaemonState {
     pub appium: Option<AppiumManager>,
     pub safari_driver: Option<safari::SafariDriverProcess>,
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
-    pub firefox: Option<firefox::session::FirefoxSession>,
+    pub firefox: Option<bidi::session::FirefoxSession>,
+    pub firefox_poller: Option<bidi::stream::Poller>,
+    /// Retry a failed stream tab refresh on the next idle maintenance tick.
+    firefox_tabs_dirty: bool,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
@@ -789,6 +792,8 @@ impl DaemonState {
             safari_driver: None,
             webdriver_backend: None,
             firefox: None,
+            firefox_poller: None,
+            firefox_tabs_dirty: false,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
@@ -1185,7 +1190,7 @@ impl DaemonState {
                         Some("browsingContext.userPromptOpened") => {
                             pending.remove(context);
                             if params["handler"] != "accept"
-                                && firefox::session::auto_handles_prompt(params, true)
+                                && bidi::session::auto_handles_prompt(params, true)
                             {
                                 pending.insert(context.to_string());
                             }
@@ -1283,33 +1288,70 @@ impl DaemonState {
         }));
     }
 
-    /// Update the stream server's CDP client slot when browser is set or cleared.
-    pub async fn update_stream_client(&self) {
+    /// Publish Firefox tabs without changing CDP session or frame bookkeeping.
+    async fn broadcast_firefox_tabs(&mut self) {
+        let Some(server) = self.stream_server.clone() else {
+            self.firefox_tabs_dirty = false;
+            return;
+        };
+        if let Some(ff) = self.firefox.as_mut() {
+            match bidi::tabs::stream_tabs(ff).await {
+                Ok(tabs) => {
+                    self.firefox_tabs_dirty = false;
+                    server.broadcast_tabs(&tabs).await;
+                }
+                Err(_) => self.firefox_tabs_dirty = true,
+            }
+        } else {
+            self.firefox_tabs_dirty = false;
+        }
+    }
+
+    /// Update the stream server's client when a browser is set, cleared, or switched.
+    pub async fn update_stream_client(&mut self) {
         if let Some(ref slot) = self.stream_client {
             let mut guard = slot.write().await;
             *guard = self.browser.as_ref().map(|m| Arc::clone(&m.client));
         }
-        if let Some(ref server) = self.stream_server {
+        if let Some(server) = self.stream_server.clone() {
             // Update the CDP page session ID so screencast commands target the right page
             let session_id = self
                 .browser
                 .as_ref()
                 .and_then(|m| m.active_session_id().ok().map(|s| s.to_string()));
-            let connected = self.browser.is_some();
+            let connected = self.browser.is_some() || self.firefox.is_some();
+            let live = self.firefox.as_ref().map(|ff| bidi::stream::FirefoxLive {
+                bidi: Arc::clone(&ff.bidi),
+                context: ff.top_context.clone(),
+                contexts: ff.context_parents.clone(),
+                modifiers: Default::default(),
+            });
+            let paused = live.as_ref().is_some_and(|live| {
+                self.pending_dialog.as_ref().is_some_and(|dialog| {
+                    bidi::session::dialog_blocks_tab(dialog.owner_context.as_deref(), &live.context)
+                })
+            });
+            self.firefox_poller = None;
+            server.set_firefox_live(live.clone()).await;
             let sc = server.is_screencasting().await;
-            let (vw, vh) = server.viewport().await;
             if let Some(ref mgr) = self.browser {
                 server
                     .bind_cdp_session_and_broadcast_tabs(session_id, &mgr.tab_list())
                     .await;
+            } else if self.firefox.is_some() {
+                self.broadcast_firefox_tabs().await;
             } else {
+                self.firefox_tabs_dirty = false;
                 server
                     .bind_cdp_session_and_broadcast_tabs(session_id, &[])
                     .await;
             }
+            let (vw, vh) = server.viewport().await;
             server
                 .broadcast_status(connected, sc, vw, vh, &self.engine)
                 .await;
+            self.firefox_poller =
+                live.map(|live| bidi::stream::spawn_poller(live, Arc::clone(&server), paused));
         }
     }
 
@@ -1402,7 +1444,8 @@ impl DaemonState {
     }
 
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
-        firefox::network::drain(self).await;
+        let previous_firefox_context = self.firefox.as_ref().map(|ff| ff.top_context.clone());
+        let firefox_tabs_changed = bidi::network::drain(self).await;
         if let Some(ff) = self.firefox.as_mut() {
             if ff.top_context.is_empty() {
                 let tree = ff
@@ -1413,8 +1456,13 @@ impl DaemonState {
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
-                firefox::tabs::reset_refs(self);
             }
+        }
+        if previous_firefox_context != self.firefox.as_ref().map(|ff| ff.top_context.clone()) {
+            bidi::tabs::reset_refs(self);
+            self.update_stream_client().await;
+        } else if firefox_tabs_changed || self.firefox_tabs_dirty {
+            self.broadcast_firefox_tabs().await;
         }
         let drained = self.drain_cdp_events();
         self.apply_drained_events(drained).await
@@ -2754,6 +2802,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
         let _ = task.await;
     }
     if let Some(ff) = state.firefox.take() {
+        state.firefox_poller = None;
         state.pending_dialog = None;
         ff.close().await;
     }
@@ -3559,7 +3608,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     let firefox_routed = state.engine == "firefox"
         && !matches!(action, "launch" | "confirm")
-        && (!skip_launch || firefox::actions::handles(action));
+        && (!skip_launch || bidi::actions::handles(action));
 
     // WebDriver backend: reject unsupported CDP-only actions
     if !firefox_routed
@@ -3629,7 +3678,14 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     let mut result = match action {
-        _ if firefox_routed => Box::pin(firefox::actions::execute(action, cmd, state)).await,
+        _ if firefox_routed => {
+            let before = state.firefox.as_ref().map(|ff| ff.top_context.clone());
+            let result = Box::pin(bidi::actions::execute(action, cmd, state)).await;
+            if state.firefox.as_ref().map(|ff| ff.top_context.clone()) != before {
+                state.update_stream_client().await;
+            }
+            result
+        }
         "launch" => {
             let applied = match launch_patch.as_ref() {
                 Some(patch) => apply_settings_patch(state, patch, true)
@@ -3974,6 +4030,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 .await;
         }
     }
+    if state.browser.is_none() && state.firefox.is_some() {
+        state.broadcast_firefox_tabs().await;
+    }
 
     resp
 }
@@ -4199,7 +4258,7 @@ fn should_blank_existing_url(url: &str, filter: &DomainFilter) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn check_url_allowed_by_filter(
+pub(crate) fn check_url_allowed_by_filter(
     filter: Option<&DomainFilter>,
     url: &str,
 ) -> Result<(), String> {
@@ -5269,7 +5328,7 @@ async fn load_state_path_for_engine(
     path: &str,
 ) -> Option<Result<Vec<String>, String>> {
     if let Some(ff) = state.firefox.as_mut() {
-        return Some(firefox::storage::load_state_path(ff, path).await);
+        return Some(bidi::storage::load_state_path(ff, path).await);
     }
     if let Some(mgr) = state.browser.as_ref() {
         if let Ok(session_id) = mgr.active_session_id() {
@@ -5346,7 +5405,7 @@ async fn validate_restore_if_pending(state: &mut DaemonState) {
 async fn validate_restored_state(state: &DaemonState) -> Result<(), String> {
     let timeout_ms = state.default_timeout_ms.min(2_000);
     if let Some(ref ff) = state.firefox {
-        return firefox::storage::validate_restore(
+        return bidi::storage::validate_restore(
             ff,
             state.restore_check_url.as_deref(),
             state.restore_check_text.as_deref(),
@@ -5486,9 +5545,9 @@ pub(crate) async fn auto_save_restore_state(
     }
 
     let session_id = state.session_id.clone();
-    firefox::network::drain(state).await;
+    bidi::network::drain(state).await;
     if let Some(ff) = state.firefox.as_mut() {
-        return match firefox::storage::save_auto_state(ff, &session_name, &session_id).await {
+        return match bidi::storage::save_auto_state(ff, &session_name, &session_id).await {
             Ok(path) => {
                 state.restore_save_status = "saved".to_string();
                 state.restore_saved_path = Some(path.clone());
@@ -5771,7 +5830,7 @@ async fn launch_firefox(
     if state.settings.captures_flow() {
         return Err("--capture flow is not supported with --engine firefox".to_string());
     }
-    firefox::process::validate_firefox_options(
+    bidi::firefox::validate_firefox_options(
         &options,
         cdp.as_deref(),
         auto_connect,
@@ -5793,21 +5852,22 @@ async fn launch_firefox(
     let storage_state = options.storage_state.clone();
     state.ref_map.invalidate_all_documents();
     state.reset_input_state();
-    let net = firefox::network::NetContext::from_state(state);
+    let net = bidi::network::NetContext::from_state(state);
     let mut session =
-        firefox::session::FirefoxSession::launch(&options, net, state.auto_dialog).await?;
+        bidi::session::FirefoxSession::launch(&options, net, state.auto_dialog).await?;
     if !allowed_domains.is_empty()
         || state.proxy_credentials.read().await.is_some()
         || !state.routes.read().await.is_empty()
         || !state.origin_headers.read().await.is_empty()
     {
-        firefox::network::ensure_intercept(&mut session).await?;
+        bidi::network::ensure_intercept(&mut session).await?;
     }
     state.engine = "firefox".to_string();
     write_engine_file(&state.session_id, &state.engine);
     state.launch_identity = Some(state.settings.launch_identity());
     state.firefox = Some(session);
     state.start_dialog_handler();
+    state.update_stream_client().await;
     try_auto_restore_state(state).await;
     load_storage_state_for_launch(state, &storage_state, strict_state).await?;
     Ok(json!({}))
@@ -6616,7 +6676,7 @@ async fn navigate_active_page(
 
 async fn handle_url(state: &mut DaemonState) -> Result<Value, String> {
     if state.firefox.is_some() {
-        return firefox::page::url(state).await;
+        return bidi::page::url(state).await;
     }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
@@ -6734,7 +6794,7 @@ async fn handle_title(state: &DaemonState) -> Result<Value, String> {
 
 async fn handle_content(state: &mut DaemonState) -> Result<Value, String> {
     if state.firefox.is_some() {
-        return firefox::page::content(state).await;
+        return bidi::page::content(state).await;
     }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
@@ -7201,34 +7261,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
         annotate
     );
 
-    let format = cmd
-        .get("format")
-        .or_else(|| cmd.get("type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("png")
-        .to_string();
-
-    let mut options = ScreenshotOptions {
-        selector: cmd
-            .get("selector")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        path: cmd.get("path").and_then(|v| v.as_str()).map(String::from),
-        full_page: cmd
-            .get("fullPage")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        format,
-        quality: cmd
-            .get("quality")
-            .and_then(|v| v.as_i64())
-            .map(|q| q as i32),
-        annotate,
-        output_dir: cmd
-            .get("screenshotDir")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-    };
+    let mut options = screenshot_options(cmd);
 
     let (session_id, result) = if let Some(wb) = state
         .webdriver_backend
@@ -8355,7 +8388,7 @@ async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
     let page_count = if let Some(browser) = state.browser.as_ref() {
         browser.page_count()
     } else if let Some(ff) = state.firefox.as_ref() {
-        firefox::tabs::tab_count(ff).await?
+        bidi::tabs::tab_count(ff).await?
     } else {
         0
     };
@@ -9366,6 +9399,28 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
     }))
 }
 
+/// Returns the explicit PDF path or a timestamped file under the default PDF directory, creating the directory.
+pub(crate) fn pdf_save_path(cmd: &Value) -> String {
+    match cmd.get("path").and_then(Value::as_str) {
+        Some(path) => path.to_string(),
+        None => {
+            let dir = std::env::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".agent-browser")
+                .join("tmp")
+                .join("pdfs");
+            let _ = std::fs::create_dir_all(&dir);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            dir.join(format!("page-{}.pdf", timestamp))
+                .to_string_lossy()
+                .to_string()
+        }
+    }
+}
+
 async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -9386,25 +9441,7 @@ async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
         .and_then(|v| v.as_str())
         .ok_or("No PDF data returned")?;
 
-    let path = cmd.get("path").and_then(|v| v.as_str());
-    let save_path = match path {
-        Some(p) => p.to_string(),
-        None => {
-            let dir = std::env::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".agent-browser")
-                .join("tmp")
-                .join("pdfs");
-            let _ = std::fs::create_dir_all(&dir);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            dir.join(format!("page-{}.pdf", timestamp))
-                .to_string_lossy()
-                .to_string()
-        }
-    };
+    let save_path = pdf_save_path(cmd);
 
     let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
         .map_err(|e| format!("Failed to decode PDF: {}", e))?;
@@ -9817,6 +9854,24 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "handled": true, "accepted": accept }))
 }
 
+/// Reads the upload file list from `files`, falling back to a single `file`.
+pub(crate) fn upload_files(cmd: &Value) -> Vec<String> {
+    cmd.get("files")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .or_else(|| {
+            cmd.get("file")
+                .and_then(Value::as_str)
+                .map(|file| vec![file.to_string()])
+        })
+        .unwrap_or_default()
+}
+
 async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let selector = cmd
@@ -9824,20 +9879,7 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let files: Vec<String> = cmd
-        .get("files")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .or_else(|| {
-            cmd.get("file")
-                .and_then(|v| v.as_str())
-                .map(|s| vec![s.to_string()])
-        })
-        .unwrap_or_default();
+    let files = upload_files(cmd);
 
     mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
         .await?;
@@ -10547,7 +10589,7 @@ async fn current_stream_status(state: &DaemonState) -> Value {
 
     let connected = match state.browser.as_ref() {
         Some(mgr) => mgr.is_connection_alive().await,
-        None => false,
+        None => state.firefox.is_some(),
     };
     let runtime_screencasting = match state.stream_server.as_ref() {
         Some(server) => server.is_screencasting().await,
@@ -10612,6 +10654,7 @@ async fn handle_stream_disable(state: &mut DaemonState) -> Result<Value, String>
     server.shutdown().await;
     state.stream_server = None;
     state.stream_client = None;
+    state.firefox_poller = None;
     remove_stream_file(&state.session_id)?;
     remove_engine_file(&state.session_id);
     remove_provider_file(&state.session_id);
@@ -15043,7 +15086,7 @@ async fn handle_device_list() -> Result<Value, String> {
 // Input event handlers
 // ---------------------------------------------------------------------------
 
-fn mouse_button_mask(button: &str) -> i32 {
+pub(crate) fn mouse_button_mask(button: &str) -> i32 {
     match button {
         "left" => 1,
         "right" => 2,
@@ -15672,6 +15715,58 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn firefox_dispatch_preserves_confirmation_until_confirmed_or_denied() {
+        let mut state = DaemonState::new();
+        state.engine = "firefox".into();
+        state.policy = None;
+        state.confirm_actions = None;
+        let pending = || PendingConfirmation {
+            action: "session_info".into(),
+            cmd: json!({"action": "session_info", "id": "pending"}),
+            approved_actions: Vec::new(),
+            flow: None,
+        };
+        state.pending_confirmation = Some(pending());
+
+        let error = bidi::actions::execute("unknown_action", &json!({}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "`unknown_action` is not supported on Firefox");
+        assert!(state.pending_confirmation.is_some());
+        let error = bidi::actions::execute("confirm", &json!({}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "`confirm` is not supported on Firefox");
+        assert!(state.pending_confirmation.is_some());
+
+        let response = execute_command(
+            &json!({"action": "webmcp_result", "id": "unsupported"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(response["success"], false);
+        assert_eq!(
+            response["error"],
+            "`webmcp_result` is Chrome-only and is not available with --engine firefox"
+        );
+        assert!(state.pending_confirmation.is_some());
+
+        let response =
+            execute_command(&json!({"action": "confirm", "id": "confirm"}), &mut state).await;
+        assert_eq!(response["data"]["confirmed"], true);
+        assert_eq!(response["data"]["result"]["success"], true);
+        assert_eq!(response["data"]["result"]["data"]["engine"], "firefox");
+        assert!(state.pending_confirmation.is_none());
+
+        state.pending_confirmation = Some(pending());
+        let response = execute_command(&json!({"action": "deny", "id": "deny"}), &mut state).await;
+        assert_eq!(response["data"]["denied"], true);
+        assert_eq!(response["data"]["action"], "session_info");
+        assert!(state.pending_confirmation.is_none());
+        assert!(state.firefox.is_none());
+    }
+
     /// Serves `Browser.getVersion` on one fixed `ws://` address for any number
     /// of connections and counts the calls.
     async fn version_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
@@ -19767,7 +19862,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert!(error.contains("state load"), "got: {}", error);
         assert!(error.contains("replays saved origins"), "got: {}", error);
 
-        let firefox_error = firefox::storage::state_load(&json!({"path":"unused"}), &mut state)
+        let firefox_error = bidi::storage::state_load(&json!({"path":"unused"}), &mut state)
             .await
             .unwrap_err();
         assert!(
@@ -23575,7 +23670,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 #[cfg(test)]
 mod firefox_routing_tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::bidi::session::tests::fake_session;
     use crate::test_utils::EnvGuard;
 
     const ENV: &[&str] = &[
@@ -23590,6 +23685,10 @@ mod firefox_routing_tests {
         "AGENT_BROWSER_EXECUTABLE_PATH",
         "AGENT_BROWSER_ACTION_POLICY",
         "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_BYPASS",
+        "AGENT_BROWSER_PROXY_USERNAME",
+        "AGENT_BROWSER_PROXY_PASSWORD",
     ];
 
     fn clean_env() -> EnvGuard<'static> {
@@ -23621,7 +23720,7 @@ mod firefox_routing_tests {
     async fn firefox_session_info_counts_live_contexts_and_rejects_missing_tree() {
         let _guard = clean_env();
         let (mut state, _) = firefox_state().await;
-        let (ff, _events, _) = firefox::session::tests::fake_session_with_trees(vec![
+        let (ff, _events, _) = bidi::session::tests::fake_session_with_trees(vec![
             json!({"contexts": [{"context":"one", "children":[{"context":"frame"}]}, {"context":"two"}]}),
             json!({"contexts": []}),
             json!({}),
@@ -23723,7 +23822,7 @@ mod firefox_routing_tests {
         assert_eq!(resp["success"], false);
         let error = resp["error"].as_str().unwrap();
         assert!(
-            error.contains("--cdp is not supported with --engine firefox"),
+            error.contains("connect and --cdp are not supported with --engine firefox"),
             "{error}"
         );
         assert!(state.firefox.is_none());
@@ -23799,6 +23898,51 @@ mod firefox_routing_tests {
             .await
             .unwrap_err();
         assert!(error.contains("Firefox executable not found"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn failed_launch_keeps_the_existing_proxy_credentials() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        *state.proxy_credentials.write().await = Some(("old".into(), "secret".into()));
+
+        let error = handle_launch(
+            &json!({
+                "action": "launch",
+                "engine": "firefox",
+                "profile": "/tmp/profile",
+                "proxy": {"username": "new", "password": "new-secret"}
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("--profile"), "{error}");
+        assert_eq!(
+            *state.proxy_credentials.read().await,
+            Some(("old".to_string(), "secret".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_firefox_launch_rolls_back_proxy_settings() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        state.settings.set(Key::Proxy, json!("http://proxy:3128"));
+        state.settings.set(Key::ProxyUsername, json!("old"));
+        state.settings.set(Key::ProxyPassword, json!("secret"));
+        state.launch_identity = Some(state.settings.launch_identity());
+        *state.proxy_credentials.write().await = Some(("old".into(), "secret".into()));
+        let result = handle_launch(
+            &json!({"action": "launch", "engine": "firefox", "executablePath": "/nonexistent/firefox", "proxy": {"server": "http://proxy:3128", "username": "new", "password": "new-secret"}}),
+            &mut state,
+        ).await;
+        assert!(result.unwrap_err().contains("Firefox executable not found"));
+        assert_eq!(
+            *state.proxy_credentials.read().await,
+            Some(("old".into(), "secret".into()))
+        );
     }
 
     #[tokio::test]
