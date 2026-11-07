@@ -11,13 +11,11 @@ use tokio::sync::broadcast::{self, error::TryRecvError};
 use tokio::sync::Notify;
 
 use super::bidi::{remote_to_json, BidiClient};
-use super::process::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
-use super::rdp::RdpClient;
+use super::process::{check_firefox_version, find_firefox, FirefoxProcess};
 use crate::native::actions::PendingDialog;
 use crate::native::cdp::chrome::LaunchOptions;
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
-const DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const SUBSCRIBED_EVENTS: [&str; 5] = [
     "browsingContext.userPromptOpened",
@@ -34,9 +32,7 @@ pub struct FirefoxSession {
     pub bidi: Arc<BidiClient>,
     pub auto_dialog: Arc<AtomicBool>,
     pub auto_dialog_changed: Arc<Notify>,
-    pub rdp: RdpClient,
-    pub accessibility_actor: String,
-    /// Active browsing context id: a top-level tab, or a frame after `frame <sel>`.
+    /// Active top-level browsing context (tab) id.
     pub context: String,
     /// Active top-level browsing context id (tab), restored by `frame main`.
     pub top_context: String,
@@ -81,30 +77,6 @@ fn proxy_capability(proxy: &str, bypass: Option<&str>) -> Value {
     cap
 }
 
-async fn connect_devtools(endpoint: &DevtoolsEndpoint) -> Result<RdpClient, String> {
-    tokio::time::timeout(DEVTOOLS_CONNECT_WINDOW, connect_devtools_loop(endpoint))
-        .await
-        .map_err(|_| "Firefox DevTools connection timed out".to_string())?
-}
-
-async fn connect_devtools_loop(endpoint: &DevtoolsEndpoint) -> Result<RdpClient, String> {
-    let deadline = tokio::time::Instant::now() + DEVTOOLS_CONNECT_WINDOW;
-    loop {
-        let attempt = match endpoint {
-            #[cfg(unix)]
-            DevtoolsEndpoint::Unix(path) => RdpClient::connect_unix(path).await,
-            #[cfg(not(unix))]
-            DevtoolsEndpoint::Unix(_) => Err("unix sockets are unavailable".to_string()),
-            DevtoolsEndpoint::Port(port) => RdpClient::connect_tcp(*port).await,
-        };
-        match attempt {
-            Ok(c) => return Ok(c),
-            Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-        }
-    }
-}
-
 impl FirefoxSession {
     /// Finds and launches Firefox, opens the BiDi session and enables the accessibility actor.
     /// The daemon handles automatic prompts so the setting can change without relaunching Firefox.
@@ -146,15 +118,6 @@ impl FirefoxSession {
         bidi.send("session.subscribe", json!({"events": SUBSCRIBED_EVENTS}))
             .await?;
 
-        let rdp = connect_devtools(&process.devtools).await?;
-        let root = rdp.request("root", "getRoot", json!({})).await?;
-        let accessibility_actor = root["parentAccessibilityActor"]
-            .as_str()
-            .ok_or("Firefox DevTools did not expose the accessibility actor")?
-            .to_string();
-        rdp.request(&accessibility_actor, "enable", json!({}))
-            .await?;
-
         let tree = bidi.send("browsingContext.getTree", json!({})).await?;
         let context = tree["contexts"][0]["context"]
             .as_str()
@@ -166,8 +129,6 @@ impl FirefoxSession {
             bidi,
             auto_dialog: Arc::new(AtomicBool::new(auto_dialog)),
             auto_dialog_changed: Arc::new(Notify::new()),
-            rdp,
-            accessibility_actor,
             tab_ids: HashMap::from([(context.clone(), 1)]),
             context_parents: HashMap::new(),
             next_tab_id: 2,
@@ -426,7 +387,6 @@ fn owner_context<'a>(mut context: &'a str, parents: &'a HashMap<String, String>)
 pub(crate) mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
-    use tokio::io::AsyncWriteExt;
     use tokio_tungstenite::tungstenite::Message;
 
     pub(crate) type Calls = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
@@ -526,21 +486,12 @@ pub(crate) mod tests {
         });
         let bidi = BidiClient::connect(&url).await.unwrap();
         let events = bidi.subscribe();
-        let (a, mut b) = tokio::io::duplex(4096);
-        let greeting = json!({"from":"root"}).to_string();
-        b.write_all(format!("{}:{}", greeting.len(), greeting).as_bytes())
-            .await
-            .unwrap();
-        std::mem::forget(b);
-        let rdp = RdpClient::from_stream(a).await.unwrap();
         let session = FirefoxSession {
             process: None,
             headless: true,
             bidi: Arc::new(bidi),
             auto_dialog: Arc::new(AtomicBool::new(false)),
             auto_dialog_changed: Arc::new(Notify::new()),
-            rdp,
-            accessibility_actor: "acc".into(),
             context: "ctx-active".into(),
             tab_ids: HashMap::from([("ctx-active".into(), 1)]),
             context_parents: HashMap::new(),
