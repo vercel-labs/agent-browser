@@ -2986,14 +2986,16 @@ Configures various browser settings and emulation options.
 
 Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina;
-                             scale must be finite)
-  device <name>              Emulate device (e.g., "iPhone 12")
+                             scale must be finite; mobile mode is unsupported in Firefox)
+  device <name>              Emulate device (e.g., "iPhone 12"; unsupported in Firefox;
+                             use set viewport plus the --user-agent launch flag or
+                             AGENT_BROWSER_USER_AGENT instead of set device)
   geo <lat> <lng>            Set geolocation (coordinates must be finite)
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
-        [reduced-motion]     Enable reduced motion
+        [reduced-motion]     Enable reduced motion (unsupported in Firefox)
 
 Global Options:
   --json               Output as JSON
@@ -4658,7 +4660,7 @@ Options:
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
                              Invalid values warn and leave the existing output limit unchanged.
-  --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --allowed-domains <list>   Restrict network domains and non-HTTP document navigation; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --capture <list>           Record the session as it runs; only flow is supported (or AGENT_BROWSER_CAPTURE)
                              On a running session without capture, passing it relaunches with capture on
                              Firefox does not support --capture flow
@@ -4677,8 +4679,6 @@ Options:
                              Explicit Obscura launches validate this invocation's resolved
                              bypass settings, even with an existing daemon; stale daemon
                              environment values are not reused when bypass is cleared.
-                             Firefox rejects authenticated proxies, --user-agent, --color-scheme,
-                             and networkidle waits.
                              Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --relaunch                 Relaunch the session's browser even when no setting changed

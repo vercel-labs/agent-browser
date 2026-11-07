@@ -2402,7 +2402,7 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2901,7 +2901,7 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -3447,7 +3447,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Emulate a device by name.",
+      "description": "Emulate a device by name. Firefox does not support set device; use set viewport plus the --user-agent launch flag or AGENT_BROWSER_USER_AGENT instead of set device.",
       "inputSchema": {
         "properties": {
           "device": {
@@ -3535,7 +3535,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set media emulation.",
+      "description": "Set media emulation. Firefox does not support reduced motion.",
       "inputSchema": {
         "properties": {
           "colorScheme": {
@@ -3598,7 +3598,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set viewport size. The optional scale must be finite.",
+      "description": "Set viewport size. The optional scale must be finite. Firefox does not support mobile mode.",
       "inputSchema": {
         "properties": {
           "height": {
@@ -4221,7 +4221,7 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },

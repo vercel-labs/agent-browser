@@ -5,13 +5,18 @@ use std::time::Duration;
 
 use super::actions::session;
 use super::bidi::{remote_to_json, BidiClient};
-use crate::native::actions::DaemonState;
+use super::emulation;
+use super::page;
+use crate::native::actions::{self as chrome, DaemonState};
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 
 /// Opens a tab and makes it active. Must return what Chrome's `handle_tab_new` returns,
 /// honouring `url` and `label`.
 pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd.get("url").and_then(Value::as_str);
+    if let Some(url) = url {
+        chrome::check_url_allowed_by_filter(state.domain_filter.read().await.as_ref(), url)?;
+    }
     let label = cmd.get("label").and_then(Value::as_str);
     if let Some(label) = label {
         validate_tab_label(label)?;
@@ -48,6 +53,7 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         if let Some(label) = label {
             ff.tab_labels.insert(context.clone(), label.to_string());
         }
+        let _ = emulation::apply_to_context(ff, &context).await;
         match url {
             Some(url) => {
                 let nav = ff
@@ -56,7 +62,10 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
                         "browsingContext.navigate",
                         json!({"context": context, "url": url, "wait": "complete"}),
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        format!("Navigation failed: {}", page::normalize_net_error_text(&e))
+                    })?;
                 let landed = nav["url"].as_str().unwrap_or(url).to_string();
                 ff.note_visit(&landed);
                 landed
@@ -166,6 +175,7 @@ pub async fn tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             .send("browsingContext.activate", json!({"context": context}))
             .await?;
         ff.top_context = context.clone();
+        emulation::apply_to_context(ff, &context).await?;
     }
     reset_refs(state);
 
@@ -252,6 +262,7 @@ pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .send("browsingContext.activate", json!({"context": context}))
             .await?;
         ff.top_context = context.clone();
+        let _ = emulation::apply_to_context(ff, &context).await;
     }
     reset_refs(state);
     let total = tab_count(session(state)?).await?;
