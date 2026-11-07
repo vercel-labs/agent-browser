@@ -24420,10 +24420,7 @@ mod firefox_routing_tests {
             .as_str()
             .unwrap()
             .contains("not supported on Firefox"));
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            ["browsingContext.getTree", "browsingContext.getTree"]
-        );
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
