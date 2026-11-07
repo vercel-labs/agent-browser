@@ -175,6 +175,7 @@ pub async fn tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             .send("browsingContext.activate", json!({"context": context}))
             .await?;
         ff.top_context = context.clone();
+        emulation::apply_to_context(ff, &context).await?;
     }
     reset_refs(state);
 
