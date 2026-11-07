@@ -1950,7 +1950,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_recording_excludes_background_tabs() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session_with(
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session_with(
             |_| json!({"bytes": {"type": "string", "value": "body"}}),
         )
         .await;
