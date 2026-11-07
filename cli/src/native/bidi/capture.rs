@@ -276,6 +276,7 @@ pub async fn screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         let mut params = screenshot_params(cmd, &context)?;
         if !full_page {
             if let Some(target) = &target {
+                params["origin"] = json!("document");
                 params["clip"] = element_clip(&target.shared_id);
             }
         }
