@@ -12564,12 +12564,16 @@ async fn handle_flow_run_inner(
         super::flow::run_requests(&flow, &requests, &mut senders, &check).await?
     };
 
+    // The run's own result comes first: writes it sent happened whether or
+    // not the flow file can be updated, so a save error never hides it.
     if let Some(outcome) = super::flow::RunOutcome::stopped(&results) {
-        if super::flow::unverify_on_shape_change(&mut flow, &results) {
-            super::flow::write_flow(&flow)?;
-        }
-        state.flow_stop = outcome.data(name);
-        return Err(outcome.message(name));
+        let saved = if super::flow::unverify_on_shape_change(&mut flow, &results) {
+            super::flow::write_flow(&flow).err()
+        } else {
+            None
+        };
+        state.flow_stop = with_save_error(outcome.data(name), saved.as_deref());
+        return Err(with_save_note(outcome.message(name), saved.as_deref()));
     }
 
     let shape = super::flow::Shape::from_cmd(cmd);
@@ -12595,13 +12599,35 @@ async fn handle_flow_run_inner(
         started.elapsed().as_millis(),
         &shape,
     );
-    super::flow::write_flow(&flow)?;
+    let saved = super::flow::write_flow(&flow).err();
     if response["ok"] != json!(true) {
         let outcome = super::flow::RunOutcome::failed(&results, &flow);
-        state.flow_stop = outcome.data(name);
-        return Err(outcome.message(name));
+        state.flow_stop = with_save_error(outcome.data(name), saved.as_deref());
+        return Err(with_save_note(outcome.message(name), saved.as_deref()));
+    }
+    let mut response = response;
+    if let Some(e) = saved {
+        response["saveError"] = json!(e);
     }
     Ok(response)
+}
+
+/// A run's stop data, with the error that kept the flow file from updating.
+fn with_save_error(data: Option<Value>, saved: Option<&str>) -> Option<Value> {
+    match (data, saved) {
+        (Some(mut data), Some(e)) => {
+            data["saveError"] = json!(e);
+            Some(data)
+        }
+        (data, _) => data,
+    }
+}
+
+fn with_save_note(message: String, saved: Option<&str>) -> String {
+    match saved {
+        Some(e) => format!("{message} (the flow file was not updated: {e})"),
+        None => message,
+    }
 }
 
 /// The focused field's current value, when the page exposes one.
@@ -20421,6 +20447,36 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_flow_file_that_cannot_be_saved_does_not_hide_an_applied_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        // The site takes the write and answers with another shape.
+        let (port, hits) = serve_counting("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 13\r\nconnection: close\r\n\r\n{\"cart\":[7]}\n");
+        write_flow_fixture(dir.path(), port);
+        let origin_dir = dir.path().join("127.0.0.1");
+        let file = origin_dir.join("cart.json");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
+        std::fs::set_permissions(&origin_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let run = json!({ "id": "r", "action": "flow_run", "name": "cart", "params": {}, "allowWrite": "all" });
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let resp = execute_command(&run, &mut state).await;
+        std::fs::set_permissions(&origin_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(resp["code"], "write_applied", "{resp}");
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("do not repeat it"), "{resp}");
+        assert!(error.contains("the flow file was not updated"), "{resp}");
+        assert!(resp["data"]["saveError"].is_string(), "{resp}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn requests_of_an_unrecorded_command_are_not_tagged_to_the_previous_step() {
         let mut state = DaemonState::new();
@@ -20507,6 +20563,68 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             state.browser.is_none(),
             "no browser launched, so no click ran"
         );
+    }
+
+    #[tokio::test]
+    async fn the_replay_needs_the_policy_and_confirmation_for_its_writes_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        save_flow_json(json!({
+            "version": 1, "name": "buy", "origin": "127.0.0.1",
+            "startUrl": "http://127.0.0.1:9/", "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s2r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1w1", "method": "POST", "url": "http://127.0.0.1:9/buy", "kind": "explicit", "step": 1 }],
+            "steps": [
+                { "seq": 1, "ok": true, "command": { "action": "click", "selector": "#buy" }, "requests": [] },
+                { "seq": 2, "ok": true, "command": { "action": "click", "selector": "#list" }, "requests": [{
+                    "id": "s2r1", "method": "GET", "url": "http://127.0.0.1:9/items", "headers": {}, "body": null, "tier": "replay",
+                    "expect": { "status": 200, "mime": "application/json", "signature": super::super::flow::signature(&json!({ "items": [] })), "bytes": 12, "itemFields": [], "extract": null }
+                }] }
+            ]
+        }));
+        let policy_with = |file: &str, body: &str| {
+            let path = dir.path().join(file);
+            std::fs::write(&path, body).unwrap();
+            ActionPolicy::load(path.to_str().unwrap()).unwrap()
+        };
+        let run = json!({ "id": "r", "action": "flow_run", "name": "buy", "params": {}, "allowWrite": "all" });
+        let cases: [(Option<ActionPolicy>, Option<ConfirmActions>, &str); 3] = [
+            (
+                Some(policy_with(
+                    "deny.json",
+                    r#"{"default":"allow","deny":["flow_write:s1w1"]}"#,
+                )),
+                None,
+                "denied by policy",
+            ),
+            (
+                Some(policy_with(
+                    "confirm.json",
+                    r#"{"default":"allow","confirm":["flow_write:s1w1"]}"#,
+                )),
+                None,
+                "requires confirmation",
+            ),
+            (
+                None,
+                ConfirmActions::parse("flow_write:s1w1"),
+                "requires confirmation",
+            ),
+        ];
+        for (policy, confirm, expect) in cases {
+            let mut state = DaemonState::new();
+            state.policy = policy;
+            state.confirm_actions = confirm;
+            let resp = execute_command(&run, &mut state).await;
+            assert_eq!(resp["success"], false, "{resp}");
+            let error = resp["error"].as_str().unwrap_or_default();
+            assert!(error.contains(expect), "{expect}: {resp}");
+            assert!(
+                state.browser.is_none(),
+                "{expect}: the replay must not start"
+            );
+        }
     }
 
     #[tokio::test]
