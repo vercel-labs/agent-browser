@@ -997,23 +997,39 @@ fn build_count_elements_js(selector: &str) -> String {
 /// description of the element that would actually receive a click at (x, y)
 /// when that element is unrelated to `el`, or null when the click would land
 /// on `el` (or something that activates it). Relations that count as "lands
-/// on el": shadow-including ancestors/descendants in either direction, and
-/// label/control association (custom checkboxes hide the input under a styled
-/// sibling inside the same label).
+/// on el": shadow-including and frame-including ancestors/descendants in
+/// either direction, and label/control association (custom checkboxes hide
+/// the input under a styled sibling inside the same label).
 const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
+    // elementFromPoint retargets to the shadow host, so a frame inside a web
+    // component's shadow root is found by looking through open shadow roots.
+    // Only a frame replaces the hit; other shadow content keeps the host so
+    // the relation checks below see the same node as before.
+    const isFrame = (n) => n && (n.tagName === 'IFRAME' || n.tagName === 'FRAME') && n.contentDocument;
+    const frameAt = (n, px, py) => {
+        while (n && !isFrame(n) && n.shadowRoot) {
+            const inner = n.shadowRoot.elementFromPoint(px, py);
+            if (!inner || !n.shadowRoot.contains(inner)) return null;
+            n = inner;
+        }
+        return isFrame(n) ? n : null;
+    };
     // Descend from the given document through same-origin iframes so a point
     // over a frame resolves to the element inside it, in that frame's space.
     let d = doc, lx = x, ly = y;
     let hit = d.elementFromPoint(lx, ly);
-    while (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && hit.contentDocument && hit !== el) {
-        const r = hit.getBoundingClientRect();
-        lx -= r.x + hit.clientLeft;
-        ly -= r.y + hit.clientTop;
-        d = hit.contentDocument;
+    for (let frame = frameAt(hit, lx, ly); frame && frame !== el; frame = frameAt(hit, lx, ly)) {
+        const r = frame.getBoundingClientRect();
+        lx -= r.x + frame.clientLeft;
+        ly -= r.y + frame.clientTop;
+        d = frame.contentDocument;
         hit = d.elementFromPoint(lx, ly);
     }
     if (!hit || hit === el) return null;
-    const up = (n) => n.parentNode || n.host || (n.getRootNode && n.getRootNode().host) || null;
+    // A frame's document continues at its owning <iframe>, so content inside
+    // a frame relates to the elements around that frame.
+    const up = (n) => n.parentNode || n.host || (n.getRootNode && n.getRootNode().host)
+        || (n.defaultView && n.defaultView.frameElement) || null;
     for (let n = hit; n; n = up(n)) { if (n === el) return null; }
     for (let n = el; n; n = up(n)) { if (n === hit) return null; }
     const hitLabel = hit.closest ? hit.closest('label') : null;
