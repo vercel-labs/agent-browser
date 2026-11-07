@@ -4713,6 +4713,65 @@ async fn e2e_save_state_cross_domain() {
 }
 
 // ---------------------------------------------------------------------------
+// Attached-session state save (issue #2449)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_save_state_includes_attached_session_origin() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+
+    // Attached session B opens a site the host never navigates to and stores
+    // a token in localStorage there.
+    let mut attached =
+        attach_pinned_session(&guard, "e2e-save-attached", &ws_url, "https://example.com").await;
+    let resp = execute_command(
+        &json!({
+            "id": "attached-1", "action": "storage_set",
+            "type": "local", "key": "attached_token", "value": "attached_val"
+        }),
+        &mut attached,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Save state from the host session, which never visited example.com.
+    let tmp_state = std::env::temp_dir()
+        .join("agent-browser-e2e-attached-state.json")
+        .to_string_lossy()
+        .to_string();
+    let resp = execute_command(
+        &json!({ "id": "host-3", "action": "state_save", "path": &tmp_state }),
+        &mut host,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The save must include the attached session's origin and its token.
+    let saved = std::fs::read_to_string(&tmp_state).expect("State file should exist");
+    let state_data: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    let origins = state_data["origins"].as_array().unwrap();
+    let has_attached_origin = origins.iter().any(|o| {
+        o["origin"].as_str().is_some_and(|s| s.contains("example"))
+            && o["localStorage"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|e| e["name"] == "attached_token"))
+    });
+    assert!(
+        has_attached_origin,
+        "Should include localStorage from the attached session's origin: {:?}",
+        origins
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&tmp_state);
+
+    let _ = execute_command(&json!({ "id": "98", "action": "close" }), &mut attached).await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut host).await;
+}
+
+// ---------------------------------------------------------------------------
 // Domain filter
 // ---------------------------------------------------------------------------
 
