@@ -47,7 +47,7 @@ fn prepare_js() -> String {
 }
 
 /// Scrolls the target into view and applies the shared actionability and blocker checks.
-async fn prepare(
+pub(super) async fn prepare(
     ff: &FirefoxSession,
     target: &Target,
     label: &str,

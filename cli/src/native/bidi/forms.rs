@@ -347,11 +347,11 @@ pub async fn check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
     let target = resolve_target(state, selector).await?;
     let ff = session(state)?;
     if run(ff, &target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(false)) {
-        prepare(ff, &target, selector, true).await?;
+        let (x, y) = prepare(ff, &target, selector, true).await?;
         perform(
             ff,
             &target.context,
-            pointer_click(&Origin::Element(target.shared_id.clone()), "left", 1),
+            pointer_click(&Origin::Viewport { x, y }, "left", 1),
         )
         .await?;
     }
@@ -364,11 +364,11 @@ pub async fn uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let target = resolve_target(state, selector).await?;
     let ff = session(state)?;
     if run(ff, &target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(true)) {
-        prepare(ff, &target, selector, true).await?;
+        let (x, y) = prepare(ff, &target, selector, true).await?;
         perform(
             ff,
             &target.context,
-            pointer_click(&Origin::Element(target.shared_id.clone()), "left", 1),
+            pointer_click(&Origin::Viewport { x, y }, "left", 1),
         )
         .await?;
     }
