@@ -744,9 +744,7 @@ mod tests {
                     "children": [{"context": "ctx-frame", "url": "https://frame.test/"}]
                 }]
             }),
-            Some("script.callFunction")
-                if req["params"]["target"]["context"] == "ctx-frame" =>
-            {
+            Some("script.callFunction") if req["params"]["target"]["context"] == "ctx-frame" => {
                 json!({
                     "type": "exception",
                     "exceptionDetails": {"text": "no such frame"}
