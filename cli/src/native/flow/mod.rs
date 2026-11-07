@@ -1065,6 +1065,8 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         writes: collect_writes(&input, &policy, &given, &har_ids),
         steps,
     };
+    let mut flow = flow;
+    scrub(&mut flow, &input.recorder.secrets);
 
     let requests_report: Vec<Value> = flow
         .requests()
@@ -1649,6 +1651,10 @@ fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 }
 
 pub fn write_flow(flow: &Flow) -> Result<PathBuf, String> {
+    // Whatever produced the flow, nothing sensitive reaches the file.
+    let mut flow = flow.clone();
+    scrub(&mut flow, &[]);
+    let flow = &flow;
     let path = flow_path(&flow.origin, &flow.name)?;
     if let Some(parent) = path.parent() {
         create_private_dirs(parent)
@@ -1658,6 +1664,98 @@ pub fn write_flow(flow: &Flow) -> Result<PathBuf, String> {
     write_private(&path, &text)
         .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     Ok(path)
+}
+
+/// The one pass over everything a flow file stores, run before it is
+/// written: a known secret, in any encoding, anywhere in a command or a
+/// request becomes `<redacted>`, and so does the value of a credential
+/// parameter in a URL a command or the start URL carries (a token in a
+/// navigation's query). A step it touches is marked redacted, so the
+/// command replay never sends it.
+pub(super) fn scrub(flow: &mut Flow, secrets: &[String]) {
+    flow.start_url = scrub_url(&flow.start_url).unwrap_or_else(|| flow.start_url.clone());
+    for (index, step) in flow.steps.iter_mut().enumerate() {
+        let mut hit = scrub_strings(&mut step.command, secrets);
+        if let Some(clean) = step.command["url"].as_str().and_then(scrub_url) {
+            step.command["url"] = json!(clean);
+            hit = true;
+        }
+        for r in &mut step.requests {
+            if holds_secret(&r.url, secrets) {
+                r.url = REDACTED.to_string();
+                hit = true;
+            }
+            if r.body.as_deref().is_some_and(|b| holds_secret(b, secrets)) {
+                r.body = Some(REDACTED.to_string());
+                hit = true;
+            }
+            for v in r.headers.values_mut() {
+                if holds_secret(v, secrets) {
+                    *v = REDACTED.to_string();
+                    hit = true;
+                }
+            }
+        }
+        if hit {
+            step.command["redacted"] = json!(true);
+            if !flow.redacted_steps.contains(&(index + 1)) {
+                flow.redacted_steps.push(index + 1);
+            }
+        }
+    }
+    flow.redacted_steps.sort_unstable();
+}
+
+/// Replace every string under `v` that holds a secret; true if any did.
+fn scrub_strings(v: &mut Value, secrets: &[String]) -> bool {
+    match v {
+        Value::String(s) if s != REDACTED && holds_secret(s, secrets) => {
+            *s = REDACTED.to_string();
+            true
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .fold(false, |hit, item| scrub_strings(item, secrets) || hit),
+        Value::Object(map) => map
+            .values_mut()
+            .fold(false, |hit, item| scrub_strings(item, secrets) || hit),
+        _ => false,
+    }
+}
+
+/// The URL with credential parameter values redacted, if it had any.
+fn scrub_url(url: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(url).ok()?;
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if !pairs
+        .iter()
+        .any(|(k, v)| is_credential_param(k) && v != REDACTED)
+    {
+        return None;
+    }
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    for (k, v) in &pairs {
+        query.append_pair(k, if is_credential_param(k) { REDACTED } else { v });
+    }
+    parsed.set_query(Some(&query.finish()));
+    Some(parsed.to_string())
+}
+
+/// A query parameter that carries a credential: named like a credential
+/// header (`authorization`, anything with `token` or `csrf`), or one word of
+/// its name is a secret-field marker (`pass`, `secret`, `otp`, `pin`, `cvv`,
+/// `card`) or `password`. Words split on punctuation and match whole, so
+/// `passengers` and `shipping` are not secrets.
+fn is_credential_param(name: &str) -> bool {
+    if classify_header(name) == HeaderClass::Credential {
+        return true;
+    }
+    name.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| word == "password" || recorder::SECRET_MARKERS.contains(&word))
 }
 
 /// A flow file on disk, with the directory it was found in.
@@ -3895,6 +3993,73 @@ mod tests {
             json!({ "startUrl": "https://a.test/", "steps": [{ "command": cmd.clone() }] }),
         );
         assert!(replay_commands(&flow, &[]).unwrap_err().contains("secret"));
+    }
+
+    #[test]
+    fn a_token_in_a_navigation_url_never_reaches_the_file() {
+        let mut flow = flow_of(json!({
+            "startUrl": "https://a.test/welcome?magic_token=abc123&lang=es",
+            "steps": [
+                { "command": { "action": "navigate", "url": "https://a.test/welcome?magic_token=abc123&lang=es" } },
+                { "command": { "action": "select", "selector": "#plan", "values": ["hunter two"] } }
+            ]
+        }));
+        scrub(&mut flow, &["hunter two".to_string()]);
+        let text = serde_json::to_string(&flow).unwrap();
+        for leaked in ["abc123", "hunter two", "hunter%20two", "hunter+two"] {
+            assert!(!text.contains(leaked), "{leaked}: {text}");
+        }
+        assert!(flow.start_url.contains("lang=es"), "{}", flow.start_url);
+        assert_eq!(flow.redacted_steps, vec![1, 2]);
+        assert_eq!(flow.steps[0].command["redacted"], true);
+        // The replay never sends a redacted step.
+        assert!(replay_commands(&flow, &[]).unwrap_err().contains("secret"));
+        // A file written by any path is scrubbed too.
+        let mut raw = flow_of(json!({
+            "name": "scrub-on-write",
+            "origin": "a.test",
+            "startUrl": "https://a.test/?access_token=zzz",
+            "steps": [{ "command": { "action": "navigate", "url": "https://a.test/?access_token=zzz" } }]
+        }));
+        raw.version = FLOW_VERSION;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let path = write_flow(&raw).unwrap();
+        let written = std::fs::read_to_string(path).unwrap();
+        assert!(!written.contains("zzz"), "{written}");
+    }
+
+    #[test]
+    fn credential_params_are_named_like_credentials() {
+        for name in [
+            "token",
+            "access_token",
+            "csrf",
+            "X-CSRF",
+            "authorization",
+            "password",
+            "user[password]",
+            "client_secret",
+            "otp",
+            "pin",
+            "cvv",
+            "card",
+            "pass",
+        ] {
+            assert!(is_credential_param(name), "{name}");
+        }
+        for name in [
+            "q",
+            "passengers",
+            "shipping",
+            "cards",
+            "page",
+            "lang",
+            "spinner",
+        ] {
+            assert!(!is_credential_param(name), "{name}");
+        }
     }
 
     fn navigating_flow(start: &str, steps: Value, params: Value) -> Flow {

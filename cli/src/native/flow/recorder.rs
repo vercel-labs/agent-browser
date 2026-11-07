@@ -731,7 +731,7 @@ fn has_secret_marker(text: &str) -> bool {
     SECRET_MARKERS.iter().any(|m| text.contains(m))
 }
 
-const SECRET_MARKERS: &[&str] = &[
+pub(super) const SECRET_MARKERS: &[&str] = &[
     "pass",
     "contraseña",
     "secret",
