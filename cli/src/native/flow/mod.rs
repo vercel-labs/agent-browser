@@ -1676,13 +1676,12 @@ pub(super) fn scrub(flow: &mut Flow, secrets: &[String]) {
     flow.start_url = scrub_url(&flow.start_url).unwrap_or_else(|| flow.start_url.clone());
     for (index, step) in flow.steps.iter_mut().enumerate() {
         let mut hit = scrub_strings(&mut step.command, secrets);
-        if let Some(clean) = step.command["url"].as_str().and_then(scrub_url) {
-            step.command["url"] = json!(clean);
-            hit = true;
-        }
         for r in &mut step.requests {
             if holds_secret(&r.url, secrets) {
                 r.url = REDACTED.to_string();
+                hit = true;
+            } else if let Some(clean) = scrub_url(&r.url) {
+                r.url = clean;
                 hit = true;
             }
             if r.body.as_deref().is_some_and(|b| holds_secret(b, secrets)) {
@@ -1692,6 +1691,10 @@ pub(super) fn scrub(flow: &mut Flow, secrets: &[String]) {
             for v in r.headers.values_mut() {
                 if holds_secret(v, secrets) {
                     *v = REDACTED.to_string();
+                    hit = true;
+                } else if let Some(clean) = scrub_url(v) {
+                    // A URL in a header, such as the Referer.
+                    *v = clean;
                     hit = true;
                 }
             }
@@ -1713,6 +1716,13 @@ fn scrub_strings(v: &mut Value, secrets: &[String]) -> bool {
             *s = REDACTED.to_string();
             true
         }
+        Value::String(s) => match scrub_url(s) {
+            Some(clean) => {
+                *s = clean;
+                true
+            }
+            None => false,
+        },
         // Every item is visited: stopping at the first hit would leave the
         // rest unscrubbed.
         Value::Array(items) => {
@@ -1733,25 +1743,45 @@ fn scrub_strings(v: &mut Value, secrets: &[String]) -> bool {
     }
 }
 
-/// The URL with credential parameter values redacted, if it had any.
+/// The URL with credential parameter values redacted, if it had any. Only
+/// those values change; the rest of the query stays byte for byte, so a
+/// template (`{{name}}`, `{{@s1r1.token}}`), which a run fills, is kept.
 fn scrub_url(url: &str) -> Option<String> {
-    let mut parsed = url::Url::parse(url).ok()?;
-    let pairs: Vec<(String, String)> = parsed
-        .query_pairs()
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-    if !pairs
-        .iter()
-        .any(|(k, v)| is_credential_param(k) && v != REDACTED)
-    {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
         return None;
     }
-    let mut query = url::form_urlencoded::Serializer::new(String::new());
-    for (k, v) in &pairs {
-        query.append_pair(k, if is_credential_param(k) { REDACTED } else { v });
-    }
-    parsed.set_query(Some(&query.finish()));
-    Some(parsed.to_string())
+    let (head, rest) = url.split_once('?')?;
+    let (query, fragment) = match rest.split_once('#') {
+        Some((q, f)) => (q, Some(f)),
+        None => (rest, None),
+    };
+    let redacted = urlencoding::encode(REDACTED);
+    let mut changed = false;
+    let parts: Vec<String> = query
+        .split('&')
+        .map(|part| {
+            let (k, v) = part.split_once('=').unwrap_or((part, ""));
+            let name = url::form_urlencoded::parse(k.as_bytes())
+                .next()
+                .map(|(k, _)| k.into_owned())
+                .unwrap_or_default();
+            let value = percent_decode_lossless(&v.replace('+', " "));
+            if is_credential_param(&name) && value != REDACTED && !value.contains("{{") {
+                changed = true;
+                format!("{k}={redacted}")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect();
+    changed.then(|| {
+        let mut out = format!("{head}?{}", parts.join("&"));
+        if let Some(f) = fragment {
+            out.push('#');
+            out.push_str(f);
+        }
+        out
+    })
 }
 
 /// A query parameter that carries a credential: named like a credential
@@ -4011,10 +4041,24 @@ mod tests {
             "startUrl": "https://a.test/welcome?magic_token=abc123&lang=es",
             "steps": [
                 { "command": { "action": "navigate", "url": "https://a.test/welcome?magic_token=abc123&lang=es" } },
-                { "command": { "action": "select", "selector": "#plan", "values": ["hunter two"] } }
+                { "command": { "action": "select", "selector": "#plan", "values": ["hunter two"] }, "requests": [{
+                    "id": "s2r1", "method": "GET",
+                    "url": "https://a.test/api/items?session_token={{@s1r1.token}}&page=1",
+                    "headers": { "Referer": "https://a.test/welcome?magic_token=abc123&lang=es" }
+                }] }
             ]
         }));
         scrub(&mut flow, &["hunter two".to_string()]);
+        // A reference is filled at run time, so it stays byte for byte.
+        assert_eq!(
+            flow.steps[1].requests[0].url,
+            "https://a.test/api/items?session_token={{@s1r1.token}}&page=1"
+        );
+        assert_eq!(
+            scrub_url("https://a.test/x?token=abc&id={{@s1r1.id}}#top").as_deref(),
+            Some("https://a.test/x?token=%3Credacted%3E&id={{@s1r1.id}}#top")
+        );
+        assert_eq!(scrub_url("https://a.test/x?q=a+b&lang=es"), None);
         let text = serde_json::to_string(&flow).unwrap();
         for leaked in ["abc123", "hunter two", "hunter%20two", "hunter+two"] {
             assert!(!text.contains(leaked), "{leaked}: {text}");
