@@ -1060,6 +1060,7 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
     )
 }
 
+/// Finds Chrome from the install cache, macOS Applications directories, or system paths.
 pub fn find_chrome() -> Option<PathBuf> {
     // 1. Check Chrome downloaded by `agent-browser install`
     if let Some(p) = crate::install::find_installed_chrome() {
@@ -1081,17 +1082,11 @@ pub fn find_chrome() -> Option<PathBuf> {
     // 2. Check system-installed Chrome
     #[cfg(target_os = "macos")]
     {
-        let candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        ];
-        for c in &candidates {
-            let p = PathBuf::from(c);
-            if p.exists() {
-                return Some(p);
-            }
+        let home_applications = std::env::home_dir().map(|home| home.join("Applications"));
+        if let Some(path) =
+            find_macos_chrome(Path::new("/Applications"), home_applications.as_deref())
+        {
+            return Some(path);
         }
     }
 
@@ -1150,6 +1145,28 @@ pub fn find_chrome() -> Option<PathBuf> {
         return Some(p);
     }
 
+    None
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn find_macos_chrome(
+    system_applications: &Path,
+    home_applications: Option<&Path>,
+) -> Option<PathBuf> {
+    let candidates = [
+        "Google Chrome.app/Contents/MacOS/Google Chrome",
+        "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        "Chromium.app/Contents/MacOS/Chromium",
+        "Brave Browser.app/Contents/MacOS/Brave Browser",
+    ];
+    for applications in std::iter::once(system_applications).chain(home_applications) {
+        for candidate in &candidates {
+            let path = applications.join(candidate);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
     None
 }
 
@@ -1290,7 +1307,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::home_dir() {
             let base = home.join("Library/Application Support");
             for name in [
                 "Google/Chrome",
@@ -1305,7 +1322,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::home_dir() {
             let config = home.join(".config");
             for name in [
                 "google-chrome",
@@ -1711,7 +1728,7 @@ fn find_puppeteer_chrome() -> Option<PathBuf> {
         search_dirs.push(PathBuf::from(custom).join("chrome"));
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         search_dirs.push(home.join(".cache/puppeteer/chrome"));
     }
 
@@ -1781,7 +1798,7 @@ fn find_playwright_chromium() -> Option<PathBuf> {
         search_dirs.push(PathBuf::from(custom));
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         search_dirs.push(home.join(".cache/ms-playwright"));
     }
 
@@ -1842,7 +1859,7 @@ fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
 
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix('~') {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::home_dir() {
             return home
                 .join(rest.strip_prefix('/').unwrap_or(rest))
                 .to_string_lossy()
@@ -2006,6 +2023,33 @@ exec sleep 60
                 assert!(path.exists());
             }
         }
+    }
+
+    #[test]
+    fn test_find_macos_chrome_searches_system_before_home() {
+        let dir = TempDir::new("macos-chrome");
+        let system = dir.join("system");
+        let home_applications = dir.join("home/Applications");
+        let user_chrome = home_applications.join("Google Chrome.app/Contents/MacOS/Google Chrome");
+        std::fs::create_dir_all(user_chrome.parent().unwrap()).unwrap();
+        std::fs::write(&user_chrome, b"").unwrap();
+
+        assert_eq!(
+            find_macos_chrome(&system, Some(&home_applications)),
+            Some(user_chrome)
+        );
+
+        let system_brave = system.join("Brave Browser.app/Contents/MacOS/Brave Browser");
+        std::fs::create_dir_all(system_brave.parent().unwrap()).unwrap();
+        std::fs::write(&system_brave, b"").unwrap();
+        assert_eq!(
+            find_macos_chrome(&system, Some(&home_applications)),
+            Some(system_brave.clone())
+        );
+        assert_eq!(find_macos_chrome(&system, None), Some(system_brave));
+
+        let missing = dir.join("missing");
+        assert_eq!(find_macos_chrome(&missing, None), None);
     }
 
     #[test]

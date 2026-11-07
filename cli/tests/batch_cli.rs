@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const COMMANDS: &str = r#"[["stream","status"],["PUBLIC_SENTINEL"],["stream","status"]]"#;
@@ -136,6 +136,75 @@ fn batch_preserves_results_and_parse_errors_with_optional_command_omission() {
 }
 
 #[test]
+fn batch_rejects_item_global_flags_across_cli_and_mcp() {
+    let commands = json!([
+        ["stream", "status"],
+        ["open", "--init-script", "/tmp/probe.js"],
+        ["stream", "status"]
+    ]);
+    let mut expected_error: Option<String> = None;
+    for mode in ["quoted", "stdin", "mcp"] {
+        for bail in [false, true] {
+            let fixture = Fixture::new();
+            let rows = if mode == "mcp" {
+                let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "agent_browser_batch", "arguments": {
+                        "commands": commands, "session": "batch-test", "bail": bail}}});
+                let response = fixture.run(&["mcp", "--tools", "all"], &format!("{request}\n"), 0);
+                let result = &response["result"];
+                assert_eq!(result["isError"], true, "{response}");
+                assert_eq!(result["structuredContent"]["exitCode"], 1);
+                result["structuredContent"]["response"].clone()
+            } else {
+                let mut args = vec!["batch", "--json"];
+                if bail {
+                    args.push("--bail");
+                }
+                if mode == "quoted" {
+                    args.extend([
+                        "stream status",
+                        "open --init-script /tmp/probe.js",
+                        "stream status",
+                    ]);
+                }
+                fixture.run(&args, &commands.to_string(), 1)
+            };
+            let rows = rows.as_array().unwrap();
+            assert_eq!(rows.len(), if bail { 2 } else { 3 }, "{mode}: {rows:?}");
+            for (index, row) in rows.iter().enumerate() {
+                assert_identity(row, &commands[index], index, false);
+                assert_eq!(row["success"], index != 1, "{mode}: {row}");
+            }
+            let error = rows[1]["error"].as_str().unwrap();
+            let lower = error.to_lowercase();
+            assert!(
+                lower.contains("global flags") || lower.contains("batch command"),
+                "{mode}: {error}"
+            );
+            if let Some(expected) = &expected_error {
+                assert_eq!(error, expected, "{mode}");
+            } else {
+                expected_error = Some(error.to_string());
+            }
+        }
+    }
+
+    let fixture = Fixture::new();
+    for flag in ["--help", "-h", "--version", "-V"] {
+        let commands = json!([["open", flag]]);
+        let rows = fixture.run(&["batch", "--json"], &commands.to_string(), 1);
+        assert_eq!(rows.as_array().unwrap().len(), 1, "{flag}: {rows}");
+        assert_identity(&rows[0], &commands[0], 0, false);
+        assert_eq!(rows[0]["success"], false, "{flag}: {rows}");
+        assert_eq!(
+            rows[0]["error"].as_str(),
+            expected_error.as_deref(),
+            "{flag}"
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires Chrome"]
 fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
     const SECRET_VALUE: &str = "SECRET_VALUE";
@@ -192,6 +261,20 @@ fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
         assert_eq!(value["success"], true);
         assert_eq!(value["data"]["value"], SECRET_VALUE);
     }
+    let commands = json!([
+        ["fill", "#x", "--json"],
+        ["get", "value", "#x"],
+        ["type", "#x", "--clear", "--enable"],
+        ["get", "value", "#x"]
+    ]);
+    let rows = fixture.run(&["batch", "--json", "--bail"], &commands.to_string(), 0);
+    assert!(rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["success"] == true));
+    assert_eq!(rows[1]["result"]["value"], "--json");
+    assert_eq!(rows[3]["result"]["value"], "--enable");
     assert_eq!(fixture.run(&["close", "--json"], "", 0)["success"], true);
 }
 
@@ -383,5 +466,112 @@ fn batch_send_error_preserves_identity_without_a_daemon_response() {
         );
         assert!(row.get("result").is_none(), "{row}");
     }
+    server.join().unwrap();
+}
+
+#[test]
+fn errors_content_boundaries_skip_empty_results() {
+    let fixture = Fixture::new();
+    let bootstrap = fixture.run(&["stream", "status", "--json"], "", 0);
+    assert_eq!(bootstrap["success"], true);
+    let pid_file = fixture.0.path().join("s/batch-test.pid");
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    std::fs::remove_file(pid_file).unwrap();
+    let socket = fixture.0.path().join("s/batch-test.sock");
+    std::fs::remove_file(&socket).unwrap();
+    let listener = UnixListener::bind(socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        for errors in [
+            json!([]),
+            json!([{ "text": "first error" }, { "text": "second error" }]),
+            json!([]),
+            json!([]),
+        ] {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for an errors request"
+                );
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(err) => panic!("failed to accept errors request: {err}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                if stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .is_err()
+                {
+                    continue;
+                }
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                if line.is_empty() {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["action"], "errors");
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({ "success": true, "data": { "errors": errors } })
+                )
+                .unwrap();
+                break;
+            }
+        }
+    });
+
+    let empty = fixture.run_raw(&["errors", "--content-boundaries"], "", 0);
+    assert!(empty.stdout.is_empty(), "{empty:?}");
+
+    let populated = fixture.run_raw(&["errors", "--content-boundaries"], "", 0);
+    let output = std::str::from_utf8(&populated.stdout).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines.len(), 4, "{output}");
+    assert!(
+        lines[0].starts_with("--- AGENT_BROWSER_PAGE_CONTENT "),
+        "{output}"
+    );
+    let nonce = lines[0]
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("nonce="))
+        .unwrap();
+    assert!(lines[1].contains("first error"), "{output}");
+    assert!(lines[2].contains("second error"), "{output}");
+    assert_eq!(
+        lines[3],
+        format!("--- END_AGENT_BROWSER_PAGE_CONTENT nonce={nonce} ---")
+    );
+
+    let json = fixture.run(&["errors", "--content-boundaries", "--json"], "", 0);
+    assert_eq!(json["data"]["errors"], json!([]));
+    assert!(json["_boundary"].is_object(), "{json}");
+
+    let mcp = fixture.run(
+        &[
+            "mcp",
+            "call",
+            "agent_browser_errors",
+            r#"{"session":"batch-test"}"#,
+        ],
+        "",
+        0,
+    );
+    assert_eq!(mcp["isError"], false, "{mcp}");
+    assert_eq!(
+        mcp["structuredContent"]["response"]["data"]["errors"],
+        json!([])
+    );
     server.join().unwrap();
 }
