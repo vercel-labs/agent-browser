@@ -363,6 +363,10 @@ pub async fn press_key_with_modifiers(
     modifiers: Option<i32>,
 ) -> Result<(), String> {
     let (key_name, _, _) = named_key_info(key);
+    let key_name = shifted_key_name(
+        &key_name,
+        modifiers.is_some_and(|modifiers| modifiers & 8 != 0),
+    );
     let modifier_keys = modifiers.map(modifier_key_names).unwrap_or_default();
     let modifiers = modifiers.filter(|modifiers| *modifiers != 0);
     let mut pressed_modifiers: Vec<&'static str> = Vec::with_capacity(modifier_keys.len());
@@ -1356,6 +1360,14 @@ fn key_text(key_name: &str) -> Option<String> {
     }
 }
 
+fn shifted_key_name(key_name: &str, shift: bool) -> String {
+    if shift && key_name.len() == 1 && key_name.as_bytes()[0].is_ascii_lowercase() {
+        key_name.to_ascii_uppercase()
+    } else {
+        key_name.to_string()
+    }
+}
+
 fn named_key_info(key: &str) -> (String, String, i32) {
     match key.to_lowercase().as_str() {
         "control" | "ctrl" => ("Control".to_string(), "ControlLeft".to_string(), 17),
@@ -1419,6 +1431,13 @@ mod tests {
         assert_eq!(modifier_bit("Shift"), Some(8));
         assert_eq!(nonzero_modifiers(0), None);
         assert_eq!(nonzero_modifiers(2), Some(2));
+    }
+
+    #[test]
+    fn shift_modifier_uppercases_printable_ascii_letters() {
+        assert_eq!(shifted_key_name("b", true), "B");
+        assert_eq!(shifted_key_name("b", false), "b");
+        assert_eq!(shifted_key_name("Enter", true), "Enter");
     }
 
     /// Verify that `char_to_key_info` returns the correct (key, code,
