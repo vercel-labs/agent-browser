@@ -18,11 +18,10 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
         "headers": headers,
         "body": req.body,
     });
-    // A write must not follow a redirect to another site; the 3xx counts as
-    // the site's answer.
-    if req.write {
-        init["redirect"] = json!("manual");
-    }
+    // No request follows a redirect: the browser would send the next hop
+    // before the site boundary could be checked. A write's 3xx counts as the
+    // site's answer; a read moves on to the next tier.
+    init["redirect"] = json!("manual");
     // Cross-origin APIs differ on credentials: some need cookies, some reject
     // a credentialed request outright. Try with, then without.
     // A write is never sent a second time: a thrown fetch may still have
@@ -36,7 +35,7 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
     format!(
         "(async () => {{ const u = {url}, i = {init}; \
          {send} \
-         return {{ status: r.type === 'opaqueredirect' ? 302 : r.status, url: r.url, retryAfter: r.headers.get('retry-after'), text: await r.text() }}; }})()",
+         return {{ status: r.type === 'opaqueredirect' ? 302 : r.status, redirected: r.type === 'opaqueredirect', url: r.url, retryAfter: r.headers.get('retry-after'), text: await r.text() }}; }})()",
         url = json!(req.url),
         init = init,
         send = send
@@ -63,6 +62,12 @@ pub fn page_result(
         .filter(|u| !u.is_empty())
         .and_then(|u| policy.check(u).err().map(|_| u.to_string()));
     let outcome = match value {
+        // The page tier does not follow redirects, so the hop was never
+        // sent; the next tier can still answer the read.
+        Ok(v) if !req.write && v["redirected"] == json!(true) => Err(Failure::skipped(
+            "the in-page read was answered with a redirect, which the page tier does not follow"
+                .to_string(),
+        )),
         Ok(v) if landed.is_some() => {
             let to = landed.unwrap_or_default();
             if req.write {
