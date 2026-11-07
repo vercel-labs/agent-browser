@@ -5925,16 +5925,6 @@ async fn detect_attach_connection(
 
 async fn firefox_session_has_exited(session: &mut bidi::session::FirefoxSession) -> bool {
     session.has_exited()
-        || (session.is_attached()
-            && session
-                .bidi
-                .send_timeout(
-                    "browsingContext.getTree",
-                    json!({}),
-                    std::time::Duration::from_secs(2),
-                )
-                .await
-                .is_err())
 }
 
 /// Starts or attaches to Firefox with the session's resolved settings.
