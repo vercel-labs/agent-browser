@@ -670,11 +670,8 @@ pub async fn take_snapshot(
     // Firefox has no CDP loaderId; the document root's sharedId scopes durable refs.
     let document_id = frame_root["abSid"].as_str();
     let known = ref_map.observe_document(&context, None, &context, document_id);
-    let result = snapshot_from_ax_nodes(&nodes, &urls, options, ref_map, &context, None, known);
-    if result.is_ok() {
-        ff.ref_documents = ff.documents.clone();
-    }
-    result
+    ff.ref_documents = ff.documents.clone();
+    snapshot_from_ax_nodes(&nodes, &urls, options, ref_map, &context, None, known)
 }
 
 /// Handles the `snapshot` action.
