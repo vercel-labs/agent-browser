@@ -533,6 +533,10 @@ impl FirefoxSession {
             .any(|context| context_contains(&self.top_context, context, &self.context_parents))
     }
 
+    pub(crate) fn context_is_in_active_tab(&self, context: &str) -> bool {
+        owner_context(context, &self.context_parents) == self.top_context
+    }
+
     /// Runs `fut` until it finishes or a prompt opens in `context` or its owning tab. Returns `None` for the prompt.
     pub async fn race_prompt<T>(
         &self,
