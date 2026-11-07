@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use super::client::{remote_to_json, BidiClient};
 use super::emulation::{self, Settings as EmulationSettings};
@@ -33,6 +34,8 @@ pub struct FirefoxSession {
     process: Option<FirefoxProcess>,
     pub headless: bool,
     pub bidi: Arc<BidiClient>,
+    pub auto_dialog: Arc<AtomicBool>,
+    pub auto_dialog_changed: Arc<Notify>,
     pub rdp: RdpClient,
     pub accessibility_actor: String,
     /// Active browsing context id: a top-level tab, or a frame after `frame <sel>`.
@@ -119,7 +122,7 @@ async fn connect_devtools_loop(endpoint: &DevtoolsEndpoint) -> Result<RdpClient,
 impl FirefoxSession {
     /// Finds and launches Firefox, opens the BiDi session, starts the network dispatcher
     /// and enables the accessibility actor.
-    /// With `auto_dialog`, Firefox itself accepts alert and beforeunload prompts, like Chrome's default.
+    /// The daemon handles automatic prompts so the setting can change without relaunching Firefox.
     pub async fn launch(
         options: &LaunchOptions,
         net: NetContext,
@@ -152,11 +155,7 @@ impl FirefoxSession {
         let dispatch_events = bidi.subscribe_buffered();
         let mut caps = json!({
             "acceptInsecureCerts": options.ignore_https_errors,
-            "unhandledPromptBehavior": if auto_dialog {
-                json!({"default": "ignore", "alert": "accept", "beforeUnload": "accept"})
-            } else {
-                json!({"default": "ignore"})
-            },
+            "unhandledPromptBehavior": {"default": "ignore"},
         });
         if let Some(proxy) = options.proxy.as_deref() {
             caps["proxy"] = proxy_capability(proxy, options.proxy_bypass.as_deref());
@@ -224,6 +223,8 @@ impl FirefoxSession {
             process: Some(process),
             headless: options.headless,
             bidi,
+            auto_dialog: Arc::new(AtomicBool::new(auto_dialog)),
+            auto_dialog_changed: Arc::new(Notify::new()),
             rdp,
             accessibility_actor,
             tab_ids: HashMap::from([(context.clone(), 1)]),
@@ -349,7 +350,12 @@ impl FirefoxSession {
                     self.note_visit(url);
                 }
             }
-            apply_event(&e, dialog, &mut self.context_parents);
+            apply_event(
+                &e,
+                dialog,
+                &mut self.context_parents,
+                self.auto_dialog.load(Ordering::Acquire),
+            );
             drained.push(e);
         }
         drained
@@ -411,12 +417,12 @@ impl FirefoxSession {
                 r = &mut fut => return r.map(Some),
                 e = events.recv() => match e {
                     Some(e) if e["method"] == "browsingContext.userPromptOpened"
-                        && e["params"]["handler"] != "accept"
+                        && !auto_handles_prompt(&e["params"], self.auto_dialog.load(Ordering::Acquire))
                         && [context, &self.context, &self.top_context].iter().any(|active|
                             owner_tab(active, &parents)
                                 == owner_tab(e["params"]["context"].as_str().unwrap_or_default(), &parents)
                         ) => return Ok(None),
-                    Some(e) => apply_event(&e, &mut None, &mut parents),
+                    Some(e) => apply_event(&e, &mut None, &mut parents, self.auto_dialog.load(Ordering::Acquire)),
                     None => return fut.await.map(Some),
                 },
             }
@@ -519,15 +525,26 @@ pub(crate) fn dialog_blocks_tab(owner_context: Option<&str>, top_context: &str) 
     owner_context.is_none_or(|context| context == top_context)
 }
 
+/// Whether Firefox already accepted a prompt or the daemon will automatically accept it.
+pub(crate) fn auto_handles_prompt(params: &Value, auto_dialog: bool) -> bool {
+    params["handler"] == "accept"
+        || (auto_dialog
+            && matches!(
+                params["type"].as_str(),
+                Some("alert" | "beforeunload" | "beforeUnload")
+            ))
+}
+
 fn apply_event(
     e: &Value,
     dialog: &mut Option<PendingDialog>,
     context_parents: &mut HashMap<String, String>,
+    auto_dialog: bool,
 ) {
     record_context(e, context_parents);
     let p = &e["params"];
     match e["method"].as_str() {
-        Some("browsingContext.userPromptOpened") if p["handler"] != "accept" => {
+        Some("browsingContext.userPromptOpened") if !auto_handles_prompt(p, auto_dialog) => {
             let prompt: UserPromptOpened = serde_json::from_value(p.clone()).unwrap_or_default();
             *dialog = Some(PendingDialog {
                 dialog_type: prompt.kind.unwrap_or_else(|| "alert".to_string()),
@@ -590,7 +607,36 @@ pub(crate) mod tests {
         tokio::sync::mpsc::UnboundedSender<Value>,
         Calls,
     ) {
-        fake_session_with(|_: &Value| json!({})).await
+        fake_session_with(|v: &Value| {
+            if v["method"] == "browsingContext.getTree" {
+                json!({"contexts": [{"context": "ctx-active"}]})
+            } else {
+                json!({})
+            }
+        })
+        .await
+    }
+
+    pub(crate) async fn fake_session_with_trees(
+        trees: Vec<Value>,
+    ) -> (
+        FirefoxSession,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+    ) {
+        let trees = std::sync::Mutex::new(std::collections::VecDeque::from(trees));
+        fake_session_with(move |v| {
+            if v["method"] != "browsingContext.getTree" {
+                return json!({});
+            }
+            let mut trees = trees.lock().unwrap();
+            if trees.len() > 1 {
+                trees.pop_front().unwrap()
+            } else {
+                trees.front().cloned().unwrap_or(json!({}))
+            }
+        })
+        .await
     }
 
     /// Like `fake_session`, but `script` supplies the raw result of each `script.callFunction`.
@@ -690,6 +736,8 @@ pub(crate) mod tests {
             process: None,
             headless: true,
             bidi,
+            auto_dialog: Arc::new(AtomicBool::new(false)),
+            auto_dialog_changed: Arc::new(Notify::new()),
             rdp,
             accessibility_actor: "acc".into(),
             context: "ctx-active".into(),
@@ -821,6 +869,8 @@ pub(crate) mod tests {
             process: None,
             headless: true,
             bidi: Arc::new(bidi),
+            auto_dialog: Arc::new(AtomicBool::new(false)),
+            auto_dialog_changed: Arc::new(Notify::new()),
             rdp,
             accessibility_actor: "acc".into(),
             context: "ctx-active".into(),
@@ -955,20 +1005,81 @@ pub(crate) mod tests {
         let mut d = None;
         let mut context_parents = HashMap::new();
         let frame = json!({"method":"browsingContext.contextCreated","params":{"context":"frame","parent":"top"}});
-        apply_event(&frame, &mut d, &mut context_parents);
+        apply_event(&frame, &mut d, &mut context_parents, false);
         let open = json!({"method":"browsingContext.userPromptOpened","params":{"context":"frame","type":"confirm","message":"sure?"}});
-        apply_event(&open, &mut d, &mut context_parents);
+        apply_event(&open, &mut d, &mut context_parents, false);
         assert_eq!(d.as_ref().unwrap().dialog_type, "confirm");
         assert_eq!(d.as_ref().unwrap().session_id.as_deref(), Some("frame"));
         assert_eq!(d.as_ref().unwrap().owner_context.as_deref(), Some("top"));
         let other =
             json!({"method":"browsingContext.userPromptClosed","params":{"context":"other"}});
-        apply_event(&other, &mut d, &mut context_parents);
+        apply_event(&other, &mut d, &mut context_parents, false);
         assert!(d.is_some());
         let close =
             json!({"method":"browsingContext.userPromptClosed","params":{"context":"frame"}});
-        apply_event(&close, &mut d, &mut context_parents);
+        apply_event(&close, &mut d, &mut context_parents, false);
         assert!(d.is_none());
+    }
+
+    #[test]
+    fn automatic_prompt_filter_keeps_manual_prompts_and_ignores_stale_accepts() {
+        for kind in ["alert", "beforeunload", "beforeUnload", "confirm", "prompt"] {
+            let automatic = matches!(kind, "alert" | "beforeunload" | "beforeUnload");
+            for enabled in [false, true] {
+                for handler in ["ignore", "accept"] {
+                    let mut dialog = None;
+                    apply_event(
+                        &json!({"method": "browsingContext.userPromptOpened", "params": {
+                            "context": "ctx-active", "type": kind, "handler": handler
+                        }}),
+                        &mut dialog,
+                        &mut HashMap::new(),
+                        enabled,
+                    );
+                    assert_eq!(
+                        dialog.is_none(),
+                        handler == "accept" || (automatic && enabled),
+                        "{kind}, {handler}, enabled={enabled}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn race_prompt_waits_for_auto_alert_but_returns_for_manual_confirm() {
+        let (session, events, _) = fake_session().await;
+        session.auto_dialog.store(true, Ordering::Release);
+        let waiting =
+            session.race_prompt("ctx-active", std::future::pending::<Result<(), String>>());
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        events
+            .send(
+                json!({"type":"event", "method":"browsingContext.userPromptOpened",
+            "params":{"context":"ctx-active", "type":"alert", "handler":"ignore"}}),
+            )
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        events
+            .send(
+                json!({"type":"event", "method":"browsingContext.userPromptOpened",
+            "params":{"context":"ctx-active", "type":"confirm", "handler":"ignore"}}),
+            )
+            .unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

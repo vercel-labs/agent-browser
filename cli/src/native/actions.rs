@@ -1167,8 +1167,74 @@ impl DaemonState {
     /// dialogs so they never block the agent. `confirm` and `prompt` dialogs
     /// are left for the agent to handle explicitly.
     fn start_dialog_handler(&mut self) {
+        if self.firefox.is_some() && self.dialog_handler_task.is_some() {
+            return;
+        }
         if let Some(task) = self.dialog_handler_task.take() {
             task.abort();
+        }
+
+        if let Some(ff) = self.firefox.as_ref() {
+            let client = Arc::clone(&ff.bidi);
+            let mut events = client.subscribe_buffered();
+            let enabled = Arc::clone(&ff.auto_dialog);
+            let changed = Arc::clone(&ff.auto_dialog_changed);
+            self.dialog_handler_task = Some(tokio::spawn(async move {
+                let mut pending = HashSet::<String>::new();
+                let track = |event: &Value, pending: &mut HashSet<String>| {
+                    let params = &event["params"];
+                    let Some(context) = params["context"].as_str() else {
+                        return;
+                    };
+                    match event["method"].as_str() {
+                        Some("browsingContext.userPromptOpened") => {
+                            pending.remove(context);
+                            if params["handler"] != "accept"
+                                && bidi::session::auto_handles_prompt(params, true)
+                            {
+                                pending.insert(context.to_string());
+                            }
+                        }
+                        Some("browsingContext.userPromptClosed") => {
+                            pending.remove(context);
+                        }
+                        _ => {}
+                    }
+                };
+                loop {
+                    tokio::select! {
+                        biased;
+                        event = events.recv() => match event {
+                            Some(event) => track(&event, &mut pending),
+                            None => break,
+                        },
+                        _ = changed.notified() => {}
+                    }
+                    while let Ok(event) = events.try_recv() {
+                        track(&event, &mut pending);
+                    }
+                    if enabled.load(std::sync::atomic::Ordering::Acquire) {
+                        if let Some(context) = pending.iter().next().cloned() {
+                            pending.remove(&context);
+                            if let Err(error) = client
+                                .send(
+                                    "browsingContext.handleUserPrompt",
+                                    json!({"context": context, "accept": true}),
+                                )
+                                .await
+                            {
+                                eprintln!(
+                                    "[auto-dismiss] failed to accept Firefox dialog: {error}"
+                                );
+                            }
+                            if !pending.is_empty() {
+                                changed.notify_one();
+                            }
+                        }
+                    }
+                }
+            }));
+            return;
         }
 
         if !self.auto_dialog {
@@ -2731,6 +2797,10 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 }
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
+    if let Some(task) = state.dialog_handler_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
     if let Some(ff) = state.firefox.take() {
         state.firefox_poller = None;
         state.pending_dialog = None;
@@ -5796,6 +5866,7 @@ async fn launch_firefox(
     write_engine_file(&state.session_id, &state.engine);
     state.launch_identity = Some(state.settings.launch_identity());
     state.firefox = Some(session);
+    state.start_dialog_handler();
     state.update_stream_client().await;
     try_auto_restore_state(state).await;
     load_storage_state_for_launch(state, &storage_state, strict_state).await?;
@@ -6188,6 +6259,13 @@ async fn apply_settings_patch(
     }
     if was(Key::NoAutoDialog) {
         state.auto_dialog = !next.no_auto_dialog();
+        if let Some(ff) = state.firefox.as_mut() {
+            ff.auto_dialog
+                .store(state.auto_dialog, std::sync::atomic::Ordering::Release);
+            ff.auto_dialog_changed.notify_one();
+        } else {
+            state.start_dialog_handler();
+        }
     }
     if was(Key::ActionPolicy) || was(Key::ConfirmActions) || was(Key::AllowedDomains) {
         // An approval asked for under the old rules no longer stands.
@@ -8307,13 +8385,20 @@ pub(crate) async fn handle_errors(cmd: &Value, state: &mut DaemonState) -> Resul
 }
 
 async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
+    let page_count = if let Some(browser) = state.browser.as_ref() {
+        browser.page_count()
+    } else if let Some(ff) = state.firefox.as_ref() {
+        bidi::tabs::tab_count(ff).await?
+    } else {
+        0
+    };
     Ok(json!({
         "session": state.session_id,
         "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
         "socketDir": get_socket_dir().to_string_lossy(),
         "backgroundPid": std::process::id(),
         "browserLaunched": has_active_browser_session(state),
-        "pageCount": state.browser.as_ref().map(|mgr| mgr.page_count()).unwrap_or(0),
+        "pageCount": page_count,
         "engine": state.engine,
         "launchHash": state.launch_identity,
         "compatibilityStatus": "current",
@@ -15236,21 +15321,9 @@ async fn move_mouse_interpolated(
     let dx = target_x - start_x;
     let dy = target_y - start_y;
     let distance = dx.hypot(dy);
-    let duration_ms = if duration_ms == 0 && human {
-        (80.0 + distance * 0.35).clamp(100.0, 700.0) as u64
-    } else {
-        duration_ms
-    };
+    let duration_ms = interpolated_mouse_duration(distance, duration_ms, human);
     let steps = interpolated_mouse_steps(distance, duration_ms, requested_steps, human);
-    let bend = if human && distance > 0.0 {
-        let mixed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let unit = ((mixed >> 11) as f64) / ((1_u64 << 53) as f64);
-        (unit * 2.0 - 1.0) * (distance * 0.08).min(36.0)
-    } else {
-        0.0
-    };
+    let bend = interpolated_mouse_bend(distance, human, seed);
     let (perp_x, perp_y) = if distance > 0.0 {
         (-dy / distance, dx / distance)
     } else {
@@ -15296,7 +15369,27 @@ async fn move_mouse_interpolated(
     Ok(())
 }
 
-fn interpolated_mouse_steps(
+pub(super) fn interpolated_mouse_duration(distance: f64, duration_ms: u64, human: bool) -> u64 {
+    if duration_ms == 0 && human {
+        (80.0 + distance * 0.35).clamp(100.0, 700.0) as u64
+    } else {
+        duration_ms
+    }
+}
+
+pub(super) fn interpolated_mouse_bend(distance: f64, human: bool, seed: u64) -> f64 {
+    if human && distance > 0.0 {
+        let mixed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let unit = ((mixed >> 11) as f64) / ((1_u64 << 53) as f64);
+        (unit * 2.0 - 1.0) * (distance * 0.08).min(36.0)
+    } else {
+        0.0
+    }
+}
+
+pub(super) fn interpolated_mouse_steps(
     distance: f64,
     duration_ms: u64,
     requested_steps: Option<usize>,
@@ -15315,7 +15408,7 @@ fn interpolated_mouse_steps(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn interpolated_mouse_point(
+pub(super) fn interpolated_mouse_point(
     start_x: f64,
     start_y: f64,
     target_x: f64,
@@ -23621,6 +23714,100 @@ mod firefox_routing_tests {
             .iter()
             .filter(|m| *m == "browsingContext.navigate")
             .count()
+    }
+
+    #[tokio::test]
+    async fn firefox_session_info_counts_live_contexts_and_rejects_missing_tree() {
+        let _guard = clean_env();
+        let (mut state, _) = firefox_state().await;
+        let (ff, _events, _) = bidi::session::tests::fake_session_with_trees(vec![
+            json!({"contexts": [{"context":"one", "children":[{"context":"frame"}]}, {"context":"two"}]}),
+            json!({"contexts": []}),
+            json!({}),
+        ]).await;
+        state.firefox = Some(ff);
+        assert_eq!(handle_session_info(&state).await.unwrap()["pageCount"], 2);
+        assert_eq!(handle_session_info(&state).await.unwrap()["pageCount"], 0);
+        assert!(handle_session_info(&state)
+            .await
+            .unwrap_err()
+            .contains("browsing contexts"));
+    }
+
+    #[tokio::test]
+    async fn firefox_live_dialog_listener_survives_disabled_start_and_accepts_each_prompt_once() {
+        let _guard = clean_env();
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        state.settings.set(Key::NoAutoDialog, json!(true));
+        state.auto_dialog = false;
+        let (ff, events, calls) = fake_session().await;
+        state.firefox = Some(ff);
+        state.start_dialog_handler();
+        let task_id = state.dialog_handler_task.as_ref().unwrap().id();
+        let accepts = || {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|method| *method == "browsingContext.handleUserPrompt")
+                .count()
+        };
+        let prompt = |kind: &str| {
+            json!({"type":"event", "method":"browsingContext.userPromptOpened",
+            "params":{"context":"ctx-active", "type":kind, "handler":"ignore"}})
+        };
+        events.send(prompt("alert")).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(accepts(), 0);
+        let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(false)))]);
+        let outcome = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        assert!(!outcome.relaunched_browser);
+        assert_eq!(state.dialog_handler_task.as_ref().unwrap().id(), task_id);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while accepts() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        events.send(prompt("confirm")).unwrap();
+        for _ in 0..3 {
+            state
+                .firefox
+                .as_ref()
+                .unwrap()
+                .auto_dialog_changed
+                .notify_one();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(accepts(), 1);
+        let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(true)))]);
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        events.send(prompt("alert")).unwrap();
+        events
+            .send(
+                json!({"type":"event", "method":"browsingContext.userPromptClosed",
+            "params":{"context":"ctx-active"}}),
+            )
+            .unwrap();
+        events.send(prompt("prompt")).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(false)))]);
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(accepts(), 1);
+        assert_eq!(state.dialog_handler_task.as_ref().unwrap().id(), task_id);
+        let client = Arc::downgrade(&state.firefox.as_ref().unwrap().bidi);
+        close_all_browser_backends(&mut state).await.unwrap();
+        assert!(state.dialog_handler_task.is_none());
+        assert!(client.upgrade().is_none());
     }
 
     #[tokio::test]
