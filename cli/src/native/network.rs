@@ -342,7 +342,9 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
                 // registers a handler for them (or the import settles, whichever is
                 // first; a script awaiting its first message at top level never
                 // settles on its own). Held events are replayed one task at a time,
-                // like native delivery, and stay ahead of anything that arrives later.
+                // like native delivery (via a MessageChannel, so a backlog is not
+                // throttled by the nested-timer clamp), and stay ahead of anything
+                // that arrives later.
                 const moduleSource =
                     'const _abQueue = [];\n' +
                     'const _abTypes = ["message", "connect"];\n' +
@@ -355,12 +357,15 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
                     '  const copy = new MessageEvent(event.type, {{ data: event.data, origin: event.origin, lastEventId: event.lastEventId, ports: Array.from(event.ports || []) }});\n' +
                     '  _abReplayed.add(copy);\n' +
                     '  self.dispatchEvent(copy);\n' +
-                    '  if (_abQueue.length) setTimeout(_abStep, 0); else _abDraining = false;\n' +
+                    '  if (_abQueue.length) _abTick(); else _abDraining = false;\n' +
                     '}};\n' +
+                    'const _abChannel = new MessageChannel();\n' +
+                    '_abChannel.port1.onmessage = _abStep;\n' +
+                    'const _abTick = () => _abChannel.port2.postMessage(null);\n' +
                     'const _abDrain = () => {{\n' +
                     '  if (!_abReleased || _abDraining || !_abQueue.length) return;\n' +
                     '  _abDraining = true;\n' +
-                    '  setTimeout(_abStep, 0);\n' +
+                    '  _abTick();\n' +
                     '}};\n' +
                     'const _abHold = (event) => {{\n' +
                     '  if (_abReplayed.has(event) || (_abReleased && !_abQueue.length)) return;\n' +

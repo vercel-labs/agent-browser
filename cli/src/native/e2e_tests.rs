@@ -5711,10 +5711,34 @@ const ECHO_WORKER: &str = "self.onmessage = event => self.postMessage('pong:' + 
 /// Serves a page that starts `new Worker('/echo-worker.js', { type: 'module' })`
 /// and posts to it twice right away, then once more later, and returns what the page saw once both
 /// replies arrived (or the worker errored).
+const MODULE_WORKER_ECHO_PAGE: &str = r#"
+const worker = new Worker('/echo-worker.js', { type: 'module' });
+worker.onmessage = event => window.workerReplies.push(event.data);
+worker.onerror = () => { window.workerError = 'worker:error'; };
+worker.postMessage('early');
+worker.postMessage('early2');
+setTimeout(() => worker.postMessage('late'), 500);
+"#;
+
 async fn run_module_worker_echo_with_domain_filter(
     page_headers: &'static str,
     worker_body: &'static str,
 ) -> String {
+    run_module_worker_with_domain_filter(page_headers, MODULE_WORKER_ECHO_PAGE, worker_body).await
+}
+
+async fn run_module_worker_with_domain_filter(
+    page_headers: &'static str,
+    page_script: &'static str,
+    worker_body: &'static str,
+) -> String {
+    let page: &'static str = Box::leak(
+        format!(
+            "<!doctype html><title>allowed</title><script>\nwindow.workerReplies = [];\nwindow.workerError = null;{}</script>",
+            page_script
+        )
+        .into_boxed_str(),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -5736,20 +5760,7 @@ async fn run_module_worker_echo_with_domain_filter(
                 let (content_type, extra_headers, body) = if path == "/echo-worker.js" {
                     ("application/javascript", "", worker_body)
                 } else {
-                    (
-                        "text/html",
-                        page_headers,
-                        r#"<!doctype html><title>allowed</title><script>
-window.workerReplies = [];
-window.workerError = null;
-const worker = new Worker('/echo-worker.js', { type: 'module' });
-worker.onmessage = event => window.workerReplies.push(event.data);
-worker.onerror = () => { window.workerError = 'worker:error'; };
-worker.postMessage('early');
-worker.postMessage('early2');
-setTimeout(() => worker.postMessage('late'), 500);
-</script>"#,
-                    )
+                    ("text/html", page_headers, page)
                 };
 
                 let response = format!(
@@ -15879,4 +15890,30 @@ async fn e2e_domain_filter_module_worker_replays_held_messages_in_separate_tasks
         result, "pong:early:first,pong:early2,pong:late",
         "Held messages should be replayed one task at a time"
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_module_worker_replays_backlog_without_timer_clamping() {
+    // Nested setTimeout is clamped to ~4ms, so replaying a backlog through
+    // chained timers would take seconds for a few hundred messages.
+    let result = run_module_worker_with_domain_filter(
+        "",
+        r#"
+const worker = new Worker('/echo-worker.js', { type: 'module' });
+worker.onmessage = event => window.workerReplies.push(event.data);
+worker.onerror = () => { window.workerError = 'worker:error'; };
+for (let i = 0; i < 300; i++) worker.postMessage('b');
+worker.postMessage('end');
+setTimeout(() => worker.postMessage('late'), 2500);
+"#,
+        "let start;\n\
+         self.onmessage = event => {\n\
+           if (start === undefined) start = performance.now();\n\
+           if (event.data === 'end') self.postMessage(performance.now() - start < 300 ? 'backlog:fast' : 'backlog:slow:' + Math.round(performance.now() - start));\n\
+           else if (event.data === 'late') self.postMessage('pong:late');\n\
+         };",
+    )
+    .await;
+    assert_eq!(result, "backlog:fast,pong:late");
 }
