@@ -1290,11 +1290,22 @@ fn named_key_info(key: &str) -> (String, String, i32) {
             if key.len() == 1 {
                 let ch = key.chars().next().unwrap();
                 char_to_key_info(ch)
+            } else if let Some(number) = function_key_number(key) {
+                // VK_F1 (0x70 = 112) through VK_F12 (0x7B = 123).
+                let name = format!("F{number}");
+                (name.clone(), name, 111 + number)
             } else {
                 (key.to_string(), key.to_string(), 0)
             }
         }
     }
+}
+
+/// The number of a function key from F1 through F12, matched case-insensitively.
+fn function_key_number(key: &str) -> Option<i32> {
+    let digits = key.strip_prefix(['f', 'F'])?;
+    let number: i32 = digits.parse().ok()?;
+    ((1..=12).contains(&number) && digits == number.to_string()).then_some(number)
 }
 
 #[cfg(test)]
@@ -1380,6 +1391,27 @@ mod tests {
 
     /// Characters outside the US keyboard layout should return (key, "", 0)
     /// so that `type_text` falls back to `Input.insertText`.
+    /// Function keys carry their Windows virtual-key codes. Sent with 0, a page
+    /// that matches shortcuts on `keyCode` (Monaco's F2 rename, F12 go to
+    /// definition) never saw them.
+    #[test]
+    fn test_named_key_info_function_keys() {
+        assert_eq!(
+            named_key_info("F1"),
+            ("F1".to_string(), "F1".to_string(), 112)
+        );
+        assert_eq!(
+            named_key_info("f2"),
+            ("F2".to_string(), "F2".to_string(), 113)
+        );
+        assert_eq!(
+            named_key_info("F12"),
+            ("F12".to_string(), "F12".to_string(), 123)
+        );
+        assert_eq!(key_text("F2"), None, "a function key inserts no text");
+        assert_eq!(named_key_info("F02").2, 0);
+    }
+
     #[test]
     fn test_unmapped_chars_return_zero_keycode() {
         for ch in ['@', '#', '$', '%', '^', '&', '*', '(', ')', '€', '£', '你'] {
