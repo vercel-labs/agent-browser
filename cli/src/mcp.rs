@@ -3439,15 +3439,17 @@ fn call_set_bool(arguments: &Value, setting: &str, key: &str) -> Result<Value, P
 }
 
 fn call_set_headers(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, set_headers_args(arguments)?, None)
+}
+
+fn set_headers_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let headers = optional_value(arguments, "headers")?
         .ok_or_else(|| ProtocolError::invalid_params("headers must be an object"))?;
+    // Reject invalid tool input before the CLI child can update session state.
+    crate::validation::validate_headers(headers).map_err(ProtocolError::invalid_params)?;
     let headers_json = serde_json::to_string(headers)
         .map_err(|e| ProtocolError::invalid_params(format!("headers encode error: {}", e)))?;
-    call_cli_tool(
-        arguments,
-        vec!["set".to_string(), "headers".to_string(), headers_json],
-        None,
-    )
+    Ok(vec!["set".to_string(), "headers".to_string(), headers_json])
 }
 
 fn call_set_credentials(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -5003,6 +5005,72 @@ mod tests {
     }
 
     #[test]
+    fn set_headers_runtime_rejects_invalid_values_before_running_cli() {
+        for headers in [
+            json!(null),
+            json!(false),
+            json!(0),
+            json!(1.5),
+            json!("MCP_HEADER_SECRET_TOP_LEVEL"),
+            json!([]),
+            json!([{}]),
+            json!({ "MCP_HEADER_SECRET_KEY": null }),
+            json!({ "MCP_HEADER_SECRET_KEY": false }),
+            json!({ "MCP_HEADER_SECRET_KEY": 1 }),
+            json!({ "MCP_HEADER_SECRET_KEY": 1.5 }),
+            json!({ "MCP_HEADER_SECRET_KEY": [] }),
+            json!({ "MCP_HEADER_SECRET_KEY": {} }),
+            json!({ "X-Good": "kept", "MCP_HEADER_SECRET_KEY": null }),
+        ] {
+            let error = call_set_headers(&json!({ "headers": headers }))
+                .expect_err("invalid MCP set_headers values must fail before child execution");
+            assert_eq!(error.code, -32602);
+            assert!(error.message.contains("headers"), "{}", error.message);
+            assert!(
+                !error.message.contains("MCP_HEADER_SECRET"),
+                "MCP header diagnostic leaked caller input: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn set_headers_runtime_keeps_missing_and_schema_contracts() {
+        let missing = call_set_headers(&json!({})).unwrap_err();
+        assert_eq!(missing.code, -32602);
+        assert_eq!(missing.message, "headers must be an object");
+
+        let set_headers = find_tool(TOOL_SET_HEADERS).unwrap();
+        assert_eq!(set_headers["inputSchema"]["required"], json!(["headers"]));
+        assert_eq!(
+            set_headers["inputSchema"]["properties"]["headers"]["type"],
+            "object"
+        );
+        assert_eq!(
+            set_headers["inputSchema"]["properties"]["headers"]["additionalProperties"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn set_headers_args_roundtrips_valid_header_objects_through_cli_parser() {
+        for headers in [
+            json!({}),
+            json!({ "X-Empty": "" }),
+            json!({ "x-MiXeD": "value", "Authorization": "Bearer token" }),
+            json!({ "X-Unicode": "你好 🌍" }),
+        ] {
+            let args = set_headers_args(&json!({ "headers": headers.clone() })).unwrap();
+            assert_eq!(&args[..2], ["set", "headers"]);
+            let flags = crate::flags::parse_flags(&args);
+            let command =
+                crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+            assert_eq!(command["action"], "headers");
+            assert_eq!(command["headers"], headers);
+        }
+    }
+
+    #[test]
     fn open_args_forwards_explicit_booleans() {
         // Absent fields send nothing (env/config resolution stays with the CLI).
         assert_eq!(open_args(&json!({})).unwrap(), vec!["open"]);
@@ -5767,10 +5835,17 @@ mod tests {
             vec!["--args", "--foo"],
             vec!["--config", "/c.json"],
             vec!["--allowed-domains=x"],
+            vec!["--headers", "{}"],
+            vec!["--headers={}"],
         ] {
             let arguments = json!({ "extraArgs": bad });
             let error = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap_err();
             assert!(error.message.contains("may not set"), "{:?}", bad);
+        }
+        for bad in [vec!["--headers", "{}"], vec!["--headers={}"]] {
+            let arguments = json!({ "extraArgs": bad });
+            let error = cli_tool_args(&arguments, vec!["read".to_string()], None).unwrap_err();
+            assert!(error.message.contains("may not set --headers"), "{:?}", bad);
         }
         for ok in [vec!["--engine", "obscura"], vec!["--full"], vec!["-i"]] {
             let arguments = json!({ "extraArgs": ok });

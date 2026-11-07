@@ -7,6 +7,8 @@ use std::error::Error;
 use std::time::Duration;
 use url::Url;
 
+use crate::validation::validate_headers;
+
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 const BODY_LIMIT: usize = 2 * 1024 * 1024;
 const READ_ACCEPT: &str = "text/markdown, text/plain;q=0.9, text/html;q=0.7, */*;q=0.1";
@@ -99,13 +101,12 @@ pub fn options_from_command(cmd: &Value) -> Result<ReadOptions, String> {
         .transpose()?;
     let mut headers = HashMap::new();
     if let Some(value) = cmd.get("headers") {
-        let map = value
-            .as_object()
-            .ok_or_else(|| "read headers must be a JSON object".to_string())?;
-        for (key, value) in map {
-            if let Some(value) = value.as_str() {
-                headers.insert(key.to_string(), value.to_string());
-            }
+        // Direct read callers must obey the same page-header contract as the CLI.
+        for (key, value) in validate_headers(value)? {
+            let value = value
+                .as_str()
+                .ok_or_else(|| "headers must be a JSON object with string values".to_string())?;
+            headers.insert(key.to_string(), value.to_string());
         }
     }
     let allowed_domains = cmd
@@ -1364,6 +1365,61 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
             options.allowed_domains,
             vec!["example.com".to_string(), "*.example.org".to_string()]
         );
+    }
+
+    #[test]
+    fn options_from_command_rejects_invalid_header_shapes_without_echoing_input() {
+        let invalid = [
+            json!(null),
+            json!(false),
+            json!(0),
+            json!(1.5),
+            json!("READ_HEADER_SECRET_TOP_LEVEL"),
+            json!([]),
+            json!([{}]),
+            json!({ "READ_HEADER_SECRET_KEY": null }),
+            json!({ "READ_HEADER_SECRET_KEY": false }),
+            json!({ "READ_HEADER_SECRET_KEY": 1 }),
+            json!({ "READ_HEADER_SECRET_KEY": 1.5 }),
+            json!({ "READ_HEADER_SECRET_KEY": [] }),
+            json!({ "READ_HEADER_SECRET_KEY": {} }),
+            json!({ "X-Good": "kept", "READ_HEADER_SECRET_KEY": null }),
+            json!({
+                "READ_HEADER_SECRET_KEY": {
+                    "credential": "READ_HEADER_SECRET_VALUE"
+                }
+            }),
+        ];
+
+        for headers in invalid {
+            let error = options_from_command(&json!({ "headers": headers }))
+                .expect_err("read options must reject invalid page-header JSON shapes");
+            assert!(
+                !error.contains("READ_HEADER_SECRET"),
+                "read header diagnostic leaked caller input: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn options_from_command_preserves_valid_empty_and_string_headers() {
+        for (headers, expected) in [
+            (json!({}), HashMap::new()),
+            (
+                json!({ "X-Empty": "", "x-MiXeD": "value", "X-Unicode": "你好 🌍" }),
+                HashMap::from([
+                    ("X-Empty".to_string(), "".to_string()),
+                    ("x-MiXeD".to_string(), "value".to_string()),
+                    ("X-Unicode".to_string(), "你好 🌍".to_string()),
+                ]),
+            ),
+        ] {
+            let options = options_from_command(&json!({ "headers": headers })).unwrap();
+            assert_eq!(options.headers, expected);
+        }
+
+        let omitted = options_from_command(&json!({ "action": "read" })).unwrap();
+        assert!(omitted.headers.is_empty());
     }
 
     #[test]

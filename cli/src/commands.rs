@@ -4,7 +4,7 @@ use std::io::{self, BufRead};
 
 use crate::color;
 use crate::flags::{is_global_flag, Flags};
-use crate::validation::{is_valid_session_name, session_name_error};
+use crate::validation::{is_valid_session_name, session_name_error, validate_headers};
 
 /// Error type for command parsing with contextual information
 #[derive(Debug)]
@@ -343,6 +343,14 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
     Ok(headers)
 }
 
+/// Parses page-level `--headers`, distinct from headers for the CDP handshake.
+fn parse_page_headers(raw: &str) -> Result<Value, String> {
+    let headers = serde_json::from_str::<Value>(raw)
+        .map_err(|e| format!("Invalid JSON for --headers at column {}", e.column()))?;
+    validate_headers(&headers)?;
+    Ok(headers)
+}
+
 /// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
@@ -451,13 +459,12 @@ fn parse_command_inner(
                 nav_cmd["waitUntil"] = json!("none");
             }
             if let Some(ref headers_json) = flags.headers {
-                let headers =
-                    serde_json::from_str::<serde_json::Value>(headers_json).map_err(|_| {
-                        ParseError::InvalidValue {
-                            message: format!("Invalid JSON for --headers: {}", headers_json),
-                            usage: "open <url> --headers '{\"Key\": \"Value\"}'",
-                        }
-                    })?;
+                let headers = parse_page_headers(headers_json).map_err(|message| {
+                    ParseError::InvalidValue {
+                        message,
+                        usage: "open <url> --headers '{\"Key\": \"Value\"}'",
+                    }
+                })?;
                 nav_cmd["headers"] = headers;
             }
             // Include iOS device info if specified (needed for auto-launch with existing daemon)
@@ -2687,18 +2694,11 @@ fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
         cmd["url"] = json!(url);
     }
     if let Some(ref headers_json) = flags.headers {
-        let headers = serde_json::from_str::<serde_json::Value>(headers_json).map_err(|_| {
-            ParseError::InvalidValue {
-                message: format!("Invalid JSON for --headers: {}", headers_json),
+        let headers =
+            parse_page_headers(headers_json).map_err(|message| ParseError::InvalidValue {
+                message,
                 usage: READ_USAGE,
-            }
-        })?;
-        if !headers.is_object() {
-            return Err(ParseError::InvalidValue {
-                message: format!("Invalid JSON object for --headers: {}", headers_json),
-                usage: READ_USAGE,
-            });
-        }
+            })?;
         cmd["headers"] = headers;
     }
     if let Some(ref allowed_domains) = flags.allowed_domains {
@@ -3639,11 +3639,10 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "set headers".to_string(),
                 usage: "set headers <json>",
             })?;
-            // Parse the JSON string into an object
-            let headers: serde_json::Value =
-                serde_json::from_str(headers_json).map_err(|_| ParseError::MissingArguments {
-                    context: "set headers".to_string(),
-                    usage: "set headers <json> (must be valid JSON object)",
+            let headers =
+                parse_page_headers(headers_json).map_err(|message| ParseError::InvalidValue {
+                    message,
+                    usage: "set headers <json> (must be a JSON object with string values)",
                 })?;
             Ok(json!({ "id": id, "action": "headers", "headers": headers }))
         }
@@ -4868,6 +4867,128 @@ mod tests {
         let err = result.unwrap_err();
         let msg = err.format();
         assert!(msg.contains("Invalid JSON for --headers"));
+    }
+
+    #[test]
+    fn page_header_flags_reject_invalid_json_shapes_without_echoing_input() {
+        let invalid = [
+            "null",
+            "false",
+            "0",
+            "1.5",
+            "\"PAGE_HEADER_SECRET_TOP_LEVEL\"",
+            "[]",
+            "[{}]",
+            "{\"PAGE_HEADER_SECRET_KEY\":null}",
+            "{\"PAGE_HEADER_SECRET_KEY\":false}",
+            "{\"PAGE_HEADER_SECRET_KEY\":1}",
+            "{\"PAGE_HEADER_SECRET_KEY\":1.5}",
+            "{\"PAGE_HEADER_SECRET_KEY\":[]}",
+            "{\"PAGE_HEADER_SECRET_KEY\":{}}",
+            "{\"X-Good\":\"kept\",\"PAGE_HEADER_SECRET_KEY\":null}",
+            "{\"PAGE_HEADER_SECRET_KEY\":\"PAGE_HEADER_SECRET_VALUE\",}",
+        ];
+
+        for raw in invalid {
+            let mut flags = default_flags();
+            flags.headers = Some(raw.to_string());
+            for command in [
+                "open https://example.com",
+                "goto https://example.com",
+                "navigate https://example.com",
+                "read https://example.com",
+            ] {
+                let error = parse_command(&args(command), &flags)
+                    .expect_err("invalid page-header JSON must be rejected");
+                let message = error.format();
+                assert!(
+                    message.contains("headers") || message.contains("JSON"),
+                    "expected a page-header diagnostic for {command} and {raw:?}: {message}"
+                );
+                assert!(
+                    !message.contains("PAGE_HEADER_SECRET"),
+                    "page-header diagnostic leaked caller input: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_headers_rejects_invalid_shapes_without_echoing_input() {
+        for raw in [
+            "null",
+            "false",
+            "0",
+            "1.5",
+            "\"PAGE_HEADER_SECRET_TOP_LEVEL\"",
+            "[]",
+            "[{}]",
+            "{\"PAGE_HEADER_SECRET_KEY\":null}",
+            "{\"PAGE_HEADER_SECRET_KEY\":false}",
+            "{\"PAGE_HEADER_SECRET_KEY\":1}",
+            "{\"PAGE_HEADER_SECRET_KEY\":1.5}",
+            "{\"PAGE_HEADER_SECRET_KEY\":[]}",
+            "{\"PAGE_HEADER_SECRET_KEY\":{}}",
+            "{\"X-Good\":\"kept\",\"PAGE_HEADER_SECRET_KEY\":null}",
+            "{\"PAGE_HEADER_SECRET_KEY\":\"PAGE_HEADER_SECRET_VALUE\",}",
+        ] {
+            let error = parse_command(&args(&format!("set headers {raw}")), &default_flags())
+                .expect_err("invalid page-header JSON must be rejected");
+            assert!(
+                matches!(error, ParseError::InvalidValue { .. }),
+                "supplied invalid headers should be an invalid value"
+            );
+            let message = error.format();
+            assert!(
+                !message.contains("PAGE_HEADER_SECRET"),
+                "page-header diagnostic leaked caller input: {message}"
+            );
+        }
+
+        let malformed = r#"{"PAGE_HEADER_SECRET_KEY":"PAGE_HEADER_SECRET_VALUE",}"#;
+        let error = parse_command(&args(&format!("set headers {malformed}")), &default_flags())
+            .unwrap_err();
+        let message = error.format();
+        assert!(message.contains("column"), "{message}");
+        assert!(!message.contains("PAGE_HEADER_SECRET"), "{message}");
+    }
+
+    #[test]
+    fn page_header_cli_parsers_accept_empty_and_string_values() {
+        for raw in [
+            "{}",
+            r#"{"X-Empty":""}"#,
+            r#"{"x-MiXeD":"value","Authorization":"Bearer token"}"#,
+            r#"{"X-Unicode":"你好 🌍"}"#,
+        ] {
+            let mut flags = default_flags();
+            flags.headers = Some(raw.to_string());
+            let navigate = parse_command(&args("open https://example.com"), &flags).unwrap();
+            assert_eq!(
+                navigate["headers"],
+                serde_json::from_str::<Value>(raw).unwrap()
+            );
+
+            let read = parse_command(&args("read https://example.com"), &flags).unwrap();
+            assert_eq!(read["headers"], serde_json::from_str::<Value>(raw).unwrap());
+
+            let set_args = vec!["set".to_string(), "headers".to_string(), raw.to_string()];
+            let set = parse_command(&set_args, &default_flags()).unwrap();
+            assert_eq!(set["headers"], serde_json::from_str::<Value>(raw).unwrap());
+        }
+
+        let open_without_headers =
+            parse_command(&args("open https://example.com"), &default_flags()).unwrap();
+        assert!(open_without_headers.get("headers").is_none());
+        let read_without_headers =
+            parse_command(&args("read https://example.com"), &default_flags()).unwrap();
+        assert!(read_without_headers.get("headers").is_none());
+
+        let mut unused_headers = default_flags();
+        unused_headers.headers = Some("null".to_string());
+        let launch_only_open = parse_command(&args("open"), &unused_headers).unwrap();
+        assert_eq!(launch_only_open["action"], "launch");
+        assert!(launch_only_open.get("headers").is_none());
     }
 
     #[test]
