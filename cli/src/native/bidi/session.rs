@@ -38,7 +38,7 @@ pub struct FirefoxSession {
     pub auto_dialog_changed: Arc<Notify>,
     pub rdp: RdpClient,
     pub accessibility_actor: String,
-    /// Active browsing context id: a top-level tab, or a frame after `frame <sel>`.
+    /// Active top-level browsing context (tab) id.
     pub context: String,
     /// Active top-level browsing context id (tab), restored by `frame main`.
     pub top_context: String,
@@ -113,8 +113,8 @@ async fn connect_devtools_loop(endpoint: &DevtoolsEndpoint) -> Result<RdpClient,
             DevtoolsEndpoint::Port(port) => RdpClient::connect_tcp(*port).await,
         };
         match attempt {
-            Ok(c) => return Ok(c),
-            Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
+            Ok(client) => return Ok(client),
+            Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
             Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
@@ -603,7 +603,6 @@ fn context_contains<'a>(
 pub(crate) mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
-    use tokio::io::AsyncWriteExt;
     use tokio_tungstenite::tungstenite::Message;
 
     pub(crate) type Calls = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
