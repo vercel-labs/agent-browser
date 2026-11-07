@@ -16122,10 +16122,13 @@ async fn e2e_firefox_element_screenshot_below_viewport() {
     firefox_open(&mut state, &url).await;
     assert_eq!(firefox_eval(&mut state, "window.scrollY").await, json!(0));
     assert!(
-        firefox_eval(&mut state, "document.querySelector('#box').getBoundingClientRect().top")
-            .await
-            .as_f64()
-            .unwrap()
+        firefox_eval(
+            &mut state,
+            "document.querySelector('#box').getBoundingClientRect().top"
+        )
+        .await
+        .as_f64()
+        .unwrap()
             > 600.0
     );
 
@@ -16140,7 +16143,11 @@ async fn e2e_firefox_element_screenshot_below_viewport() {
     firefox_close(&mut state).await;
 
     assert_eq!((width, height), (200, 200));
-    assert!(red > 0.99, "only {:.0}% of the clip is the element", red * 100.0);
+    assert!(
+        red > 0.99,
+        "only {:.0}% of the clip is the element",
+        red * 100.0
+    );
 }
 
 #[tokio::test]
