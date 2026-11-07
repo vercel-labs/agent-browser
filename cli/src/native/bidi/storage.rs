@@ -315,17 +315,17 @@ pub async fn storage_clear(cmd: &Value, state: &mut DaemonState) -> Result<Value
     Ok(json!({ "cleared": true }))
 }
 
-fn collect_context_ids(contexts: &[Value], out: &mut Vec<(String, String)>) {
+fn collect_context_ids(contexts: &[Value], out: &mut Vec<(String, String, bool)>, top_level: bool) {
     for context in contexts {
         let url = context["url"].as_str().unwrap_or("");
         if let Some(id) = context["context"]
             .as_str()
             .filter(|_| !url.starts_with("about:"))
         {
-            out.push((id.to_string(), url.to_string()));
+            out.push((id.to_string(), url.to_string(), top_level));
         }
         if let Some(children) = context["children"].as_array() {
-            collect_context_ids(children, out);
+            collect_context_ids(children, out, false);
         }
     }
 }
@@ -409,13 +409,13 @@ async fn collect_origins(
         .as_array()
         .ok_or("Failed to read active browsing contexts")?;
     let mut ids = Vec::new();
-    collect_context_ids(contexts, &mut ids);
+    collect_context_ids(contexts, &mut ids, true);
     let mut open = HashSet::new();
     let mut read = HashSet::new();
     let mut seen = HashSet::new();
     let mut temporary = HashSet::new();
     let mut origins = Vec::new();
-    for (id, url) in ids {
+    for (id, url, top_level) in ids {
         if let Ok(url) = url::Url::parse(&url) {
             let origin = url.origin().ascii_serialization();
             if origin != "null" {
@@ -423,7 +423,15 @@ async fn collect_origins(
                 open.insert(origin);
             }
         }
-        let Some(origin) = read_origin(ff, &id).await? else {
+        let origin = match read_origin(ff, &id).await {
+            Ok(origin) => origin,
+            Err(error) if !top_level => {
+                eprintln!("Skipping unreadable Firefox child context {id}: {error}");
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(origin) = origin else {
             continue;
         };
         ff.visited_origins.insert(origin.origin.clone());
@@ -724,6 +732,35 @@ mod tests {
             .unwrap()
             .iter()
             .any(|method| method == "browsingContext.create"));
+    }
+
+    #[tokio::test]
+    async fn unreadable_child_context_does_not_abort_state_collection() {
+        let (mut ff, tx, _calls) = fake_session_with(|req| match req["method"].as_str() {
+            Some("browsingContext.getTree") => json!({
+                "contexts": [{
+                    "context": "ctx-page",
+                    "url": "https://one.test/",
+                    "children": [{"context": "ctx-frame", "url": "https://frame.test/"}]
+                }]
+            }),
+            Some("script.callFunction")
+                if req["params"]["target"]["context"] == "ctx-frame" =>
+            {
+                json!({
+                    "type": "exception",
+                    "exceptionDetails": {"text": "no such frame"}
+                })
+            }
+            Some("script.callFunction") => origin_result("https://one.test"),
+            _ => json!({}),
+        })
+        .await;
+        std::mem::forget(tx);
+
+        let (_, seen, _) = collect_origins(&mut ff).await.unwrap();
+
+        assert_eq!(seen, HashSet::from(["https://one.test".to_string()]));
     }
 
     #[tokio::test]

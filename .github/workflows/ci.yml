@@ -209,7 +209,6 @@ jobs:
 
   native-e2e:
     name: Native E2E Tests
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     needs: rust
     steps:
@@ -227,6 +226,12 @@ jobs:
       - name: Install Chrome
         run: |
           cargo run --manifest-path cli/Cargo.toml -- install --with-deps
+
+      - name: Install Firefox
+        run: |
+          curl -fsSL "https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64&lang=en-US" -o "$RUNNER_TEMP/firefox.tar.xz"
+          sudo tar -xJf "$RUNNER_TEMP/firefox.tar.xz" -C /opt
+          echo "FIREFOX_BIN=/opt/firefox/firefox" >> "$GITHUB_ENV"
 
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg

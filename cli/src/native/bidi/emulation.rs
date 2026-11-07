@@ -206,12 +206,15 @@ pub(crate) async fn update_tab_configuration(
 /// Replays every stored setting onto `context`, used for tabs the daemon creates.
 pub async fn apply_to_context(ff: &FirefoxSession, context: &str) -> Result<(), String> {
     let settings = ff.emulation.read().unwrap().clone();
-    apply_settings_to_context(&ff.bidi, &ff.rdp, &settings, context).await
+    apply_settings_to_context(&ff.bidi, &settings, context).await?;
+    if let Some(ref media) = settings.media {
+        update_tab_configuration(&ff.bidi, &ff.rdp, context, &media_config(media)?).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn apply_settings_to_context(
     bidi: &BidiClient,
-    rdp: &RdpClient,
     settings: &Settings,
     context: &str,
 ) -> Result<(), String> {
@@ -232,9 +235,6 @@ pub(crate) async fn apply_settings_to_context(
     }
     if let Some(offline) = settings.offline {
         send_scoped_bidi(bidi, context, self::offline(offline)).await?;
-    }
-    if let Some(ref media) = settings.media {
-        update_tab_configuration(bidi, rdp, context, &media_config(media)?).await?;
     }
     Ok(())
 }
