@@ -24088,10 +24088,7 @@ mod firefox_routing_tests {
         let _guard = clean_env();
         let (mut session, _tx, calls) = fake_session().await;
         assert!(!firefox_session_has_exited(&mut session).await);
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            ["browsingContext.getTree"]
-        );
+        assert!(calls.lock().unwrap().is_empty());
 
         let mut session = fake_session_dead().await;
         assert!(firefox_session_has_exited(&mut session).await);
