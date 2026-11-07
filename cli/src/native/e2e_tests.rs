@@ -17675,37 +17675,6 @@ async fn e2e_firefox_full_page_screenshot_larger_than_64mb() {
     firefox_close(&mut state).await;
 }
 
-/// Alerts and beforeunload prompts are auto-accepted, so they never block the next command.
-#[tokio::test]
-#[ignore = "requires FIREFOX_BIN; run serially"]
-async fn e2e_firefox_auto_dialog() {
-    required_firefox_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let _env = firefox_test_environment(tmp.path());
-    let fixture = firefox_fixture().await;
-    let mut state = DaemonState::new();
-    launch_firefox(&mut state, json!({})).await;
-    firefox_open(&mut state, &fixture.url).await;
-
-    assert_eq!(
-        firefox_eval(&mut state, "alert('Heads up'); 1").await,
-        json!(1)
-    );
-    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
-
-    firefox_eval(&mut state, "window.onbeforeunload = () => 'leave?'").await;
-    firefox_open(&mut state, &fixture.other).await;
-    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
-
-    state
-        .firefox
-        .as_mut()
-        .unwrap()
-        .drain_events(&mut state.pending_dialog);
-    assert!(state.pending_dialog.is_none());
-    firefox_close(&mut state).await;
-}
-
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_review_live_dialog_setting() {

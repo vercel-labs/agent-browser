@@ -806,7 +806,7 @@ mod tests {
                     .unwrap();
             }
         });
-        ff.bidi = super::super::bidi::client::BidiClient::connect(&address)
+        ff.bidi = super::super::client::BidiClient::connect(&address)
             .await
             .unwrap()
             .into();
