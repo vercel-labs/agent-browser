@@ -72,6 +72,10 @@
       {
         "from": "mobile - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard",
         "to": "mobile - Viewport/device/geolocation/permissions/media, touch, swipe, mouse, keyboard"
+      },
+      {
+        "from": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)\nagent-browser set device <name>       # Emulate device (\"iPhone 14\")\nagent-browser set geo <lat> <lng>     # Set geolocation\nagent-browser set offline [on|off]    # Toggle offline mode\nagent-browser set headers <json>      # Extra HTTP headers\nagent-browser set credentials <u> <p> # HTTP basic auth for current and future tabs\nagent-browser set media [dark|light]  # Emulate color scheme (persists for session)",
+        "to": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)\nagent-browser set device <name>       # Emulate device (\"iPhone 14\")\nagent-browser set geo <lat> <lng>     # Set geolocation\nagent-browser set permissions <name...> [--origin <url>]  # Grant Chrome permission types\nagent-browser set offline [on|off]    # Toggle offline mode\nagent-browser set headers <json>      # Extra HTTP headers\nagent-browser set credentials <u> <p> # HTTP basic auth for current and future tabs\nagent-browser set media [dark|light]  # Emulate color scheme (persists for session)"
       }
     ],
     "/configuration": [
@@ -317,16 +321,16 @@
     "/sessions": [
       {
         "from": "Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use `agent-browser session id` to generate a valid key:",
-        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, `café-東京_7` is valid, while `my session` is rejected because it contains a space.\n\nUse `agent-browser session id` to generate a valid key:"
+        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, `caf\u00e9-\u6771\u4eac_7` is valid, while `my session` is rejected because it contains a space.\n\nUse `agent-browser session id` to generate a valid key:"
       },
       {
         "from": "Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use agent-browser session id to generate a valid key:",
-        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, café-東京_7 is valid, while my session is rejected because it contains a space.\n\nUse agent-browser session id to generate a valid key:"
+        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, caf\u00e9-\u6771\u4eac_7 is valid, while my session is rejected because it contains a space.\n\nUse agent-browser session id to generate a valid key:"
       }
     ],
     "/skills": [
       {
-        "from": " — ",
+        "from": " \u2014 ",
         "to": ": "
       },
       {
