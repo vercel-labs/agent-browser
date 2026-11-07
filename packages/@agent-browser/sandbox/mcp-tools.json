@@ -3535,6 +3535,34 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
+      "description": "Override Intl locale (DateTimeFormat, NumberFormat) for the current page and tabs opened later. Use off or default to clear. Does not change navigator.language.",
+      "inputSchema": {
+        "properties": {
+          "locale": {
+            "description": "BCP 47 locale tag such as en-GB or ja-JP. Use off or default to clear. Applies to Intl APIs; navigator.language stays the browser language.",
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "locale"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_set_locale",
+      "profiles": [
+        "mobile"
+      ],
+      "title": "Set locale"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Set media emulation.",
       "inputSchema": {
         "properties": {
@@ -3592,6 +3620,34 @@
         "network"
       ],
       "title": "Set offline"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Override Intl timezone for the current page and tabs opened later. Use off or default to clear.",
+      "inputSchema": {
+        "properties": {
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "timezoneId": {
+            "description": "IANA timezone ID such as America/New_York or UTC. Use off or default to clear.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timezoneId"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_set_timezone",
+      "profiles": [
+        "mobile"
+      ],
+      "title": "Set timezone"
     },
     {
       "annotations": {
