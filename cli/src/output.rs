@@ -909,6 +909,21 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
     }
 }
 
+/// Formats numeric Unix seconds as a UTC date and preserves legacy date strings.
+/// Invalid or out-of-range values return an empty string.
+fn format_state_modified(modified: Option<&serde_json::Value>) -> String {
+    match modified {
+        Some(serde_json::Value::Number(seconds)) => seconds
+            .as_u64()
+            .and_then(|seconds| i64::try_from(seconds).ok())
+            .and_then(|seconds| chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0))
+            .map(|timestamp| timestamp.format("%Y-%m-%d").to_string())
+            .unwrap_or_default(),
+        Some(serde_json::Value::String(date)) => date.split('T').next().unwrap_or(date).to_string(),
+        _ => String::new(),
+    }
+}
+
 fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -1777,7 +1792,7 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 for file in files {
                     let filename = file.get("filename").and_then(|v| v.as_str()).unwrap_or("");
                     let size = file.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let modified = file.get("modified").and_then(|v| v.as_str()).unwrap_or("");
+                    let modified = format_state_modified(file.get("modified"));
                     let encrypted = file
                         .get("encrypted")
                         .and_then(|v| v.as_bool())
@@ -1787,12 +1802,11 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                     } else {
                         format!("{}B", size)
                     };
-                    let date_str = modified.split('T').next().unwrap_or(modified);
                     let enc_str = if encrypted { " [encrypted]" } else { "" };
                     println!(
                         "  {} {}",
                         filename,
-                        color::dim(&format!("({}, {}){}", size_str, date_str, enc_str))
+                        color::dim(&format!("({}, {}){}", size_str, modified, enc_str))
                     );
                 }
             }
@@ -3589,6 +3603,7 @@ agent-browser state - Manage browser state
 Usage: agent-browser state <operation> [args]
 
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
+Text listings show modification dates in UTC. JSON output preserves Unix seconds.
 
 Operations:
   save <path>                        Save current state to file
@@ -4964,10 +4979,61 @@ mod tests {
 
     use super::{
         boundary_origin, format_a11y_text, format_react_tree_text, format_snapshot_delta,
-        format_storage_text, format_vitals_text, format_webmcp_context, format_webmcp_text,
-        format_webmcp_tool_text, format_with_boundaries, OutputOptions,
+        format_state_modified, format_storage_text, format_vitals_text, format_webmcp_context,
+        format_webmcp_text, format_webmcp_tool_text, format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_format_state_modified_unix_seconds() {
+        assert_eq!(
+            format_state_modified(Some(&json!(1_794_000_000))),
+            "2026-11-06"
+        );
+        assert_eq!(
+            format_state_modified(Some(&json!(1_704_067_200))),
+            "2024-01-01"
+        );
+        assert_eq!(
+            format_state_modified(Some(&json!(1_704_067_199))),
+            "2023-12-31"
+        );
+    }
+
+    #[test]
+    fn test_format_state_modified_epoch_zero() {
+        assert_eq!(format_state_modified(Some(&json!(0))), "1970-01-01");
+    }
+
+    #[test]
+    fn test_format_state_modified_preserves_legacy_strings() {
+        assert_eq!(
+            format_state_modified(Some(&json!("2024-01-01T00:00:00Z"))),
+            "2024-01-01"
+        );
+        assert_eq!(
+            format_state_modified(Some(&json!("1794000000"))),
+            "1794000000"
+        );
+    }
+
+    #[test]
+    fn test_format_state_modified_invalid_values() {
+        assert_eq!(format_state_modified(None), "");
+
+        for invalid in [
+            json!(null),
+            json!(true),
+            json!([]),
+            json!({}),
+            json!(1.5),
+            json!(-1),
+            json!(i64::MAX),
+            json!(u64::MAX),
+        ] {
+            assert_eq!(format_state_modified(Some(&invalid)), "", "{invalid}");
+        }
+    }
 
     #[test]
     fn test_format_react_tree_text_preserves_populated_tree() {

@@ -108,6 +108,8 @@ agent-browser --session "$SESSION" session info --json
 
 Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.
 
+Text output from `agent-browser state list` shows modification dates in UTC. JSON output preserves the original Unix seconds.
+
 ## Common Patterns
 
 ### Authenticated Session Reuse
