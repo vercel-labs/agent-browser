@@ -246,7 +246,10 @@ mod tests {
         assert!(first.await.unwrap().unwrap_err().contains("timed out"));
 
         let error = c.request("act1", "second", json!({})).await.unwrap_err();
-        assert!(error.contains("unusable after a request timeout"), "{error}");
+        assert!(
+            error.contains("unusable after a request timeout"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -287,6 +290,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(get(&mut s).await["type"], "first");
         let error = c.request("act1", "second", json!({})).await.unwrap_err();
-        assert!(error.contains("unusable after a request timeout"), "{error}");
+        assert!(
+            error.contains("unusable after a request timeout"),
+            "{error}"
+        );
     }
 }
