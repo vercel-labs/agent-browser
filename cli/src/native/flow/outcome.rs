@@ -443,9 +443,9 @@ fn check_response_on(
         }
         // The proxy refused the request; the site never saw it.
         407 => {
-            return Err(Failure::transport(format!(
-                "HTTP 407: the proxy requires authentication"
-            )))
+            return Err(Failure::transport(
+                "HTTP 407: the proxy requires authentication".to_string(),
+            ))
         }
         _ => {}
     }
