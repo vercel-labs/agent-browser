@@ -266,6 +266,8 @@ Firefox does not support mobile viewport mode, `set device`, or `reduced-motion`
 
 Viewport scales and geolocation coordinates must be finite numbers.
 
+`set headers` and page-level `--headers` accept a JSON object whose values are strings. With `open` or navigation, `--headers` stays scoped to the URL's origin; with `read`, it applies only to that request. An empty map on navigation leaves the existing origin-scoped headers unchanged. Use `set headers '{}'` to clear global headers on current and future tabs.
+
 ## Cookies and Storage
 
 ```bash
@@ -606,7 +608,7 @@ agent-browser -p <provider> ...       # Browser provider or configured provider 
 agent-browser -p ladybird ...         # Ladybird over WebDriver: CSS selectors, no snapshot refs
 agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy
-agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
+agent-browser --headers <json> ...    # JSON object of string values; scoped by URL for navigation, per-request for read
 agent-browser --executable-path <p>   # Custom browser executable
 agent-browser --args "--a,--b=x,y"    # Launch args; commas inside a value are kept
 agent-browser --extension <path> ...  # Load browser extension (repeatable)
