@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head><title>Upload Test</title></head>
+<body>
+  <h1>Upload Test</h1>
+  <label for="fileInput">Choose file:</label>
+  <input type="file" id="fileInput" name="fileInput">
+  <div id="result"></div>
+  <script>
+    document.getElementById('fileInput').addEventListener('change', function(e) {
+      var file = e.target.files[0];
+      if (file) {
+        document.getElementById('result').textContent = 'uploaded:' + file.name;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -4,6 +4,8 @@ use serde_json::Value;
 /// Abstract backend for browser automation. CDP (Chromium) and WebDriver
 /// (Safari/iOS) share this interface so actions.rs can remain backend-agnostic
 /// in the future.
+// async_trait adds #[must_use] to methods returning an already must_use future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BrowserBackend: Send + Sync {
     async fn navigate(&self, url: &str) -> Result<(), String>;
@@ -46,6 +48,17 @@ pub struct WebDriverBackend {
 impl WebDriverBackend {
     pub fn new(client: super::client::WebDriverClient) -> Self {
         Self { client }
+    }
+
+    pub async fn is_connection_alive(&self) -> bool {
+        matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.client.get_window_handles(),
+            )
+            .await,
+            Ok(Ok(_))
+        )
     }
 }
 
@@ -113,6 +126,8 @@ impl BrowserBackend for WebDriverBackend {
 
 /// CDP-backed backend constants for unsupported actions on WebDriver
 pub const WEBDRIVER_UNSUPPORTED_ACTIONS: &[&str] = &[
+    // axe-core frame injection currently relies on CDP execution contexts.
+    "a11y",
     "screencast_start",
     "screencast_stop",
     "trace_start",
@@ -135,6 +150,7 @@ mod tests {
 
     #[test]
     fn test_unsupported_actions() {
+        assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"a11y"));
         assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"screencast_start"));
         assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"trace_start"));
         assert!(!WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"navigate"));

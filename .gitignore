@@ -45,6 +45,9 @@ yarn.lock
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
+!.env.*.example
 
 # opensrc - source code for packages
 opensrc/
@@ -58,6 +61,13 @@ docs/package-lock.json
 # pnpm
 .pnpm-store/
 
+# TypeScript
+*.tsbuildinfo
+
 # next
 .next/
 out/
+next-env.d.ts
+
+# Output of the native parity tests
+cli/test-parity-state.json.enc

@@ -5,6 +5,7 @@ import { useAtomValue, useSetAtom } from "jotai/react";
 import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
+import { getSessionStreamUrl } from "@/lib/dashboard-routes";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -68,6 +69,29 @@ const KEY_INFO: Record<string, { text?: string; keyCode: number }> = {
   PageUp: { keyCode: 33 },
   PageDown: { keyCode: 34 },
 };
+
+function printableKeyCode(key: string): number {
+  if (key.length !== 1) return 0;
+  const code = key.charCodeAt(0);
+  if (code >= 65 && code <= 90) return code;
+  if (code >= 97 && code <= 122) return code - 32;
+  if (code >= 48 && code <= 57) return code;
+  switch (key) {
+    case " ": return 32;
+    case ";": case ":": return 186;
+    case "=": case "+": return 187;
+    case ",": case "<": return 188;
+    case "-": case "_": return 189;
+    case ".": case ">": return 190;
+    case "/": case "?": return 191;
+    case "`": case "~": return 192;
+    case "[": case "{": return 219;
+    case "\\": case "|": return 220;
+    case "]": case "}": return 221;
+    case "'": case "\"": return 222;
+    default: return 0;
+  }
+}
 
 function cdpButton(btn: number): string {
   switch (btn) {
@@ -360,9 +384,9 @@ export function Viewport() {
     (e: KeyboardEvent, eventType: string) => {
       const info = KEY_INFO[e.key];
       const text = eventType === "keyDown"
-        ? (info?.text ?? (e.key.length === 1 ? e.key : undefined))
+        ? (info?.text ?? (Array.from(e.key).length === 1 ? e.key : undefined))
         : undefined;
-      const keyCode = info?.keyCode ?? (e.key.length === 1 ? e.key.charCodeAt(0) : 0);
+      const keyCode = info?.keyCode ?? printableKeyCode(e.key);
       let m = 0;
       if (e.altKey) m |= 1;
       if (e.ctrlKey) m |= 2;
@@ -446,7 +470,7 @@ export function Viewport() {
                 value={addressValue}
                 onChange={(e) => setAddressValue(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") {
+                  if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                     e.preventDefault();
                     handleNavigate();
                   }
@@ -550,7 +574,7 @@ export function Viewport() {
         </span>
         {browserConnected && (
           <span className="text-xs text-muted-foreground/60 font-mono">
-            ws://localhost:{streamPort}
+            {getSessionStreamUrl(streamPort)}
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
@@ -674,7 +698,7 @@ export function Viewport() {
             value={customValue}
             onChange={(e) => setCustomValue(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                 e.preventDefault();
                 submitCustomDimensions();
               }
@@ -704,7 +728,7 @@ export function Viewport() {
             value={recordPath}
             onChange={(e) => setRecordPath(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                 e.preventDefault();
                 handleRecordStart();
               }

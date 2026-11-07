@@ -9,7 +9,7 @@ import type {
   StreamMessage,
   TabInfo,
 } from "@/types";
-import { activePortAtom } from "@/store/sessions";
+import { getSessionStreamUrl } from "@/lib/dashboard-routes";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 
 const MAX_EVENTS = 500;
@@ -117,9 +117,10 @@ export function useStreamSync(port: number) {
   }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine]);
 
   const connect = useCallback(() => {
+    if (port <= 0) return;
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(`ws://localhost:${port}`);
+    const ws = new WebSocket(getSessionStreamUrl(port));
     wsRef.current = ws;
     setWsRef(ws);
 

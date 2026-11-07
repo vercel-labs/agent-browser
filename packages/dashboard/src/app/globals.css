@@ -186,3 +186,22 @@ button {
 :is(.dark *).json-punct {
   color: #a1a1a1;
 }
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.shimmer-text {
+  background: linear-gradient(
+    90deg,
+    currentColor 25%,
+    color-mix(in srgb, currentColor 40%, transparent) 50%,
+    currentColor 75%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 2s ease-in-out infinite;
+}
