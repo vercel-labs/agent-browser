@@ -447,9 +447,13 @@ impl FirefoxSession {
                     e["params"]["context"].as_str(),
                     e["params"]["originalOpener"].as_str(),
                 ) {
+                    let owner = owner_tab(opener, &self.context_parents).to_string();
+                    let active_owner = owner_tab(&self.top_context, &self.context_parents);
                     self.top_context_openers
-                        .insert(context.to_string(), opener.to_string());
-                    self.top_context = context.to_string();
+                        .insert(context.to_string(), owner.clone());
+                    if owner == active_owner {
+                        self.top_context = context.to_string();
+                    }
                 }
             } else if e["method"] == "browsingContext.contextDestroyed" {
                 if let Some(context) = e["params"]["context"].as_str() {
@@ -1296,6 +1300,42 @@ pub(crate) mod tests {
         ff.drain_events(&mut None);
         assert_eq!(ff.top_context, "tab-3");
         assert_eq!(ff.context, "tab-3");
+    }
+
+    #[tokio::test]
+    async fn popup_opened_from_an_iframe_restores_the_top_level_tab() {
+        let (mut ff, tx, _) = fake_session().await;
+        ff.context = "tab-frame".into();
+        ff.top_context = "tab".into();
+        ff.context_parents.insert("tab-frame".into(), "tab".into());
+        let mut received = ff.bidi.subscribe_buffered();
+        tx.send(json!({
+            "type": "event",
+            "method": "browsingContext.contextCreated",
+            "params": {"context": "popup", "originalOpener": "tab-frame"}
+        }))
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        ff.drain_events(&mut None);
+        assert_eq!(ff.top_context, "popup");
+        ff.context = "popup".into();
+
+        tx.send(json!({
+            "type": "event",
+            "method": "browsingContext.contextDestroyed",
+            "params": {"context": "popup"}
+        }))
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        ff.drain_events(&mut None);
+        assert_eq!(ff.top_context, "tab");
+        assert_eq!(ff.context, "tab");
     }
 
     #[tokio::test]
