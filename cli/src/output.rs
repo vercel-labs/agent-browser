@@ -2988,8 +2988,8 @@ Settings:
                              scale must be finite)
   device <name>              Emulate device (e.g., "iPhone 12")
   geo <lat> <lng>            Set geolocation (coordinates must be finite)
-  timezone <iana|off>        Override Intl timezone (IANA); off or default clears new-tab replay
-  locale <tag|off>           Override navigator.language (BCP 47); off or default clears new-tab replay
+  timezone <iana|off>        Override Intl timezone (IANA); off or default clears the override
+  locale <tag|off>           Override Intl locale (BCP 47); off or default clears the override
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
@@ -4439,7 +4439,7 @@ Mouse:  agent-browser mouse <action> [args]
 
 Browser Settings:  agent-browser set <setting> [value]
   viewport <w> <h>, device <name>, geo <lat> <lng>
-  timezone <iana>, locale <tag>
+  timezone <iana|off>, locale <tag|off>
   offline [on|off], headers <json>, credentials <user> <pass>
   media [dark|light] [reduced-motion]
 

@@ -1319,8 +1319,8 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SET_LOCALE,
             "Set locale",
-            "Override navigator.language for the current page and tabs opened later. Use off or default to clear.",
-            json!({ "locale": { "type": "string", "description": "BCP 47 locale tag such as en-GB. Use off or default to clear." } }),
+            "Override Intl locale (DateTimeFormat, NumberFormat) for the current page and tabs opened later. Use off or default to clear. Does not change navigator.language.",
+            json!({ "locale": { "type": "string", "description": "BCP 47 locale tag such as en-GB or ja-JP. Use off or default to clear. Applies to Intl APIs; navigator.language stays the browser language." } }),
             &["locale"],
         ),
         tool(
@@ -5627,9 +5627,23 @@ mod tests {
     }
 
     #[test]
+    fn set_timezone_args_map_off_and_default() {
+        let args = set_timezone_args(&json!({ "timezoneId": "off" })).unwrap();
+        assert_eq!(args, vec!["set", "timezone", "off"]);
+        let args = set_timezone_args(&json!({ "timezoneId": "default" })).unwrap();
+        assert_eq!(args, vec!["set", "timezone", "default"]);
+    }
+
+    #[test]
     fn set_locale_args_map_locale_tag() {
         let args = set_locale_args(&json!({ "locale": "en-GB" })).unwrap();
         assert_eq!(args, vec!["set", "locale", "en-GB"]);
+    }
+
+    #[test]
+    fn set_locale_args_map_off() {
+        let args = set_locale_args(&json!({ "locale": "off" })).unwrap();
+        assert_eq!(args, vec!["set", "locale", "off"]);
     }
 
     #[test]
@@ -5638,6 +5652,10 @@ mod tests {
         assert!(MOBILE_PROFILE_TOOLS.contains(&TOOL_SET_LOCALE));
         assert!(ToolProfile::Mobile.tools().contains(&TOOL_SET_TIMEZONE));
         assert!(ToolProfile::Mobile.tools().contains(&TOOL_SET_LOCALE));
+        let config = parse_mcp_config(&["--tools=mobile".into()]).unwrap();
+        assert!(config.allows(TOOL_SET_TIMEZONE));
+        assert!(config.allows(TOOL_SET_LOCALE));
+        assert!(config.allows(TOOL_SET_GEO));
     }
 
     #[test]

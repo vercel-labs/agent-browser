@@ -221,7 +221,7 @@ agent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher
 agent-browser set device "iPhone 14"          # Emulate device
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
 agent-browser set timezone America/New_York   # Override Intl timezone (IANA)
-agent-browser set locale en-GB                # Override navigator.language (BCP 47)
+agent-browser set locale en-GB                # Override Intl locale (BCP 47)
 agent-browser set timezone off                # Clear timezone so later tabs do not replay it
 agent-browser set locale off                  # Clear locale so later tabs do not replay it
 agent-browser set offline on                  # Toggle offline mode
@@ -231,7 +231,7 @@ agent-browser set media dark                  # Emulate color scheme
 agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```
 
-Viewport scales and geolocation coordinates must be finite numbers. Timezone IDs are IANA names such as `America/New_York` or `UTC`. Locale tags are BCP 47 such as `en-GB`. Chrome validates both. `off` or `default` clears the timezone or locale override so tabs opened later do not replay it.
+Viewport scales and geolocation coordinates must be finite numbers. Timezone IDs are IANA names such as `America/New_York` or `UTC`. Locale tags are BCP 47 such as `en-GB`. Chrome validates both. `off` or `default` sends an empty CDP override for the current page and clears session setup so tabs opened later do not replay it. `set locale` changes ICU locale used by `Intl`. It does not change `navigator.language`.
 
 ## Cookies and Storage
 

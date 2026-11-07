@@ -3535,11 +3535,11 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Override navigator.language for the current page and tabs opened later. Use off or default to clear.",
+      "description": "Override Intl locale (DateTimeFormat, NumberFormat) for the current page and tabs opened later. Use off or default to clear. Does not change navigator.language.",
       "inputSchema": {
         "properties": {
           "locale": {
-            "description": "BCP 47 locale tag such as en-GB. Use off or default to clear.",
+            "description": "BCP 47 locale tag such as en-GB or ja-JP. Use off or default to clear. Applies to Intl APIs; navigator.language stays the browser language.",
             "type": "string"
           },
           "session": {

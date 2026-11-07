@@ -3682,8 +3682,14 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("timezone") => {
             let tz = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "set timezone".to_string(),
-                usage: "set timezone <iana|off>",
+                usage: "set timezone <iana|off|default>",
             })?;
+            if tz.is_empty() {
+                return Err(ParseError::MissingArguments {
+                    context: "set timezone".to_string(),
+                    usage: "set timezone <iana|off|default>",
+                });
+            }
             let timezone_id = if *tz == "off" || *tz == "default" {
                 ""
             } else {
@@ -3694,8 +3700,14 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("locale") => {
             let tag = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "set locale".to_string(),
-                usage: "set locale <tag|off>",
+                usage: "set locale <tag|off|default>",
             })?;
+            if tag.is_empty() {
+                return Err(ParseError::MissingArguments {
+                    context: "set locale".to_string(),
+                    usage: "set locale <tag|off|default>",
+                });
+            }
             let locale = if *tag == "off" || *tag == "default" {
                 ""
             } else {
@@ -6231,6 +6243,17 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_command_set_timezone_empty_token() {
+        assert!(matches!(
+            parse_command(
+                &["set".into(), "timezone".into(), "".into()],
+                &default_flags(),
+            ),
+            Err(ParseError::MissingArguments { context, .. }) if context == "set timezone"
+        ));
+    }
+
+    #[test]
     fn test_parse_command_set_locale() {
         let cmd = parse_command(&args("set locale en-GB"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "locale");
@@ -6255,6 +6278,17 @@ mod tests {
     fn test_parse_command_set_locale_missing() {
         assert!(matches!(
             parse_command(&args("set locale"), &default_flags()),
+            Err(ParseError::MissingArguments { context, .. }) if context == "set locale"
+        ));
+    }
+
+    #[test]
+    fn test_parse_command_set_locale_empty_token() {
+        assert!(matches!(
+            parse_command(
+                &["set".into(), "locale".into(), "".into()],
+                &default_flags(),
+            ),
             Err(ParseError::MissingArguments { context, .. }) if context == "set locale"
         ));
     }
