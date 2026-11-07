@@ -5706,6 +5706,149 @@ worker.onerror = () => {
     );
 }
 
+const ECHO_WORKER: &str = "self.onmessage = event => self.postMessage('pong:' + event.data);";
+
+/// Serves a page that starts `new Worker('/echo-worker.js', { type: 'module' })`
+/// and posts to it twice right away, then once more later, and returns what the page saw once both
+/// replies arrived (or the worker errored).
+const MODULE_WORKER_ECHO_PAGE: &str = r#"
+const worker = new Worker('/echo-worker.js', { type: 'module' });
+worker.onmessage = event => window.workerReplies.push(event.data);
+worker.onerror = () => { window.workerError = 'worker:error'; };
+worker.postMessage('early');
+worker.postMessage('early2');
+setTimeout(() => worker.postMessage('late'), 500);
+"#;
+
+async fn run_module_worker_echo_with_domain_filter(
+    page_headers: &'static str,
+    worker_body: &'static str,
+) -> String {
+    run_module_worker_with_domain_filter(page_headers, MODULE_WORKER_ECHO_PAGE, worker_body).await
+}
+
+async fn run_module_worker_with_domain_filter(
+    page_headers: &'static str,
+    page_script: &'static str,
+    worker_body: &'static str,
+) -> String {
+    let page: &'static str = Box::leak(
+        format!(
+            "<!doctype html><title>allowed</title><script>\nwindow.workerReplies = [];\nwindow.workerError = null;{}</script>",
+            page_script
+        )
+        .into_boxed_str(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        for _ in 0..20 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+
+                let (content_type, extra_headers, body) = if path == "/echo-worker.js" {
+                    ("application/javascript", "", worker_body)
+                } else {
+                    ("text/html", page_headers, page)
+                };
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    content_type,
+                    extra_headers,
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    {
+        let mut df = state.domain_filter.write().await;
+        *df = Some(super::network::DomainFilter::new("localhost"));
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{}/", port),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut result = String::new();
+    for _ in 0..30 {
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "evaluate",
+                "script": "window.workerError || window.workerReplies.join(',')",
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        result = get_data(&resp)["result"].as_str().unwrap_or("").to_string();
+        if result == "worker:error" || result.contains("pong:late") {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    server.abort();
+    result
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_module_worker_receives_early_messages() {
+    let result = run_module_worker_echo_with_domain_filter("", ECHO_WORKER).await;
+    assert_eq!(
+        result, "pong:early,pong:early2,pong:late",
+        "Module worker should get messages posted right after construction"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_module_worker_starts_under_blob_worker_csp() {
+    let result = run_module_worker_echo_with_domain_filter(
+        "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; worker-src 'self' blob:\r\n",
+        ECHO_WORKER,
+    )
+    .await;
+    assert_eq!(
+        result, "pong:early,pong:early2,pong:late",
+        "A CSP that allows blob: workers should allow the guarded worker to start"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Diff engine
 // ---------------------------------------------------------------------------
@@ -16339,4 +16482,67 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
     )
     .await;
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_module_worker_awaiting_first_message_at_top_level() {
+    // The import only settles once the first message arrives, so holding
+    // messages until it settles would never deliver it.
+    let result = run_module_worker_echo_with_domain_filter(
+        "",
+        "const first = await new Promise(resolve => self.addEventListener('message', event => resolve(event.data), { once: true }));\n\
+         self.postMessage('pong:' + first);\n\
+         self.onmessage = event => self.postMessage('pong:' + event.data);",
+    )
+    .await;
+    assert_eq!(
+        result, "pong:early,pong:early2,pong:late",
+        "A module worker awaiting its first message at top level should still get it"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_module_worker_replays_held_messages_in_separate_tasks() {
+    // Natively each message is its own task, so microtasks queued by one
+    // handler run before the next message is handled.
+    let result = run_module_worker_echo_with_domain_filter(
+        "",
+        "self.onmessage = event => {\n\
+           self.postMessage('pong:' + event.data + (self.seen ? '' : ':first'));\n\
+           Promise.resolve().then(() => { self.seen = true; });\n\
+         };",
+    )
+    .await;
+    assert_eq!(
+        result, "pong:early:first,pong:early2,pong:late",
+        "Held messages should be replayed one task at a time"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_module_worker_replays_backlog_without_timer_clamping() {
+    // Nested setTimeout is clamped to ~4ms, so replaying a backlog through
+    // chained timers would take seconds for a few hundred messages.
+    let result = run_module_worker_with_domain_filter(
+        "",
+        r#"
+const worker = new Worker('/echo-worker.js', { type: 'module' });
+worker.onmessage = event => window.workerReplies.push(event.data);
+worker.onerror = () => { window.workerError = 'worker:error'; };
+for (let i = 0; i < 300; i++) worker.postMessage('b');
+worker.postMessage('end');
+setTimeout(() => worker.postMessage('late'), 2500);
+"#,
+        "let start;\n\
+         self.onmessage = event => {\n\
+           if (start === undefined) start = performance.now();\n\
+           if (event.data === 'end') self.postMessage(performance.now() - start < 300 ? 'backlog:fast' : 'backlog:slow:' + Math.round(performance.now() - start));\n\
+           else if (event.data === 'late') self.postMessage('pong:late');\n\
+         };",
+    )
+    .await;
+    assert_eq!(result, "backlog:fast,pong:late");
 }

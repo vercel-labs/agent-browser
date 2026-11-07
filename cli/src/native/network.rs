@@ -242,6 +242,24 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
             const _allowed = {};
             function _agentBrowserInstallDomainFilter(_allowed, _baseOverride) {{
             const _global = globalThis;
+            // The filter can reach one global several times (new-document
+            // script, runtime evaluate, worker bootstrap). Wrapping again
+            // with the same list only nests worker bootstrap blobs, which
+            // CSP script-src can reject, so install once per list.
+            const _installKey = (typeof Symbol === 'function' && Symbol.for)
+                ? Symbol.for('agent-browser.domainFilter:' + JSON.stringify(_allowed))
+                : '__agentBrowserDomainFilter:' + JSON.stringify(_allowed);
+            if (_global[_installKey]) return;
+            try {{
+                Object.defineProperty(_global, _installKey, {{
+                    value: true,
+                    enumerable: false,
+                    writable: false,
+                    configurable: false
+                }});
+            }} catch (_) {{
+                return;
+            }}
             function _securityError(message) {{
                 if (typeof DOMException === 'function') {{
                     return new DOMException(message, 'SecurityError');
@@ -317,8 +335,79 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
                 const cacheKey = apiName + '|' + (isModule ? 'module' : 'classic') + '|' + absolute;
                 if (_workerUrlCache && _workerUrlCache.has(cacheKey)) return _workerUrlCache.get(cacheKey);
                 const installSource = '(' + _agentBrowserInstallDomainFilter.toString() + ')(' + JSON.stringify(_allowed) + ', ' + JSON.stringify(absolute) + ');\n';
+                // A module bootstrap has to load the real script with a dynamic
+                // import so it runs after the filter. The browser starts delivering
+                // messages as soon as the bootstrap body finishes, before the import
+                // settles, so hold message/connect events until the real script
+                // registers a handler for them (or the import settles, whichever is
+                // first; a script awaiting its first message at top level never
+                // settles on its own). Held events are replayed one task at a time,
+                // like native delivery (via a MessageChannel, so a backlog is not
+                // throttled by the nested-timer clamp), and stay ahead of anything
+                // that arrives later.
+                const moduleSource =
+                    'const _abQueue = [];\n' +
+                    'const _abTypes = ["message", "connect"];\n' +
+                    'const _abReplayed = new WeakSet();\n' +
+                    'let _abReleased = false;\n' +
+                    'let _abDraining = false;\n' +
+                    'const _abHandlerProps = [];\n' +
+                    'const _abStep = () => {{\n' +
+                    '  const event = _abQueue.shift();\n' +
+                    '  const copy = new MessageEvent(event.type, {{ data: event.data, origin: event.origin, lastEventId: event.lastEventId, ports: Array.from(event.ports || []) }});\n' +
+                    '  _abReplayed.add(copy);\n' +
+                    '  self.dispatchEvent(copy);\n' +
+                    '  if (_abQueue.length) _abTick(); else _abDraining = false;\n' +
+                    '}};\n' +
+                    'const _abChannel = new MessageChannel();\n' +
+                    '_abChannel.port1.onmessage = _abStep;\n' +
+                    'const _abTick = () => _abChannel.port2.postMessage(null);\n' +
+                    'const _abDrain = () => {{\n' +
+                    '  if (!_abReleased || _abDraining || !_abQueue.length) return;\n' +
+                    '  _abDraining = true;\n' +
+                    '  _abTick();\n' +
+                    '}};\n' +
+                    'const _abHold = (event) => {{\n' +
+                    '  if (_abReplayed.has(event) || (_abReleased && !_abQueue.length)) return;\n' +
+                    '  event.stopImmediatePropagation();\n' +
+                    '  _abQueue.push(event);\n' +
+                    '  _abDrain();\n' +
+                    '}};\n' +
+                    'const _abRelease = () => {{\n' +
+                    '  if (_abReleased) return;\n' +
+                    '  _abReleased = true;\n' +
+                    '  delete self.addEventListener;\n' +
+                    '  for (const [name, owner, desc] of _abHandlerProps) {{\n' +
+                    '    if (owner === self) Object.defineProperty(self, name, desc); else delete self[name];\n' +
+                    '  }}\n' +
+                    '  _abDrain();\n' +
+                    '}};\n' +
+                    'for (const type of _abTypes) self.addEventListener(type, _abHold);\n' +
+                    'self.addEventListener = function(type, ...rest) {{\n' +
+                    '  const result = EventTarget.prototype.addEventListener.call(this, type, ...rest);\n' +
+                    '  if (_abTypes.includes(type)) _abRelease();\n' +
+                    '  return result;\n' +
+                    '}};\n' +
+                    'for (const type of _abTypes) {{\n' +
+                    '  let proto = self;\n' +
+                    '  let desc;\n' +
+                    '  while (proto && !(desc = Object.getOwnPropertyDescriptor(proto, "on" + type))) proto = Object.getPrototypeOf(proto);\n' +
+                    '  if (!desc || !desc.set || !desc.configurable) continue;\n' +
+                    '  _abHandlerProps.push(["on" + type, proto, desc]);\n' +
+                    '  Object.defineProperty(self, "on" + type, {{\n' +
+                    '    configurable: true,\n' +
+                    '    enumerable: desc.enumerable,\n' +
+                    '    get() {{ return desc.get.call(this); }},\n' +
+                    '    set(value) {{ desc.set.call(this, value); _abRelease(); }},\n' +
+                    '  }});\n' +
+                    '}}\n' +
+                    'try {{\n' +
+                    'await import(' + JSON.stringify(absolute) + ');\n' +
+                    '}} finally {{\n' +
+                    '  _abRelease();\n' +
+                    '}}\n';
                 const source = installSource + (isModule
-                    ? 'await import(' + JSON.stringify(absolute) + ');\n'
+                    ? moduleSource
                     : 'importScripts(' + JSON.stringify(absolute) + ');\n');
                 const wrapped = _global.URL.createObjectURL(new Blob([source], {{ type: 'application/javascript' }}));
                 if (_workerUrlCache) _workerUrlCache.set(cacheKey, wrapped);
