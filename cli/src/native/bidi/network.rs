@@ -277,7 +277,6 @@ impl LegacyDownloadIds {
 /// Starts the task that resolves every intercepted request exactly once.
 pub fn spawn_dispatcher(
     bidi: Arc<BidiClient>,
-    rdp: super::firefox_devtools::RdpClient,
     net: NetContext,
     mut rx: tokio::sync::mpsc::Receiver<Value>,
     emulation: Arc<std::sync::RwLock<super::emulation::Settings>>,
@@ -1585,7 +1584,6 @@ mod tests {
         *net.domain_filter.write().await = Some(DomainFilter::new("allowed.example"));
         let _dispatcher = spawn_dispatcher(
             ff.bidi.clone(),
-            ff.rdp.clone(),
             net,
             ff.bidi.subscribe_buffered(),
             ff.emulation.clone(),
@@ -1656,7 +1654,6 @@ mod tests {
         let downloads = net.downloads.clone();
         let _dispatcher = spawn_dispatcher(
             ff.bidi.clone(),
-            ff.rdp.clone(),
             net,
             ff.bidi.subscribe_buffered(),
             ff.emulation.clone(),
@@ -1717,7 +1714,6 @@ mod tests {
         let downloads = net.downloads.clone();
         let _dispatcher = spawn_dispatcher(
             ff.bidi.clone(),
-            ff.rdp.clone(),
             net,
             ff.bidi.subscribe_buffered(),
             ff.emulation.clone(),

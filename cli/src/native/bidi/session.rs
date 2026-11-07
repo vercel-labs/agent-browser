@@ -214,7 +214,6 @@ impl FirefoxSession {
         }));
         let dispatcher = Some(super::network::spawn_dispatcher(
             bidi.clone(),
-            rdp.clone(),
             net.clone(),
             dispatch_events,
             emulation.clone(),
