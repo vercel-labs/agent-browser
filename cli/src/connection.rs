@@ -1318,7 +1318,9 @@ fn has_os_error(error: &str, code: u32) -> bool {
     error.contains(&format!("(os error {})", code))
 }
 
-/// Socket read timeout for one request. Ordinary commands get a 30s floor.
+/// Socket read timeout for one request. Ordinary commands get a 45s floor.
+/// The daemon can spend 30s waiting for CDP and another 3s probing a
+/// potentially wedged renderer before it can return a useful error.
 /// Commands carrying an operation timeout (the wait family, which
 /// parse_command stamps with AGENT_BROWSER_DEFAULT_TIMEOUT when no explicit
 /// --timeout is given) get that timeout plus margin, so the daemon can report
@@ -1328,7 +1330,7 @@ fn has_os_error(error: &str, code: u32) -> bool {
 /// The env var is deliberately NOT consulted here. Reading it would apply a
 /// long wait budget to every command, so a genuinely hung daemon on a simple
 /// `url`/`title`/`snapshot` call would take the full budget to surface
-/// instead of 30s. Only commands that actually carry a `timeout` field get
+/// instead of 45s. Only commands that actually carry a `timeout` field get
 /// the extended budget, and that field is set client-side per invocation,
 /// avoiding the daemon's spawn-time env snapshot drifting from the client.
 pub(crate) fn read_timeout_for(cmd: &Value) -> Duration {
@@ -1336,7 +1338,7 @@ pub(crate) fn read_timeout_for(cmd: &Value) -> Duration {
     if cmd.get("action").and_then(Value::as_str) == Some("mousemove") {
         op_ms = op_ms.max(cmd.get("duration").and_then(Value::as_u64).unwrap_or(0));
     }
-    Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
+    Duration::from_millis(op_ms.saturating_add(10_000).max(45_000))
 }
 
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, SendError> {
@@ -1599,6 +1601,20 @@ mod tests {
         assert_eq!(
             read_timeout_for(&json!({"action":"mousemove", "duration": 35_000})),
             Duration::from_secs(45)
+        );
+    }
+
+    #[test]
+    fn commands_allow_time_for_wedged_page_detection() {
+        for action in ["click", "evaluate", "screenshot", "snapshot"] {
+            assert_eq!(
+                read_timeout_for(&json!({"action": action})),
+                Duration::from_secs(45)
+            );
+        }
+        assert_eq!(
+            read_timeout_for(&json!({"action": "wait", "timeout": 60_000})),
+            Duration::from_secs(70)
         );
     }
 
