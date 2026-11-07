@@ -103,7 +103,9 @@ async fn recover(
         .await
         .ok()
         .and_then(|d| d["sharedId"].as_str().map(String::from));
-    if document.is_none() || document.as_deref() != ff.documents.get(&context).map(String::as_str) {
+    if document.is_none()
+        || document.as_deref() != ff.ref_documents.get(&context).map(String::as_str)
+    {
         return Err(format!("Stale ref for role={role} name={name}: the page changed since the snapshot. Run snapshot again and use a fresh ref."));
     }
     let found = ff
@@ -155,7 +157,8 @@ mod tests {
     ) -> (DaemonState, Calls) {
         let mut state = DaemonState::new();
         let (mut ff, _tx, calls) = fake_session_with_script(document_responder(document)).await;
-        ff.documents.insert("ctx-active".into(), "doc1".into());
+        ff.documents.insert("ctx-active".into(), document.into());
+        ff.ref_documents.insert("ctx-active".into(), "doc1".into());
         ff.refs.insert(("ctx-active".into(), "sid".into()), 7);
         state.firefox = Some(ff);
         state

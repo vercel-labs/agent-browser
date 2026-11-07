@@ -41,7 +41,7 @@ pub struct FirefoxSession {
     pub auto_dialog_changed: Arc<Notify>,
     pub rdp: RdpClient,
     pub accessibility_actor: String,
-    /// Active browsing context id: a top-level tab, or a frame after `frame <sel>`.
+    /// Active top-level browsing context (tab) id.
     pub context: String,
     /// Active top-level browsing context id (tab), restored by `frame main`.
     pub top_context: String,
@@ -56,6 +56,7 @@ pub struct FirefoxSession {
     pub frames: Option<super::snapshot::FrameWatch>,
     /// Document node `sharedId` last snapshotted per context, used to reset `refs` on a new document.
     pub documents: HashMap<String, String>,
+    pub ref_documents: HashMap<String, String>,
     pub tab_labels: HashMap<String, String>,
     /// Touch points of the active touch sequence, released by a later `input_touch` end.
     pub touches: Vec<(f64, f64)>,
@@ -358,6 +359,7 @@ impl FirefoxSession {
             next_node_id: 0,
             frames: None,
             documents: HashMap::new(),
+            ref_documents: HashMap::new(),
             tab_labels: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
@@ -942,6 +944,7 @@ pub(crate) mod tests {
             next_node_id: 0,
             frames: None,
             documents: HashMap::new(),
+            ref_documents: HashMap::new(),
             tab_labels: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
