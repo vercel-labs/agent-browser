@@ -671,7 +671,9 @@ pub async fn take_snapshot(
     let document_id = frame_root["abSid"].as_str();
     let known = ref_map.observe_document(&context, None, &context, document_id);
     ff.ref_documents = ff.documents.clone();
-    snapshot_from_ax_nodes(&nodes, &urls, options, ref_map, &context, None, known)
+    Ok(snapshot_from_ax_nodes(
+        &nodes, &urls, options, ref_map, &context, None, known,
+    ))
 }
 
 /// Handles the `snapshot` action.
