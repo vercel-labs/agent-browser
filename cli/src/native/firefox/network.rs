@@ -291,10 +291,9 @@ pub fn spawn_dispatcher(
                 if let Some(context) = e["params"]["context"].as_str() {
                     if emulated_contexts.insert(context.to_string()) {
                         let settings = emulation.read().unwrap().clone();
-                        if let Err(error) = super::emulation::apply_settings_to_context(
-                            &bidi, &rdp, &settings, context,
-                        )
-                        .await
+                        if let Err(error) =
+                            super::emulation::apply_settings_to_context(&bidi, &settings, context)
+                                .await
                         {
                             eprintln!(
                                 "Warning: failed to apply Firefox emulation to {context}: {error}"
