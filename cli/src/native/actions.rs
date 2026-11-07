@@ -224,6 +224,7 @@ pub struct PendingDialog {
     /// Flat CDP session the dialog opened on. A dialog on a background tab
     /// must not block commands targeting the active tab.
     pub session_id: Option<String>,
+    pub owner_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1390,6 +1391,17 @@ impl DaemonState {
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
         if let Some(ff) = self.firefox.as_mut() {
             ff.drain_events(&mut self.pending_dialog);
+            if ff.top_context.is_empty() {
+                let tree = ff
+                    .bidi
+                    .send("browsingContext.getTree", json!({"maxDepth": 0}))
+                    .await?;
+                ff.top_context = tree["contexts"][0]["context"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                firefox::tabs::reset_refs(self);
+            }
         }
         let drained = self.drain_cdp_events();
         self.apply_drained_events(drained).await
@@ -2362,6 +2374,7 @@ impl DaemonState {
                                         url: dialog_event.url,
                                         default_prompt: dialog_event.default_prompt,
                                         session_id: event.session_id.clone(),
+                                        owner_context: None,
                                     });
                                 }
                             }
@@ -3068,15 +3081,13 @@ fn append_launch_policy_actions(
     }
 }
 
-/// The command future is large; boxing it keeps it off the caller's stack,
-/// which a debug-build test thread would otherwise overflow.
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
-    Box::pin(execute_command_flow(cmd, state)).await
+    execute_command_flow(cmd, state).await
 }
 
 async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
     let outer = state.flow.enter();
-    let mut resp = execute_command_inner(cmd, state).await;
+    let mut resp = Box::pin(execute_command_inner(cmd, state)).await;
     if let Some(seq) = state.flow.exit(outer) {
         let ok = resp.get("success") == Some(&json!(true));
         let url = match state.browser.as_ref() {
@@ -4794,14 +4805,14 @@ async fn auto_launch_with(
     if matches!(connection, Connection::Cdp(_) | Connection::AutoConnect)
         || !matches!(&connection, Connection::Provider(provider) if provider_is_browser_use(provider))
     {
-        return auto_launch_inner(state, plugins, cmd, strict_state).await;
+        return Box::pin(auto_launch_inner(state, plugins, cmd, strict_state)).await;
     }
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
     let result = match tokio::time::timeout(
         BROWSER_USE_SETUP_DEADLINE,
-        auto_launch_inner(state, plugins, cmd, strict_state),
+        Box::pin(auto_launch_inner(state, plugins, cmd, strict_state)),
     )
     .await
     {
@@ -5679,16 +5690,17 @@ async fn handle_launch_for_target(
             .and_then(Value::as_str)
             .is_some_and(provider_is_browser_use)
     {
-        return handle_launch_inner(cmd, state).await;
+        return Box::pin(handle_launch_inner(cmd, state)).await;
     }
     let filter = state.domain_filter.read().await.clone();
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
-    let result = match tokio::time::timeout(deadline, handle_launch_inner(cmd, state)).await {
-        Ok(result) => result,
-        Err(_) => Err(browser_use_setup_timeout(state).await),
-    };
+    let result =
+        match tokio::time::timeout(deadline, Box::pin(handle_launch_inner(cmd, state))).await {
+            Ok(result) => result,
+            Err(_) => Err(browser_use_setup_timeout(state).await),
+        };
     if result.is_err() {
         restore_domain_filter(state, &filter).await;
         *state.proxy_credentials.write().await = credentials;
@@ -6795,11 +6807,9 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
 // Phase 2 handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-
-    let options = SnapshotOptions {
+/// Reads the snapshot flags (`selector`, `interactive`, `compact`, `maxDepth`, `urls`) from a command.
+pub(crate) fn snapshot_options(cmd: &Value) -> SnapshotOptions {
+    SnapshotOptions {
         selector: cmd
             .get("selector")
             .and_then(|v| v.as_str())
@@ -6817,7 +6827,14 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .and_then(|v| v.as_u64())
             .map(|d| d as usize),
         urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
-    };
+    }
+}
+
+async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    let options = snapshot_options(cmd);
 
     let previous_refs = state.ref_map.ref_ids();
     state.ref_map.begin_snapshot();
@@ -6832,7 +6849,19 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     .await?;
 
     let url = mgr.get_url().await.unwrap_or_default();
+    snapshot_response(cmd, state, session_id, &options, previous_refs, tree, url)
+}
 
+/// Builds the `snapshot` reply (refs, removed refs and the optional delta) from a rendered tree.
+pub(crate) fn snapshot_response(
+    cmd: &Value,
+    state: &mut DaemonState,
+    session_id: String,
+    options: &SnapshotOptions,
+    previous_refs: std::collections::HashSet<String>,
+    tree: String,
+    url: String,
+) -> Result<Value, String> {
     let refs: serde_json::Map<String, Value> = state
         .ref_map
         .entries_sorted()
@@ -7268,7 +7297,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .await?;
         let call_params = json!({
             "objectId": object_id,
-            "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
+            "functionDeclaration": interaction::CLICK_HREF_JS,
             "returnByValue": true
         });
         let call_result = mgr
@@ -8373,6 +8402,16 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
     )
     .await?;
 
+    diff_snapshot_response(cmd, state, current, current_ref_map)
+}
+
+/// Diffs a freshly rendered snapshot against the command's baseline and commits its ref map.
+pub(crate) fn diff_snapshot_response(
+    cmd: &Value,
+    state: &mut DaemonState,
+    current: String,
+    current_ref_map: RefMap,
+) -> Result<Value, String> {
     let baseline = cmd.get("baseline").and_then(|v| v.as_str());
 
     let baseline_text = match baseline {
@@ -11251,7 +11290,7 @@ async fn execute_subaction(
     }
 }
 
-fn build_role_selector(role: &str, name: Option<&str>, exact: bool) -> String {
+pub(crate) fn build_role_selector(role: &str, name: Option<&str>, exact: bool) -> String {
     match name {
         Some(n) => {
             let exact_str = if exact { ", exact: true" } else { "" };
@@ -11265,7 +11304,7 @@ fn build_role_selector(role: &str, name: Option<&str>, exact: bool) -> String {
 /// element's semantics, so Chrome prunes such elements from the AX tree
 /// entirely (divs, lists, imgs) or keeps them only as ignored nodes
 /// (tables). The accessibility tree can never answer a query for them.
-fn is_presentational_role(role: &str) -> bool {
+pub(crate) fn is_presentational_role(role: &str) -> bool {
     role.eq_ignore_ascii_case("none") || role.eq_ignore_ascii_case("presentation")
 }
 
@@ -11280,13 +11319,11 @@ fn is_presentational_role(role: &str) -> bool {
 /// precedence (aria-labelledby, then aria-label, then text content) with
 /// whitespace normalized; non-exact is a case-insensitive substring check,
 /// exact is a case-sensitive whole-name comparison.
-async fn handle_presentational_getbyrole(
-    cmd: &Value,
-    state: &mut DaemonState,
+pub(crate) fn build_presentational_role_locator_js(
     role: &str,
     name: Option<&str>,
     exact: bool,
-) -> Result<Value, String> {
+) -> String {
     let name_check = match name {
         Some(n) => {
             let name_json = serde_json::to_string(n).unwrap_or_default();
@@ -11307,7 +11344,7 @@ async fn handle_presentational_getbyrole(
     // later presentational token wrongly win.
     // A function of `root` (the document to search), so it can run against the
     // top document or a selected frame's document, not just the global one.
-    let locate_body = format!(
+    format!(
         r#"(root) => {{
             const VALID_ROLES = new Set(['alert','alertdialog','application','article','banner','blockquote','button','caption','cell','checkbox','code','columnheader','combobox','complementary','contentinfo','definition','deletion','dialog','directory','document','emphasis','feed','figure','form','generic','grid','gridcell','group','heading','img','insertion','link','list','listbox','listitem','log','main','mark','marquee','math','meter','menu','menubar','menuitem','menuitemcheckbox','menuitemradio','navigation','none','note','option','paragraph','presentation','progressbar','radio','radiogroup','region','row','rowgroup','rowheader','scrollbar','search','searchbox','separator','slider','spinbutton','status','strong','subscript','superscript','switch','tab','table','tablist','tabpanel','term','textbox','time','timer','toolbar','tooltip','tree','treegrid','treeitem']);
             const norm = s => (s || '').replace(/\s+/g, ' ').trim();
@@ -11339,11 +11376,23 @@ async fn handle_presentational_getbyrole(
                 // answer a query for none/presentation.
                 if (isPresentational && (isFocusable(el) || el.getAttributeNames().some(a => GLOBAL_ARIA.has(a)))) continue;
                 {name_check}
-                el.setAttribute('data-agent-browser-located', 'true');
-                return true;
+                return el;
             }}
-            return false;
+            return null;
         }}"#
+    )
+}
+
+async fn handle_presentational_getbyrole(
+    cmd: &Value,
+    state: &mut DaemonState,
+    role: &str,
+    name: Option<&str>,
+    exact: bool,
+) -> Result<Value, String> {
+    let locator = build_presentational_role_locator_js(role, name, exact);
+    let locate_body = format!(
+        "(root) => {{ const el = ({locator})(root); if (!el) return false; el.setAttribute('data-agent-browser-located', 'true'); return true; }}"
     );
 
     let located = {
@@ -11505,7 +11554,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 /// `img` and `document`); queries pass through the same table so both spellings
 /// match. `directory` is not mapped here (Chrome collapses it into `list`); it is
 /// matched on the DOM attribute instead, see handle_getbyrole.
-fn normalize_ax_role(role: &str) -> String {
+pub(crate) fn normalize_ax_role(role: &str) -> String {
     let lower = role.to_ascii_lowercase();
     match lower.as_str() {
         "image" => "img".to_string(),
@@ -11517,7 +11566,7 @@ fn normalize_ax_role(role: &str) -> String {
 /// Collapse internal whitespace runs to single spaces and trim, mirroring
 /// Playwright's accessible-name normalization: `"Save   changes"` and
 /// `"Save changes"` are the same accessible name.
-fn normalize_ws(s: &str) -> String {
+pub(crate) fn normalize_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -11528,7 +11577,7 @@ fn normalize_ws(s: &str) -> String {
 /// exact matching is a case-sensitive whole-name comparison. Continues past AX
 /// nodes without a backendDOMNodeId (virtual nodes) so a later actionable match
 /// still wins.
-fn find_ax_node_by_role(
+pub(crate) fn find_ax_node_by_role(
     nodes: &[super::cdp::types::AXNode],
     role: &str,
     name: Option<&str>,
@@ -15115,21 +15164,9 @@ async fn move_mouse_interpolated(
     let dx = target_x - start_x;
     let dy = target_y - start_y;
     let distance = dx.hypot(dy);
-    let duration_ms = if duration_ms == 0 && human {
-        (80.0 + distance * 0.35).clamp(100.0, 700.0) as u64
-    } else {
-        duration_ms
-    };
+    let duration_ms = interpolated_mouse_duration(distance, duration_ms, human);
     let steps = interpolated_mouse_steps(distance, duration_ms, requested_steps, human);
-    let bend = if human && distance > 0.0 {
-        let mixed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let unit = ((mixed >> 11) as f64) / ((1_u64 << 53) as f64);
-        (unit * 2.0 - 1.0) * (distance * 0.08).min(36.0)
-    } else {
-        0.0
-    };
+    let bend = interpolated_mouse_bend(distance, human, seed);
     let (perp_x, perp_y) = if distance > 0.0 {
         (-dy / distance, dx / distance)
     } else {
@@ -15175,7 +15212,27 @@ async fn move_mouse_interpolated(
     Ok(())
 }
 
-fn interpolated_mouse_steps(
+pub(super) fn interpolated_mouse_duration(distance: f64, duration_ms: u64, human: bool) -> u64 {
+    if duration_ms == 0 && human {
+        (80.0 + distance * 0.35).clamp(100.0, 700.0) as u64
+    } else {
+        duration_ms
+    }
+}
+
+pub(super) fn interpolated_mouse_bend(distance: f64, human: bool, seed: u64) -> f64 {
+    if human && distance > 0.0 {
+        let mixed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let unit = ((mixed >> 11) as f64) / ((1_u64 << 53) as f64);
+        (unit * 2.0 - 1.0) * (distance * 0.08).min(36.0)
+    } else {
+        0.0
+    }
+}
+
+pub(super) fn interpolated_mouse_steps(
     distance: f64,
     duration_ms: u64,
     requested_steps: Option<usize>,
@@ -15194,7 +15251,7 @@ fn interpolated_mouse_steps(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn interpolated_mouse_point(
+pub(super) fn interpolated_mouse_point(
     start_x: f64,
     start_y: f64,
     target_x: f64,
@@ -16916,6 +16973,7 @@ mod tests {
             url: "https://example.com".to_string(),
             default_prompt: None,
             session_id: None,
+            owner_context: None,
         });
         assert!(!autosave_due(&state, 30_000));
     }
@@ -23594,7 +23652,7 @@ mod firefox_routing_tests {
         let error = resp["error"].as_str().unwrap();
         assert!(error.contains("`trace_start` is Chrome-only"), "{error}");
         assert!(!error.contains("WebDriver backend"), "{error}");
-        let resp = execute_command(&json!({"id":"2","action":"snapshot"}), &mut state).await;
+        let resp = execute_command(&json!({"id":"2","action":"vitals"}), &mut state).await;
         assert!(resp["error"]
             .as_str()
             .unwrap()
@@ -23606,10 +23664,13 @@ mod firefox_routing_tests {
     async fn dialog_on_a_background_tab_does_not_block_the_active_tab() {
         let _guard = clean_env();
         let (mut state, calls) = firefox_state().await;
+        let ff = state.firefox.as_mut().unwrap();
+        ff.tab_ids.insert("ctx-background".into(), 2);
         state.pending_dialog = Some(PendingDialog {
             dialog_type: "confirm".into(),
             message: "sure?".into(),
             session_id: Some("ctx-background".into()),
+            owner_context: Some("ctx-background".into()),
             ..Default::default()
         });
         let nav = json!({"id":"1","action":"navigate","url":"https://a.test"});
@@ -23617,7 +23678,9 @@ mod firefox_routing_tests {
         assert_eq!(resp["success"], true, "{resp}");
         assert_eq!(navigations(&calls), 1);
 
-        state.pending_dialog.as_mut().unwrap().session_id = Some("ctx-active".into());
+        let dialog = state.pending_dialog.as_mut().unwrap();
+        dialog.session_id = Some("ctx-active".into());
+        dialog.owner_context = Some("ctx-active".into());
         let resp = execute_command(&nav, &mut state).await;
         assert_eq!(resp["success"], false);
         assert!(resp["error"]

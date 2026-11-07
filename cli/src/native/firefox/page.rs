@@ -32,11 +32,8 @@ fn neterror_message(url: &str) -> Option<String> {
 
 /// Drops refs and frame state after a document-level navigation.
 fn reset_page_state(state: &mut DaemonState) {
+    super::tabs::reset_refs(state);
     state.ref_map.invalidate_all_documents();
-    state.active_frame_id = None;
-    if let Some(ff) = state.firefox.as_mut() {
-        ff.refs.clear();
-    }
 }
 
 /// Navigates the active tab and returns `{url, title, targetId}` like `BrowserManager::navigate`.
@@ -61,16 +58,17 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         Some("none") => "none",
         _ => "complete",
     };
-    state.ref_map.invalidate_all_documents();
-    state.active_frame_id = None;
+    reset_page_state(state);
     let ff = session(state)?;
-    ff.refs.clear();
-    let context = ff.context.clone();
+    let context = ff.top_context.clone();
     let nav = ff
-        .race_prompt(ff.bidi.send(
-            "browsingContext.navigate",
-            json!({"context": context, "url": url, "wait": wait}),
-        ))
+        .race_prompt(
+            &context,
+            ff.bidi.send(
+                "browsingContext.navigate",
+                json!({"context": context, "url": url, "wait": wait}),
+            ),
+        )
         .await
         .map_err(|e| format!("Navigation failed: {e}"))?;
     let Some(nav) = nav else {
@@ -89,11 +87,14 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 /// Moves `delta` entries through the active tab's history and returns `{url}` like `BrowserManager`.
 async fn traverse_history(delta: i64, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    let context = ff.context.clone();
-    ff.race_prompt(ff.bidi.send(
-        "browsingContext.traverseHistory",
-        json!({"context": context, "delta": delta}),
-    ))
+    let context = ff.top_context.clone();
+    ff.race_prompt(
+        &context,
+        ff.bidi.send(
+            "browsingContext.traverseHistory",
+            json!({"context": context, "delta": delta}),
+        ),
+    )
     .await
     .map_err(|e| format!("History navigation failed: {e}"))?;
     reset_page_state(state);
@@ -115,11 +116,14 @@ pub async fn forward(_cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 /// Reload. Must return what Chrome's `handle_reload` returns.
 pub async fn reload(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    let context = ff.context.clone();
-    ff.race_prompt(ff.bidi.send(
-        "browsingContext.reload",
-        json!({"context": context, "wait": "complete"}),
-    ))
+    let context = ff.top_context.clone();
+    ff.race_prompt(
+        &context,
+        ff.bidi.send(
+            "browsingContext.reload",
+            json!({"context": context, "wait": "complete"}),
+        ),
+    )
     .await
     .map_err(|e| format!("Reload failed: {e}"))?;
     reset_page_state(state);
@@ -134,7 +138,7 @@ pub async fn url(state: &mut DaemonState) -> Result<Value, String> {
 
 /// Document title as `{title}`.
 pub async fn title(state: &mut DaemonState) -> Result<Value, String> {
-    Ok(json!({ "title": session(state)?.eval("document.title").await? }))
+    Ok(json!({ "title": session(state)?.eval_top("document.title").await? }))
 }
 
 /// Page HTML. Must return `{html, origin}` like Chrome's `handle_content`.
@@ -347,7 +351,7 @@ pub async fn waitforfunction(cmd: &Value, state: &mut DaemonState) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::firefox::session::tests::{fake_session, fake_session_with};
 
     #[test]
     fn neterror_url_becomes_a_message() {
@@ -370,6 +374,29 @@ mod tests {
         state.firefox = Some(ff);
         let result = wait(&json!({"timeout": 5}), &mut state).await.unwrap();
         assert_eq!(result, json!({ "waited": "timeout", "ms": 5 }));
+    }
+
+    #[tokio::test]
+    async fn title_uses_the_top_context_when_a_frame_is_active() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let (mut ff, _tx, _) = fake_session_with(move |request| {
+            seen.lock().unwrap().push(request.clone());
+            json!({"type": "success", "result": {"type": "string", "value": "Page title"}})
+        })
+        .await;
+        ff.context = "ctx-frame".into();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        assert_eq!(
+            title(&mut state).await.unwrap(),
+            json!({"title": "Page title"})
+        );
+        assert_eq!(
+            requests.lock().unwrap()[0]["params"]["target"]["context"],
+            "ctx-active"
+        );
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@
 use serde_json::Value;
 
 use super::session::FirefoxSession;
-use super::{capture, page, storage, tabs};
+use super::{capture, forms, interact, page, query, snapshot, storage, tabs};
 use crate::native::actions::{self as chrome, DaemonState};
 
 /// Actions that run on Firefox.
@@ -36,6 +36,64 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "dialog",
     "screenshot",
     "pdf",
+    "snapshot",
+    "diff_snapshot",
+    "click",
+    "dblclick",
+    "hover",
+    "focus",
+    "tap",
+    "swipe",
+    "drag",
+    "mouse",
+    "mousemove",
+    "mousedown",
+    "mouseup",
+    "wheel",
+    "input_mouse",
+    "input_touch",
+    "scroll",
+    "scrollintoview",
+    "highlight",
+    "dispatch",
+    "fill",
+    "type",
+    "press",
+    "keydown",
+    "keyup",
+    "keyboard",
+    "input_keyboard",
+    "inserttext",
+    "clear",
+    "selectall",
+    "select",
+    "check",
+    "uncheck",
+    "setvalue",
+    "upload",
+    "gettext",
+    "getattribute",
+    "innertext",
+    "innerhtml",
+    "inputvalue",
+    "count",
+    "boundingbox",
+    "styles",
+    "isvisible",
+    "isenabled",
+    "ischecked",
+    "find",
+    "frame",
+    "mainframe",
+    "getbyrole",
+    "getbytext",
+    "getbylabel",
+    "getbyplaceholder",
+    "getbyalttext",
+    "getbytitle",
+    "getbytestid",
+    "nth",
+    "evalhandle",
     "close",
     "confirm",
     "deny",
@@ -95,7 +153,10 @@ fn dialog_guard(action: &str, state: &DaemonState) -> Result<(), String> {
     let (Some(dialog), Some(ff)) = (&state.pending_dialog, &state.firefox) else {
         return Ok(());
     };
-    let on_active_tab = dialog.session_id.as_deref().is_none_or(|c| c == ff.context);
+    let on_active_tab = dialog
+        .owner_context
+        .as_deref()
+        .is_none_or(|context| context == ff.top_context);
     if on_active_tab && !SAFE_DURING_DIALOG.contains(&action) {
         return Err(format!(
             "A JavaScript {} dialog is blocking the page: \"{}\". Resolve it with `dialog accept` or `dialog dismiss`, then retry `{}`.",
@@ -142,46 +203,70 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
         "storage_clear" => storage::storage_clear(cmd, state).await,
         "state_save" => storage::state_save(cmd, state).await,
         "state_load" => storage::state_load(cmd, state).await,
-        "dialog" => handle_dialog(cmd, state).await,
+        "dialog" => interact::dialog(cmd, state).await,
         "screenshot" => capture::screenshot(cmd, state).await,
         "pdf" => capture::pdf(cmd, state).await,
+        "snapshot" => Box::pin(snapshot::snapshot(cmd, state)).await,
+        "diff_snapshot" => Box::pin(snapshot::diff_snapshot(cmd, state)).await,
+        "click" => interact::click(cmd, state).await,
+        "dblclick" => interact::dblclick(cmd, state).await,
+        "hover" => interact::hover(cmd, state).await,
+        "focus" => interact::focus(cmd, state).await,
+        "tap" => interact::tap(cmd, state).await,
+        "swipe" => interact::swipe(cmd, state).await,
+        "drag" => interact::drag(cmd, state).await,
+        "mouse" => interact::mouse(cmd, state).await,
+        "mousemove" => interact::mousemove(cmd, state).await,
+        "mousedown" => interact::mousedown(cmd, state).await,
+        "mouseup" => interact::mouseup(cmd, state).await,
+        "wheel" => interact::wheel(cmd, state).await,
+        "input_mouse" => interact::input_mouse(cmd, state).await,
+        "input_touch" => interact::input_touch(cmd, state).await,
+        "scroll" => interact::scroll(cmd, state).await,
+        "scrollintoview" => interact::scrollintoview(cmd, state).await,
+        "highlight" => interact::highlight(cmd, state).await,
+        "dispatch" => interact::dispatch(cmd, state).await,
+        "fill" => forms::fill(cmd, state).await,
+        "type" => forms::type_text(cmd, state).await,
+        "press" => forms::press(cmd, state).await,
+        "keydown" => forms::keydown(cmd, state).await,
+        "keyup" => forms::keyup(cmd, state).await,
+        "keyboard" => forms::keyboard(cmd, state).await,
+        "input_keyboard" => forms::input_keyboard(cmd, state).await,
+        "inserttext" => forms::inserttext(cmd, state).await,
+        "clear" => forms::clear(cmd, state).await,
+        "selectall" => forms::selectall(cmd, state).await,
+        "select" => forms::select(cmd, state).await,
+        "check" => forms::check(cmd, state).await,
+        "uncheck" => forms::uncheck(cmd, state).await,
+        "setvalue" => forms::setvalue(cmd, state).await,
+        "upload" => forms::upload(cmd, state).await,
+        "gettext" => query::gettext(cmd, state).await,
+        "getattribute" => query::getattribute(cmd, state).await,
+        "innertext" => query::innertext(cmd, state).await,
+        "innerhtml" => query::innerhtml(cmd, state).await,
+        "inputvalue" => query::inputvalue(cmd, state).await,
+        "count" => query::count(cmd, state).await,
+        "boundingbox" => query::boundingbox(cmd, state).await,
+        "styles" => query::styles(cmd, state).await,
+        "isvisible" => query::isvisible(cmd, state).await,
+        "isenabled" => query::isenabled(cmd, state).await,
+        "ischecked" => query::ischecked(cmd, state).await,
+        "find" => query::find(cmd, state).await,
+        "frame" => query::frame(cmd, state).await,
+        "mainframe" => query::mainframe(state).await,
+        "getbyrole" => query::getbyrole(cmd, state).await,
+        "getbytext" => query::getbytext(cmd, state).await,
+        "getbylabel" => query::getbylabel(cmd, state).await,
+        "getbyplaceholder" => query::getbyplaceholder(cmd, state).await,
+        "getbyalttext" => query::getbyalttext(cmd, state).await,
+        "getbytitle" => query::getbytitle(cmd, state).await,
+        "getbytestid" => query::getbytestid(cmd, state).await,
+        "nth" => query::nth(cmd, state).await,
+        "evalhandle" => query::evalhandle(cmd, state).await,
         "close" => chrome::handle_close(state).await,
         _ => chrome::handle_deny(cmd, state).await,
     }
-}
-
-async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let response = cmd.get("response").and_then(Value::as_str);
-    if response == Some("status") {
-        return Ok(match &state.pending_dialog {
-            Some(dialog) => {
-                let mut result = serde_json::json!({
-                    "hasDialog": true,
-                    "type": dialog.dialog_type,
-                    "message": dialog.message,
-                });
-                if let Some(prompt) = &dialog.default_prompt {
-                    result["defaultPrompt"] = serde_json::json!(prompt);
-                }
-                result
-            }
-            None => serde_json::json!({ "hasDialog": false }),
-        });
-    }
-    let accept = response
-        .map(|response| response == "accept")
-        .or_else(|| cmd.get("accept").and_then(Value::as_bool))
-        .unwrap_or(true);
-    let mut params = serde_json::json!({ "context": session(state)?.context, "accept": accept });
-    if let Some(text) = cmd.get("promptText").and_then(Value::as_str) {
-        params["userText"] = serde_json::json!(text);
-    }
-    session(state)?
-        .bidi
-        .send("browsingContext.handleUserPrompt", params)
-        .await?;
-    state.pending_dialog = None;
-    Ok(serde_json::json!({ "handled": true, "accepted": accept }))
 }
 
 #[cfg(test)]
@@ -191,11 +276,12 @@ mod tests {
     use crate::native::firefox::session::tests::fake_session;
     use serde_json::json;
 
-    fn dialog(context: &str) -> PendingDialog {
+    fn dialog(context: &str, owner_context: Option<&str>) -> PendingDialog {
         PendingDialog {
             dialog_type: "confirm".into(),
             message: "sure?".into(),
             session_id: Some(context.into()),
+            owner_context: owner_context.map(String::from),
             ..Default::default()
         }
     }
@@ -207,11 +293,52 @@ mod tests {
             let e = execute(action, &json!({}), &mut state).await.unwrap_err();
             assert!(e.contains(action) && e.contains("Chrome-only"), "{e}");
         }
-        let e = execute("snapshot", &json!({}), &mut state)
+        let e = execute("vitals", &json!({}), &mut state).await.unwrap_err();
+        assert_eq!(e, "`vitals` is not supported on Firefox");
+        assert!(state.firefox.is_none());
+    }
+
+    #[tokio::test]
+    async fn query_actions_are_routed_to_the_query_handlers() {
+        let mut state = DaemonState::new();
+        for action in [
+            "gettext",
+            "getattribute",
+            "innertext",
+            "innerhtml",
+            "inputvalue",
+            "count",
+            "boundingbox",
+            "styles",
+            "isvisible",
+            "isenabled",
+            "ischecked",
+            "find",
+            "frame",
+            "nth",
+            "getbyrole",
+            "getbytext",
+            "getbylabel",
+            "getbyplaceholder",
+            "getbyalttext",
+            "getbytitle",
+            "getbytestid",
+        ] {
+            assert!(handles(action), "{action}");
+            let error = execute(action, &json!({}), &mut state).await.unwrap_err();
+            assert!(
+                error.starts_with("Missing '"),
+                "{action} did not reach its query handler: {error}"
+            );
+        }
+        let error = execute("mainframe", &json!({}), &mut state)
             .await
             .unwrap_err();
-        assert_eq!(e, "`snapshot` is not supported on Firefox");
-        assert!(state.firefox.is_none());
+        assert_eq!(error, "Browser not launched");
+        let error = execute("evalhandle", &json!({}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Missing 'script' parameter");
     }
 
     #[tokio::test]
@@ -233,37 +360,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dialog_blocks_only_the_active_context() {
+    async fn dialog_blocks_only_the_active_tab() {
         let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
+        let (mut ff, _tx, _) = fake_session().await;
+        ff.tab_ids.insert("ctx-background".to_string(), 2);
         state.firefox = Some(ff);
-        state.pending_dialog = Some(dialog("ctx-active"));
+        state.pending_dialog = Some(dialog("ctx-active", Some("ctx-active")));
         let e = dialog_guard("navigate", &state).unwrap_err();
         assert!(e.contains("confirm dialog is blocking the page"), "{e}");
         assert!(dialog_guard("tab_list", &state).is_ok());
-        state.pending_dialog = Some(dialog("ctx-background"));
+        state.pending_dialog = Some(dialog("ctx-iframe", Some("ctx-background")));
         assert!(dialog_guard("navigate", &state).is_ok());
-    }
-
-    #[tokio::test]
-    async fn dialog_command_reports_and_resolves_pending_prompt() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-        state.pending_dialog = Some(dialog("ctx-active"));
-        let status = execute("dialog", &json!({"response": "status"}), &mut state)
-            .await
-            .unwrap();
-        assert_eq!(status["type"], "confirm");
-        let result = execute("dialog", &json!({"response": "dismiss"}), &mut state)
-            .await
-            .unwrap();
-        assert_eq!(result, json!({"handled": true, "accepted": false}));
-        assert!(state.pending_dialog.is_none());
-        assert!(calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|method| method == "browsingContext.handleUserPrompt"));
+        state.pending_dialog = Some(dialog("ctx-iframe", Some("ctx-active")));
+        assert!(dialog_guard("navigate", &state).is_err());
+        state.pending_dialog = Some(dialog("ctx-iframe", None));
+        assert!(dialog_guard("navigate", &state).is_err());
+        state.pending_dialog = Some(dialog("ctx-background", Some("ctx-background")));
+        assert!(dialog_guard("navigate", &state).is_ok());
     }
 }

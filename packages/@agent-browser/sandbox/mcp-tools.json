@@ -1089,7 +1089,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Drag one element to another.",
+      "description": "Drag one element to another. On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.",
       "inputSchema": {
         "properties": {
           "human": {

@@ -811,13 +811,15 @@ pub async fn resolve_element_object_id(
     Ok((object_id, session_id.to_string()))
 }
 
+pub(crate) const IS_CONNECTED_JS: &str = "function() { return this.isConnected; }";
+
 /// Reports whether a resolved node has been removed from its document, releasing it if so.
 async fn is_detached(client: &CdpClient, session_id: &str, object_id: &str) -> bool {
     let result: Result<EvaluateResult, String> = client
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return this.isConnected; }".to_string(),
+                function_declaration: IS_CONNECTED_JS.to_string(),
                 object_id: Some(object_id.to_string()),
                 arguments: None,
                 return_by_value: Some(true),
@@ -958,7 +960,7 @@ pub(super) fn extract_ax_string(value: &Option<AXValue>) -> String {
 }
 
 /// Build a JS expression that finds a DOM element by CSS selector or XPath.
-fn build_find_element_js(selector: &str) -> String {
+pub(crate) fn build_find_element_js(selector: &str) -> String {
     build_find_element_js_in("document", selector)
 }
 
@@ -979,7 +981,7 @@ fn build_find_element_js_in(root: &str, selector: &str) -> String {
 }
 
 /// Build a JS expression that counts matching DOM elements by CSS selector or XPath.
-fn build_count_elements_js(selector: &str) -> String {
+pub(crate) fn build_count_elements_js(selector: &str) -> String {
     if let Some(xpath) = selector.strip_prefix("xpath=") {
         format!(
             "document.evaluate({}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength",
@@ -1000,7 +1002,7 @@ fn build_count_elements_js(selector: &str) -> String {
 /// on el": shadow-including ancestors/descendants in either direction, and
 /// label/control association (custom checkboxes hide the input under a styled
 /// sibling inside the same label).
-const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
+pub(crate) const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     // Descend from the given document through same-origin iframes so a point
     // over a frame resolves to the element inside it, in that frame's space.
     let d = doc, lx = x, ly = y;
@@ -1034,7 +1036,7 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
 
 /// Returns why a click at (x, y) cannot reach `el`, or null when it can.
 /// It fails open when the engine lacks an API it needs.
-const ACTIONABILITY_JS: &str = r#"(doc, el, x, y) => {
+pub(crate) const ACTIONABILITY_JS: &str = r#"(doc, el, x, y) => {
     try {
         const rect = el.getBoundingClientRect();
         if ((rect.width <= 0 && rect.height <= 0) || ['hidden', 'collapse'].includes(el.ownerDocument.defaultView.getComputedStyle(el).visibility)) return 'not visible';
@@ -1112,14 +1114,14 @@ async fn resolve_by_selector(
     }
 }
 
-fn intercepted_error(target: &str, blocker: &str) -> String {
+pub(crate) fn intercepted_error(target: &str, blocker: &str) -> String {
     format!(
         "Element '{}' is covered by <{}> at its click point, so the input would land on that element instead. Dismiss or interact with the covering element first (it is often a dialog, banner, or sticky header).",
         target, blocker
     )
 }
 
-fn not_actionable_error(target: &str, reason: &str) -> String {
+pub(crate) fn not_actionable_error(target: &str, reason: &str) -> String {
     format!(
         "Element '{}' is {}, so the click would not reach it",
         target, reason
@@ -1136,6 +1138,9 @@ fn box_model_center(model: &BoxModel) -> (f64, f64) {
         (0.0, 0.0)
     }
 }
+
+pub(crate) const ELEMENT_TEXT_JS: &str =
+    "function() { return this.innerText || this.textContent || ''; }";
 
 pub async fn get_element_text(
     client: &CdpClient,
@@ -1157,8 +1162,7 @@ pub async fn get_element_text(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration:
-                    "function() { return this.innerText || this.textContent || ''; }".to_string(),
+                function_declaration: ELEMENT_TEXT_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1211,6 +1215,15 @@ pub async fn get_element_attribute(
 
     Ok(result.result.value.unwrap_or(Value::Null))
 }
+
+pub(crate) const ELEMENT_VISIBLE_JS: &str = r#"function() {
+                    const rect = this.getBoundingClientRect();
+                    const style = window.getComputedStyle(this);
+                    return rect.width > 0 && rect.height > 0 &&
+                           style.visibility !== 'hidden' &&
+                           style.display !== 'none' &&
+                           parseFloat(style.opacity) > 0;
+                }"#;
 
 /// What a field says about itself, so a recording can tell a credential
 /// from other input even when the field has no label.
@@ -1276,15 +1289,7 @@ pub async fn is_element_visible(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    const rect = this.getBoundingClientRect();
-                    const style = window.getComputedStyle(this);
-                    return rect.width > 0 && rect.height > 0 &&
-                           style.visibility !== 'hidden' &&
-                           style.display !== 'none' &&
-                           parseFloat(style.opacity) > 0;
-                }"#
-                .to_string(),
+                function_declaration: ELEMENT_VISIBLE_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1300,6 +1305,9 @@ pub async fn is_element_visible(
         .and_then(|v| v.as_bool())
         .unwrap_or(false))
 }
+
+pub(crate) const ELEMENT_ENABLED_JS: &str =
+    "function() { return !this.disabled && !(this.matches && this.matches(':disabled')); }";
 
 pub async fn is_element_enabled(
     client: &CdpClient,
@@ -1321,7 +1329,7 @@ pub async fn is_element_enabled(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return !this.disabled && !(this.matches && this.matches(':disabled')); }".to_string(),
+                function_declaration: ELEMENT_ENABLED_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1338,32 +1346,7 @@ pub async fn is_element_enabled(
         .unwrap_or(true))
 }
 
-pub async fn is_element_checked(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<bool, String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
-
-    // Mirrors Playwright's getChecked() with follow-label retargeting:
-    // 1. If element is a native checkbox/radio input, return .checked
-    // 2. If element has an ARIA checked role, return aria-checked
-    // 3. Follow label → input association (label.control)
-    // 4. Check for nested checkbox/radio input as last resort
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: r#"function() {
+pub(crate) const ELEMENT_CHECKED_JS: &str = r#"function() {
                     var el = this;
                     // Native checkbox/radio input
                     var tag = el.tagName && el.tagName.toUpperCase();
@@ -1391,7 +1374,34 @@ pub async fn is_element_checked(
                     var input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
                     if (input) return input.checked;
                     return false;
-                }"#.to_string(),
+                }"#;
+
+pub async fn is_element_checked(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<bool, String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    // Mirrors Playwright's getChecked() with follow-label retargeting:
+    // 1. If element is a native checkbox/radio input, return .checked
+    // 2. If element has an ARIA checked role, return aria-checked
+    // 3. Follow label → input association (label.control)
+    // 4. Check for nested checkbox/radio input as last resort
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: ELEMENT_CHECKED_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1407,6 +1417,8 @@ pub async fn is_element_checked(
         .and_then(|v| v.as_bool())
         .unwrap_or(false))
 }
+
+pub(crate) const ELEMENT_INNER_TEXT_JS: &str = "function() { return this.innerText || ''; }";
 
 pub async fn get_element_inner_text(
     client: &CdpClient,
@@ -1428,7 +1440,7 @@ pub async fn get_element_inner_text(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return this.innerText || ''; }".to_string(),
+                function_declaration: ELEMENT_INNER_TEXT_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1444,6 +1456,8 @@ pub async fn get_element_inner_text(
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_default())
 }
+
+pub(crate) const ELEMENT_INNER_HTML_JS: &str = "function() { return this.innerHTML || ''; }";
 
 pub async fn get_element_inner_html(
     client: &CdpClient,
@@ -1465,7 +1479,7 @@ pub async fn get_element_inner_html(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return this.innerHTML || ''; }".to_string(),
+                function_declaration: ELEMENT_INNER_HTML_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1481,6 +1495,9 @@ pub async fn get_element_inner_html(
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_default())
 }
+
+pub(crate) const ELEMENT_INPUT_VALUE_JS: &str =
+    "function() { return typeof this.value === 'string' ? this.value : ''; }";
 
 pub async fn get_element_input_value(
     client: &CdpClient,
@@ -1502,9 +1519,7 @@ pub async fn get_element_input_value(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration:
-                    "function() { return typeof this.value === 'string' ? this.value : ''; }"
-                        .to_string(),
+                function_declaration: ELEMENT_INPUT_VALUE_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1560,6 +1575,11 @@ pub async fn set_element_value(
     Ok(())
 }
 
+pub(crate) const ELEMENT_BOUNDING_BOX_JS: &str = r#"function() {
+                    const r = this.getBoundingClientRect();
+                    return { x: r.x, y: r.y, width: r.width, height: r.height };
+                }"#;
+
 pub async fn get_element_bounding_box(
     client: &CdpClient,
     session_id: &str,
@@ -1580,11 +1600,7 @@ pub async fn get_element_bounding_box(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    const r = this.getBoundingClientRect();
-                    return { x: r.x, y: r.y, width: r.width, height: r.height };
-                }"#
-                .to_string(),
+                function_declaration: ELEMENT_BOUNDING_BOX_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1622,6 +1638,16 @@ pub async fn get_element_count(
     Ok(result.result.value.and_then(|v| v.as_i64()).unwrap_or(0))
 }
 
+pub(crate) const ELEMENT_STYLES_ALL_JS: &str = r#"function() {
+                    const s = window.getComputedStyle(this);
+                    const result = {};
+                    for (let i = 0; i < s.length; i++) {
+                        const p = s[i];
+                        result[p] = s.getPropertyValue(p);
+                    }
+                    return result;
+                }"#;
+
 pub async fn get_element_styles(
     client: &CdpClient,
     session_id: &str,
@@ -1653,16 +1679,7 @@ pub async fn get_element_styles(
                 props_json
             )
         }
-        None => r#"function() {
-                    const s = window.getComputedStyle(this);
-                    const result = {};
-                    for (let i = 0; i < s.length; i++) {
-                        const p = s[i];
-                        result[p] = s.getPropertyValue(p);
-                    }
-                    return result;
-                }"#
-        .to_string(),
+        None => ELEMENT_STYLES_ALL_JS.to_string(),
     };
 
     let result: EvaluateResult = client
