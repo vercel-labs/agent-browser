@@ -42,23 +42,46 @@ pub struct FirefoxProcess {
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Rejects options Firefox cannot honour. `cdp`, `auto_connect`, `provider` and
-/// `allowed_domains` are resolved from flags, env and config by the caller.
-pub fn validate_firefox_options(
-    options: &LaunchOptions,
-    cdp: Option<&str>,
-    auto_connect: bool,
-    provider: Option<&str>,
-    allowed_domains: bool,
-) -> Result<(), String> {
+/// The launch request Firefox is asked to honour, as flags, env and config resolved it.
+#[derive(Default)]
+pub struct LaunchFlags<'a> {
+    pub cdp: Option<&'a str>,
+    pub auto_connect: bool,
+    pub provider: Option<&'a str>,
+    pub allowed_domains: bool,
+    pub capture_flow: bool,
+    pub enable_features: &'a [String],
+    pub init_scripts: &'a [String],
+    pub plugins: &'a [crate::plugins::PluginConfig],
+}
+
+/// Rejects every launch option Firefox cannot honour, naming the flag that asked for it.
+pub fn validate_launch(options: &LaunchOptions, flags: LaunchFlags<'_>) -> Result<(), String> {
     let unsupported = |flag: &str| Err(format!("{flag} is not supported with --engine firefox"));
-    if cdp.is_some() {
+    if !flags.enable_features.is_empty() {
+        return unsupported("--enable");
+    }
+    if !flags.init_scripts.is_empty() {
+        return unsupported("--init-script");
+    }
+    if !crate::plugins::resolved_plugins_with_capability(
+        flags.plugins,
+        crate::plugins::CAPABILITY_LAUNCH_MUTATE,
+    )
+    .is_empty()
+    {
+        return unsupported("launch-mutator plugins");
+    }
+    if flags.capture_flow {
+        return Err("--capture flow is not supported with --engine firefox".to_string());
+    }
+    if flags.cdp.is_some() {
         return unsupported("--cdp");
     }
-    if auto_connect {
+    if flags.auto_connect {
         return unsupported("--auto-connect");
     }
-    if provider.is_some() {
+    if flags.provider.is_some() {
         return unsupported("--provider");
     }
     if options.extensions.as_ref().is_some_and(|e| !e.is_empty()) {
@@ -88,8 +111,8 @@ pub fn validate_firefox_options(
     if options.color_scheme.is_some() {
         return unsupported("--color-scheme");
     }
-    if allowed_domains {
-        return Err("allowed-domains is not yet supported on Firefox".to_string());
+    if flags.allowed_domains {
+        return unsupported("--allowed-domains");
     }
     Ok(())
 }
@@ -388,12 +411,12 @@ mod tests {
     }
 
     fn err_of(o: &LaunchOptions) -> String {
-        validate_firefox_options(o, None, false, None, false).unwrap_err()
+        validate_launch(o, LaunchFlags::default()).unwrap_err()
     }
 
     #[test]
     fn validate_accepts_plain_options() {
-        assert!(validate_firefox_options(&ok(), None, false, None, false).is_ok());
+        assert!(validate_launch(&ok(), LaunchFlags::default()).is_ok());
     }
 
     #[test]
@@ -425,15 +448,64 @@ mod tests {
         let mut o = ok();
         o.color_scheme = Some("dark".into());
         assert!(err_of(&o).contains("--color-scheme"));
-        let e = validate_firefox_options(&ok(), Some("9222"), false, None, false).unwrap_err();
+        let flags = |cdp, auto_connect, provider| LaunchFlags {
+            cdp,
+            auto_connect,
+            provider,
+            ..LaunchFlags::default()
+        };
+        let e = validate_launch(&ok(), flags(Some("9222"), false, None)).unwrap_err();
         assert!(e.contains("--cdp"));
-        let e = validate_firefox_options(&ok(), None, true, None, false).unwrap_err();
+        let e = validate_launch(&ok(), flags(None, true, None)).unwrap_err();
         assert!(e.contains("--auto-connect"));
-        let e =
-            validate_firefox_options(&ok(), None, false, Some("browserbase"), false).unwrap_err();
+        let e = validate_launch(&ok(), flags(None, false, Some("browserbase"))).unwrap_err();
         assert!(e.contains("--provider"));
-        let e = validate_firefox_options(&ok(), None, false, None, true).unwrap_err();
-        assert!(e.contains("allowed-domains is not yet supported on Firefox"));
+    }
+
+    #[test]
+    fn validate_rejects_launch_extras_and_flow_capture() {
+        let init_scripts = vec!["x.js".to_string()];
+        let features = vec!["foo".to_string()];
+        assert!(validate_launch(
+            &ok(),
+            LaunchFlags {
+                init_scripts: &init_scripts,
+                ..LaunchFlags::default()
+            }
+        )
+        .unwrap_err()
+        .contains("--init-script"));
+        assert!(validate_launch(
+            &ok(),
+            LaunchFlags {
+                enable_features: &features,
+                ..LaunchFlags::default()
+            }
+        )
+        .unwrap_err()
+        .contains("--enable"));
+        assert_eq!(
+            validate_launch(
+                &ok(),
+                LaunchFlags {
+                    capture_flow: true,
+                    ..LaunchFlags::default()
+                }
+            )
+            .unwrap_err(),
+            "--capture flow is not supported with --engine firefox"
+        );
+        assert_eq!(
+            validate_launch(
+                &ok(),
+                LaunchFlags {
+                    allowed_domains: true,
+                    ..LaunchFlags::default()
+                }
+            )
+            .unwrap_err(),
+            "--allowed-domains is not supported with --engine firefox"
+        );
     }
 
     #[test]

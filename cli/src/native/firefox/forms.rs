@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::actions::session;
+use super::daemon::session;
 use super::input::{key_chord_actions, key_event_actions, key_text_actions, pointer_click, Origin};
 use super::interact::{act_element, perform_actions, PointerAction};
 use super::session::FirefoxSession;

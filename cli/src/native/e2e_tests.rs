@@ -15537,6 +15537,40 @@ async fn e2e_firefox_form_entry() {
     firefox_close(&mut state).await;
 }
 
+/// History and reload report the document they land on, like Chrome's handlers.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_history_and_reload_land_on_the_traversed_document() {
+    required_firefox_binary();
+    let home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    _env.set("HOME", home.path().to_str().unwrap());
+    let fixture = firefox_fixture().await;
+    let second = format!("{}/page", fixture.other);
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_open(&mut state, &second).await;
+
+    for (action, expected) in [
+        ("back", fixture.url.clone()),
+        ("forward", second.clone()),
+        ("reload", second.clone()),
+    ] {
+        let resp = firefox_command(&mut state, json!({ "id": action, "action": action })).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["url"], expected, "{action}");
+        assert_eq!(
+            firefox_command(&mut state, json!({ "id": "url", "action": "url" })).await["data"]
+                ["url"],
+            expected,
+            "{action} leaves the tab on the same document"
+        );
+    }
+    firefox_close(&mut state).await;
+}
+
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_read_active_page() {

@@ -585,7 +585,7 @@ agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
 ```
 
-Firefox rejects authenticated proxies, `--user-agent`, `--color-scheme`, and `networkidle` waits.
+Firefox rejects `--allowed-domains`, authenticated proxies, `--user-agent`, `--color-scheme`, and `networkidle` waits.
 
 ## Debugging
 

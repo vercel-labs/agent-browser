@@ -277,50 +277,7 @@ impl FirefoxSession {
                         }
                         Some("browsingContext.contextDestroyed") => {
                             if let Some(context) = params["context"].as_str() {
-                                let destroyed: HashSet<String> = self
-                                    .context_parents
-                                    .keys()
-                                    .filter(|id| {
-                                        is_context_or_descendant(id, context, &self.context_parents)
-                                    })
-                                    .cloned()
-                                    .chain(std::iter::once(context.to_string()))
-                                    .collect();
-                                let stale_ids: HashSet<i64> = self
-                                    .refs
-                                    .iter()
-                                    .filter(|((id, _), _)| destroyed.contains(id))
-                                    .map(|(_, id)| *id)
-                                    .collect();
-                                self.refs.retain(|(id, _), _| !destroyed.contains(id));
-                                self.documents.retain(|id, _| !destroyed.contains(id));
-                                self.shadow_ids.retain(|id| !stale_ids.contains(id));
-                                if dialog.as_ref().is_some_and(|d| {
-                                    d.owner_context.as_deref() == Some(context)
-                                        || d.session_id.as_deref() == Some(context)
-                                }) {
-                                    *dialog = None;
-                                }
-                                if destroyed.contains(&self.context) {
-                                    self.context = self.top_context.clone();
-                                    active_destroyed = true;
-                                }
-                                self.context_parents.retain(|id, _| !destroyed.contains(id));
-                                if params["parent"].is_null() {
-                                    self.tab_ids.remove(context);
-                                    self.tab_labels.remove(context);
-                                    if self.top_context == context {
-                                        self.top_context = self
-                                            .tab_ids
-                                            .iter()
-                                            .min_by_key(|(_, id)| *id)
-                                            .map(|(context, _)| context.clone())
-                                            .unwrap_or_default();
-                                        self.context = self.top_context.clone();
-                                        self.refs.clear();
-                                        active_destroyed = true;
-                                    }
-                                }
+                                active_destroyed |= self.forget_context(context, dialog);
                             }
                         }
                         _ => {}
@@ -337,6 +294,117 @@ impl FirefoxSession {
             }
         }
         active_destroyed
+    }
+
+    /// Forgets a browsing context that is gone along with every context nested inside it: stable
+    /// ids, labels, element refs, documents, shadow ids and any prompt they owned. Returns true
+    /// when the active context was among them, which then falls back to its top-level tab, or to
+    /// the lowest surviving tab id when that tab itself is gone.
+    pub fn forget_context(&mut self, context: &str, dialog: &mut Option<PendingDialog>) -> bool {
+        let gone: HashSet<String> = self
+            .context_parents
+            .keys()
+            .filter(|id| is_context_or_descendant(id, context, &self.context_parents))
+            .cloned()
+            .chain(std::iter::once(context.to_string()))
+            .collect();
+        let stale_ids: HashSet<i64> = self
+            .refs
+            .iter()
+            .filter(|((id, _), _)| gone.contains(id))
+            .map(|(_, id)| *id)
+            .collect();
+        self.refs.retain(|(id, _), _| !gone.contains(id));
+        self.documents.retain(|id, _| !gone.contains(id));
+        self.shadow_ids.retain(|id| !stale_ids.contains(id));
+        if dialog.as_ref().is_some_and(|d| {
+            [&d.owner_context, &d.session_id]
+                .into_iter()
+                .flatten()
+                .any(|owner| gone.contains(owner))
+        }) {
+            *dialog = None;
+        }
+        self.context_parents.retain(|id, _| !gone.contains(id));
+        if self.tab_ids.remove(context).is_some() {
+            self.tab_labels.remove(context);
+            if self.top_context == context {
+                self.top_context = self
+                    .tab_ids
+                    .iter()
+                    .min_by_key(|(_, id)| *id)
+                    .map(|(context, _)| context.clone())
+                    .unwrap_or_default();
+                self.context = self.top_context.clone();
+                self.refs.clear();
+                return true;
+            }
+        }
+        if !gone.contains(&self.context) {
+            return false;
+        }
+        self.context = self.top_context.clone();
+        true
+    }
+
+    /// Accepts the prompts the daemon answers itself, following `auto_dialog` as it changes.
+    pub fn spawn_auto_dismiss(&self) -> tokio::task::JoinHandle<()> {
+        let client = Arc::clone(&self.bidi);
+        let mut events = client.subscribe();
+        let enabled = Arc::clone(&self.auto_dialog);
+        let changed = Arc::clone(&self.auto_dialog_changed);
+        tokio::spawn(async move {
+            let mut pending = HashSet::<String>::new();
+            let track = |event: &Value, pending: &mut HashSet<String>| {
+                let params = &event["params"];
+                let Some(context) = params["context"].as_str() else {
+                    return;
+                };
+                match event["method"].as_str() {
+                    Some("browsingContext.userPromptOpened") => {
+                        pending.remove(context);
+                        if params["handler"] != "accept" && auto_handles_prompt(params, true) {
+                            pending.insert(context.to_string());
+                        }
+                    }
+                    Some("browsingContext.userPromptClosed") => {
+                        pending.remove(context);
+                    }
+                    _ => {}
+                }
+            };
+            loop {
+                tokio::select! {
+                    biased;
+                    event = events.recv() => match event {
+                        Ok(event) => track(&event, &mut pending),
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    },
+                    _ = changed.notified() => {}
+                }
+                while let Ok(event) = events.try_recv() {
+                    track(&event, &mut pending);
+                }
+                if enabled.load(Ordering::Acquire) {
+                    if let Some(context) = pending.iter().next().cloned() {
+                        pending.remove(&context);
+                        if let Err(error) = client
+                            .send(
+                                "browsingContext.handleUserPrompt",
+                                json!({"context": context, "accept": true}),
+                            )
+                            .await
+                        {
+                            eprintln!("[auto-dismiss] failed to accept Firefox dialog: {error}");
+                        }
+                        if !pending.is_empty() {
+                            changed.notify_one();
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Runs `fut` until it finishes or a prompt opens in `context` or its owning tab. Returns `None` for the prompt.

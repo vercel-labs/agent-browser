@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use super::actions::session;
+use super::daemon::session;
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
 use crate::native::element::{build_find_element_js, parse_ref, RefEntry, IS_CONNECTED_JS};

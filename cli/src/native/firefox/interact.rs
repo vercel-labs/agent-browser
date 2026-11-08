@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use super::actions::session;
+use super::daemon::session;
 use super::input::{
     mouse_button_mask, mouse_button_name, pointer_click, pointer_down, pointer_hover,
     pointer_mousemove, pointer_up, pointer_wheel, touch_event, touch_swipe_path, touch_tap, Origin,
