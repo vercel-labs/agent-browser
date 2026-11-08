@@ -71,12 +71,10 @@ fn parse_origin_storage(data: &Value) -> Option<OriginStorage> {
     }
     let local_storage: Vec<StorageEntry> = data
         .get("localStorage")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
+        .and_then(|v| serde_json::from_value(v.clone()).ok())?;
     let session_storage: Vec<StorageEntry> = data
         .get("sessionStorage")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
+        .and_then(|v| serde_json::from_value(v.clone()).ok())?;
 
     Some(OriginStorage {
         origin,
@@ -90,7 +88,7 @@ async fn eval_origin_storage(
     client: &CdpClient,
     session_id: &str,
     origin_js: &str,
-) -> Option<OriginStorage> {
+) -> Result<Option<OriginStorage>, String> {
     let result = client
         .send_command_typed::<_, super::cdp::types::EvaluateResult>(
             "Runtime.evaluate",
@@ -101,10 +99,19 @@ async fn eval_origin_storage(
             },
             Some(session_id),
         )
-        .await
-        .ok()?;
+        .await?;
+    if result.exception_details.is_some() {
+        return Err(
+            "Storage capture failed in the page; previous saved state was not replaced.".into(),
+        );
+    }
     let data = result.result.value.unwrap_or(Value::Null);
-    parse_origin_storage(&data)
+    if data.get("origin").and_then(Value::as_str) == Some("null") {
+        return Ok(None);
+    }
+    parse_origin_storage(&data).map(Some).ok_or_else(|| {
+        "Storage capture returned incomplete data; previous saved state was not replaced.".into()
+    })
 }
 
 /// Create a temporary CDP target, navigate it to each origin to collect localStorage,
@@ -170,29 +177,32 @@ async fn collect_storage_in_target(
     // Blank HTML response body, pre-encoded to avoid repeated base64 work per request
     let blank_html_b64 = base64::engine::general_purpose::STANDARD.encode("<html></html>");
 
-    let _ = client
+    client
         .send_command(
             "Fetch.enable",
             Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
             Some(temp_session),
         )
-        .await;
+        .await?;
 
     let mut event_rx = client.subscribe();
     let mut results = Vec::new();
 
     for target_origin in origins {
         let nav_url = format!("{}/", target_origin.trim_end_matches('/'));
-        if client
+        let navigation = client
             .send_command(
                 "Page.navigate",
                 Some(json!({ "url": nav_url })),
                 Some(temp_session),
             )
-            .await
-            .is_err()
+            .await?;
+        if navigation
+            .get("errorText")
+            .and_then(Value::as_str)
+            .is_some()
         {
-            continue;
+            return Err(format!("Failed to capture storage for {}", target_origin));
         }
 
         // Fulfill intercepted requests with blank HTML until the page loads
@@ -205,7 +215,7 @@ async fn collect_storage_in_target(
                         if let Some(request_id) =
                             evt.params.get("requestId").and_then(|v| v.as_str())
                         {
-                            let _ = client
+                            client
                                 .send_command(
                                     "Fetch.fulfillRequest",
                                     Some(json!({
@@ -218,7 +228,7 @@ async fn collect_storage_in_target(
                                     })),
                                     Some(temp_session),
                                 )
-                                .await;
+                                .await?;
                         }
                     } else if evt.method == "Page.loadEventFired" {
                         page_loaded = true;
@@ -232,14 +242,22 @@ async fn collect_storage_in_target(
         }
 
         if !page_loaded {
-            continue;
+            return Err(format!(
+                "Storage capture timed out for {}; previous saved state was not replaced.",
+                target_origin
+            ));
         }
 
-        if let Some(storage) = eval_origin_storage(client, temp_session, origin_js).await {
-            if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
-                results.push(storage);
-            }
+        let storage = eval_origin_storage(client, temp_session, origin_js)
+            .await?
+            .ok_or_else(|| format!("Missing storage origin for {}", target_origin))?;
+        if &storage.origin != target_origin {
+            return Err(format!(
+                "Storage capture changed origin from {} to {}",
+                target_origin, storage.origin
+            ));
         }
+        results.push(storage);
     }
 
     Ok(results)
@@ -257,52 +275,112 @@ pub async fn save_state(
 
     let origin_js = r#"(() => {
         const result = { origin: location.origin, localStorage: [], sessionStorage: [] };
-        try {
+        if (location.origin === "null") return result;
+        {
             for (let i = 0; i < localStorage.length; i++) {
                 const key = localStorage.key(i);
                 result.localStorage.push({ name: key, value: localStorage.getItem(key) });
             }
-        } catch(e) {}
-        try {
+        }
+        {
             for (let i = 0; i < sessionStorage.length; i++) {
                 const key = sessionStorage.key(i);
                 result.sessionStorage.push({ name: key, value: sessionStorage.getItem(key) });
             }
-        } catch(e) {}
+        }
         return result;
     })()"#;
 
     // Merge visited origins with current frame tree origins
     let mut all_origins = visited_origins.clone();
-    if let Ok(tree_result) = client
+    let tree_result = client
         .send_command_no_params("Page.getFrameTree", Some(session_id))
-        .await
-    {
-        if let Some(tree) = tree_result.get("frameTree") {
-            collect_frame_origins(tree, &mut all_origins);
-        }
-    }
+        .await?;
+    let tree = tree_result
+        .get("frameTree")
+        .ok_or("Missing frame tree during state capture")?;
+    collect_frame_origins(tree, &mut all_origins);
 
     // 1. Collect localStorage from the current page
     let mut origins = Vec::new();
-    let mut current_origin = String::new();
-
-    if let Some(storage) = eval_origin_storage(client, session_id, origin_js).await {
-        current_origin = storage.origin.clone();
-        if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
-            origins.push(storage);
+    let current = eval_origin_storage(client, session_id, origin_js).await?;
+    let current_origin = current
+        .as_ref()
+        .map(|storage| storage.origin.clone())
+        .unwrap_or_default();
+    if let Some(expected) = tree
+        .pointer("/frame/url")
+        .and_then(Value::as_str)
+        .and_then(|url| url::Url::parse(url).ok())
+        .map(|url| url.origin().ascii_serialization())
+        .filter(|origin| origin != "null")
+    {
+        if expected != current_origin {
+            return Err(
+                "Page navigated during state capture; previous saved state was not replaced."
+                    .into(),
+            );
         }
     }
+    origins.extend(current);
 
     // 2. Collect localStorage from remaining origins via a disposable temp target
     all_origins.remove(&current_origin);
+    // A disposable target cannot read another live tab's sessionStorage.
+    let targets = client
+        .send_command_no_params("Target.getTargets", None)
+        .await?;
+    let targets = targets
+        .get("targetInfos")
+        .and_then(Value::as_array)
+        .ok_or("Missing targets during state capture")?;
+    for target in targets {
+        if target.get("type").and_then(Value::as_str) != Some("page") {
+            continue;
+        }
+        let Some(origin) = target
+            .get("url")
+            .and_then(Value::as_str)
+            .and_then(|url| url::Url::parse(url).ok())
+            .map(|url| url.origin().ascii_serialization())
+        else {
+            continue;
+        };
+        if !all_origins.contains(&origin) {
+            continue;
+        }
+        let target_id = target
+            .get("targetId")
+            .and_then(Value::as_str)
+            .ok_or("Missing page target ID")?;
+        let attached: AttachToTargetResult = client
+            .send_command_typed(
+                "Target.attachToTarget",
+                &AttachToTargetParams {
+                    target_id: target_id.into(),
+                    flatten: true,
+                },
+                None,
+            )
+            .await?;
+        let captured = eval_origin_storage(client, &attached.session_id, origin_js).await;
+        let _ = client
+            .send_command(
+                "Target.detachFromTarget",
+                Some(json!({"sessionId":attached.session_id})),
+                None,
+            )
+            .await;
+        let storage = captured?.ok_or("Live page became unavailable during state capture")?;
+        if storage.origin != origin {
+            return Err("Live page navigated during state capture".into());
+        }
+        origins.push(storage);
+        all_origins.remove(&origin);
+    }
     if !all_origins.is_empty() {
         let remaining: Vec<String> = all_origins.into_iter().collect();
-        if let Ok(temp_origins) =
-            collect_storage_via_temp_target(client, &remaining, origin_js).await
-        {
-            origins.extend(temp_origins);
-        }
+        origins.extend(collect_storage_via_temp_target(client, &remaining, origin_js).await?);
     }
 
     let state = StorageState { cookies, origins };
@@ -854,6 +932,124 @@ pub fn get_sessions_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn capture_fixture(mode: &'static str) -> CdpClient {
+        use futures_util::{SinkExt, StreamExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let Ok(request) = serde_json::from_str::<Value>(text) else {
+                    continue;
+                };
+                let method = request["method"].as_str().unwrap_or("");
+                let result = match method {
+                    "Network.getAllCookies" if mode == "cookies" => json!({"cookies":"invalid"}),
+                    "Network.getAllCookies" => json!({"cookies":[]}),
+                    "Page.getFrameTree" => {
+                        json!({"frameTree":{"frame":{"url":"https://first.example/"}}})
+                    }
+                    "Runtime.evaluate" => {
+                        let origin = if request["sessionId"] == "other" {
+                            "https://other.example"
+                        } else {
+                            "https://first.example"
+                        };
+                        json!({"result":{"type":"object","value":{"origin":origin,"localStorage":[],"sessionStorage":[{"name":"token","value":origin}]}}})
+                    }
+                    "Target.getTargets" if mode == "complete" => {
+                        json!({"targetInfos":[{"type":"page","targetId":"other","url":"https://other.example/"}]})
+                    }
+                    "Target.getTargets" => json!({"targetInfos":[]}),
+                    "Target.createTarget" => json!({"targetId":"temporary"}),
+                    "Target.attachToTarget" => json!({"sessionId":"other"}),
+                    _ => json!({}),
+                };
+                let fail = (mode == "frame" && method == "Page.getFrameTree")
+                    || (mode == "active" && method == "Runtime.evaluate")
+                    || (mode == "target" && method == "Target.createTarget")
+                    || (mode == "navigation" && method == "Page.navigate");
+                let response = if fail {
+                    json!({"id":request["id"],"error":{"code":-32000,"message":"fixture capture failure"}})
+                } else {
+                    json!({"id":request["id"],"result":result})
+                };
+                if socket
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn incomplete_capture_preserves_previous_autosave() {
+        let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
+        let home = tempfile::tempdir().unwrap();
+        guard.set("HOME", home.path().to_str().unwrap());
+        guard.set("AGENT_BROWSER_NAMESPACE", "capture-fixture");
+        fs::create_dir_all(get_sessions_dir()).unwrap();
+        let previous = get_sessions_dir().join("saved-id.json");
+        let usable = r#"{"cookies":[],"origins":[{"origin":"https://first.example","localStorage":[{"name":"auth","value":"keep"}]}]}"#;
+        fs::write(&previous, usable).unwrap();
+        for mode in ["cookies", "frame", "active", "target", "navigation"] {
+            let client = capture_fixture(mode).await;
+            let origins = HashSet::from(["https://other.example".to_string()]);
+            assert!(
+                save_auto_state_transactional(&client, "active", "saved", "id", &origins)
+                    .await
+                    .is_err(),
+                "{mode}"
+            );
+            assert_eq!(fs::read_to_string(&previous).unwrap(), usable, "{mode}");
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_capture_uses_live_pages_for_session_storage() {
+        let client = capture_fixture("complete").await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let saved = save_state(
+            &client,
+            "active",
+            Some(path.to_str().unwrap()),
+            None,
+            "id",
+            &HashSet::from(["https://other.example".to_string()]),
+        )
+        .await
+        .unwrap();
+        let state: StorageState =
+            serde_json::from_str(&fs::read_to_string(saved).unwrap()).unwrap();
+        assert_eq!(state.origins.len(), 2);
+        assert!(state
+            .origins
+            .iter()
+            .all(|origin| origin.session_storage[0].value == origin.origin));
+    }
+
+    #[test]
+    fn incomplete_storage_entries_are_not_empty_storage() {
+        assert!(parse_origin_storage(
+            &json!({"origin":"https://example.com","localStorage":"invalid","sessionStorage":[]})
+        )
+        .is_none());
+        assert!(parse_origin_storage(&json!({"origin":"https://example.com","localStorage":[],"sessionStorage":[{"name":"auth"}]})).is_none());
+    }
 
     #[test]
     fn test_storage_state_serialization() {

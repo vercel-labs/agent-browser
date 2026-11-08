@@ -3586,6 +3586,9 @@ Examples:
             r##"
 agent-browser state - Manage browser state
 
+State saves fail on incomplete cookies or storage capture. Failed autosaves
+leave the previous usable save in place.
+
 Usage: agent-browser state <operation> [args]
 
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
