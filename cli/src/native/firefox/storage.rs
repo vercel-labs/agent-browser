@@ -438,10 +438,12 @@ async fn collect_via_temp_context(
     let result = async {
         let mut found = Vec::new();
         for origin in origins {
-            if let Some(filter) = ff.net.domain_filter.read().await.as_ref() {
-                if filter.check_url(origin).is_err() {
-                    continue;
-                }
+            let allowed = {
+                let filter = ff.net.domain_filter.read().await;
+                crate::native::network::check_navigation_allowed(filter.as_ref(), origin).is_ok()
+            };
+            if !allowed {
+                continue;
             }
             ff.bidi
                 .send(

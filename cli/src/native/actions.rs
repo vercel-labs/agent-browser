@@ -916,6 +916,11 @@ impl DaemonState {
         self.mouse_state = MouseState::default();
     }
 
+    /// Rejects a navigation to a URL outside the allowed domains; `about:blank` stays reachable.
+    pub async fn ensure_navigation_allowed(&self, url: &str) -> Result<(), String> {
+        network::check_navigation_allowed(self.domain_filter.read().await.as_ref(), url)
+    }
+
     /// Create state with an optional stream client slot and server instance
     /// (for daemon startup with stream server).
     pub fn new_with_stream(
@@ -4200,18 +4205,6 @@ fn should_blank_existing_url(url: &str, filter: &DomainFilter) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn check_url_allowed_by_filter(
-    filter: Option<&DomainFilter>,
-    url: &str,
-) -> Result<(), String> {
-    if let Some(filter) = filter {
-        if url != "about:blank" {
-            filter.check_url(url)?;
-        }
-    }
-    Ok(())
-}
-
 fn network_controls_required(filter: Option<&DomainFilter>, handle_auth_requests: bool) -> bool {
     filter.is_some() || handle_auth_requests
 }
@@ -4225,7 +4218,7 @@ fn should_defer_url_until_network_controls(
         return Ok(false);
     };
 
-    check_url_allowed_by_filter(filter, url)?;
+    network::check_navigation_allowed(filter, url)?;
     Ok(filter.is_some_and(|filter| !filter.allowed_domains.is_empty()) || handle_auth_requests)
 }
 
@@ -6463,12 +6456,7 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
 
-    {
-        let df = state.domain_filter.read().await;
-        if let Some(ref filter) = *df {
-            filter.check_url(url)?;
-        }
-    }
+    state.ensure_navigation_allowed(url).await?;
 
     // WebDriver backend path
     if let Some(ref wb) = state.webdriver_backend {
@@ -9241,7 +9229,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     {
         let domain_filter = state.domain_filter.read().await;
         if let Some(url) = recording_url {
-            check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
+            network::check_navigation_allowed(domain_filter.as_ref(), url)?;
         }
     }
 
@@ -9306,7 +9294,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
     {
         let domain_filter = state.domain_filter.read().await;
         if let Some(ref url) = recording_url {
-            check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
+            network::check_navigation_allowed(domain_filter.as_ref(), url)?;
         }
     }
 
@@ -13504,6 +13492,9 @@ fn unix_timestamp_millis() -> u128 {
 }
 
 async fn har_browser_metadata(state: &DaemonState) -> Option<Value> {
+    if let Some(ff) = state.firefox.as_ref() {
+        return Some(json!({ "name": "Firefox", "version": ff.browser_version }));
+    }
     let mgr = state.browser.as_ref()?;
     if !mgr.is_connection_alive().await {
         return None;

@@ -275,7 +275,9 @@ impl LegacyDownloadIds {
     }
 }
 
-/// Starts the task that resolves every intercepted request exactly once.
+/// Starts the task that owns the protocol side of BiDi events: resolving intercepted requests,
+/// tracking downloads and replaying emulation onto new tabs. It never touches daemon state; the
+/// drain owns that.
 pub fn spawn_dispatcher(
     bidi: Arc<BidiClient>,
     net: NetContext,
@@ -283,26 +285,18 @@ pub fn spawn_dispatcher(
     emulation: Arc<std::sync::RwLock<super::emulation::Settings>>,
 ) -> AbortOnDrop {
     AbortOnDrop(tokio::spawn(async move {
-        let mut emulated_contexts = HashSet::new();
         let mut legacy_downloads = LegacyDownloadIds::default();
         while let Some(mut e) = rx.recv().await {
             if e["method"] == "browsingContext.contextCreated" && e["params"]["parent"].is_null() {
                 if let Some(context) = e["params"]["context"].as_str() {
-                    if emulated_contexts.insert(context.to_string()) {
-                        let settings = emulation.read().unwrap().clone();
-                        if let Err(error) =
-                            super::emulation::apply_settings_to_context(&bidi, &settings, context)
-                                .await
-                        {
-                            eprintln!(
-                                "Warning: failed to apply Firefox emulation to {context}: {error}"
-                            );
-                        }
+                    let settings = emulation.read().unwrap().clone();
+                    if let Err(error) =
+                        super::emulation::apply_overrides(&bidi, &settings, context).await
+                    {
+                        eprintln!(
+                            "Warning: failed to apply Firefox emulation to {context}: {error}"
+                        );
                     }
-                }
-            } else if e["method"] == "browsingContext.contextDestroyed" {
-                if let Some(context) = e["params"]["context"].as_str() {
-                    emulated_contexts.remove(context);
                 }
             }
             let is_download = matches!(
@@ -496,7 +490,8 @@ fn auth_response(
     }
 }
 
-/// Drains buffered BiDi events and applies them to the daemon's dialog, network and console state.
+/// Drains buffered BiDi events into the daemon: tab bookkeeping and dialogs first, then the
+/// recorders, which only see events from the active tab.
 pub async fn drain(state: &mut DaemonState) {
     if let Some(ff) = state.firefox.as_mut() {
         let top_context = ff.top_context.clone();
@@ -510,8 +505,33 @@ pub async fn drain(state: &mut DaemonState) {
     }
 }
 
+/// The browsing context an event reports, when the event carries one.
+fn event_context(event: &Value) -> Option<&str> {
+    if event["method"] == "log.entryAdded" {
+        event["params"]["source"]["context"].as_str()
+    } else {
+        event["params"]["context"].as_str()
+    }
+}
+
+/// Whether an event belongs to the active tab, one of its frames, or a context the daemon
+/// cannot place, such as a worker that has no browsing context.
+fn recorded_in_active_tab(state: &DaemonState, event: &Value) -> bool {
+    event_context(event).is_none_or(|context| {
+        state
+            .firefox
+            .as_ref()
+            .is_some_and(|ff| ff.context_is_in_active_tab(context))
+    })
+}
+
+/// Records buffered BiDi events. Events from background tabs are dropped here, before any
+/// recorder sees them, so every recorder keeps the Chrome rule of one active page.
 async fn apply_events(state: &mut DaemonState, events: Vec<Value>) {
     for e in events {
+        if !recorded_in_active_tab(state, &e) {
+            continue;
+        }
         let p = &e["params"];
         match e["method"].as_str() {
             Some("network.beforeRequestSent") => request_started(state, p),
@@ -532,15 +552,6 @@ fn request_id(p: &Value) -> &str {
 }
 
 fn request_started(state: &mut DaemonState, p: &Value) {
-    if let Some(context) = p["context"].as_str() {
-        let active = state
-            .firefox
-            .as_ref()
-            .is_some_and(|ff| ff.context_is_in_active_tab(context));
-        if !active {
-            return;
-        }
-    }
     let request = &p["request"];
     let id = request_id(p).to_string();
     let url = request["url"].as_str().unwrap_or("").to_string();
@@ -906,27 +917,6 @@ pub async fn request_detail(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     Ok(result)
 }
 
-/// True when `context` is the active tab's top-level context or one of its frames.
-async fn in_active_tab(ff: &FirefoxSession, context: &str) -> bool {
-    fn contains(node: &Value, context: &str) -> bool {
-        node["context"] == context
-            || node["children"]
-                .as_array()
-                .is_some_and(|c| c.iter().any(|n| contains(n, context)))
-    }
-    if context == ff.top_context {
-        return true;
-    }
-    ff.bidi
-        .send("browsingContext.getTree", json!({"root": ff.top_context}))
-        .await
-        .is_ok_and(|tree| {
-            tree["contexts"]
-                .as_array()
-                .is_some_and(|c| c.iter().any(|n| contains(n, context)))
-        })
-}
-
 /// `responsebody`: waits for the next response whose URL contains the pattern and returns its body.
 pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let pattern = cmd
@@ -947,11 +937,14 @@ pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             Err(_) => return Err(format!("Timeout waiting for response matching '{pattern}'")),
         };
         let p = &event["params"];
-        if event["method"] == "network.responseCompleted"
+        let matches = event["method"] == "network.responseCompleted"
             && p["response"]["url"]
                 .as_str()
-                .is_some_and(|u| u.contains(pattern))
-            && in_active_tab(ff, p["context"].as_str().unwrap_or("")).await
+                .is_some_and(|u| u.contains(pattern));
+        if matches
+            && ff
+                .active_tab_contains(p["context"].as_str().unwrap_or(""))
+                .await
         {
             let (body, _) = data(&ff.bidi, request_id(p), "response").await?;
             return Ok(json!({
@@ -1895,6 +1888,48 @@ mod tests {
         assert_eq!(state.har_entries.len(), 2);
         assert_eq!(state.har_entries[0].request_id, "active");
         assert_eq!(state.har_entries[1].request_id, "frame");
+    }
+
+    #[tokio::test]
+    async fn log_entries_exclude_background_tabs() {
+        let (mut ff, _, _) =
+            crate::native::firefox::session::tests::fake_session_with(|_| json!({})).await;
+        ff.top_context = "active".into();
+        ff.context = "active".into();
+        ff.context_parents.insert("frame".into(), "active".into());
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        for (context, text) in [
+            (json!("active"), "from-active"),
+            (json!("frame"), "from-frame"),
+            (json!("other"), "from-other"),
+            (Value::Null, "from-worker"),
+        ] {
+            apply_events(
+                &mut state,
+                vec![json!({
+                    "method": "log.entryAdded",
+                    "params": {
+                        "type": "console",
+                        "method": "log",
+                        "text": text,
+                        "args": [],
+                        "source": {"context": context},
+                    },
+                })],
+            )
+            .await;
+        }
+
+        let console = state.event_tracker.get_console_json();
+        let texts: Vec<&str> = console["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["from-active", "from-frame", "from-worker"]);
     }
 
     #[tokio::test]

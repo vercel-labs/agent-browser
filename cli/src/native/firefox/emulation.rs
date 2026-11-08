@@ -202,17 +202,20 @@ pub(crate) async fn update_tab_configuration(
     Ok(())
 }
 
-/// Replays every stored setting onto `context`, used for tabs the daemon creates.
+/// Replays every stored setting onto `context` as it becomes the active tab, including the
+/// media configuration Firefox only accepts for the selected tab.
 pub async fn apply_to_context(ff: &FirefoxSession, context: &str) -> Result<(), String> {
     let settings = ff.emulation.read().unwrap().clone();
-    apply_settings_to_context(&ff.bidi, &settings, context).await?;
+    apply_overrides(&ff.bidi, &settings, context).await?;
     if let Some(ref media) = settings.media {
         update_tab_configuration(&ff.bidi, &ff.rdp, context, &media_config(media)?).await?;
     }
     Ok(())
 }
 
-pub(crate) async fn apply_settings_to_context(
+/// Replays the per-context overrides only. The media configuration is left to `apply_to_context`,
+/// because Firefox accepts it through DevTools for the selected tab alone.
+pub(crate) async fn apply_overrides(
     bidi: &BidiClient,
     settings: &Settings,
     context: &str,

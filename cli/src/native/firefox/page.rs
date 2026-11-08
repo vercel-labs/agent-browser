@@ -86,6 +86,34 @@ fn reset_page_state(state: &mut DaemonState) {
     state.ref_map.invalidate_all_documents();
 }
 
+/// Navigates one context and returns the URL it landed on, translating Firefox failures and
+/// `about:neterror` pages to Chromium error text. `None` means a prompt opened first.
+pub(super) async fn open(
+    ff: &FirefoxSession,
+    context: &str,
+    url: &str,
+    wait: &str,
+) -> Result<Option<String>, String> {
+    let nav = ff
+        .race_prompt(
+            context,
+            ff.bidi.send(
+                "browsingContext.navigate",
+                json!({"context": context, "url": url, "wait": wait}),
+            ),
+        )
+        .await
+        .map_err(|e| format!("Navigation failed: {}", normalize_net_error_text(&e)))?;
+    let Some(nav) = nav else {
+        return Ok(None);
+    };
+    let landed = nav["url"].as_str().unwrap_or(url);
+    if let Some(message) = neterror_message(landed) {
+        return Err(format!("Navigation failed: {message}"));
+    }
+    Ok(Some(landed.to_string()))
+}
+
 /// Navigates the active tab and returns `{url, title, targetId}` like `BrowserManager::navigate`.
 /// `waitUntil` maps to the BiDi `wait` state.
 pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -93,9 +121,7 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .get("url")
         .and_then(Value::as_str)
         .ok_or("Missing 'url' parameter")?;
-    if let Some(filter) = state.domain_filter.read().await.as_ref() {
-        filter.check_url(url)?;
-    }
+    state.ensure_navigation_allowed(url).await?;
     let wait_until = cmd.get("waitUntil").and_then(Value::as_str);
     let network_idle = wait_until == Some("networkidle");
     let wait = match wait_until {
@@ -111,25 +137,11 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     reset_page_state(state);
     let ff = session(state)?;
     let context = ff.top_context.clone();
-    let nav = ff
-        .race_prompt(
-            &context,
-            ff.bidi.send(
-                "browsingContext.navigate",
-                json!({"context": context, "url": url, "wait": wait}),
-            ),
-        )
-        .await
-        .map_err(|e| format!("Navigation failed: {}", normalize_net_error_text(&e)))?;
-    let Some(nav) = nav else {
+    let Some(landed) = open(ff, &context, url, wait).await? else {
         let url = ff.url().await.unwrap_or_default();
         return Ok(json!({ "url": url, "targetId": context, "dialogOpened": true }));
     };
-    let landed = nav["url"].as_str().unwrap_or(url);
-    if let Some(msg) = neterror_message(landed) {
-        return Err(format!("Navigation failed: {msg}"));
-    }
-    ff.note_visit(landed);
+    ff.note_visit(&landed);
     if network_idle {
         network::wait_idle(state, timeout_ms)
             .await
@@ -482,14 +494,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn navigate_rejects_about_blank_under_an_allowlist_like_chrome() {
+    async fn navigate_allows_about_blank_under_an_allowlist() {
+        let (ff, _tx, _) = fake_session_with(|cmd: &Value| {
+            if cmd["method"] == "browsingContext.navigate" {
+                json!({"navigation": "nav-1", "url": "about:blank"})
+            } else {
+                json!({})
+            }
+        })
+        .await;
         let mut state = DaemonState::new();
+        state.firefox = Some(ff);
         *state.domain_filter.write().await =
             Some(crate::native::network::DomainFilter::new("allowed.example"));
-        let error = navigate(&json!({ "url": "about:blank" }), &mut state)
+        let result = navigate(&json!({ "url": "about:blank" }), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(result["url"], "about:blank");
+        let error = navigate(&json!({ "url": "https://evil.example/" }), &mut state)
             .await
             .unwrap_err();
-        assert_eq!(error, "No hostname in URL: about:blank");
+        assert_eq!(
+            error,
+            "Domain 'evil.example' is not in the allowed domains list"
+        );
     }
 
     #[tokio::test]

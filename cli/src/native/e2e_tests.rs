@@ -16523,6 +16523,12 @@ async fn e2e_firefox_allowed_domains_block_worker_and_websocket() {
     )
     .await;
     assert_eq!(file["success"], false, "{file}");
+    let blank = firefox_command(
+        &mut state,
+        json!({ "id": "blank", "action": "navigate", "url": "about:blank" }),
+    )
+    .await;
+    assert_eq!(blank["success"], true, "{blank}");
     let target = json!({ "id": "tab", "action": "tab_new", "url": &fixture.other });
     assert_eq!(firefox_command(&mut state, target).await["success"], false);
     firefox_open(&mut state, &fixture.url).await;

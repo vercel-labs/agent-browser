@@ -70,6 +70,8 @@ pub struct FirefoxSession {
     pub inflight: HashMap<String, Option<String>>,
     pub(crate) dispatcher: Option<AbortOnDrop>,
     pub visited_origins: HashSet<String>,
+    /// Version Firefox reported when the session opened, used for HAR browser metadata.
+    pub browser_version: String,
 }
 
 /// Builds the BiDi `proxy` capability from a `--proxy` value such as `http://host:3128`.
@@ -165,11 +167,11 @@ impl FirefoxSession {
                 json!({"capabilities": {"alwaysMatch": caps}}),
             )
             .await?;
-        check_firefox_version(
-            created["capabilities"]["browserVersion"]
-                .as_str()
-                .unwrap_or(""),
-        )?;
+        let browser_version = created["capabilities"]["browserVersion"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        check_firefox_version(&browser_version)?;
         let events_to_watch: Vec<&str> = CONTEXT_EVENTS
             .into_iter()
             .chain(PROMPT_EVENTS)
@@ -245,6 +247,7 @@ impl FirefoxSession {
             inflight: HashMap::new(),
             dispatcher,
             visited_origins: HashSet::new(),
+            browser_version,
         };
         if let Some(contexts) = tree["contexts"].as_array() {
             for context in contexts {
@@ -405,7 +408,7 @@ impl FirefoxSession {
                 if let Some(context) = params["context"].as_str() {
                     self.inflight.retain(|_, owner| {
                         !owner.as_deref().is_some_and(|owner| {
-                            context_contains(context, owner, &self.context_parents)
+                            is_descendant_of(context, owner, &self.context_parents)
                         })
                     });
                 }
@@ -419,11 +422,32 @@ impl FirefoxSession {
         self.inflight
             .values()
             .filter_map(|context| context.as_deref())
-            .any(|context| context_contains(&self.top_context, context, &self.context_parents))
+            .any(|context| self.context_is_in_active_tab(context))
     }
 
+    /// True when `context` is the active tab or one of its frames.
     pub(crate) fn context_is_in_active_tab(&self, context: &str) -> bool {
-        owner_context(context, &self.context_parents) == self.top_context
+        is_descendant_of(&self.top_context, context, &self.context_parents)
+    }
+
+    /// Records the frame tree under the active tab so frames created since the last drain can be placed.
+    pub(crate) async fn refresh_frame_tree(&mut self) -> Result<(), String> {
+        let tree = self
+            .bidi
+            .send("browsingContext.getTree", json!({"root": self.top_context}))
+            .await?;
+        let contexts = tree["contexts"].as_array().cloned().unwrap_or_default();
+        self.record_context_origins(&contexts);
+        Ok(())
+    }
+
+    /// True when `context` is the active tab or one of its frames, reading the live frame tree
+    /// when the drained events have not described it yet.
+    pub(crate) async fn active_tab_contains(&mut self, context: &str) -> bool {
+        if self.context_is_in_active_tab(context) {
+            return true;
+        }
+        self.refresh_frame_tree().await.is_ok() && self.context_is_in_active_tab(context)
     }
 
     /// Runs `fut` until it finishes or a prompt opens in `context` or its owning tab. Returns `None` for the prompt.
@@ -569,7 +593,8 @@ fn owner_context<'a>(mut context: &'a str, parents: &'a HashMap<String, String>)
     context
 }
 
-fn context_contains<'a>(
+/// True when `context` is `root` or a frame nested inside it.
+fn is_descendant_of<'a>(
     root: &str,
     mut context: &'a str,
     parents: &'a HashMap<String, String>,
@@ -755,6 +780,7 @@ pub(crate) mod tests {
             intercepting: false,
             inflight: HashMap::new(),
             dispatcher: None,
+            browser_version: String::new(),
         };
         (session, tx, calls)
     }
@@ -887,6 +913,7 @@ pub(crate) mod tests {
             intercepting: false,
             inflight: HashMap::new(),
             dispatcher: None,
+            browser_version: String::new(),
         };
         (session, tx, calls, bidi_messages, rdp_messages)
     }
@@ -989,6 +1016,22 @@ pub(crate) mod tests {
         .await
         .unwrap();
         assert_eq!(state.firefox.as_ref().unwrap().context, "survivor");
+    }
+
+    #[tokio::test]
+    async fn a_frame_missing_from_drained_events_is_still_in_the_active_tab() {
+        let (mut ff, _, _) = fake_session_with(|v: &Value| {
+            if v["method"] == "browsingContext.getTree" {
+                json!({"contexts": [{"context": "ctx-active", "children": [{"context": "ctx-frame"}]}]})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        assert!(!ff.context_is_in_active_tab("ctx-frame"));
+        assert!(ff.active_tab_contains("ctx-frame").await);
+        assert!(ff.context_is_in_active_tab("ctx-frame"));
+        assert!(!ff.active_tab_contains("ctx-other").await);
     }
 
     #[tokio::test]

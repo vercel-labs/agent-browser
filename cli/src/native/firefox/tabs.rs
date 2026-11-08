@@ -7,7 +7,7 @@ use super::actions::session;
 use super::bidi::{remote_to_json, BidiClient};
 use super::emulation;
 use super::page;
-use crate::native::actions::{self as chrome, DaemonState};
+use crate::native::actions::DaemonState;
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 
 /// Opens a tab and makes it active. Must return what Chrome's `handle_tab_new` returns,
@@ -15,7 +15,7 @@ use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd.get("url").and_then(Value::as_str);
     if let Some(url) = url {
-        chrome::check_url_allowed_by_filter(state.domain_filter.read().await.as_ref(), url)?;
+        state.ensure_navigation_allowed(url).await?;
     }
     let label = cmd.get("label").and_then(Value::as_str);
     if let Some(label) = label {
@@ -56,17 +56,9 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         let _ = emulation::apply_to_context(ff, &context).await;
         match url {
             Some(url) => {
-                let nav = ff
-                    .bidi
-                    .send(
-                        "browsingContext.navigate",
-                        json!({"context": context, "url": url, "wait": "complete"}),
-                    )
-                    .await
-                    .map_err(|e| {
-                        format!("Navigation failed: {}", page::normalize_net_error_text(&e))
-                    })?;
-                let landed = nav["url"].as_str().unwrap_or(url).to_string();
+                let landed = page::open(ff, &context, url, "complete")
+                    .await?
+                    .unwrap_or_else(|| url.to_string());
                 ff.note_visit(&landed);
                 landed
             }
@@ -224,7 +216,8 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .bidi
             .send("browsingContext.activate", json!({"context": successor}))
             .await;
-        ff.top_context = successor;
+        ff.top_context = successor.clone();
+        let _ = emulation::apply_to_context(ff, &successor).await;
     }
     if state
         .pending_dialog
