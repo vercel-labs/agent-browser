@@ -275,31 +275,51 @@ impl FirefoxSession {
                                 self.note_visit(url);
                             }
                         }
-                        Some("browsingContext.contextDestroyed") if params["parent"].is_null() => {
+                        Some("browsingContext.contextDestroyed") => {
                             if let Some(context) = params["context"].as_str() {
-                                let parents = &self.context_parents;
-                                self.refs
-                                    .retain(|(id, _), _| owner_context(id, parents) != context);
-                                self.documents
-                                    .retain(|id, _| owner_context(id, parents) != context);
+                                let destroyed: HashSet<String> = self
+                                    .context_parents
+                                    .keys()
+                                    .filter(|id| {
+                                        is_context_or_descendant(id, context, &self.context_parents)
+                                    })
+                                    .cloned()
+                                    .chain(std::iter::once(context.to_string()))
+                                    .collect();
+                                let stale_ids: HashSet<i64> = self
+                                    .refs
+                                    .iter()
+                                    .filter(|((id, _), _)| destroyed.contains(id))
+                                    .map(|(_, id)| *id)
+                                    .collect();
+                                self.refs.retain(|(id, _), _| !destroyed.contains(id));
+                                self.documents.retain(|id, _| !destroyed.contains(id));
+                                self.shadow_ids.retain(|id| !stale_ids.contains(id));
                                 if dialog.as_ref().is_some_and(|d| {
                                     d.owner_context.as_deref() == Some(context)
                                         || d.session_id.as_deref() == Some(context)
                                 }) {
                                     *dialog = None;
                                 }
-                                self.tab_ids.remove(context);
-                                self.tab_labels.remove(context);
-                                if self.top_context == context {
-                                    self.top_context = self
-                                        .tab_ids
-                                        .iter()
-                                        .min_by_key(|(_, id)| *id)
-                                        .map(|(context, _)| context.clone())
-                                        .unwrap_or_default();
+                                if destroyed.contains(&self.context) {
                                     self.context = self.top_context.clone();
-                                    self.refs.clear();
                                     active_destroyed = true;
+                                }
+                                self.context_parents.retain(|id, _| !destroyed.contains(id));
+                                if params["parent"].is_null() {
+                                    self.tab_ids.remove(context);
+                                    self.tab_labels.remove(context);
+                                    if self.top_context == context {
+                                        self.top_context = self
+                                            .tab_ids
+                                            .iter()
+                                            .min_by_key(|(_, id)| *id)
+                                            .map(|(context, _)| context.clone())
+                                            .unwrap_or_default();
+                                        self.context = self.top_context.clone();
+                                        self.refs.clear();
+                                        active_destroyed = true;
+                                    }
                                 }
                             }
                         }
@@ -453,6 +473,22 @@ fn apply_event(
             *dialog = None;
         }
         _ => {}
+    }
+}
+
+fn is_context_or_descendant<'a>(
+    mut context: &'a str,
+    root: &str,
+    parents: &'a HashMap<String, String>,
+) -> bool {
+    loop {
+        if context == root {
+            return true;
+        }
+        let Some(parent) = parents.get(context).filter(|parent| !parent.is_empty()) else {
+            return false;
+        };
+        context = parent;
     }
 }
 
@@ -640,8 +676,17 @@ pub(crate) mod tests {
         session
             .tab_labels
             .insert("ctx-active".into(), "docs".into());
+        session.context = "child".into();
+        session
+            .context_parents
+            .insert("child".into(), "ctx-active".into());
         session.refs.insert(("child".into(), "node".into()), 1);
+        session.documents.insert("child".into(), "document".into());
+        session.shadow_ids.insert(1);
         let mut state = crate::native::actions::DaemonState::new();
+        state
+            .ref_map
+            .add_with_frame("e1".into(), Some(1), "button", "OK", None, Some("child"));
         state.firefox = Some(session);
         state.active_frame_id = Some("child".into());
 
@@ -664,9 +709,13 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-active");
-        assert_eq!(state.active_frame_id.as_deref(), Some("child"));
-        assert_eq!(state.firefox.as_ref().unwrap().refs.len(), 1);
+        let ff = state.firefox.as_ref().unwrap();
+        assert_eq!(ff.context, "ctx-active");
+        assert!(state.active_frame_id.is_none());
+        assert!(ff.refs.is_empty());
+        assert!(ff.documents.is_empty());
+        assert!(ff.shadow_ids.is_empty());
+        assert!(state.ref_map.get("e1").is_none());
 
         tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {

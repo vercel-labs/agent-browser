@@ -15427,6 +15427,44 @@ async fn e2e_firefox_form_entry() {
     )
     .await;
     assert_success(&inserted);
+    firefox_eval(
+        &mut state,
+        "document.body.insertAdjacentHTML('beforeend', '<input id=key-cancelled>'); document.querySelector('#key-cancelled').addEventListener('keydown', event => event.preventDefault()); true",
+    )
+    .await;
+    assert_success(
+        &firefox_act(
+            &mut state,
+            "type",
+            "#key-cancelled",
+            json!({ "text": "literal" }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "document.querySelector('#key-cancelled').value").await,
+        "literal"
+    );
+    firefox_eval(
+        &mut state,
+        "document.body.insertAdjacentHTML('beforeend', '<input id=checkbox type=checkbox value=sentinel>'); document.querySelector('#checkbox').focus(); true",
+    )
+    .await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "checkbox-insert", "action": "inserttext", "text": "changed" }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "JSON.stringify([checkbox.checked, checkbox.value])"
+        )
+        .await,
+        "[false,\"sentinel\"]"
+    );
     let raw_char = firefox_command(
         &mut state,
         json!({ "id": "char", "action": "input_keyboard", "type": "char", "text": "!" }),
@@ -15915,7 +15953,9 @@ async fn e2e_firefox_dialog() {
     firefox_open(&mut state, &fixture.url).await;
 
     let ask = firefox_ref(&mut state, "Ask").await;
-    assert_success(&firefox_act(&mut state, "click", &ask, json!({})).await);
+    let resp = firefox_act(&mut state, "click", &ask, json!({})).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["dialogOpened"], true, "{resp}");
     let resp = firefox_command(
         &mut state,
         json!({ "id": "d", "action": "dialog", "response": "accept" }),
@@ -15923,6 +15963,46 @@ async fn e2e_firefox_dialog() {
     .await;
     assert_success(&resp);
     assert_eq!(firefox_title(&mut state).await, "confirmed");
+
+    firefox_eval(
+        &mut state,
+        "document.getElementById('go').addEventListener('mousedown', () => confirm('mousedown'), { once: true }); true",
+    )
+    .await;
+    let go = firefox_ref(&mut state, "Go").await;
+    let resp = firefox_act(&mut state, "click", &go, json!({})).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["dialogOpened"], true, "{resp}");
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "release", "action": "dialog", "response": "dismiss" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.mouse_state.buttons, 0);
+    assert_success(&firefox_act(&mut state, "click", &go, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "Hello");
+
+    firefox_eval(
+        &mut state,
+        "document.body.insertAdjacentHTML('beforeend', '<div id=drag-source draggable=true></div><div id=drag-target></div>'); document.querySelector('#drag-source').addEventListener('dragstart', () => confirm('drag')); true",
+    )
+    .await;
+    let drag = firefox_command(
+        &mut state,
+        json!({"id":"dialog-drag", "action":"drag", "source":"#drag-source", "target":"#drag-target"}),
+    )
+    .await;
+    assert_success(&drag);
+    assert_eq!(get_data(&drag)["dragged"], false, "{drag}");
+    assert_eq!(get_data(&drag)["dialogOpened"], true, "{drag}");
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "drag-dismiss", "action": "dialog", "response": "dismiss" }),
+        )
+        .await,
+    );
     firefox_close(&mut state).await;
 }
 

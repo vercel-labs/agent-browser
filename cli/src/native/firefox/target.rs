@@ -97,7 +97,9 @@ async fn recover(
     if entry.nth.is_some() {
         return Err(format!("Stale ref for role={role} name={name} cannot be recovered: the snapshot had several matching elements. Run snapshot again and use a fresh ref."));
     }
-    let context = context.unwrap_or_else(|| ff.context.clone());
+    let context = context
+        .or_else(|| entry.frame_id.clone())
+        .unwrap_or_else(|| ff.context.clone());
     let found = ff
         .bidi
         .send(

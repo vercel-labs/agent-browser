@@ -186,6 +186,13 @@ pub struct SnapshotOptions {
     pub urls: bool,
 }
 
+pub struct SnapshotRefContext<'a> {
+    pub node_contexts: &'a HashMap<i64, String>,
+    pub session_id: &'a str,
+    pub frame_id: Option<&'a str>,
+    pub document_is_known: bool,
+}
+
 struct TreeNode {
     role: String,
     name: String,
@@ -484,6 +491,7 @@ pub async fn take_snapshot(
     assign_refs(
         &mut tree_nodes,
         &cursor_elements,
+        &HashMap::new(),
         ref_map,
         session_id,
         frame_id,
@@ -640,12 +648,13 @@ pub async fn take_snapshot(
 fn assign_refs(
     tree_nodes: &mut [TreeNode],
     cursor_elements: &HashMap<i64, CursorElementInfo>,
+    node_contexts: &HashMap<i64, String>,
     ref_map: &mut RefMap,
     session_id: &str,
     frame_id: Option<&str>,
     document_is_known: bool,
 ) {
-    let mut tracker = RoleNameTracker::new();
+    let mut trackers = HashMap::<String, RoleNameTracker>::new();
     let mut next_ref: usize = ref_map.next_ref_num();
 
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
@@ -670,17 +679,36 @@ fn assign_refs(
         }
 
         if should_ref {
-            let nth = tracker.track(role, &node.name, idx);
+            let context = node
+                .backend_node_id
+                .and_then(|id| node_contexts.get(&id))
+                .cloned()
+                .unwrap_or_default();
+            let nth = trackers
+                .entry(context)
+                .or_insert_with(RoleNameTracker::new)
+                .track(role, &node.name, idx);
             nodes_with_refs.push((idx, nth));
         }
     }
 
-    let duplicates = tracker.get_duplicates();
+    let duplicates: HashMap<String, HashMap<String, usize>> = trackers
+        .into_iter()
+        .map(|(context, tracker)| (context, tracker.get_duplicates()))
+        .collect();
 
     for (idx, nth) in &nodes_with_refs {
         let node = &tree_nodes[*idx];
         let key = format!("{}:{}", node.role, node.name);
-        let actual_nth = if duplicates.contains_key(&key) {
+        let context = node
+            .backend_node_id
+            .and_then(|id| node_contexts.get(&id))
+            .map(String::as_str)
+            .unwrap_or_default();
+        let actual_nth = if duplicates
+            .get(context)
+            .is_some_and(|context_duplicates| context_duplicates.contains_key(&key))
+        {
             Some(*nth)
         } else {
             None
@@ -704,13 +732,18 @@ fn assign_refs(
             allocated
         };
 
+        let node_frame = tree_nodes[*idx]
+            .backend_node_id
+            .and_then(|id| node_contexts.get(&id))
+            .map(String::as_str)
+            .or(frame_id);
         ref_map.add_with_frame(
             ref_id.clone(),
             tree_nodes[*idx].backend_node_id,
             &tree_nodes[*idx].role,
             &tree_nodes[*idx].name,
             actual_nth,
-            frame_id,
+            node_frame,
         );
 
         tree_nodes[*idx].has_ref = true;
@@ -754,18 +787,17 @@ pub fn snapshot_from_ax_nodes(
     urls: &HashMap<i64, String>,
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
-    session_id: &str,
-    frame_id: Option<&str>,
-    document_is_known: bool,
+    refs: SnapshotRefContext<'_>,
 ) -> String {
     let (mut tree_nodes, roots) = build_tree(nodes);
     assign_refs(
         &mut tree_nodes,
         &HashMap::new(),
+        refs.node_contexts,
         ref_map,
-        session_id,
-        frame_id,
-        document_is_known,
+        refs.session_id,
+        refs.frame_id,
+        refs.document_is_known,
     );
     if options.urls {
         for node in tree_nodes

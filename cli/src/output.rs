@@ -4397,7 +4397,7 @@ Core Commands:
   type <sel> <text>          Type into element
   fill <sel> <text>          Clear and fill
   press <key>                Press key (Enter, Tab, Control+a)
-  keyboard type <text>       Type text with real keystrokes (no selector)
+  keyboard type <text>       Type at current focus (no selector)
   keyboard inserttext <text> Insert text without key events
   hover <sel>                Hover element
   focus <sel>                Focus element
