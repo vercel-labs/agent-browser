@@ -709,14 +709,30 @@ fn is_explicit_state_path(path: &str) -> bool {
         || path.ends_with(".previous")
 }
 
+fn state_file_suffix(filename: &str) -> &str {
+    filename
+        .rfind(".json")
+        .map(|index| &filename[index..])
+        .unwrap_or("")
+}
+
 fn renamed_session_filename(old_file: &str, old_name: &str, new_name: &str) -> String {
-    let prefixed = format!("{old_name}-");
-    if let Some(rest) = old_file.strip_prefix(&prefixed) {
+    let ext = state_file_suffix(old_file);
+    let old_stem = old_file.strip_suffix(ext).unwrap_or(old_file);
+    let name_stem = old_name.strip_suffix(ext).unwrap_or(old_name);
+    let new_stem = if let Some(rest) = old_stem.strip_prefix(&format!("{name_stem}-")) {
         format!("{new_name}-{rest}")
-    } else if let Some(rest) = old_file.strip_prefix(old_name) {
+    } else if let Some(rest) = old_stem.strip_prefix(name_stem) {
         format!("{new_name}{rest}")
-    } else {
+    } else if ext.is_empty() {
         format!("{new_name}.json")
+    } else {
+        new_name.to_string()
+    };
+    if ext.is_empty() || new_stem.ends_with(ext) {
+        new_stem
+    } else {
+        format!("{new_stem}{ext}")
     }
 }
 
@@ -763,7 +779,15 @@ pub fn state_rename(old_path: &str, new_name: &str) -> Result<Value, String> {
     let (old, new_path) = if given.is_file() && is_explicit_state_path(old_path) {
         let fallback = PathBuf::from(".");
         let dir = given.parent().unwrap_or(&fallback).to_path_buf();
-        (given, dir.join(format!("{new_name}.json")))
+        let fname = given
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        (
+            given,
+            dir.join(renamed_session_filename(&fname, old_path, new_name)),
+        )
     } else {
         let old = resolve_named_state(&get_sessions_dir(), old_path)?;
         let fname = old
@@ -1182,6 +1206,21 @@ mod tests {
         assert_eq!(result["to"], dest.to_string_lossy().as_ref());
         assert!(dest.is_file());
         assert!(!saved.exists());
+    }
+
+    #[test]
+    fn test_state_rename_keeps_encrypted_extension_for_a_filename() {
+        let (_guard, _dir, sessions) = isolated_sessions_dir();
+        let saved = sessions.join("app-session-1.json.enc");
+        fs::write(&saved, b"cipher").unwrap();
+
+        let result = state_rename("app-session-1.json.enc", "other").unwrap();
+
+        let dest = sessions.join("other.json.enc");
+        assert_eq!(result["to"], dest.to_string_lossy().as_ref());
+        assert_eq!(fs::read(&dest).unwrap(), b"cipher");
+        assert!(!saved.exists());
+        assert!(!sessions.join("other").exists());
     }
 
     #[test]
