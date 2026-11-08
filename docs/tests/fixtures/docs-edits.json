@@ -2,6 +2,10 @@
   "pages": {
     "/commands": [
       {
+        "from": "--auto-connect           # Auto-discover and connect to running Chrome",
+        "to": "--auto-connect           # Auto-discover and connect to running Chrome\n--no-auto-connect        # Return an --auto-connect session to a local launch (overrides AGENT_BROWSER_AUTO_CONNECT)"
+      },
+      {
         "from": "# Trust a CA for locally launched Chromium on Linux",
         "to": "# Trust a CA for CLI requests, and for local Chromium on Linux"
       },
@@ -63,11 +67,11 @@
       },
       {
         "from": "Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, and `allowedDomains`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. The common `idleTimeout` string maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. Each tool also accepts `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured `allowedDomains` is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.",
-        "to": "Each tool has typed fields such as `url`, `selector`, `text`, and `key`, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments `session`, `restore`, `allowedDomains`, `extraArgs`, `timeoutMs`, `namespace`, `restoreSave`, `restoreCheckUrl`, `restoreCheckText`, `restoreCheckFn`, `caCert`, `useSystemCa`, `clearCaCert`, and `idleTimeout`. A tool's schema lists only the ones that usually matter for it: `session` on every tool, `restore` on `open` and `tab_new`, `allowedDomains` and `extraArgs` on `open`, `tab_new`, and `read`, and `timeoutMs` on tools that navigate, wait, or run scripts. The server's `initialize` instructions describe all of them. `allowedDomains` maps to `--allowed-domains`, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. `idleTimeout` maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. `extraArgs` carries per-command options and display or emulation flags such as `--engine`; it cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
+        "to": "Each tool has typed fields such as `url`, `selector`, `text`, and `key`, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments `session`, `restore`, `allowedDomains`, `extraArgs`, `timeoutMs`, `namespace`, `restoreSave`, `restoreCheckUrl`, `restoreCheckText`, `restoreCheckFn`, `caCert`, `useSystemCa`, `clearCaCert`, `idleTimeout`, and `relaunch`. A tool's schema lists only the ones that usually matter for it: `session` on every tool, `restore` and `relaunch` on `open` and `tab_new`, `allowedDomains` and `extraArgs` on `open`, `tab_new`, and `read`, and `timeoutMs` on tools that navigate, wait, or run scripts. The server's `initialize` instructions describe all of them. `allowedDomains` maps to `--allowed-domains`, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. `idleTimeout` maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. `relaunch: true` maps to `--relaunch`. `extraArgs` carries per-command options and display or emulation flags such as `--engine`; it cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
       },
       {
         "from": "Each tool has typed fields such as url, selector, text, key, session, and allowedDomains, so MCP clients show meaningful approval prompts instead of raw command arrays. The common allowedDomains array maps to --allowed-domains and activates the same WebRTC containment and launch-mode restrictions. The common idleTimeout string maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. Each tool also accepts extraArgs for per-command options and display or emulation flags such as --engine; extraArgs cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured allowedDomains is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.",
-        "to": "Each tool has typed fields such as url, selector, text, and key, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments session, restore, allowedDomains, extraArgs, timeoutMs, namespace, restoreSave, restoreCheckUrl, restoreCheckText, restoreCheckFn, caCert, useSystemCa, clearCaCert, and idleTimeout. A tool's schema lists only the ones that usually matter for it: session on every tool, restore on open and tab_new, allowedDomains and extraArgs on open, tab_new, and read, and timeoutMs on tools that navigate, wait, or run scripts. The server's initialize instructions describe all of them. allowedDomains maps to --allowed-domains, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. idleTimeout maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. extraArgs carries per-command options and display or emulation flags such as --engine; it cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
+        "to": "Each tool has typed fields such as url, selector, text, and key, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments session, restore, allowedDomains, extraArgs, timeoutMs, namespace, restoreSave, restoreCheckUrl, restoreCheckText, restoreCheckFn, caCert, useSystemCa, clearCaCert, idleTimeout, and relaunch. A tool's schema lists only the ones that usually matter for it: session on every tool, restore and relaunch on open and tab_new, allowedDomains and extraArgs on open, tab_new, and read, and timeoutMs on tools that navigate, wait, or run scripts. The server's initialize instructions describe all of them. allowedDomains maps to --allowed-domains, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. idleTimeout maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. relaunch: true maps to --relaunch. extraArgs carries per-command options and display or emulation flags such as --engine; it cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
       }
     ],
     "/configuration": [
@@ -170,6 +174,14 @@
       {
         "from": "Tip: If your project-level agent-browser.json contains environment-specific values (paths, proxies), consider adding it to .gitignore.",
         "to": "Existing project configs that use advanced keys must move those settings to user config or be loaded explicitly with --config."
+      },
+      {
+        "from": "<tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance.</td><td>(disabled)</td></tr>",
+        "to": "<tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance. <code>0</code>, <code>false</code>, <code>no</code> or an empty value leave it off.</td><td>(disabled)</td></tr>"
+      },
+      {
+        "from": "anthropic/claude-sonnet-4.6",
+        "to": "openai/gpt-6-luna-fast"
       }
     ],
     "/plugins": [
@@ -254,6 +266,24 @@
       {
         "from": "pass it once and later commands and daemon restarts keep the strict semantics.",
         "to": "pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit close releases it so other sessions can take the tab, and the next pinned command pins again."
+      }
+    ],
+    "/engines/chrome": [
+      {
+        "from": "When no `--executable-path` is provided, agent-browser searches for Chrome in this order:",
+        "to": "When no `--executable-path` is provided, agent-browser checks the Chrome it downloaded with `agent-browser install` first, then searches the platform locations in this order:"
+      },
+      {
+        "from": "When no --executable-path is provided, agent-browser searches for Chrome in this order:",
+        "to": "When no --executable-path is provided, agent-browser checks the Chrome it downloaded with agent-browser install first, then searches the platform locations in this order:"
+      },
+      {
+        "from": "        <code>/Applications/Google Chrome.app</code>,\n        <code>/Applications/Google Chrome Canary.app</code>,\n        <code>/Applications/Chromium.app</code>,\n        <code>/Applications/Brave Browser.app</code>,\n        Puppeteer cache (<code>~/.cache/puppeteer/chrome/</code> or <code>PUPPETEER_CACHE_DIR</code>),\n        Chrome for Testing cache",
+        "to": "        <code>/Applications/Google Chrome.app</code>,\n        <code>/Applications/Google Chrome Canary.app</code>,\n        <code>/Applications/Chromium.app</code>,\n        <code>/Applications/Brave Browser.app</code>,\n        the same apps in <code>~/Applications</code>,\n        Puppeteer cache (<code>~/.cache/puppeteer/chrome/</code> or <code>PUPPETEER_CACHE_DIR</code>),\n        Playwright cache (<code>~/.cache/ms-playwright</code> or <code>PLAYWRIGHT_BROWSERS_PATH</code>)"
+      },
+      {
+        "from": "/Applications/Google Chrome.app, /Applications/Google Chrome Canary.app, /Applications/Chromium.app, /Applications/Brave Browser.app, Puppeteer cache (~/.cache/puppeteer/chrome/ or PUPPETEER_CACHE_DIR), Chrome for Testing cache",
+        "to": "/Applications/Google Chrome.app, /Applications/Google Chrome Canary.app, /Applications/Chromium.app, /Applications/Brave Browser.app, the same apps in ~/Applications, Puppeteer cache (~/.cache/puppeteer/chrome/ or PUPPETEER_CACHE_DIR), Playwright cache (~/.cache/ms-playwright or PLAYWRIGHT_BROWSERS_PATH)"
       }
     ],
     "/engines/obscura": [
@@ -342,6 +372,12 @@
       {
         "from": "agent-browser errors --clear",
         "to": "agent-browser errors --clear\nagent-browser errors --follow"
+      }
+    ],
+    "/dashboard": [
+      {
+        "from": "anthropic/claude-sonnet-4.6",
+        "to": "openai/gpt-6-luna-fast"
       }
     ]
   },

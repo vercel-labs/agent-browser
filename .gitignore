@@ -68,3 +68,6 @@ docs/package-lock.json
 .next/
 out/
 next-env.d.ts
+
+# Output of the native parity tests
+cli/test-parity-state.json.enc

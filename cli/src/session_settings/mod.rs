@@ -1,32 +1,36 @@
 //! Session settings: the option table, the patch an invocation sends, and the
 //! typed views the daemon reads.
 //!
-//! The module does no IO. `seed` is the one place that reads the environment,
-//! kept as a temporary shim until the patch rides on every command.
+//! The only IO is `store`, which keeps the security settings across daemon
+//! restarts. `seed` is the one place that reads the environment, kept as a
+//! temporary shim until the daemon stops being spawned with the settings in
+//! its environment.
 
-// The patch and the option table have no caller until the CLI sends the
-// patch. The running views and the seed are used by the daemon and stay
-// compiler-checked.
+// Accessors the tests use have no non-test caller yet.
 #[allow(dead_code)]
 mod patch;
+mod plan;
 mod proxy;
 mod running;
 mod seed;
 #[allow(dead_code)]
 mod spec;
+mod store;
 
-#[allow(unused_imports)]
 pub use patch::{Patch, Requested};
 pub use proxy::parse_proxy;
 #[cfg(test)]
 pub use running::resolve_idle_timeout;
-pub use running::{Connection, IdleTimeout, Running, DEFAULT_IDLE_TIMEOUT_MS};
+pub use running::SecurityView;
+pub use running::{named, Connection, IdleTimeout, Running, DEFAULT_IDLE_TIMEOUT_MS};
 #[allow(unused_imports)]
 pub use spec::{spec, spec_by_name, Effect, Key, Persist, Shape, Spec, SPECS};
+pub use store::{clear_file, is_refusal, orphan_sessions, FsStore, Store};
+#[cfg(test)]
+pub use store::{MemStore, StoreError};
 
 use std::fmt;
 
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub enum SettingsError {
     NotAnObject,
