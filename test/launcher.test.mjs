@@ -9,18 +9,34 @@ import test from 'node:test';
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const launcherPath = join(repositoryRoot, 'bin', 'agent-browser.js');
 
-async function runLauncher(t, { platform, arch, binaries, args }) {
+async function writeFixtureBinary(path, marker) {
+  await writeFile(path, `#!/bin/sh
+printf '%s\\n' ${JSON.stringify(marker)} "$@"
+`);
+  await chmod(path, 0o755);
+}
+
+async function runLauncher(t, { platform, arch, binaries, args, buildLddOutput }) {
   const packageRoot = await mkdtemp(join(tmpdir(), 'agent-browser-launcher-'));
   const binDirectory = join(packageRoot, 'bin');
+  const scripts = join(packageRoot, 'scripts');
   const copiedLauncherPath = join(binDirectory, 'agent-browser.js');
   const bootstrapPath = join(packageRoot, 'bootstrap.mjs');
 
   t.after(() => rm(packageRoot, { recursive: true, force: true }));
 
   await mkdir(binDirectory, { recursive: true });
+  await mkdir(scripts, { recursive: true });
   await writeFile(join(packageRoot, 'package.json'), '{"type":"module"}\n');
   await copyFile(launcherPath, copiedLauncherPath);
+  await copyFile(join(repositoryRoot, 'scripts', 'linux-libc.js'), join(scripts, 'linux-libc.js'));
   await chmod(copiedLauncherPath, 0o755);
+  if (buildLddOutput !== undefined) {
+    const release = join(packageRoot, 'cli', 'target', 'release');
+    await mkdir(release, { recursive: true });
+    await copyFile(join(repositoryRoot, 'scripts', 'copy-native.js'), join(scripts, 'copy-native.js'));
+    await writeFixtureBinary(join(release, 'agent-browser'), 'source-binary-ran');
+  }
   await writeFile(
     bootstrapPath,
     `import { createRequire, syncBuiltinESMExports } from 'node:module';
@@ -29,20 +45,15 @@ const require = createRequire(import.meta.url);
 const os = require('node:os');
 os.platform = () => ${JSON.stringify(platform)};
 os.arch = () => ${JSON.stringify(arch)};
+${buildLddOutput === undefined ? '' : `require('node:child_process').execSync = () => ${JSON.stringify(buildLddOutput)};`}
 syncBuiltinESMExports();
 
+${buildLddOutput === undefined ? '' : "await import('./scripts/copy-native.js');"}
 await import('./bin/agent-browser.js');
 `,
   );
   for (const { name, marker } of binaries) {
-    const fakeBinaryPath = join(binDirectory, name);
-    await writeFile(
-      fakeBinaryPath,
-      `#!/bin/sh
-printf '%s\\n' ${JSON.stringify(marker)} "$@"
-`,
-    );
-    await chmod(fakeBinaryPath, 0o755);
+    await writeFixtureBinary(join(binDirectory, name), marker);
   }
 
   return spawnSync(process.execPath, [bootstrapPath, ...args], {
@@ -113,3 +124,22 @@ test('macOS ARM64 launcher keeps selecting the ARM64 executable', async (t) => {
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.stdout.trim().split('\n'), ['arm64-binary-ran', ...args]);
 });
+
+for (const [libc, lddOutput, suffix] of [
+  ['musl', 'musl libc (x86_64)', 'linux-musl-x64'],
+  ['glibc', 'ldd (GNU libc) 2.39', 'linux-x64'],
+]) {
+  test(`launcher finds a source-built Linux ${libc} executable`, async (t) => {
+    const result = await runLauncher(t, {
+      platform: 'linux',
+      arch: 'x64',
+      binaries: [],
+      args: ['--version'],
+      buildLddOutput: lddOutput,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes(`agent-browser-${suffix}`), result.stdout);
+    assert.deepEqual(result.stdout.trim().split('\n').slice(-2), ['source-binary-ran', '--version']);
+  });
+}

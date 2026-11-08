@@ -8,6 +8,7 @@ import { copyFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
+import { isMusl } from './linux-libc.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
@@ -17,7 +18,9 @@ const sourcePath = join(projectRoot, `cli/target/release/agent-browser${sourceEx
 const binDir = join(projectRoot, 'bin');
 
 // Determine platform suffix
-const platformKey = `${platform()}-${arch()}`;
+const os = platform();
+const osKey = os === 'linux' && isMusl() ? 'linux-musl' : os;
+const platformKey = `${osKey}-${arch()}`;
 const ext = platform() === 'win32' ? '.exe' : '';
 const targetName = `agent-browser-${platformKey}${ext}`;
 const targetPath = join(binDir, targetName);
