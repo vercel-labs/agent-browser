@@ -2,10 +2,6 @@
   "pages": {
     "/commands": [
       {
-        "from": "# Browser engine: chrome (default), lightpanda, obscura (experimental)",
-        "to": "# Browser engine: chrome (default), lightpanda, obscura, firefox"
-      },
-      {
         "from": "agent-browser type <sel> <text>       # Type into element",
         "to": "agent-browser type <sel> <text>       # Type without clearing"
       },
@@ -72,10 +68,6 @@
       {
         "from": "Each tool has typed fields such as url, selector, text, key, session, and allowedDomains, so MCP clients show meaningful approval prompts instead of raw command arrays. The common allowedDomains array maps to --allowed-domains and activates the same WebRTC containment and launch-mode restrictions. The common idleTimeout string maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. Each tool also accepts extraArgs for per-command options and display or emulation flags such as --engine; extraArgs cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured allowedDomains is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.",
         "to": "Each tool has typed fields such as url, selector, text, and key, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments session, restore, allowedDomains, extraArgs, timeoutMs, namespace, restoreSave, restoreCheckUrl, restoreCheckText, restoreCheckFn, caCert, useSystemCa, clearCaCert, idleTimeout, and relaunch. A tool's schema lists only the ones that usually matter for it: session on every tool, restore and relaunch on open and tab_new, allowedDomains and extraArgs on open, tab_new, and read, and timeoutMs on tools that navigate, wait, or run scripts. The server's initialize instructions describe all of them. allowedDomains maps to --allowed-domains, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. idleTimeout maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. relaunch: true maps to --relaunch. extraArgs carries per-command options and display or emulation flags such as --engine; it cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
-      },
-      {
-        "from": "# Browser engine: chrome (default), lightpanda, obscura (experimental)",
-        "to": "# Browser engine: chrome (default), lightpanda, obscura, firefox"
       }
     ],
     "/configuration": [
@@ -353,16 +345,16 @@
     "/sessions": [
       {
         "from": "Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use `agent-browser session id` to generate a valid key:",
-        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, `caf\u00e9-\u6771\u4eac_7` is valid, while `my session` is rejected because it contains a space.\n\nUse `agent-browser session id` to generate a valid key:"
+        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, `café-東京_7` is valid, while `my session` is rejected because it contains a space.\n\nUse `agent-browser session id` to generate a valid key:"
       },
       {
         "from": "Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use agent-browser session id to generate a valid key:",
-        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, caf\u00e9-\u6771\u4eac_7 is valid, while my session is rejected because it contains a space.\n\nUse agent-browser session id to generate a valid key:"
+        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, café-東京_7 is valid, while my session is rejected because it contains a space.\n\nUse agent-browser session id to generate a valid key:"
       }
     ],
     "/skills": [
       {
-        "from": " \u2014 ",
+        "from": " — ",
         "to": ": "
       },
       {
