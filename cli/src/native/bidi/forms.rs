@@ -252,9 +252,10 @@ pub async fn fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
     let value = require(cmd, "value")?;
     let target = resolve_target(state, selector).await?;
     let ff = session(state)?;
-    if focus_target(ff, &target).await? {
-        literal_edit(ff, &target.context, Some(&target), value, true).await?;
+    if !focus_target(ff, &target).await? {
+        return Ok(json!({ "filled": selector, "dialogOpened": true }));
     }
+    literal_edit(ff, &target.context, Some(&target), value, true).await?;
     Ok(json!({ "filled": selector }))
 }
 
@@ -266,9 +267,10 @@ pub async fn type_text(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     let delay = cmd.get("delay").and_then(Value::as_u64);
     let target = resolve_target(state, selector).await?;
     let ff = session(state)?;
-    if focus_target(ff, &target).await?
-        && (!clear || run(ff, &target, CLEAR_INPUT_JS, vec![]).await?.is_some())
-    {
+    if !focus_target(ff, &target).await? {
+        return Ok(json!({ "typed": text, "dialogOpened": true }));
+    }
+    if !clear || run(ff, &target, CLEAR_INPUT_JS, vec![]).await?.is_some() {
         send_text(ff, &target.context, text, delay).await?;
     }
     Ok(json!({ "typed": text }))
