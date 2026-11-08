@@ -67,7 +67,7 @@ fn proxy_capability(proxy: &str, bypass: Option<&str>) -> Value {
 }
 
 impl FirefoxSession {
-    /// Finds and launches Firefox, opens the BiDi session and enables the accessibility actor.
+    /// Launches Firefox and opens a BiDi session.
     /// The daemon handles automatic prompts so the setting can change without relaunching Firefox.
     pub async fn launch(options: &LaunchOptions, auto_dialog: bool) -> Result<Self, String> {
         let path = find_firefox(options.executable_path.as_deref())?;
@@ -379,6 +379,17 @@ pub(crate) mod tests {
         tokio::sync::mpsc::UnboundedSender<Value>,
         Calls,
     ) {
+        fake_session_with_navigation_prompt(trees, false).await
+    }
+
+    pub(crate) async fn fake_session_with_navigation_prompt(
+        trees: Vec<Value>,
+        prompt: bool,
+    ) -> (
+        FirefoxSession,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+    ) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", l.local_addr().unwrap());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -394,7 +405,16 @@ pub(crate) mod tests {
                         let Some(Ok(Message::Text(t))) = m else { break };
                         let v: Value = serde_json::from_str(&t).unwrap();
                         log.lock().unwrap().push(v["method"].as_str().unwrap().to_string());
-                        let result = if v["method"] == "browsingContext.getTree" {
+                        if prompt && v["method"] == "browsingContext.navigate" {
+                            let event = json!({"type":"event", "method":"browsingContext.userPromptOpened", "params":{
+                                "context":"ctx-new", "type":"confirm", "message":"sure?", "handler":"ignore"
+                            }});
+                            ws.send(Message::Text(event.to_string())).await.unwrap();
+                            continue;
+                        }
+                        let result = if prompt && v["method"] == "browsingContext.create" {
+                            json!({"context":"ctx-new"})
+                        } else if v["method"] == "browsingContext.getTree" {
                             if trees.len() > 1 {
                                 trees.pop_front().unwrap()
                             } else {

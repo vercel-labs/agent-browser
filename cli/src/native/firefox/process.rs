@@ -160,7 +160,6 @@ pub fn check_firefox_version(version: &str) -> Result<(), String> {
 fn user_js(download_path: Option<&str>) -> String {
     let mut js = String::from(
         "user_pref(\"devtools.debugger.remote-enabled\", true);\n\
-         user_pref(\"devtools.chrome.enabled\", true);\n\
          user_pref(\"devtools.debugger.prompt-connection\", false);\n\
          user_pref(\"dom.w3c_touch_events.enabled\", 1);\n\
          user_pref(\"browser.download.useDownloadDir\", true);\n\
@@ -218,7 +217,7 @@ fn prepare(
 ) -> Result<(DevtoolsEndpoint, Option<PathBuf>, Child), String> {
     std::fs::write(profile_dir.join("user.js"), user_js(download_path))
         .map_err(|e| format!("Failed to write Firefox profile: {e}"))?;
-    let (devtools, rdp, socket_dir) = devtools_endpoint(profile_dir)?;
+    let (devtools, _rdp, socket_dir) = devtools_endpoint(profile_dir)?;
     let mut args: Vec<String> = Vec::new();
     if headless {
         args.push("--headless".into());
@@ -229,8 +228,7 @@ fn prepare(
     if cfg!(windows) {
         args.push("--wait-for-browser".into());
     }
-    args.extend(["--remote-debugging-port", "0", "--start-debugger-server"].map(String::from));
-    args.push(rdp);
+    args.extend(["--remote-debugging-port", "0"].map(String::from));
     args.extend([
         "-profile".into(),
         profile_dir.to_string_lossy().into_owned(),
@@ -493,14 +491,19 @@ mod tests {
     #[test]
     fn launch_parses_url_and_drop_removes_profile() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = fake(
-            dir.path(),
-            "echo noise >&2\necho 'WebDriver BiDi listening on ws://127.0.0.1:4242' >&2\nexec sleep 30",
+        let args_path = dir.path().join("args");
+        let body = format!(
+            "printf '%s\\n' \"$@\" > '{}'\necho noise >&2\necho 'WebDriver BiDi listening on ws://127.0.0.1:4242' >&2\nexec sleep 30",
+            args_path.display()
         );
+        let bin = fake(dir.path(), &body);
         let p = FirefoxProcess::launch(&bin, true, None, Duration::from_secs(10)).unwrap();
         assert_eq!(p.bidi_url, "ws://127.0.0.1:4242");
         let profile = p.profile_dir.clone();
-        assert!(profile.join("user.js").exists());
+        let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(!args.lines().any(|arg| arg == "--start-debugger-server"));
+        let prefs = std::fs::read_to_string(profile.join("user.js")).unwrap();
+        assert!(!prefs.contains("devtools.chrome.enabled"));
         assert!(profile
             .file_name()
             .unwrap()
