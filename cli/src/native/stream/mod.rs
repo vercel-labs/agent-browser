@@ -557,6 +557,18 @@ impl StreamServer {
         let _ = self.frame_tx.send(msg.to_string());
     }
 
+    /// Broadcast where an agent action landed, in viewport CSS pixels.
+    pub fn broadcast_pointer(&self, action: &str, x: f64, y: f64) {
+        let msg = json!({
+            "type": "pointer",
+            "action": action,
+            "x": x,
+            "y": y,
+            "timestamp": timestamp_ms(),
+        });
+        let _ = self.frame_tx.send(msg.to_string());
+    }
+
     /// Broadcast a console event from the browser.
     pub fn broadcast_console(&self, level: &str, text: &str, args: &[Value]) {
         let mut msg = json!({
