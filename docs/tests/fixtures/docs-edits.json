@@ -84,6 +84,10 @@
     ],
     "/configuration": [
       {
+        "from": "<code>chrome</code> (default), <code>lightpanda</code>, <code>obscura</code> (experimental)",
+        "to": "<code>chrome</code> (default), <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code> (experimental)"
+      },
+      {
         "from": "This initial implementation does not support",
         "to": "Browser trust does not support"
       },
