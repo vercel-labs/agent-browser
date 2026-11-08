@@ -199,33 +199,44 @@ async fn collect_storage_in_target(
 
     for target_origin in origins {
         let nav_url = format!("{}/", target_origin.trim_end_matches('/'));
-        let navigation = client
-            .send_command(
-                "Page.navigate",
-                Some(json!({ "url": nav_url })),
-                Some(temp_session),
-            )
-            .await?;
-        if navigation
-            .get("errorText")
-            .and_then(Value::as_str)
-            .is_some()
-        {
-            return Err(format!("Failed to capture storage for {}", target_origin));
-        }
+        let navigation = client.send_command(
+            "Page.navigate",
+            Some(json!({ "url": nav_url })),
+            Some(temp_session),
+        );
+        tokio::pin!(navigation);
 
-        // Fulfill intercepted requests with blank HTML until the page loads
+        // Navigation can wait for its intercepted request to be fulfilled.
+        // Poll both concurrently and require navigation success and a load event.
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let timed_out = || {
+            format!(
+                "Storage capture timed out for {}; previous saved state was not replaced.",
+                target_origin
+            )
+        };
+        let mut navigation_done = false;
         let mut page_loaded = false;
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(tokio::time::Duration::from_secs(2), event_rx.recv()).await {
-                Ok(Some(evt)) => {
+        while !navigation_done || !page_loaded {
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => return Err(timed_out()),
+                result = &mut navigation, if !navigation_done => {
+                    let result = result?;
+                    if result.get("errorText").and_then(Value::as_str).is_some() {
+                        return Err(format!("Failed to capture storage for {}", target_origin));
+                    }
+                    navigation_done = true;
+                }
+                event = event_rx.recv() => {
+                    let evt = event.ok_or("Storage capture event stream closed")?;
                     if evt.method == "Fetch.requestPaused" {
                         if let Some(request_id) =
                             evt.params.get("requestId").and_then(|v| v.as_str())
                         {
-                            client
-                                .send_command(
+                            tokio::time::timeout_at(
+                                deadline,
+                                client.send_command(
                                     "Fetch.fulfillRequest",
                                     Some(json!({
                                         "requestId": request_id,
@@ -236,24 +247,16 @@ async fn collect_storage_in_target(
                                         "body": &blank_html_b64
                                     })),
                                     Some(temp_session),
-                                )
-                                .await?;
+                                ),
+                            )
+                            .await
+                            .map_err(|_| timed_out())??;
                         }
                     } else if evt.method == "Page.loadEventFired" {
                         page_loaded = true;
-                        break;
                     }
                 }
-                Ok(None) => return Err("Storage capture event stream closed".into()),
-                Err(_) => break,
             }
-        }
-
-        if !page_loaded {
-            return Err(format!(
-                "Storage capture timed out for {}; previous saved state was not replaced.",
-                target_origin
-            ));
         }
 
         let storage = eval_origin_storage(client, temp_session, origin_js)
@@ -948,6 +951,7 @@ mod tests {
         tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let mut pending_navigation = None;
             while let Some(Ok(message)) = socket.next().await {
                 let Ok(text) = message.to_text() else {
                     continue;
@@ -956,12 +960,16 @@ mod tests {
                     continue;
                 };
                 let method = request["method"].as_str().unwrap_or("");
-                if mode == "closed" {
+                let delayed_navigation = matches!(
+                    mode,
+                    "closed-wait" | "closed-navigation-error" | "closed-fulfill-error"
+                );
+                if mode == "closed" || delayed_navigation {
                     let event = match method {
                         "Page.navigate" => Some(
                             json!({"method":"Fetch.requestPaused","sessionId":"other","params":{"requestId":"capture","request":{"url":"https://other.example/"}}}),
                         ),
-                        "Fetch.fulfillRequest" => Some(
+                        "Fetch.fulfillRequest" if mode != "closed-fulfill-error" => Some(
                             json!({"method":"Page.loadEventFired","sessionId":"other","params":{}}),
                         ),
                         _ => None,
@@ -970,6 +978,25 @@ mod tests {
                         socket
                             .send(tokio_tungstenite::tungstenite::Message::Text(
                                 event.to_string(),
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                    if delayed_navigation && method == "Page.navigate" {
+                        // Chrome cannot finish navigation until interception is handled.
+                        pending_navigation = Some(request["id"].clone());
+                        continue;
+                    }
+                    if delayed_navigation && method == "Fetch.fulfillRequest" {
+                        let result = if mode == "closed-navigation-error" {
+                            json!({"errorText":"net::ERR_FAILED"})
+                        } else {
+                            json!({})
+                        };
+                        socket
+                            .send(tokio_tungstenite::tungstenite::Message::Text(
+                                json!({"id":pending_navigation.take().unwrap(),"result":result})
+                                    .to_string(),
                             ))
                             .await
                             .unwrap();
@@ -1000,7 +1027,8 @@ mod tests {
                 let fail = (mode == "frame" && method == "Page.getFrameTree")
                     || (mode == "active" && method == "Runtime.evaluate")
                     || (mode == "target" && method == "Target.createTarget")
-                    || (mode == "navigation" && method == "Page.navigate");
+                    || (mode == "navigation" && method == "Page.navigate")
+                    || (mode == "closed-fulfill-error" && method == "Fetch.fulfillRequest");
                 let response = if fail {
                     json!({"id":request["id"],"error":{"code":-32000,"message":"fixture capture failure"}})
                 } else {
@@ -1032,7 +1060,15 @@ mod tests {
         let previous = get_sessions_dir().join("saved-id.json");
         let usable = r#"{"cookies":[],"origins":[{"origin":"https://first.example","localStorage":[{"name":"auth","value":"keep"}]}]}"#;
         fs::write(&previous, usable).unwrap();
-        for mode in ["cookies", "frame", "active", "target", "navigation"] {
+        for mode in [
+            "cookies",
+            "frame",
+            "active",
+            "target",
+            "navigation",
+            "closed-navigation-error",
+            "closed-fulfill-error",
+        ] {
             let client = capture_fixture(mode).await;
             let origins = HashSet::from(["https://other.example".to_string()]);
             assert!(
@@ -1043,6 +1079,22 @@ mod tests {
             );
             assert_eq!(fs::read_to_string(&previous).unwrap(), usable, "{mode}");
         }
+    }
+
+    #[tokio::test]
+    async fn closed_origin_capture_fulfills_requests_while_navigation_waits() {
+        let client = capture_fixture("closed-wait").await;
+        let origins = vec!["https://other.example".to_string()];
+        let captured = tokio::time::timeout(
+            tokio::time::Duration::from_secs(3),
+            collect_storage_via_temp_target(&client, &origins, "fixture"),
+        )
+        .await
+        .expect("navigation must not block handling its intercepted request")
+        .unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].origin, origins[0]);
+        assert_eq!(captured[0].session_storage[0].name, "token");
     }
 
     #[tokio::test]
