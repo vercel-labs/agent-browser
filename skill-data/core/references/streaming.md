@@ -66,6 +66,7 @@ Every message is JSON text with a `type` field.
 - `tabs`: the current tab list, sent on connect when tabs are known and on change.
 - `url`: on Chrome, full-document, History API, and fragment navigation in the active tab's main frame. Child-frame and background-tab navigation is ignored.
 - `console`: console events.
+- `pointer`: where an agent click landed, as `{"type": "pointer", "action": "click", "x": 1001, "y": 52, "timestamp": ...}` in viewport CSS pixels. Scale it by the frame width over `metadata.deviceWidth` to place a marker on the image.
 
 Status, tabs, url, and console travel on an ordered channel: they are delivered in order and are never replaced by a newer message the way frames are. They are not unconditionally durable. A client that falls far enough behind can lag out of that channel and lose messages it never saw, so treat console output as a live feed, not an audit log.
 

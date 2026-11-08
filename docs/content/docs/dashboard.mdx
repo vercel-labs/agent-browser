@@ -69,6 +69,50 @@ The dashboard is a single-page web app with three areas:
   </tbody>
 </table>
 
+## PiP window
+
+On macOS, `agent-browser pip` opens the dashboard's `/pip` view in a small always-on-top window, so you can watch an agent work without switching to the dashboard:
+
+```bash
+agent-browser pip        # starts the dashboard if needed, then opens the window
+agent-browser pip stop   # closes the window; the dashboard keeps running
+```
+
+The window follows the session whose agent acted most recently. While the agent works it shows the last action, such as `click link "Sign up"`, and marks where the click landed.
+
+<table>
+  <thead>
+    <tr>
+      <th>Action</th>
+      <th>Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Click the frame</td>
+      <td>Take over mouse and keyboard. Press Esc, click outside the window, or stop typing for 10 seconds to hand control back. The agent can still act while you drive; the bar shows when it does.</td>
+    </tr>
+    <tr>
+      <td>Drag the top edge, or Cmd and drag anywhere</td>
+      <td>Move the window. It snaps to the nearest screen corner and remembers it.</td>
+    </tr>
+    <tr>
+      <td>Drag a bottom corner</td>
+      <td>Resize. The height follows the page's aspect ratio.</td>
+    </tr>
+    <tr>
+      <td>Double-click the top edge</td>
+      <td>Open the full dashboard.</td>
+    </tr>
+    <tr>
+      <td>Right-click the top edge</td>
+      <td>Close the window.</td>
+    </tr>
+  </tbody>
+</table>
+
+The window dims after a minute without agent activity and closes itself a minute after its session ends. On other platforms, open `http://localhost:4848/pip` in a browser to get the same view. From a source checkout, build the macOS helper with `pnpm build:pip`.
+
 ## WebSocket protocol
 
 The dashboard connects to the same WebSocket endpoint used by [Streaming](/streaming), with additional message types for observability:

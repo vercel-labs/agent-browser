@@ -95,6 +95,22 @@ On Chrome, the server sends URL updates for full-document, History API, and frag
 
 Navigation inside child frames or background tabs does not emit a URL message or replace the active tab's cached URL.
 
+### Pointer messages
+
+When an agent clicks, the server sends where the click landed, in viewport CSS pixels:
+
+```json
+{
+  "type": "pointer",
+  "action": "click",
+  "x": 1001,
+  "y": 52,
+  "timestamp": 1785038682238
+}
+```
+
+To place a marker on a frame, scale `x` and `y` by the frame image width divided by `metadata.deviceWidth`.
+
 ### Status messages
 
 Connection and screencast status:

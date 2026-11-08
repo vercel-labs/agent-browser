@@ -466,6 +466,16 @@ agent-browser dashboard stop
 
 The dashboard runs on port 4848 by default, independent of browser sessions. It can also be opened through a proxied or forwarded URL such as `https://dashboard.agent-browser.localhost`; stay on the dashboard origin, because session tabs, status, and stream traffic are proxied internally and session ports do not need to be exposed. Loopback origins are allowed by default over IPv4 and IPv6 without an access token. Set `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS` to a comma-separated list of exact HTTPS reverse-proxied origins. Every origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. The URL's token is carried in the initial fragment, then stored in a Secure, host-bound, same-site cookie for dashboard API and stream requests. Configure the reverse proxy to redact cookies from logs. The dashboard rejects requests with missing or cross-origin browser provenance. Open `http://localhost:<port>` directly for local access. Repeated starts reuse the running dashboard only when the port and allowed origins match; stop it before changing either setting.
 
+## PiP window
+
+```bash
+agent-browser pip                 # open the floating window (starts the dashboard if needed)
+agent-browser pip --port 8080     # dashboard port to start when none is running
+agent-browser pip stop            # close the window; the dashboard keeps running
+```
+
+Opens a small always-on-top window on the user's screen that streams the session whose agent acted most recently, with the last action and a marker where it clicked. The user can click the frame to take over mouse and keyboard and press Esc to hand control back. Running `pip` again while the window is open reports it as already open. The window is a macOS helper that ships next to the CLI binary; on other platforms the command fails with the dashboard URL to open in a browser (`http://localhost:<port>/pip`). From a source checkout, build the helper with `pnpm build:pip`.
+
 ## Browser installation
 
 `agent-browser install` downloads Chrome for Testing. On macOS versions below 13, the command stops before the download and prints instructions to update macOS or install Chrome manually. If `sw_vers -productVersion` is unavailable, exits with an error, returns no version, or returns a malformed version, the command reports a detection error and stops before making a network request. On Linux, `--with-deps` also installs system dependencies and exits nonzero if the package manager cannot install every required browser library.
@@ -509,7 +519,7 @@ Profiles:
 - `core` - Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
 - `network` - Network routes, request inspection, HAR, headers, credentials, offline
 - `state` - Cookies, storage, auth, saved state, sessions, profiles, skills
-- `debug` - Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+- `debug` - Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, pip, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
 - `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
