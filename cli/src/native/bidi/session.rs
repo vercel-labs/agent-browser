@@ -72,6 +72,8 @@ pub struct FirefoxSession {
     /// Origins of pages this session navigated to, kept so state saves still cover them after the tab moves on.
     pub visited_origins: HashSet<String>,
     pub(crate) dispatcher: Option<AbortOnDrop>,
+    /// BiDi user context created for a window opened by `window new`, keyed by its top-level context.
+    pub window_contexts: HashMap<String, String>,
     /// Version Firefox reported when the session opened, used for HAR browser metadata.
     pub browser_version: String,
 }
@@ -250,6 +252,7 @@ impl FirefoxSession {
             intercepting: false,
             inflight: HashMap::new(),
             visited_origins: HashSet::new(),
+            window_contexts: HashMap::new(),
             dispatcher,
             browser_version,
         };
@@ -938,6 +941,7 @@ pub(crate) mod tests {
             shadow_ids: Default::default(),
             emulation: Arc::default(),
             download_dir: None,
+            window_contexts: HashMap::new(),
             visited_origins: HashSet::new(),
             events,
             net: NetContext::default(),
@@ -1080,6 +1084,7 @@ pub(crate) mod tests {
             inflight: HashMap::new(),
             dispatcher: None,
             browser_version: String::new(),
+            window_contexts: HashMap::new(),
         };
         (session, tx, calls, bidi_messages, rdp_messages)
     }
