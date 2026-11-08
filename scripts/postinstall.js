@@ -9,12 +9,27 @@
  * - Mac/Linux: Replaces symlink to point to native binary
  */
 
-import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync } from 'fs';
+import {
+  chmodSync,
+  createWriteStream,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  rmdirSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 import { get } from 'https';
 import { execSync } from 'child_process';
+import { pipeline } from 'node:stream/promises';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
@@ -52,35 +67,33 @@ const GITHUB_REPO = 'vercel-labs/agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
 async function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    const file = createWriteStream(dest);
-    
-    const request = (url) => {
-      get(url, (response) => {
-        // Handle redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          request(response.headers.location);
-          return;
-        }
-        
-        if (response.statusCode !== 200) {
-          reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
-          return;
-        }
-        
-        response.pipe(file);
-        file.on('finish', () => {
-          file.close();
-          resolve();
-        });
-      }).on('error', (err) => {
-        unlinkSync(dest);
-        reject(err);
-      });
-    };
-    
-    request(url);
+  const response = await new Promise((resolve, reject) => {
+    get(url, resolve).on('error', reject);
   });
+  if (response.statusCode !== 200) {
+    response.destroy();
+    const location = response.headers.location;
+    if ((response.statusCode === 301 || response.statusCode === 302) && location) {
+      return downloadFile(new URL(location, url), dest);
+    }
+    throw new Error(`Failed to download: HTTP ${response.statusCode}`);
+  }
+
+  let stagedPath;
+  try {
+    stagedPath = join(mkdtempSync(join(dirname(dest), '.agent-browser-download-')), 'binary');
+    await pipeline(response, createWriteStream(stagedPath));
+    if (statSync(stagedPath).size === 0) {
+      throw new Error('Downloaded native binary is empty');
+    }
+    renameSync(stagedPath, dest);
+  } finally {
+    response.destroy();
+    if (stagedPath) {
+      rmSync(stagedPath, { force: true });
+      rmdirSync(dirname(stagedPath));
+    }
+  }
 }
 
 /**

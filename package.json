@@ -30,7 +30,7 @@
     "build:docker": "docker build --platform linux/amd64 -t agent-browser-builder -f docker/Dockerfile.build .",
     "release": "npm run version:sync && npm run build:all-platforms && npm publish",
     "postinstall": "node scripts/postinstall.js",
-    "test:launcher": "node --test test/launcher.test.mjs",
+    "test:launcher": "node --test test/launcher.test.mjs test/postinstall.test.mjs",
     "build:dashboard": "cd packages/dashboard && pnpm build",
     "build:source": "pnpm install --frozen-lockfile --filter dashboard && pnpm run build:dashboard && pnpm run build:native"
   },
