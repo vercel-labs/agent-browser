@@ -220,24 +220,7 @@ impl FirefoxSession {
                         }
                         Some("browsingContext.contextDestroyed") if params["parent"].is_null() => {
                             if let Some(context) = params["context"].as_str() {
-                                self.refs.retain(|(id, _), _| id != context);
-                                if dialog.as_ref().and_then(|d| d.session_id.as_deref())
-                                    == Some(context)
-                                {
-                                    *dialog = None;
-                                }
-                                self.tab_ids.remove(context);
-                                self.tab_labels.remove(context);
-                                if self.context == context {
-                                    self.context = self
-                                        .tab_ids
-                                        .iter()
-                                        .min_by_key(|(_, id)| *id)
-                                        .map(|(context, _)| context.clone())
-                                        .unwrap_or_default();
-                                    self.refs.clear();
-                                    active_destroyed = true;
-                                }
+                                active_destroyed |= self.forget_context(context, dialog);
                             }
                         }
                         _ => {}
@@ -249,6 +232,88 @@ impl FirefoxSession {
             }
         }
         active_destroyed
+    }
+
+    /// Forgets a browsing context that is gone: its stable id, label, element refs and any prompt it
+    /// owned. Returns true when it was the active context, which is then replaced by the lowest id.
+    pub fn forget_context(&mut self, context: &str, dialog: &mut Option<PendingDialog>) -> bool {
+        self.refs.retain(|(id, _), _| id != context);
+        if dialog.as_ref().and_then(|d| d.session_id.as_deref()) == Some(context) {
+            *dialog = None;
+        }
+        self.tab_ids.remove(context);
+        self.tab_labels.remove(context);
+        if self.context != context {
+            return false;
+        }
+        self.context = self
+            .tab_ids
+            .iter()
+            .min_by_key(|(_, id)| *id)
+            .map(|(context, _)| context.clone())
+            .unwrap_or_default();
+        self.refs.clear();
+        true
+    }
+
+    /// Accepts the prompts the daemon answers itself, following `auto_dialog` as it changes.
+    pub fn spawn_auto_dismiss(&self) -> tokio::task::JoinHandle<()> {
+        let client = Arc::clone(&self.bidi);
+        let mut events = client.subscribe();
+        let enabled = Arc::clone(&self.auto_dialog);
+        let changed = Arc::clone(&self.auto_dialog_changed);
+        tokio::spawn(async move {
+            let mut pending = HashSet::<String>::new();
+            let track = |event: &Value, pending: &mut HashSet<String>| {
+                let params = &event["params"];
+                let Some(context) = params["context"].as_str() else {
+                    return;
+                };
+                match event["method"].as_str() {
+                    Some("browsingContext.userPromptOpened") => {
+                        pending.remove(context);
+                        if params["handler"] != "accept" && auto_handles_prompt(params, true) {
+                            pending.insert(context.to_string());
+                        }
+                    }
+                    Some("browsingContext.userPromptClosed") => {
+                        pending.remove(context);
+                    }
+                    _ => {}
+                }
+            };
+            loop {
+                tokio::select! {
+                    biased;
+                    event = events.recv() => match event {
+                        Ok(event) => track(&event, &mut pending),
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    },
+                    _ = changed.notified() => {}
+                }
+                while let Ok(event) = events.try_recv() {
+                    track(&event, &mut pending);
+                }
+                if enabled.load(Ordering::Acquire) {
+                    if let Some(context) = pending.iter().next().cloned() {
+                        pending.remove(&context);
+                        if let Err(error) = client
+                            .send(
+                                "browsingContext.handleUserPrompt",
+                                json!({"context": context, "accept": true}),
+                            )
+                            .await
+                        {
+                            eprintln!("[auto-dismiss] failed to accept Firefox dialog: {error}");
+                        }
+                        if !pending.is_empty() {
+                            changed.notify_one();
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Runs `fut` until it finishes or a prompt opens on the active context. Returns `None` for the prompt.
@@ -414,6 +479,8 @@ pub(crate) mod tests {
                         }
                         let result = if prompt && v["method"] == "browsingContext.create" {
                             json!({"context":"ctx-new"})
+                        } else if v["method"] == "browsingContext.navigate" {
+                            json!({ "url": v["params"]["url"] })
                         } else if v["method"] == "browsingContext.getTree" {
                             if trees.len() > 1 {
                                 trees.pop_front().unwrap()

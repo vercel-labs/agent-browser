@@ -3,7 +3,7 @@
 use base64::Engine;
 use serde_json::{json, Value};
 
-use super::actions::session;
+use super::daemon::session;
 use crate::native::actions::DaemonState;
 use crate::native::screenshot::{save_screenshot, ScreenshotOptions};
 

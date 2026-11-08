@@ -4676,8 +4676,8 @@ Options:
                              Explicit Obscura launches validate this invocation's resolved
                              bypass settings, even with an existing daemon; stale daemon
                              environment values are not reused when bypass is cleared.
-                             Firefox rejects authenticated proxies, --user-agent, --color-scheme,
-                             and networkidle waits.
+                             Firefox rejects --allowed-domains, authenticated proxies, --user-agent,
+                             --color-scheme, and networkidle waits.
                              Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --relaunch                 Relaunch the session's browser even when no setting changed

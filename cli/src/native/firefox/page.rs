@@ -4,43 +4,15 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::actions::session;
+use super::daemon::session;
+use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
 use crate::native::actions::{route_url_matches, DaemonState};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Turns an `about:neterror?e=...&d=...` URL into the message Firefox shows for the failure.
-fn neterror_message(url: &str) -> Option<String> {
-    if !url.starts_with("about:neterror") {
-        return None;
-    }
-    let parsed = url::Url::parse(url).ok()?;
-    let pair = |key: &str| {
-        parsed
-            .query_pairs()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.into_owned())
-            .filter(|v| !v.is_empty())
-    };
-    let code = pair("e").unwrap_or_else(|| "unknown error".to_string());
-    Some(match pair("d") {
-        Some(detail) => format!("{code}: {detail}"),
-        None => code,
-    })
-}
-
-/// Drops refs and frame state after a document-level navigation.
-fn reset_page_state(state: &mut DaemonState) {
-    state.ref_map.invalidate_all_documents();
-    state.active_frame_id = None;
-    if let Some(ff) = state.firefox.as_mut() {
-        ff.refs.clear();
-    }
-}
-
 /// Navigates the active tab and returns `{url, title, targetId}` like `BrowserManager::navigate`.
-/// `waitUntil` maps to the BiDi `wait` state.
+/// `waitUntil` maps to the load wait.
 pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd
         .get("url")
@@ -53,53 +25,42 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     {
         return Err("--headers is not supported with --engine firefox".into());
     }
-    let wait = match cmd.get("waitUntil").and_then(Value::as_str) {
-        Some("networkidle") => {
-            return Err("networkidle is not supported with --engine firefox".into())
-        }
-        Some("domcontentloaded") => "interactive",
-        Some("none") => "none",
-        _ => "complete",
-    };
-    state.ref_map.invalidate_all_documents();
-    state.active_frame_id = None;
-    let ff = session(state)?;
-    ff.refs.clear();
-    let context = ff.context.clone();
-    let nav = ff
-        .race_prompt(ff.bidi.send(
-            "browsingContext.navigate",
-            json!({"context": context, "url": url, "wait": wait}),
-        ))
-        .await
-        .map_err(|e| format!("Navigation failed: {e}"))?;
-    let Some(nav) = nav else {
-        let url = ff.url().await.unwrap_or_default();
-        return Ok(json!({ "url": url, "targetId": context, "dialogOpened": true }));
-    };
-    let landed = nav["url"].as_str().unwrap_or(url);
-    if let Some(msg) = neterror_message(landed) {
-        return Err(format!("Navigation failed: {msg}"));
+    let wait = Wait::from_wait_until(cmd.get("waitUntil").and_then(Value::as_str))?;
+    let landing = navigation::load(state, Load::Url { url, wait }).await?;
+    if landing.prompt {
+        return Ok(json!({
+            "url": landing.url,
+            "targetId": landing.context,
+            "dialogOpened": true,
+        }));
     }
-    ff.note_visit(landed);
-    let title = ff.eval("document.title").await.unwrap_or(Value::Null);
-    Ok(json!({ "url": landed, "title": title, "targetId": context }))
+    if let Some(message) = landing.failure() {
+        return Err(format!("Navigation failed: {message}"));
+    }
+    let title = session(state)?
+        .eval("document.title")
+        .await
+        .unwrap_or(Value::Null);
+    Ok(json!({
+        "url": landing.url,
+        "title": title,
+        "targetId": landing.context,
+    }))
+}
+
+/// The `{url}` answer a load reports, flagging a prompt that stopped it the way `navigate` does.
+fn landing_json(landing: navigation::Landing) -> Value {
+    let mut result = json!({ "url": landing.url });
+    if landing.prompt {
+        result["dialogOpened"] = json!(true);
+    }
+    result
 }
 
 /// Moves `delta` entries through the active tab's history and returns `{url}` like `BrowserManager`.
 async fn traverse_history(delta: i64, state: &mut DaemonState) -> Result<Value, String> {
-    let ff = session(state)?;
-    let context = ff.context.clone();
-    ff.race_prompt(ff.bidi.send(
-        "browsingContext.traverseHistory",
-        json!({"context": context, "delta": delta}),
-    ))
-    .await
-    .map_err(|e| format!("History navigation failed: {e}"))?;
-    reset_page_state(state);
-    let url = session(state)?.url().await.unwrap_or_default();
-    session(state)?.note_visit(&url);
-    Ok(json!({ "url": url }))
+    let landing = navigation::load(state, Load::History { delta }).await?;
+    Ok(landing_json(landing))
 }
 
 /// History back. Must return what Chrome's `handle_back` returns.
@@ -114,17 +75,8 @@ pub async fn forward(_cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
 /// Reload. Must return what Chrome's `handle_reload` returns.
 pub async fn reload(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let ff = session(state)?;
-    let context = ff.context.clone();
-    ff.race_prompt(ff.bidi.send(
-        "browsingContext.reload",
-        json!({"context": context, "wait": "complete"}),
-    ))
-    .await
-    .map_err(|e| format!("Reload failed: {e}"))?;
-    reset_page_state(state);
-    let url = session(state)?.url().await.unwrap_or_default();
-    Ok(json!({ "url": url }))
+    let landing = navigation::load(state, Load::Reload).await?;
+    Ok(landing_json(landing))
 }
 
 /// Current URL as `{url}`.
@@ -348,20 +300,6 @@ pub async fn waitforfunction(cmd: &Value, state: &mut DaemonState) -> Result<Val
 mod tests {
     use super::*;
     use crate::native::firefox::session::tests::fake_session;
-
-    #[test]
-    fn neterror_url_becomes_a_message() {
-        let url = "about:neterror?e=dnsNotFound&u=https%3A//nope.invalid/&d=We%20can%27t%20connect";
-        assert_eq!(
-            neterror_message(url).unwrap(),
-            "dnsNotFound: We can't connect"
-        );
-        assert_eq!(
-            neterror_message("about:neterror?e=connectionFailure").unwrap(),
-            "connectionFailure"
-        );
-        assert!(neterror_message("https://example.com").is_none());
-    }
 
     #[tokio::test]
     async fn bare_wait_sleeps_and_returns_the_timeout_shape() {

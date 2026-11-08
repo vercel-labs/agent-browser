@@ -106,8 +106,9 @@ impl DomainFilter {
         false
     }
 
+    /// Fails unless `url`'s host is in the list. `about:blank` has no host, so it always passes.
     pub fn check_url(&self, url: &str) -> Result<(), String> {
-        if self.allowed_domains.is_empty() {
+        if self.allowed_domains.is_empty() || url == "about:blank" {
             return Ok(());
         }
         let parsed = url::Url::parse(url).map_err(|_| format!("Invalid URL: {}", url))?;

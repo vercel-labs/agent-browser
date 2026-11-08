@@ -4,6 +4,8 @@
 pub mod actions;
 pub mod bidi;
 pub mod capture;
+pub mod daemon;
+pub mod navigation;
 pub mod page;
 pub mod process;
 pub mod rdp;
