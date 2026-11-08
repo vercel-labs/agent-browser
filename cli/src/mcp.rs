@@ -177,6 +177,8 @@ const TOOL_PLUGIN_RUN: &str = "agent_browser_plugin_run";
 const TOOL_DOCTOR: &str = "agent_browser_doctor";
 const TOOL_DASHBOARD_START: &str = "agent_browser_dashboard_start";
 const TOOL_DASHBOARD_STOP: &str = "agent_browser_dashboard_stop";
+const TOOL_PIP: &str = "agent_browser_pip";
+const TOOL_PIP_STOP: &str = "agent_browser_pip_stop";
 const TOOL_INSTALL: &str = "agent_browser_install";
 const TOOL_UPGRADE: &str = "agent_browser_upgrade";
 const TOOL_CHAT: &str = "agent_browser_chat";
@@ -464,6 +466,8 @@ const DEBUG_PROFILE_TOOLS: &[&str] = &[
     TOOL_DOCTOR,
     TOOL_DASHBOARD_START,
     TOOL_DASHBOARD_STOP,
+    TOOL_PIP,
+    TOOL_PIP_STOP,
     TOOL_INSTALL,
     TOOL_UPGRADE,
     TOOL_CHAT,
@@ -2017,6 +2021,22 @@ fn parity_tools() -> Vec<Value> {
             &[],
         ),
         tool(
+            TOOL_PIP,
+            "PiP",
+            "Open a small always-on-top window on the user's screen that shows the active session live, with the agent's last action and where it clicked. Use it when the user wants to watch the browser while you work. Starts the dashboard when it is not running. macOS only; elsewhere it returns the dashboard URL to open instead.",
+            json!({
+                "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Dashboard port to start when no dashboard is running. Defaults to 4848." }
+            }),
+            &[],
+        ),
+        tool(
+            TOOL_PIP_STOP,
+            "PiP stop",
+            "Close the PiP window.",
+            json!({}),
+            &[],
+        ),
+        tool(
             TOOL_INSTALL,
             "Install",
             "Install browser binaries. On macOS versions below 13, the command stops before downloading Chrome for Testing and prints instructions to update macOS or install Chrome manually. If `sw_vers -productVersion` is unavailable, exits with an error, returns no version, or returns a malformed version, the command reports a detection error and stops before making a network request.",
@@ -2317,6 +2337,8 @@ fn is_open_world_tool(name: &str) -> bool {
             | TOOL_DOCTOR
             | TOOL_DASHBOARD_START
             | TOOL_DASHBOARD_STOP
+            | TOOL_PIP
+            | TOOL_PIP_STOP
             | TOOL_INSTALL
             | TOOL_UPGRADE
     )
@@ -2617,6 +2639,8 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_DOCTOR => call_doctor(arguments),
         TOOL_DASHBOARD_START => call_dashboard_start(arguments),
         TOOL_DASHBOARD_STOP => call_literal(arguments, &["dashboard", "stop"]),
+        TOOL_PIP => call_cli_tool(arguments, pip_args(arguments)?, None),
+        TOOL_PIP_STOP => call_literal(arguments, &["pip", "stop"]),
         TOOL_INSTALL => call_install(arguments),
         TOOL_UPGRADE => call_literal(arguments, &["upgrade"]),
         TOOL_CHAT => call_chat(arguments),
@@ -2678,6 +2702,7 @@ fn call_cli_tool(
                 | "upgrade"
                 | "doctor"
                 | "dashboard"
+                | "pip"
                 | "profiles"
                 | "skills"
                 | "plugin"
@@ -4091,6 +4116,15 @@ fn dashboard_start_args(arguments: &Value) -> Result<Vec<String>, ProtocolError>
     if let Some(origins) = optional_string(arguments, "allowedOrigins")? {
         args.push("--allowed-origins".to_string());
         args.push(origins);
+    }
+    Ok(args)
+}
+
+fn pip_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["pip".to_string()];
+    if let Some(port) = optional_u64(arguments, "port")? {
+        args.push("--port".to_string());
+        args.push(port.to_string());
     }
     Ok(args)
 }
@@ -6201,6 +6235,31 @@ mod tests {
                 "--allowed-origins",
                 "https://dashboard.example.com"
             ]
+        );
+    }
+
+    #[test]
+    fn pip_tools_map_to_the_cli() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_PIP))
+            .unwrap();
+        assert_eq!(tool["inputSchema"]["properties"]["port"]["minimum"], 1);
+        assert_eq!(tool["inputSchema"]["properties"]["port"]["maximum"], 65535);
+        assert!(tools()
+            .iter()
+            .any(|tool| tool["name"].as_str() == Some(TOOL_PIP_STOP)));
+
+        assert_eq!(pip_args(&json!({})).unwrap(), vec!["pip"]);
+        assert_eq!(
+            pip_args(&json!({ "port": 4900 })).unwrap(),
+            vec!["pip", "--port", "4900"]
+        );
+        let parsed =
+            crate::pip::parse_pip_command(&pip_args(&json!({ "port": 4900 })).unwrap()[1..]);
+        assert_eq!(
+            parsed,
+            Ok(crate::pip::PipCommand::Open { port: Some(4900) })
         );
     }
 

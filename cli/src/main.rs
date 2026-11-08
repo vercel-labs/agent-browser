@@ -10,6 +10,7 @@ mod install;
 mod mcp;
 mod native;
 mod output;
+mod pip;
 mod plugins;
 mod read;
 mod session_files;
@@ -1154,6 +1155,114 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
     }
 }
 
+fn exit_with_error(message: impl AsRef<str>, json_mode: bool) -> ! {
+    if json_mode {
+        print_json_error(message);
+    } else {
+        eprintln!("{} {}", color::error_indicator(), message.as_ref());
+    }
+    exit(1);
+}
+
+/// Port of the running dashboard, starting one on `requested` when none runs.
+fn ensure_dashboard_port(requested: u16) -> Result<u16, String> {
+    if let Ok(pid) = fs::read_to_string(get_dashboard_pid_path()) {
+        if pid.trim().parse::<u32>().is_ok_and(is_pid_alive) {
+            return read_dashboard_config()
+                .map(|config| config.port)
+                .ok_or_else(|| "Dashboard is running, but its port could not be read. Run 'agent-browser dashboard stop' and try again.".to_string());
+        }
+    }
+
+    let exe = env::current_exe().map_err(|e| format!("Failed to get executable path: {e}"))?;
+    let output = std::process::Command::new(exe)
+        .args([
+            "dashboard",
+            "start",
+            "--port",
+            &requested.to_string(),
+            "--json",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("Failed to start dashboard: {e}"))?;
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Failed to start dashboard.".to_string())?;
+    if response.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        let error = response
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Failed to start dashboard.");
+        return Err(error.to_string());
+    }
+    Ok(requested)
+}
+
+/// Open a floating window that shows the active session live.
+fn run_pip_open(port: Option<u16>, json_mode: bool) {
+    if !cfg!(target_os = "macos") {
+        let port = port.unwrap_or(pip::DEFAULT_DASHBOARD_PORT);
+        exit_with_error(
+            format!(
+                "The PiP window is available on macOS only. Run 'agent-browser dashboard start --port {port}' and open {} in a browser instead.",
+                pip::pip_url(port)
+            ),
+            json_mode,
+        );
+    }
+
+    if let Some(pid) = pip::running_pid() {
+        if json_mode {
+            print_json_value(
+                json!({ "success": true, "data": { "pid": pid, "already_running": true } }),
+            );
+        } else {
+            println!("PiP window is already open");
+        }
+        return;
+    }
+
+    let exe = env::current_exe()
+        .map(|p| p.canonicalize().unwrap_or(p))
+        .unwrap_or_else(|e| {
+            exit_with_error(format!("Failed to get executable path: {e}"), json_mode)
+        });
+    let Some(helper) = pip::find_helper(&exe) else {
+        exit_with_error(
+            format!(
+                "PiP helper not found next to {}. From a source checkout, run 'pnpm build:pip'.",
+                exe.display()
+            ),
+            json_mode,
+        );
+    };
+
+    let dashboard_port = ensure_dashboard_port(port.unwrap_or(pip::DEFAULT_DASHBOARD_PORT))
+        .unwrap_or_else(|error| exit_with_error(error, json_mode));
+    let url = pip::pip_url(dashboard_port);
+    let pid =
+        pip::spawn_helper(&helper, &url).unwrap_or_else(|error| exit_with_error(error, json_mode));
+
+    if json_mode {
+        print_json_value(
+            json!({ "success": true, "data": { "pid": pid, "url": url, "dashboard_port": dashboard_port } }),
+        );
+    } else {
+        println!("PiP window opened for {url}");
+    }
+}
+
+fn run_pip_stop(json_mode: bool) {
+    let stopped = pip::stop();
+    if json_mode {
+        print_json_value(json!({ "success": true, "data": { "stopped": stopped } }));
+    } else if stopped {
+        println!("PiP window closed");
+    } else {
+        println!("PiP window is not open");
+    }
+}
+
 fn print_dashboard_access_urls(config: &DashboardConfig) {
     let access_urls = config.access_urls();
     if access_urls.is_empty() {
@@ -1591,6 +1700,23 @@ fn main() {
                 return;
             }
         }
+    }
+
+    // Handle pip subcommand
+    if clean.first().map(|s| s.as_str()) == Some("pip") {
+        match pip::parse_pip_command(&clean[1..]) {
+            Ok(pip::PipCommand::Stop) => run_pip_stop(flags.json),
+            Ok(pip::PipCommand::Open { port }) => run_pip_open(port, flags.json),
+            Err(error) => {
+                if flags.json {
+                    print_json_error(error);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), error);
+                }
+                exit(1);
+            }
+        }
+        return;
     }
 
     // Handle profiles command (doesn't need daemon)

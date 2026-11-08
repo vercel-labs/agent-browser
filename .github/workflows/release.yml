@@ -230,6 +230,18 @@ jobs:
           path: artifacts/${{ matrix.binary }}
           retention-days: 7
 
+      - name: Build PiP helper
+        if: matrix.binary == 'agent-browser-darwin-arm64'
+        run: bash scripts/build-pip.sh
+
+      - name: Upload PiP helper
+        if: matrix.binary == 'agent-browser-darwin-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-browser-pip-darwin
+          path: bin/agent-browser-pip-darwin
+          retention-days: 7
+
   publish-packages:
     name: Publish packages to npm
     needs: [check-release, build-binaries]
@@ -298,6 +310,7 @@ jobs:
             "agent-browser-win32-x64.exe"
             "agent-browser-darwin-x64"
             "agent-browser-darwin-arm64"
+            "agent-browser-pip-darwin"
           )
           MIN_SIZE=100000
           ERRORS=0

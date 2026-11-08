@@ -2504,6 +2504,54 @@
     },
     {
       "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Open a small always-on-top window on the user's screen that shows the active session live, with the agent's last action and where it clicked. Use it when the user wants to watch the browser while you work. Starts the dashboard when it is not running. macOS only; elsewhere it returns the dashboard URL to open instead.",
+      "inputSchema": {
+        "properties": {
+          "port": {
+            "description": "Dashboard port to start when no dashboard is running. Defaults to 4848.",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_pip",
+      "profiles": [
+        "debug"
+      ],
+      "title": "PiP"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Close the PiP window.",
+      "inputSchema": {
+        "properties": {
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_pip_stop",
+      "profiles": [
+        "debug"
+      ],
+      "title": "PiP stop"
+    },
+    {
+      "annotations": {
         "openWorldHint": true,
         "readOnlyHint": false
       },
