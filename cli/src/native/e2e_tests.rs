@@ -7348,6 +7348,104 @@ async fn e2e_screenshot_selector_beyond_viewport() {
     assert_success(&resp);
 }
 
+/// Issue #2462: iframe annotations must be drawn in the same top-level
+/// viewport coordinates as the screenshot, including iframe borders.
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_annotate_same_origin_iframe_coordinates() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r##"<!doctype html><body style="margin:0">
+        <button id="main" style="position:absolute;left:20px;top:30px">Main action</button>
+        <iframe id="child"
+          style="position:absolute;left:240px;top:280px;width:400px;height:180px;border:2px solid blue"
+          srcdoc="<body style='margin:0'><button id='inner' style='position:absolute;left:35px;top:48px'>Iframe action</button></body>">
+        </iframe></body>"##;
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Allow the srcdoc child to become available before snapshotting its refs.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "wait", "timeout": 200 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+
+    let path = std::env::temp_dir()
+        .join("agent-browser-e2e-iframe-annotation.png")
+        .to_string_lossy()
+        .to_string();
+    let shot = execute_command(
+        &json!({ "id": "5", "action": "screenshot", "annotate": true, "path": path }),
+        &mut state,
+    )
+    .await;
+    assert_success(&shot);
+    let annotations = get_data(&shot)["annotations"]
+        .as_array()
+        .expect("annotated screenshot must contain annotation metadata");
+    let annotation = |name: &str| {
+        annotations
+            .iter()
+            .find(|item| item["name"] == name)
+            .unwrap_or_else(|| panic!("Missing annotation {name}: {annotations:?}"))
+    };
+    let main = annotation("Main action");
+    let inner = annotation("Iframe action");
+
+    // Independent geometry calculation from the parent page, not the
+    // annotation code that walks from a child document up to the top.
+    let expected = execute_command(
+        &json!({
+            "id": "6",
+            "action": "evaluate",
+            "script": r#"(() => {
+                const frame = document.querySelector('#child');
+                const parent = frame.getBoundingClientRect();
+                const child = frame.contentDocument.querySelector('#inner');
+                const local = child.getBoundingClientRect();
+                const top = document.querySelector('#main').getBoundingClientRect();
+                return {
+                    inner: {
+                        x: Math.round(parent.x + frame.clientLeft + local.x),
+                        y: Math.round(parent.y + frame.clientTop + local.y)
+                    },
+                    main: { x: Math.round(top.x), y: Math.round(top.y) }
+                };
+            })()"#
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&expected);
+    let geometry = &get_data(&expected)["result"];
+    assert_eq!(main["box"]["x"], geometry["main"]["x"]);
+    assert_eq!(main["box"]["y"], geometry["main"]["y"]);
+    assert_eq!(inner["box"]["x"], geometry["inner"]["x"]);
+    assert_eq!(inner["box"]["y"], geometry["inner"]["y"]);
+    assert_eq!(inner["box"]["x"], 277);
+    assert_eq!(inner["box"]["y"], 330);
+
+    let image = image::open(&path).expect("annotated screenshot PNG should exist");
+    assert!(image.width() >= 600 && image.height() >= 400);
+    let _ = std::fs::remove_file(path);
+    let resp = execute_command(&json!({ "id": "7", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verifies that `screenshot --annotate` completes in bounded time even with
 /// many interactive elements. Guards against the sequential CDP round-trip
 /// regression that caused hangs over high-latency WSS (Issue #841).

@@ -287,7 +287,7 @@ async fn collect_annotations(
     // Batch-get bounding rects for all resolved elements using concurrent CDP calls.
     let rect_futures: Vec<_> = resolved
         .iter()
-        .map(|(_, _, object_id)| get_rect_for_object(client, session_id, object_id))
+        .map(|(_, _, object_id)| get_annotation_rect_for_object(client, session_id, object_id))
         .collect();
 
     let rect_results = futures_util::future::join_all(rect_futures).await;
@@ -332,7 +332,7 @@ async fn get_rect_for_selector(
         iframe_sessions,
     )
     .await?;
-    get_rect_for_object(client, &effective_session_id, &object_id).await
+    get_annotation_rect_for_object(client, &effective_session_id, &object_id).await
 }
 
 async fn get_document_rect_for_selector(
@@ -416,6 +416,48 @@ async fn get_rect_for_object(
                 function_declaration: r#"function() {
                     const rect = this.getBoundingClientRect();
                     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+                }"#
+                .to_string(),
+                object_id: Some(object_id.to_string()),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+
+    Ok(result.result.value.as_ref().and_then(parse_rect))
+}
+
+/// Resolve an annotation rect into the top-level viewport. The overlay
+/// is drawn in the top document, not in an element's owning iframe.
+async fn get_annotation_rect_for_object(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+) -> Result<Option<Rect>, String> {
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: r#"function() {
+                    const rect = this.getBoundingClientRect();
+                    let x = rect.x;
+                    let y = rect.y;
+                    let win = this.ownerDocument.defaultView;
+                    while (win && win !== win.top) {
+                        // Child rects are relative to their viewport. Add
+                        // the embedding frame's position and border at each level.
+                        let frame;
+                        try { frame = win.frameElement; } catch (_) { return null; }
+                        if (!frame) return null;
+                        const bounds = frame.getBoundingClientRect();
+                        x += bounds.x + frame.clientLeft;
+                        y += bounds.y + frame.clientTop;
+                        win = win.parent;
+                    }
+                    return { x, y, width: rect.width, height: rect.height };
                 }"#
                 .to_string(),
                 object_id: Some(object_id.to_string()),
