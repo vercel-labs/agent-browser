@@ -149,15 +149,51 @@ pub(super) async fn perform_actions(
     Ok(reply.is_none())
 }
 
-fn commit_mouse_position(
+const TO_TOP_LEVEL_POINT_JS: &str = r#"function(x, y) {
+    let left = x;
+    let top = y;
+    let win = window;
+    while (win && win.frameElement) {
+        try {
+            const frame = win.frameElement;
+            const rect = frame.getBoundingClientRect();
+            left += rect.left + frame.clientLeft;
+            top += rect.top + frame.clientTop;
+            win = win.parent;
+        } catch {
+            break;
+        }
+    }
+    return [left, top];
+}"#;
+
+async fn commit_mouse_position(
+    ff: &FirefoxSession,
     mouse_state: &mut MouseState,
     context: &str,
-    top_context: &str,
     position: (f64, f64),
 ) {
-    if context == top_context {
-        (mouse_state.x, mouse_state.y) = position;
-    }
+    let position = if context == ff.top_context {
+        position
+    } else {
+        match ff
+            .bidi
+            .call_function(
+                context,
+                TO_TOP_LEVEL_POINT_JS,
+                None,
+                vec![json!(position.0), json!(position.1)],
+            )
+            .await
+        {
+            Ok(point) => (
+                point[0].as_f64().unwrap_or(position.0),
+                point[1].as_f64().unwrap_or(position.1),
+            ),
+            Err(_) => return,
+        }
+    };
+    (mouse_state.x, mouse_state.y) = position;
 }
 
 fn apply_mouse_action(mouse_state: &mut MouseState, action: &Value) {
@@ -205,7 +241,7 @@ async fn perform_pointer(
                     "actions": [pointer_action],
                 }]);
                 dialog_opened = perform_actions(ff, &context, request).await?;
-                if context == ff.top_context && pointer_action["type"] == "pointerMove" {
+                if pointer_action["type"] == "pointerMove" {
                     let point = if pointer_action["origin"] == "viewport" {
                         match (pointer_action["x"].as_f64(), pointer_action["y"].as_f64()) {
                             (Some(x), Some(y)) => (x, y),
@@ -214,7 +250,7 @@ async fn perform_pointer(
                     } else {
                         position
                     };
-                    commit_mouse_position(state.mouse, &context, &ff.top_context, point);
+                    commit_mouse_position(ff, state.mouse, &context, point).await;
                 }
                 apply_mouse_action(state.mouse, pointer_action);
                 match pointer_action["type"].as_str() {
@@ -238,13 +274,13 @@ async fn perform_pointer(
         } else {
             dialog_opened = perform_actions(ff, &context, actions).await?;
             if !matches!(action, PointerAction::Tap) {
-                commit_mouse_position(state.mouse, &context, &ff.top_context, position);
+                commit_mouse_position(ff, state.mouse, &context, position).await;
             }
         }
     } else {
         dialog_opened = perform_actions(ff, &context, actions).await?;
         if !matches!(action, PointerAction::Tap) {
-            commit_mouse_position(state.mouse, &context, &ff.top_context, position);
+            commit_mouse_position(ff, state.mouse, &context, position).await;
         }
     }
     if dialog_opened && state.pending_release.is_none() {
@@ -599,12 +635,7 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
                 "dialogOpened": true,
             }));
         }
-        commit_mouse_position(
-            mouse_state,
-            &source_target.context,
-            &ff.top_context,
-            (tx, ty),
-        );
+        commit_mouse_position(ff, mouse_state, &source_target.context, (tx, ty)).await;
         if top_level {
             mouse_state.buttons = 0;
         }
@@ -1250,7 +1281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn element_pointer_tracking_uses_only_top_level_coordinates() {
+    async fn element_pointer_tracking_commits_the_pointer_position() {
         for action in ["click", "dblclick", "hover"] {
             for (selected_context, target_context) in [
                 ("ctx-active", "ctx-active"),
@@ -1271,14 +1302,9 @@ mod tests {
                     "dblclick" => dblclick(&command, &mut state).await.unwrap(),
                     _ => hover(&command, &mut state).await.unwrap(),
                 };
-                let expected = if target_context == "ctx-active" {
-                    (40.0, 50.0)
-                } else {
-                    (17.0, 23.0)
-                };
                 assert_eq!(
                     (state.mouse_state.x, state.mouse_state.y),
-                    expected,
+                    (40.0, 50.0),
                     "{action}: selected={selected_context}, target={target_context}"
                 );
             }
