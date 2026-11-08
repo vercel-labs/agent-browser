@@ -3,6 +3,38 @@ title: "Changelog"
 navTitle: "Changelog"
 ---
 
+## v0.42.0
+
+<p className="text-[#888] text-sm">November 8, 2026</p>
+
+### New Features
+
+- Added **saved flows** (experimental): record a browser task once, then replay its requests. Runs send requests only to public addresses, and saving waits for in-flight requests and follows redirects to the end (#2236, #2432, #2433, #2444)
+- **MCP tools** now list only the shared arguments each tool uses (#2311)
+
+### Bug Fixes
+
+- Fixed **session reuse and relaunch**, now decided in one place in the daemon. A connection target is kept only after an attach succeeds, and security settings persist across daemon restarts (#2396, #2418, #2429)
+- Fixed **Safari and iOS WebDriver sessions** being dropped (#2385)
+- Fixed **fill and type** altering literal text, and **mouse and element coordinates** losing fractional values (#2394, #2393)
+- Fixed **percent-encoded proxy credentials** not being decoded (#2389)
+- Fixed **downloads** moving local files from an attached Chrome (#2392)
+- Fixed **MCP tool results** that repeated JSON stdout (#2390)
+- Fixed **unknown commands and cookie operations**, now rejected, and **misplaced global options** in batch commands (#2383, #2386)
+- Fixed **errors output** to print page error text, and labeled `storage clear` as storage rather than the request log (#2427, #2428)
+- Fixed **macOS Chrome discovery** for apps installed in the user's Applications folder (#2388)
+- Fixed **Windows recording** opening ffmpeg console windows (#2382)
+- Skipped a repeat `Browser.getVersion` call after the outdated-browser check (#2420)
+
+### Improvements
+
+- The **core skill** now tells agents to prefer snapshots: screenshot only when asked or for content the DOM cannot represent, and wait and snapshot again when an expected element is missing (#2453, #2461)
+- The package now declares a **Node 22 minimum** and drops `engines.pnpm` (#2404)
+- Docs and dashboard chat use **openai/gpt-6-luna-fast** (#2440)
+- Upgraded the repository to **TypeScript 7**
+
+---
+
 ## v0.41.2
 
 <p className="text-[#888] text-sm">November 3, 2026</p>
