@@ -209,7 +209,23 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .bidi
         .send("browsingContext.close", json!({"context": context}))
         .await?;
+    let user_context = session(state)?.window_contexts.remove(&context);
     let was_active = super::daemon::forget_context(state, &context)?;
+    if let Some(user_context) = user_context {
+        let still_open = session(state)?
+            .window_contexts
+            .values()
+            .any(|other| *other == user_context);
+        if !still_open {
+            let _ = session(state)?
+                .bidi
+                .send(
+                    "browser.removeUserContext",
+                    json!({"userContext": user_context}),
+                )
+                .await;
+        }
+    }
     if was_active {
         match successor {
             Some(successor) => {
@@ -229,15 +245,41 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
 /// Opens a new window. Must return what Chrome's `handle_window_new` returns.
 pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let user_context = session(state)?
+        .bidi
+        .send("browser.createUserContext", json!({}))
+        .await?
+        .get("userContext")
+        .and_then(Value::as_str)
+        .ok_or("Firefox did not return a user context for the new window")?
+        .to_string();
     let created = session(state)?
         .bidi
-        .send("browsingContext.create", json!({"type": "window"}))
-        .await?;
+        .send(
+            "browsingContext.create",
+            json!({"type": "window", "userContext": user_context}),
+        )
+        .await;
+    let created = match created {
+        Ok(created) => created,
+        Err(error) => {
+            let _ = session(state)?
+                .bidi
+                .send(
+                    "browser.removeUserContext",
+                    json!({"userContext": user_context}),
+                )
+                .await;
+            return Err(error);
+        }
+    };
     let context = created["context"]
         .as_str()
         .ok_or("Firefox did not return a context id for the new window")?
         .to_string();
-    let tab_id = session(state)?.tab_id(&context);
+    let ff = session(state)?;
+    ff.window_contexts.insert(context.clone(), user_context);
+    let tab_id = ff.tab_id(&context);
     activate(state, &context).await?;
     let total = tab_count(session(state)?).await?;
 

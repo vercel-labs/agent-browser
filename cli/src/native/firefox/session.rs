@@ -69,6 +69,8 @@ pub struct FirefoxSession {
     /// Unfinished requests mapped to their reported browsing contexts.
     pub inflight: HashMap<String, Option<String>>,
     pub(crate) dispatcher: Option<AbortOnDrop>,
+    /// BiDi user context created for a window opened by `window new`, keyed by its top-level context.
+    pub window_contexts: HashMap<String, String>,
     pub visited_origins: HashSet<String>,
     /// Version Firefox reported when the session opened, used for HAR browser metadata.
     pub browser_version: String,
@@ -241,12 +243,13 @@ impl FirefoxSession {
             shadow_ids: Default::default(),
             emulation,
             download_dir: options.download_path.clone(),
+            window_contexts: HashMap::new(),
+            visited_origins: HashSet::new(),
             events,
             net,
             intercepting: false,
             inflight: HashMap::new(),
             dispatcher,
-            visited_origins: HashSet::new(),
             browser_version,
         };
         if let Some(contexts) = tree["contexts"].as_array() {
@@ -884,6 +887,7 @@ pub(crate) mod tests {
             shadow_ids: Default::default(),
             emulation: Arc::default(),
             download_dir: None,
+            window_contexts: HashMap::new(),
             visited_origins: HashSet::new(),
             events,
             net: NetContext::default(),
@@ -1024,6 +1028,7 @@ pub(crate) mod tests {
             inflight: HashMap::new(),
             dispatcher: None,
             browser_version: String::new(),
+            window_contexts: HashMap::new(),
         };
         (session, tx, calls, bidi_messages, rdp_messages)
     }
