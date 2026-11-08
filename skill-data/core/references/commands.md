@@ -97,11 +97,15 @@ agent-browser upload @e1 file.pdf # Upload files
 
 On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
 
+`type` focuses the element without clearing its current value. Printable characters are inserted as text; Enter, Tab, and line breaks use key events. Use `fill` to replace the current value.
+
 For `fill` and `type`, put options before the optional `--` marker. Text after the marker is literal, including values that look like flags. For example, `agent-browser fill @e2 -- --json` fills with `--json`, and `agent-browser type @e2 --clear --delay 10 -- --clear` clears the field, then types `--clear`. MCP `agent_browser_fill` and `agent_browser_type` pass typed `text` values literally, so they do not need the marker.
 
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
+
+A click or dblclick result includes `dialogOpened: true` when a page dialog interrupts the action. On Firefox, this also applies to `tap` and `drag`; an interrupted drag returns `dragged: false`. Resolve the dialog before sending the next page action.
 
 ## Get Information
 
@@ -534,7 +538,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains`, including Firefox's rejection of non-HTTP document navigations, and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`. The typed `relaunch` argument maps to `--relaunch`; `open` and `tab_new` list it in their schema.
+Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains`, including Firefox blocking non-HTTP document navigations, and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`. The typed `relaunch` argument maps to `--relaunch`; `open` and `tab_new` list it in their schema.
 
 For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__open`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, backed by agent-browser inside the eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship in `@agent-browser/eve/sandbox`.
 
@@ -582,6 +586,8 @@ agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
 ```
+
+Firefox rejects authenticated proxies, `--cdp`, `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`.
 
 ## Debugging
 

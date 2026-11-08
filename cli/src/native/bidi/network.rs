@@ -5,12 +5,10 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, RwLock};
 
-use super::actions::session;
 use super::client::BidiClient;
-use super::forms::require;
+use super::daemon::session;
 use super::session::FirefoxSession;
 use super::target::resolve_target;
-use super::types::{BytesValue, Header, NetworkData, NetworkEvent, RequestData};
 use crate::native::actions::{
     self as chrome, DaemonState, HarContentMode, HarEntry, RouteEntry, TrackedRequest,
 };
@@ -147,8 +145,7 @@ pub struct NetContext {
     /// Downloads seen on this session, so `wait --download` can claim one that
     /// finished before the command arrived.
     pub downloads: Arc<Mutex<DownloadLedger>>,
-    /// Contexts whose requests are answered with a blank page instead of reaching the network.
-    pub blank_contexts: Arc<RwLock<std::collections::HashSet<String>>>,
+    pub blank_contexts: Arc<RwLock<HashSet<String>>>,
 }
 
 impl NetContext {
@@ -173,14 +170,21 @@ impl Drop for AbortOnDrop {
     }
 }
 
-fn header_list(headers: &[Header]) -> Vec<(String, String)> {
+fn header_list(headers: &Value) -> Vec<(String, String)> {
     headers
-        .iter()
-        .map(|h| (h.name.clone(), h.value.text()))
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|h| {
+            Some((
+                h["name"].as_str()?.to_string(),
+                h["value"]["value"].as_str().unwrap_or("").to_string(),
+            ))
+        })
         .collect()
 }
 
-fn header_object(headers: &[Header]) -> Value {
+fn header_object(headers: &Value) -> Value {
     Value::Object(
         header_list(headers)
             .into_iter()
@@ -189,21 +193,18 @@ fn header_object(headers: &[Header]) -> Value {
     )
 }
 
-fn bidi_headers(headers: Vec<(String, String)>) -> Vec<Header> {
+fn bidi_headers(headers: Vec<(String, String)>) -> Value {
     headers
         .into_iter()
-        .map(|(name, value)| Header {
-            name,
-            value: BytesValue::string(value),
-        })
+        .map(|(name, value)| json!({"name": name, "value": {"type": "string", "value": value}}))
         .collect()
 }
 
 /// Maps a BiDi request to the resource type names Chrome reports.
-fn resource_type(request: &RequestData) -> &'static str {
+fn resource_type(request: &Value) -> &'static str {
     match (
-        request.initiator_type.as_deref(),
-        request.destination.as_deref(),
+        request["initiatorType"].as_str(),
+        request["destination"].as_str(),
     ) {
         (Some("fetch"), _) => "Fetch",
         (Some("xmlhttprequest"), _) => "XHR",
@@ -274,7 +275,9 @@ impl LegacyDownloadIds {
     }
 }
 
-/// Starts the task that resolves every intercepted request exactly once.
+/// Starts the task that owns the protocol side of BiDi events: resolving intercepted requests,
+/// tracking downloads and replaying emulation onto new tabs. It never touches daemon state; the
+/// drain owns that.
 pub fn spawn_dispatcher(
     bidi: Arc<BidiClient>,
     net: NetContext,
@@ -282,26 +285,18 @@ pub fn spawn_dispatcher(
     emulation: Arc<std::sync::RwLock<super::emulation::Settings>>,
 ) -> AbortOnDrop {
     AbortOnDrop(tokio::spawn(async move {
-        let mut emulated_contexts = HashSet::new();
         let mut legacy_downloads = LegacyDownloadIds::default();
         while let Some(mut e) = rx.recv().await {
             if e["method"] == "browsingContext.contextCreated" && e["params"]["parent"].is_null() {
                 if let Some(context) = e["params"]["context"].as_str() {
-                    if emulated_contexts.insert(context.to_string()) {
-                        let settings = emulation.read().unwrap().clone();
-                        if let Err(error) =
-                            super::emulation::apply_settings_to_context(&bidi, &settings, context)
-                                .await
-                        {
-                            eprintln!(
-                                "Warning: failed to apply Firefox emulation to {context}: {error}"
-                            );
-                        }
+                    let settings = emulation.read().unwrap().clone();
+                    if let Err(error) =
+                        super::emulation::apply_overrides(&bidi, &settings, context).await
+                    {
+                        eprintln!(
+                            "Warning: failed to apply Firefox emulation to {context}: {error}"
+                        );
                     }
-                }
-            } else if e["method"] == "browsingContext.contextDestroyed" {
-                if let Some(context) = e["params"]["context"].as_str() {
-                    emulated_contexts.remove(context);
                 }
             }
             let is_download = matches!(
@@ -339,11 +334,19 @@ pub fn spawn_dispatcher(
 }
 
 async fn resolve(bidi: Arc<BidiClient>, net: NetContext, event: Value) {
-    let ev: NetworkEvent = serde_json::from_value(event["params"].clone()).unwrap_or_default();
-    let id = ev.request.request.clone();
+    let id = event["params"]["request"]["request"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
     let (result, fallback, fallback_params) = match event["method"].as_str() {
         Some("network.beforeRequestSent") => (
-            before_request(&bidi, &net, &ev.request, ev.context.as_deref()).await,
+            before_request(
+                &bidi,
+                &net,
+                &event["params"]["request"],
+                event["params"]["context"].as_str(),
+            )
+            .await,
             "network.failRequest",
             json!({"request": id}),
         ),
@@ -362,13 +365,13 @@ async fn resolve(bidi: Arc<BidiClient>, net: NetContext, event: Value) {
 async fn before_request(
     bidi: &BidiClient,
     net: &NetContext,
-    request: &RequestData,
+    request: &Value,
     context: Option<&str>,
 ) -> Result<(), String> {
-    let id = request.request.as_str();
-    let url = request.url.as_str();
+    let id = request["request"].as_str().unwrap_or("");
+    let url = request["url"].as_str().unwrap_or("");
     let blank = match context {
-        Some(c) => net.blank_contexts.read().await.contains(c),
+        Some(context) => net.blank_contexts.read().await.contains(context),
         None => false,
     };
     let decision = if blank {
@@ -397,7 +400,8 @@ async fn before_request(
         } else {
             HashMap::from([(origin, extra)])
         };
-        let headers: HashMap<String, String> = header_list(&request.headers).into_iter().collect();
+        let headers: HashMap<String, String> =
+            header_list(&request["headers"]).into_iter().collect();
         let filter = net.domain_filter.read().await;
         let routes = net.routes.read().await;
         decide_request(
@@ -433,7 +437,7 @@ async fn before_request(
         NetworkDecision::Continue { headers } => {
             let mut params = json!({"request": id});
             if let Some(headers) = headers {
-                params["headers"] = json!(bidi_headers(headers));
+                params["headers"] = bidi_headers(headers);
             }
             bidi.send("network.continueRequest", params).await?;
         }
@@ -486,11 +490,19 @@ fn auth_response(
     }
 }
 
-/// Applies buffered BiDi events and reports whether the top-level context set changed.
+/// Drains buffered BiDi events into the daemon: tab bookkeeping and dialogs first, then the
+/// recorders, which only see events from the active tab. When the drained events dropped the
+/// active context, or its tab, the daemon's element refs and frame scope go with it.
 pub async fn drain(state: &mut DaemonState) -> bool {
     if let Some(ff) = state.firefox.as_mut() {
+        let active = ff.context.clone();
         let events = ff.drain_events(&mut state.pending_dialog);
         let tabs_changed = events.iter().any(top_level_context_changed);
+        if ff.context != active {
+            state.ref_map.invalidate_all_documents();
+            state.active_iframe_sessions.clear();
+            state.active_frame_id = None;
+        }
         apply_events(state, events).await;
         return tabs_changed;
     }
@@ -504,54 +516,70 @@ fn top_level_context_changed(event: &Value) -> bool {
     ) && event["params"]["parent"].is_null()
 }
 
+/// The browsing context an event reports, when the event carries one.
+fn event_context(event: &Value) -> Option<&str> {
+    if event["method"] == "log.entryAdded" {
+        event["params"]["source"]["context"].as_str()
+    } else {
+        event["params"]["context"].as_str()
+    }
+}
+
+/// Whether an event belongs to the active tab, one of its frames, or a context the daemon
+/// cannot place, such as a worker that has no browsing context.
+fn recorded_in_active_tab(state: &DaemonState, event: &Value) -> bool {
+    event_context(event).is_none_or(|context| {
+        state
+            .firefox
+            .as_ref()
+            .is_some_and(|ff| ff.context_is_in_active_tab(context))
+    })
+}
+
+/// Records buffered BiDi events. Events from background tabs are dropped here, before any
+/// recorder sees them, so every recorder keeps the Chrome rule of one active page.
 async fn apply_events(state: &mut DaemonState, events: Vec<Value>) {
     for e in events {
-        let method = e["method"].as_str().unwrap_or("");
-        if method == "log.entryAdded" {
-            log_entry(state, &e["params"]);
+        if !recorded_in_active_tab(state, &e) {
             continue;
         }
-        let p: NetworkEvent = serde_json::from_value(e["params"].clone()).unwrap_or_default();
-        let id = p.request.request.as_str();
-        match method {
-            "network.beforeRequestSent" => request_started(state, &p),
-            "network.responseStarted" => response_seen(state, &p, true),
-            "network.responseCompleted" => {
-                response_seen(state, &p, false);
-                request_body(state, id).await;
-                har_body(state, id).await;
+        let p = &e["params"];
+        match e["method"].as_str() {
+            Some("network.beforeRequestSent") => request_started(state, p),
+            Some("network.responseStarted") => response_seen(state, p, true),
+            Some("network.responseCompleted") => {
+                response_seen(state, p, false);
+                request_body(state, request_id(p)).await;
+                har_body(state, request_id(p)).await;
             }
+            Some("log.entryAdded") => log_entry(state, p),
             _ => {}
         }
     }
 }
 
-fn request_started(state: &mut DaemonState, p: &NetworkEvent) {
-    if let Some(context) = p.context.as_deref() {
-        let active = state
-            .firefox
-            .as_ref()
-            .is_some_and(|ff| ff.context_is_in_active_tab(context));
-        if !active {
-            return;
-        }
-    }
-    let request = &p.request;
-    let id = request.request.clone();
-    let url = request.url.clone();
-    let method = request.method.clone().unwrap_or_else(|| "GET".to_string());
-    let millis = p.timestamp;
+fn request_id(p: &Value) -> &str {
+    p["request"]["request"].as_str().unwrap_or("")
+}
+
+fn request_started(state: &mut DaemonState, p: &Value) {
+    let request = &p["request"];
+    let id = request_id(p).to_string();
+    let url = request["url"].as_str().unwrap_or("").to_string();
+    let method = request["method"].as_str().unwrap_or("GET").to_string();
+    let timestamp = p["timestamp"].as_f64();
+    let millis = timestamp.map(|t| t as u64).unwrap_or_default();
     let resource_type = resource_type(request).to_string();
-    if state.har_recording {
+    if let Some(timestamp) = timestamp.filter(|_| state.har_recording) {
         state.har_entries.push(HarEntry {
             request_id: id.clone(),
             remote_addr: None,
-            wall_time: millis as f64 / 1000.0,
+            wall_time: timestamp / 1000.0,
             method: method.clone(),
             url: url.clone(),
-            request_headers: header_list(&request.headers),
+            request_headers: header_list(&request["headers"]),
             post_data: None,
-            request_body_size: request.body_size.unwrap_or(0),
+            request_body_size: request["bodySize"].as_i64().unwrap_or(0),
             resource_type: resource_type.clone(),
             status: None,
             status_text: String::new(),
@@ -572,7 +600,7 @@ fn request_started(state: &mut DaemonState, p: &NetworkEvent) {
         state.tracked_requests.push(TrackedRequest {
             url,
             method,
-            headers: header_object(&request.headers),
+            headers: header_object(&request["headers"]),
             timestamp: millis,
             resource_type,
             request_id: id,
@@ -584,11 +612,11 @@ fn request_started(state: &mut DaemonState, p: &NetworkEvent) {
     }
 }
 
-fn response_seen(state: &mut DaemonState, p: &NetworkEvent, started: bool) {
-    let id = p.request.request.as_str();
-    let response = &p.response;
-    let status = response.status;
-    let mime = response.mime_type.clone();
+fn response_seen(state: &mut DaemonState, p: &Value, started: bool) {
+    let id = request_id(p);
+    let response = &p["response"];
+    let status = response["status"].as_i64();
+    let mime = response["mimeType"].as_str().unwrap_or("").to_string();
     if state.har_recording {
         if let Some(entry) = state
             .har_entries
@@ -596,19 +624,24 @@ fn response_seen(state: &mut DaemonState, p: &NetworkEvent, started: bool) {
             .rev()
             .find(|e| e.request_id == id)
         {
-            let headers = header_list(&response.headers);
+            let headers = header_list(&response["headers"]);
             entry.status = status;
-            entry.status_text = response.status_text.clone();
+            entry.status_text = response["statusText"].as_str().unwrap_or("").to_string();
             entry.mime_type = mime.clone();
-            entry.http_version = chrome::har_cdp_protocol_to_http_version(&response.protocol);
+            entry.http_version = chrome::har_cdp_protocol_to_http_version(
+                response["protocol"].as_str().unwrap_or(""),
+            );
             entry.redirect_url = headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default();
             entry.response_headers = headers;
-            entry.response_body_size = response.body_size.or(response.content.size).unwrap_or(-1);
-            let timestamp = Some(p.timestamp as f64 / 1000.0);
+            entry.response_body_size = response["bodySize"]
+                .as_i64()
+                .or(response["content"]["size"].as_i64())
+                .unwrap_or(-1);
+            let timestamp = p["timestamp"].as_f64().map(|t| t / 1000.0);
             if started {
                 entry.response_started_timestamp = timestamp;
             } else {
@@ -625,19 +658,22 @@ fn response_seen(state: &mut DaemonState, p: &NetworkEvent, started: bool) {
         {
             entry.status = status;
             entry.mime_type = Some(mime);
-            entry.response_headers = Some(header_object(&response.headers));
+            entry.response_headers = Some(header_object(&response["headers"]));
         }
     }
 }
 
 async fn data(bidi: &BidiClient, id: &str, data_type: &str) -> Result<(String, bool), String> {
-    let r: NetworkData = bidi
-        .send_typed(
+    let r = bidi
+        .send(
             "network.getData",
-            &json!({"dataType": data_type, "request": id}),
+            json!({"dataType": data_type, "request": id}),
         )
         .await?;
-    Ok((r.bytes.raw().to_string(), r.bytes.is_base64()))
+    Ok((
+        r["bytes"]["value"].as_str().unwrap_or("").to_string(),
+        r["bytes"]["type"] == "base64",
+    ))
 }
 
 async fn request_body(state: &mut DaemonState, id: &str) {
@@ -892,30 +928,12 @@ pub async fn request_detail(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     Ok(result)
 }
 
-/// True when `context` is the active tab's top-level context or one of its frames.
-async fn in_active_tab(ff: &FirefoxSession, context: &str) -> bool {
-    fn contains(node: &Value, context: &str) -> bool {
-        node["context"] == context
-            || node["children"]
-                .as_array()
-                .is_some_and(|c| c.iter().any(|n| contains(n, context)))
-    }
-    if context == ff.top_context {
-        return true;
-    }
-    ff.bidi
-        .send("browsingContext.getTree", json!({"root": ff.top_context}))
-        .await
-        .is_ok_and(|tree| {
-            tree["contexts"]
-                .as_array()
-                .is_some_and(|c| c.iter().any(|n| contains(n, context)))
-        })
-}
-
 /// `responsebody`: waits for the next response whose URL contains the pattern and returns its body.
 pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let pattern = require(cmd, "url")?;
+    let pattern = cmd
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'url' parameter")?;
     let timeout_ms = cmd
         .get("timeout")
         .and_then(Value::as_u64)
@@ -929,16 +947,21 @@ pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             Ok(None) => return Err("Event stream closed".to_string()),
             Err(_) => return Err(format!("Timeout waiting for response matching '{pattern}'")),
         };
-        let p: NetworkEvent = serde_json::from_value(event["params"].clone()).unwrap_or_default();
-        if event["method"] == "network.responseCompleted"
-            && p.response.url.contains(pattern)
-            && in_active_tab(ff, event["params"]["context"].as_str().unwrap_or("")).await
+        let p = &event["params"];
+        let matches = event["method"] == "network.responseCompleted"
+            && p["response"]["url"]
+                .as_str()
+                .is_some_and(|u| u.contains(pattern));
+        if matches
+            && ff
+                .active_tab_contains(p["context"].as_str().unwrap_or(""))
+                .await
         {
-            let (body, _) = data(&ff.bidi, &p.request.request, "response").await?;
+            let (body, _) = data(&ff.bidi, request_id(p), "response").await?;
             return Ok(json!({
                 "body": body,
-                "status": p.response.status.unwrap_or(0),
-                "headers": header_object(&p.response.headers),
+                "status": p["response"]["status"].as_i64().unwrap_or(0),
+                "headers": header_object(&p["response"]["headers"]),
             }));
         }
     }
@@ -1004,8 +1027,14 @@ pub async fn download(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 }
 
 async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = require(cmd, "selector")?;
-    let path = require(cmd, "path")?;
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+    let path = cmd
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'path' parameter")?;
     let (dir, _) = chrome::resolve_download_dest(path)?;
     let download_dir = dir
         .to_str()
@@ -1144,6 +1173,24 @@ mod tests {
             abort: false,
             resource_types: Vec::new(),
         }
+    }
+
+    #[test]
+    fn only_top_level_lifecycle_events_change_the_tab_set() {
+        for method in [
+            "browsingContext.contextCreated",
+            "browsingContext.contextDestroyed",
+        ] {
+            assert!(top_level_context_changed(
+                &json!({"method":method, "params":{"context":"tab", "parent":null}})
+            ));
+            assert!(!top_level_context_changed(
+                &json!({"method":method, "params":{"context":"frame", "parent":"tab"}})
+            ));
+        }
+        assert!(!top_level_context_changed(
+            &json!({"method":"log.entryAdded", "params":{}})
+        ));
     }
 
     #[tokio::test]
@@ -1376,11 +1423,7 @@ mod tests {
         before_request(
             &ff.bidi,
             &net,
-            &RequestData {
-                request: "r1".into(),
-                url: "https://example.com/".into(),
-                ..Default::default()
-            },
+            &json!({"request": "r1", "url": "https://example.com/", "headers": []}),
             Some("storage-tab"),
         )
         .await
@@ -1406,11 +1449,7 @@ mod tests {
         before_request(
             &ff.bidi,
             &net,
-            &RequestData {
-                request: "r1".into(),
-                url: "https://example.com/".into(),
-                ..Default::default()
-            },
+            &json!({"request": "r1", "url": "https://example.com/", "headers": []}),
             Some("storage-tab"),
         )
         .await
@@ -1459,12 +1498,7 @@ mod tests {
             before_request(
                 &ff.bidi,
                 &net,
-                &RequestData {
-                    request: "r1".to_string(),
-                    url: "https://api.example/data".to_string(),
-                    headers: bidi_headers(headers),
-                    ..Default::default()
-                },
+                &json!({"request": "r1", "url": "https://api.example/data", "headers": bidi_headers(headers)}),
                 None,
             )
             .await
@@ -1496,28 +1530,8 @@ mod tests {
                         json!("content-type,x-client");
                 }
             }
-            let headers: Vec<Header> = serde_json::from_value(params["headers"].clone()).unwrap();
-            assert_eq!(header_object(&headers), expected_headers);
+            assert_eq!(header_object(&params["headers"]), expected_headers);
         }
-        net.blank_contexts
-            .write()
-            .await
-            .insert("storage".to_string());
-        before_request(
-            &ff.bidi,
-            &net,
-            &RequestData {
-                request: "storage".to_string(),
-                url: "https://page.example/".to_string(),
-                ..Default::default()
-            },
-            Some("storage"),
-        )
-        .await
-        .unwrap();
-        let sent = messages.lock().unwrap().last().unwrap().clone();
-        let body: BytesValue = serde_json::from_value(sent["params"]["body"].clone()).unwrap();
-        assert_eq!(body.text(), "<html></html>");
     }
 
     #[test]
@@ -1636,24 +1650,6 @@ mod tests {
                 "network.failRequest"
             ]
         );
-    }
-
-    #[test]
-    fn only_top_level_lifecycle_events_change_the_tab_set() {
-        for method in [
-            "browsingContext.contextCreated",
-            "browsingContext.contextDestroyed",
-        ] {
-            assert!(top_level_context_changed(
-                &json!({"method":method, "params":{"context":"tab", "parent":null}})
-            ));
-            assert!(!top_level_context_changed(
-                &json!({"method":method, "params":{"context":"frame", "parent":"tab"}})
-            ));
-        }
-        assert!(!top_level_context_changed(
-            &json!({"method":"log.entryAdded", "params":{}})
-        ));
     }
 
     #[tokio::test]
@@ -1794,7 +1790,7 @@ mod tests {
             "method": "POST",
             "headers": [{
                 "name": "Content-Type",
-                "value": {"type": "string", "value": "application/x-www-form-urlencoded"}
+                "value": {"value": "application/x-www-form-urlencoded"}
             }],
             "bodySize": 17,
             "initiatorType": "fetch",
@@ -1813,15 +1809,15 @@ mod tests {
             vec![
                 json!({
                     "method": "network.beforeRequestSent",
-                    "params": {"timestamp": 1_800_000_000_250_u64, "request": request},
+                    "params": {"timestamp": 1_800_000_000_000.25, "request": request},
                 }),
                 json!({
                     "method": "network.responseStarted",
-                    "params": {"timestamp": 1_800_000_000_650_u64, "request": request, "response": response},
+                    "params": {"timestamp": 1_800_000_000_400.25, "request": request, "response": response},
                 }),
                 json!({
                     "method": "network.responseCompleted",
-                    "params": {"timestamp": 1_800_000_000_670_u64, "request": request, "response": response},
+                    "params": {"timestamp": 1_800_000_000_420.25, "request": request, "response": response},
                 }),
             ],
         )
@@ -1830,9 +1826,11 @@ mod tests {
         let entry = &state.har_entries[0];
         assert_eq!(entry.post_data.as_deref(), Some("payload=har-probe"));
         assert_eq!(entry.request_body_size, 17);
-        assert!((entry.wall_time - 1_800_000_000.25).abs() < 0.00001);
-        assert!((entry.response_started_timestamp.unwrap() - 1_800_000_000.65).abs() < 0.00001);
-        assert!((entry.response_completed_timestamp.unwrap() - 1_800_000_000.67).abs() < 0.00001);
+        assert!((entry.wall_time - 1_800_000_000.00025).abs() < 0.00001);
+        assert!((entry.response_started_timestamp.unwrap() - 1_800_000_000.40025).abs() < 0.00001);
+        assert!(
+            (entry.response_completed_timestamp.unwrap() - 1_800_000_000.42025).abs() < 0.00001
+        );
         assert_eq!(entry.response_body.as_deref(), Some("har-response"));
     }
 
@@ -1919,6 +1917,48 @@ mod tests {
         assert_eq!(state.har_entries.len(), 2);
         assert_eq!(state.har_entries[0].request_id, "active");
         assert_eq!(state.har_entries[1].request_id, "frame");
+    }
+
+    #[tokio::test]
+    async fn log_entries_exclude_background_tabs() {
+        let (mut ff, _, _) =
+            crate::native::bidi::session::tests::fake_session_with(|_| json!({})).await;
+        ff.top_context = "active".into();
+        ff.context = "active".into();
+        ff.context_parents.insert("frame".into(), "active".into());
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        for (context, text) in [
+            (json!("active"), "from-active"),
+            (json!("frame"), "from-frame"),
+            (json!("other"), "from-other"),
+            (Value::Null, "from-worker"),
+        ] {
+            apply_events(
+                &mut state,
+                vec![json!({
+                    "method": "log.entryAdded",
+                    "params": {
+                        "type": "console",
+                        "method": "log",
+                        "text": text,
+                        "args": [],
+                        "source": {"context": context},
+                    },
+                })],
+            )
+            .await;
+        }
+
+        let console = state.event_tracker.get_console_json();
+        let texts: Vec<&str> = console["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["from-active", "from-frame", "from-worker"]);
     }
 
     #[tokio::test]

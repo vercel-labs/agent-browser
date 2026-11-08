@@ -1,13 +1,11 @@
 //! Firefox read/query commands, semantic locators, frame switching and eval handles.
 
-use super::actions::session;
 use super::client::BidiClient;
-use super::forms::require;
+use super::daemon::session;
 use super::target::{resolve_target, Target};
-use super::types::LocateNodes;
 use crate::native::actions::{self as chrome, DaemonState};
 use crate::native::element::{
-    build_count_elements_js, parse_ref, styles_js, ELEMENT_BOUNDING_BOX_JS, ELEMENT_CHECKED_JS,
+    build_count_elements_js, parse_ref, ELEMENT_BOUNDING_BOX_JS, ELEMENT_CHECKED_JS,
     ELEMENT_ENABLED_JS, ELEMENT_INNER_HTML_JS, ELEMENT_INNER_TEXT_JS, ELEMENT_INPUT_VALUE_JS,
     ELEMENT_STYLES_ALL_JS, ELEMENT_TEXT_JS, ELEMENT_VISIBLE_JS,
 };
@@ -50,6 +48,12 @@ const FIND_LABEL_JS: &str = r#"function(value, exact) {
     )) || null;
 }"#;
 
+fn selector(cmd: &Value) -> Result<&str, String> {
+    cmd.get("selector")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing 'selector' parameter".to_string())
+}
+
 /// Runs a Chrome element function body with `this` set to the resolved node.
 async fn call_on_target(bidi: &BidiClient, target: &Target, js: &str) -> Result<Value, String> {
     bidi.call_function(&target.context, js, Some(target.node_ref()), Vec::new())
@@ -66,7 +70,7 @@ pub(crate) async fn element_rect(
 }
 
 async fn resolve(state: &mut DaemonState, cmd: &Value) -> Result<Target, String> {
-    let sel = require(cmd, "selector")?;
+    let sel = selector(cmd)?;
     resolve_target(state, sel).await
 }
 
@@ -90,7 +94,10 @@ pub async fn gettext(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 
 /// `get attr`: `{value, origin}`, a missing attribute reading as `null`.
 pub async fn getattribute(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let attribute = require(cmd, "attribute")?;
+    let attribute = cmd
+        .get("attribute")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing 'attribute' parameter".to_string())?;
     let target = resolve(state, cmd).await?;
     let ff = session(state)?;
     let js = format!(
@@ -122,7 +129,7 @@ pub async fn inputvalue(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 
 /// `get count`: `{count, selector}`.
 pub async fn count(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let sel = require(cmd, "selector")?;
+    let sel = selector(cmd)?;
     let ff = session(state)?;
     let value = ff.eval(&build_count_elements_js(sel)).await?;
     Ok(json!({ "count": value.as_i64().unwrap_or(0), "selector": sel }))
@@ -136,10 +143,23 @@ pub async fn boundingbox(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     if value.is_null() {
         return Err(format!(
             "Could not get bounding box for: {}",
-            require(cmd, "selector")?
+            selector(cmd)?
         ));
     }
     Ok(value)
+}
+
+fn styles_js(properties: &[String]) -> String {
+    let props = serde_json::to_string(properties).unwrap_or_else(|_| "[]".to_string());
+    format!(
+        r#"function() {{
+            const s = window.getComputedStyle(this);
+            const props = {props};
+            const result = {{}};
+            for (const p of props) result[p] = s.getPropertyValue(p);
+            return result;
+        }}"#
+    )
 }
 
 /// `get styles`: `{styles}` for all properties or the requested ones.
@@ -192,7 +212,7 @@ pub async fn ischecked(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
 /// `find <selector>`: the same element summary Chrome returns.
 pub async fn find(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let sel = require(cmd, "selector")?;
+    let sel = selector(cmd)?;
     let js = format!(
         r#"(() => {{
             const els = document.querySelectorAll({});
@@ -238,10 +258,8 @@ async fn locate_nodes(
     if let Some(nodes) = start_nodes {
         params["startNodes"] = json!(nodes);
     }
-    let found: LocateNodes = bidi
-        .send_typed("browsingContext.locateNodes", &params)
-        .await?;
-    Ok(found.nodes)
+    let found = bidi.send("browsingContext.locateNodes", params).await?;
+    Ok(found["nodes"].as_array().cloned().unwrap_or_default())
 }
 
 /// Searches the document, then every open shadow root, returning the first match.
@@ -364,7 +382,10 @@ async fn run_subaction(
 
 /// `find role <role>`: resolve through the accessibility locator, then run the subaction.
 pub async fn getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let role = require(cmd, "role")?;
+    let role = cmd
+        .get("role")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing 'role' parameter".to_string())?;
     let name = cmd.get("name").and_then(Value::as_str);
     let exact = cmd.get("exact").and_then(Value::as_bool).unwrap_or(false);
     let ff = session(state)?;
@@ -457,7 +478,7 @@ fn nth_js(selector: &str, index: i64) -> String {
 
 /// `find nth <index> <selector>` and the `first`/`last` aliases.
 pub async fn nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let sel = require(cmd, "selector")?;
+    let sel = selector(cmd)?;
     let index = cmd
         .get("index")
         .and_then(Value::as_i64)
@@ -502,7 +523,7 @@ const FRAME_WINDOW_JS: &str = r#"function() {
 
 /// `frame <selector>`: make the iframe's browsing context active for later commands.
 pub async fn frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let sel = require(cmd, "selector")?;
+    let sel = selector(cmd)?;
     let from_ref = parse_ref(sel).is_some();
     let target = resolve_target(state, sel).await?;
     let ff = session(state)?;
@@ -535,7 +556,10 @@ pub async fn mainframe(state: &mut DaemonState) -> Result<Value, String> {
 
 /// `evalhandle`: run the script and return its BiDi remote handle.
 pub async fn evalhandle(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let script = require(cmd, "script")?;
+    let script = cmd
+        .get("script")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing 'script' parameter".to_string())?;
     let ff = session(state)?;
     let value = ff
         .bidi
@@ -623,22 +647,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mainframe_returns_to_the_active_tab() {
-        let mut state = DaemonState::new();
-        let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
-        ff.context = "ctx-frame".into();
-        state.firefox = Some(ff);
-        state.active_frame_id = Some("ctx-frame".into());
-
-        assert_eq!(
-            mainframe(&mut state).await.unwrap(),
-            json!({"frame": "main"})
-        );
-        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-active");
-        assert!(state.active_frame_id.is_none());
-    }
-
-    #[tokio::test]
     async fn locate_nodes_sends_the_locator_and_start_nodes() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let bidi = mock_once(json!({"nodes": [{"sharedId": "node-1"}]}), requests.clone()).await;
@@ -692,6 +700,22 @@ mod tests {
             request["params"]["functionDeclaration"],
             json!(ELEMENT_BOUNDING_BOX_JS)
         );
+    }
+
+    #[tokio::test]
+    async fn mainframe_returns_to_the_active_tab() {
+        let mut state = DaemonState::new();
+        let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
+        ff.context = "ctx-frame".into();
+        state.firefox = Some(ff);
+        state.active_frame_id = Some("ctx-frame".into());
+
+        assert_eq!(
+            mainframe(&mut state).await.unwrap(),
+            json!({"frame": "main"})
+        );
+        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-active");
+        assert!(state.active_frame_id.is_none());
     }
 
     #[tokio::test]

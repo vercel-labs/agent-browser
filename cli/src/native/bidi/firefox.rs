@@ -42,22 +42,45 @@ pub struct FirefoxProcess {
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Rejects options Firefox cannot honour. `cdp`, `auto_connect` and `provider`
-/// are resolved from flags, env and config by the caller.
-pub fn validate_firefox_options(
-    options: &LaunchOptions,
-    cdp: Option<&str>,
-    auto_connect: bool,
-    provider: Option<&str>,
-) -> Result<(), String> {
+/// The launch request Firefox is asked to honour, as flags, env and config resolved it.
+#[derive(Default)]
+pub struct LaunchFlags<'a> {
+    pub cdp: Option<&'a str>,
+    pub auto_connect: bool,
+    pub provider: Option<&'a str>,
+    pub capture_flow: bool,
+    pub enable_features: &'a [String],
+    pub init_scripts: &'a [String],
+    pub plugins: &'a [crate::plugins::PluginConfig],
+}
+
+/// Rejects every launch option Firefox cannot honour, naming the flag that asked for it.
+pub fn validate_launch(options: &LaunchOptions, flags: LaunchFlags<'_>) -> Result<(), String> {
     let unsupported = |flag: &str| Err(format!("{flag} is not supported with --engine firefox"));
-    if cdp.is_some() {
+    if !flags.enable_features.is_empty() {
+        return unsupported("--enable");
+    }
+    if !flags.init_scripts.is_empty() {
+        return unsupported("--init-script");
+    }
+    if !crate::plugins::resolved_plugins_with_capability(
+        flags.plugins,
+        crate::plugins::CAPABILITY_LAUNCH_MUTATE,
+    )
+    .is_empty()
+    {
+        return unsupported("launch-mutator plugins");
+    }
+    if flags.capture_flow {
+        return Err("--capture flow is not supported with --engine firefox".to_string());
+    }
+    if flags.cdp.is_some() {
         return Err("connect and --cdp are not supported with --engine firefox".to_string());
     }
-    if auto_connect {
+    if flags.auto_connect {
         return unsupported("--auto-connect");
     }
-    if provider.is_some() {
+    if flags.provider.is_some() {
         return unsupported("--provider");
     }
     if options.extensions.as_ref().is_some_and(|e| !e.is_empty()) {
@@ -389,12 +412,20 @@ mod tests {
     }
 
     fn err_of(o: &LaunchOptions) -> String {
-        validate_firefox_options(o, None, false, None).unwrap_err()
+        validate_launch(o, LaunchFlags::default()).unwrap_err()
     }
 
     #[test]
     fn validate_accepts_plain_options() {
-        assert!(validate_firefox_options(&ok(), None, false, None).is_ok());
+        assert!(validate_launch(&ok(), LaunchFlags::default()).is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_the_options_emulation_replays() {
+        let mut o = ok();
+        o.user_agent = Some("custom".into());
+        o.color_scheme = Some("dark".into());
+        assert!(validate_launch(&o, LaunchFlags::default()).is_ok());
     }
 
     #[test]
@@ -417,12 +448,56 @@ mod tests {
         let mut o = ok();
         o.ca_cert = Some("c".into());
         assert!(err_of(&o).contains("--ca-cert"));
-        let e = validate_firefox_options(&ok(), Some("9222"), false, None).unwrap_err();
-        assert!(e.contains("connect") && e.contains("--cdp"));
-        let e = validate_firefox_options(&ok(), None, true, None).unwrap_err();
+        let mut o = ok();
+        o.proxy_username = Some("user".into());
+        assert!(validate_launch(&o, LaunchFlags::default()).is_ok());
+        let flags = |cdp, auto_connect, provider| LaunchFlags {
+            cdp,
+            auto_connect,
+            provider,
+            ..LaunchFlags::default()
+        };
+        let e = validate_launch(&ok(), flags(Some("9222"), false, None)).unwrap_err();
+        assert!(e.contains("--cdp"));
+        let e = validate_launch(&ok(), flags(None, true, None)).unwrap_err();
         assert!(e.contains("--auto-connect"));
-        let e = validate_firefox_options(&ok(), None, false, Some("browserbase")).unwrap_err();
+        let e = validate_launch(&ok(), flags(None, false, Some("browserbase"))).unwrap_err();
         assert!(e.contains("--provider"));
+    }
+
+    #[test]
+    fn validate_rejects_launch_extras_and_flow_capture() {
+        let init_scripts = vec!["x.js".to_string()];
+        let features = vec!["foo".to_string()];
+        assert!(validate_launch(
+            &ok(),
+            LaunchFlags {
+                init_scripts: &init_scripts,
+                ..LaunchFlags::default()
+            }
+        )
+        .unwrap_err()
+        .contains("--init-script"));
+        assert!(validate_launch(
+            &ok(),
+            LaunchFlags {
+                enable_features: &features,
+                ..LaunchFlags::default()
+            }
+        )
+        .unwrap_err()
+        .contains("--enable"));
+        assert_eq!(
+            validate_launch(
+                &ok(),
+                LaunchFlags {
+                    capture_flow: true,
+                    ..LaunchFlags::default()
+                }
+            )
+            .unwrap_err(),
+            "--capture flow is not supported with --engine firefox"
+        );
     }
 
     #[test]
@@ -439,18 +514,18 @@ mod tests {
     }
 
     #[test]
+    fn webrtc_is_disabled_only_when_domains_are_restricted() {
+        assert!(user_js(None, true).contains("media.peerconnection.enabled\", false"));
+        assert!(!user_js(None, false).contains("peerconnection"));
+    }
+
+    #[test]
     fn version_gate() {
         let e = check_firefox_version("149.0").unwrap_err();
         assert!(e.contains("149.0") && e.contains(DOWNLOAD_LINK), "{e}");
         assert!(check_firefox_version("150.0").is_ok());
         assert!(check_firefox_version("158.0.1").is_ok());
         assert!(check_firefox_version("garbage").is_err());
-    }
-
-    #[test]
-    fn webrtc_is_disabled_only_when_domains_are_restricted() {
-        assert!(user_js(None, true).contains("media.peerconnection.enabled\", false"));
-        assert!(!user_js(None, false).contains("media.peerconnection.enabled"));
     }
 
     #[test]
