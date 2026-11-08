@@ -195,15 +195,6 @@ impl FirefoxSession {
         rdp.request(&accessibility_actor, "enable", json!({}))
             .await?;
 
-        let rdp = connect_devtools(&process.devtools).await?;
-        let root = rdp.request("root", "getRoot", json!({})).await?;
-        let accessibility_actor = root["parentAccessibilityActor"]
-            .as_str()
-            .ok_or("Firefox DevTools did not expose the accessibility actor")?
-            .to_string();
-        rdp.request(&accessibility_actor, "enable", json!({}))
-            .await?;
-
         let tree = bidi.send("browsingContext.getTree", json!({})).await?;
         let context = tree["contexts"][0]["context"]
             .as_str()
