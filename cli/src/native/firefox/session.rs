@@ -541,6 +541,17 @@ pub(crate) mod tests {
         tokio::sync::mpsc::UnboundedSender<Value>,
         Calls,
     ) {
+        fake_session_with_replies(move |v| Some(responder(v))).await
+    }
+
+    /// Like `fake_session_with`, but a `None` from `responder` leaves that command unanswered.
+    pub(crate) async fn fake_session_with_replies(
+        responder: impl Fn(&Value) -> Option<Value> + Send + 'static,
+    ) -> (
+        FirefoxSession,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+    ) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", l.local_addr().unwrap());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -555,9 +566,10 @@ pub(crate) mod tests {
                         let Some(Ok(Message::Text(t))) = m else { break };
                         let v: Value = serde_json::from_str(&t).unwrap();
                         log.lock().unwrap().push(v["method"].as_str().unwrap().to_string());
-                        let reply =
-                            json!({"type":"success","id":v["id"],"result":responder(&v)});
-                        ws.send(Message::Text(reply.to_string())).await.unwrap();
+                        if let Some(result) = responder(&v) {
+                            let reply = json!({"type":"success","id":v["id"],"result":result});
+                            ws.send(Message::Text(reply.to_string())).await.unwrap();
+                        }
                     }
                     Some(ev) = rx.recv() => {
                         ws.send(Message::Text(ev.to_string())).await.unwrap();

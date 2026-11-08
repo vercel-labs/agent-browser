@@ -37,7 +37,7 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .to_string();
     let tab_id = session(state)?.tab_id(&context);
 
-    let landed = {
+    let (landed, dialog_opened) = {
         let ff = session(state)?;
         ff.bidi
             .send("browsingContext.activate", json!({"context": context}))
@@ -51,29 +51,39 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         match url {
             Some(url) => {
                 let nav = ff
-                    .bidi
-                    .send(
-                        "browsingContext.navigate",
-                        json!({"context": context, "url": url, "wait": "complete"}),
+                    .race_prompt(
+                        &context,
+                        ff.bidi.send(
+                            "browsingContext.navigate",
+                            json!({"context": context, "url": url, "wait": "complete"}),
+                        ),
                     )
                     .await?;
-                let landed = nav["url"].as_str().unwrap_or(url).to_string();
+                let dialog_opened = nav.is_none();
+                let landed = match nav {
+                    Some(nav) => nav["url"].as_str().unwrap_or(url).to_string(),
+                    None => ff.url().await.unwrap_or_else(|_| url.to_string()),
+                };
                 ff.note_visit(&landed);
-                landed
+                (landed, dialog_opened)
             }
-            None => "about:blank".to_string(),
+            None => ("about:blank".to_string(), false),
         }
     };
     reset_refs(state);
     let total = tab_count(session(state)?).await?;
 
-    Ok(json!({
+    let mut result = json!({
         "tabId": format_tab_id(tab_id),
         "targetId": context,
         "label": label,
         "url": landed,
         "total": total,
-    }))
+    });
+    if dialog_opened {
+        result["dialogOpened"] = json!(true);
+    }
+    Ok(result)
 }
 
 fn validate_tab_label(label: &str) -> Result<(), String> {
@@ -365,7 +375,49 @@ fn successor_tab(tabs: &[Value], closed_index: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::firefox::session::tests::{fake_session, fake_session_with_replies};
+
+    #[tokio::test]
+    async fn tab_new_returns_with_a_pending_navigation_prompt() {
+        let url = "https://example.com/confirm";
+        let tree = json!({"contexts": [
+            {"context": "ctx-new", "url": url},
+            {"context": "ctx-active", "url": "about:blank"}
+        ]});
+        let (ff, events, _) = fake_session_with_replies(move |v| match v["method"].as_str() {
+            Some("browsingContext.navigate") => None,
+            Some("browsingContext.create") => Some(json!({"context": "ctx-new"})),
+            Some("browsingContext.getTree") => Some(tree.clone()),
+            _ => Some(json!({})),
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.active_frame_id = Some("old-frame".into());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            events
+                .send(
+                    json!({"type":"event", "method":"browsingContext.userPromptOpened", "params":{
+                        "context":"ctx-new", "type":"confirm", "message":"sure?", "handler":"ignore"
+                    }}),
+                )
+                .unwrap();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tab_new(&json!({"url": url, "label": "new"}), &mut state),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["targetId"], "ctx-new");
+        assert_eq!(result["dialogOpened"], true);
+        assert_eq!(result["total"], 2);
+        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-new");
+        assert_eq!(state.firefox.as_ref().unwrap().tab_labels["ctx-new"], "new");
+        assert!(state.active_frame_id.is_none());
+    }
 
     fn tab(tab_id: u32, context: &str, label: Option<&str>) -> Value {
         json!({
