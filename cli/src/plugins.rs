@@ -635,7 +635,18 @@ fn config_path_for_scope(scope: &PluginConfigScope) -> Result<PathBuf, String> {
     }
 }
 
+fn reject_config_symlink(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(format!(
+            "Refusing to use config {}: it is a symbolic link",
+            path.display()
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn read_config_json(path: &Path) -> Result<serde_json::Value, String> {
+    reject_config_symlink(path)?;
     if !path.exists() {
         return Ok(json!({}));
     }
@@ -650,6 +661,7 @@ fn read_config_json(path: &Path) -> Result<serde_json::Value, String> {
 }
 
 fn write_config_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    reject_config_symlink(path)?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(|e| {
             format!(
@@ -1136,6 +1148,23 @@ mod tests {
         assert_eq!(plugins[0]["command"], "npx");
         assert_eq!(plugins[0]["source"], "npm:agent-browser-plugin-captcha");
         assert_eq!(plugins[0]["capabilities"][1], "captcha.solve");
+    }
+
+    #[test]
+    fn write_config_json_does_not_follow_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.json");
+        fs::write(&victim, "precious\n").unwrap();
+        let link = dir.path().join("agent-browser.json");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&victim, &link).unwrap();
+
+        let err = write_config_json(&link, &json!({ "plugins": [] })).unwrap_err();
+
+        assert!(err.contains("symbolic link"), "{err}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n");
     }
 
     #[cfg(unix)]
