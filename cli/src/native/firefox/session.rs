@@ -55,6 +55,8 @@ pub struct FirefoxSession {
     pub touches: Vec<(f64, f64)>,
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
     pub shadow_ids: std::collections::HashSet<i64>,
+    /// BiDi user context created for a window opened by `window new`, keyed by its top-level context.
+    pub window_contexts: HashMap<String, String>,
     pub visited_origins: HashSet<String>,
     events: broadcast::Receiver<Value>,
 }
@@ -180,6 +182,7 @@ impl FirefoxSession {
             tab_labels: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
+            window_contexts: HashMap::new(),
             visited_origins: HashSet::new(),
             events,
         };
@@ -710,6 +713,7 @@ pub(crate) mod tests {
             tab_labels: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
+            window_contexts: HashMap::new(),
             visited_origins: HashSet::new(),
             events,
         };

@@ -16637,6 +16637,47 @@ async fn e2e_firefox_review_session_page_count() {
     firefox_close(&mut state).await;
 }
 
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c1", "action": "cookies_set", "name": "main_window", "value": "1" }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = firefox_command(&mut state, json!({ "id": "w1", "action": "window_new" })).await;
+    assert_success(&resp);
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    assert!(
+        !firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .unwrap_or_default()
+            .contains("main_window=1"),
+        "a new window must not see the other window's cookies"
+    );
+
+    let resp = firefox_command(&mut state, json!({ "id": "w2", "action": "tab_close" })).await;
+    assert_success(&resp);
+    assert!(
+        firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .unwrap_or_default()
+            .contains("main_window=1"),
+        "closing the window must leave the original cookies in place"
+    );
+}
+
 /// A cookie set without a path is stored at `/`, so it stays visible site-wide; an explicit path stays scoped.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
