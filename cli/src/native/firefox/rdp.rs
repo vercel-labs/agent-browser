@@ -10,7 +10,7 @@ use tokio::io::{
 };
 use tokio::sync::{broadcast, oneshot};
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(90);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 type Pending = Arc<Mutex<HashMap<String, VecDeque<(u64, oneshot::Sender<Value>)>>>>;
 
