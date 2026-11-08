@@ -483,6 +483,25 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_launch_extras() {
+        assert!(validate_firefox_settings(&["foo".into()], &[], &[])
+            .unwrap_err()
+            .contains("--enable"));
+        assert!(validate_firefox_settings(&[], &["x.js".into()], &[])
+            .unwrap_err()
+            .contains("--init-script"));
+        assert!(validate_firefox_settings(&[], &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_the_options_emulation_replays() {
+        let mut o = ok();
+        o.user_agent = Some("custom".into());
+        o.color_scheme = Some("dark".into());
+        assert!(validate_firefox_options(&o, &Connection::Local).is_ok());
+    }
+
+    #[test]
     fn parses_bidi_url_and_ignores_noise() {
         assert_eq!(
             parse_bidi_url("WebDriver BiDi listening on ws://127.0.0.1:53123").as_deref(),
@@ -496,18 +515,18 @@ mod tests {
     }
 
     #[test]
+    fn webrtc_is_disabled_only_when_domains_are_restricted() {
+        assert!(user_js(None, true).contains("media.peerconnection.enabled\", false"));
+        assert!(!user_js(None, false).contains("peerconnection"));
+    }
+
+    #[test]
     fn version_gate() {
         let e = check_firefox_version("149.0").unwrap_err();
         assert!(e.contains("149.0") && e.contains(DOWNLOAD_LINK), "{e}");
         assert!(check_firefox_version("150.0").is_ok());
         assert!(check_firefox_version("158.0.1").is_ok());
         assert!(check_firefox_version("garbage").is_err());
-    }
-
-    #[test]
-    fn webrtc_is_disabled_only_when_domains_are_restricted() {
-        assert!(user_js(None, true).contains("media.peerconnection.enabled\", false"));
-        assert!(!user_js(None, false).contains("media.peerconnection.enabled"));
     }
 
     #[test]

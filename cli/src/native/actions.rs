@@ -942,6 +942,11 @@ impl DaemonState {
         self.mouse_state = MouseState::default();
     }
 
+    /// Rejects a navigation to a URL outside the allowed domains; `about:blank` stays reachable.
+    pub async fn ensure_navigation_allowed(&self, url: &str) -> Result<(), String> {
+        network::check_navigation_allowed(self.domain_filter.read().await.as_ref(), url)
+    }
+
     /// Create state with an optional stream client slot and server instance
     /// (for daemon startup with stream server).
     pub fn new_with_stream(
@@ -1196,65 +1201,7 @@ impl DaemonState {
         }
 
         if let Some(ff) = self.firefox.as_ref() {
-            let client = Arc::clone(&ff.bidi);
-            let mut events = client.subscribe_buffered();
-            let enabled = Arc::clone(&ff.auto_dialog);
-            let changed = Arc::clone(&ff.auto_dialog_changed);
-            self.dialog_handler_task = Some(tokio::spawn(async move {
-                let mut pending = HashSet::<String>::new();
-                let track = |event: &Value, pending: &mut HashSet<String>| {
-                    let params = &event["params"];
-                    let Some(context) = params["context"].as_str() else {
-                        return;
-                    };
-                    match event["method"].as_str() {
-                        Some("browsingContext.userPromptOpened") => {
-                            pending.remove(context);
-                            if params["handler"] != "accept"
-                                && bidi::session::auto_handles_prompt(params, true)
-                            {
-                                pending.insert(context.to_string());
-                            }
-                        }
-                        Some("browsingContext.userPromptClosed") => {
-                            pending.remove(context);
-                        }
-                        _ => {}
-                    }
-                };
-                loop {
-                    tokio::select! {
-                        biased;
-                        event = events.recv() => match event {
-                            Some(event) => track(&event, &mut pending),
-                            None => break,
-                        },
-                        _ = changed.notified() => {}
-                    }
-                    while let Ok(event) = events.try_recv() {
-                        track(&event, &mut pending);
-                    }
-                    if enabled.load(std::sync::atomic::Ordering::Acquire) {
-                        if let Some(context) = pending.iter().next().cloned() {
-                            pending.remove(&context);
-                            if let Err(error) = client
-                                .send(
-                                    "browsingContext.handleUserPrompt",
-                                    json!({"context": context, "accept": true}),
-                                )
-                                .await
-                            {
-                                eprintln!(
-                                    "[auto-dismiss] failed to accept Firefox dialog: {error}"
-                                );
-                            }
-                            if !pending.is_empty() {
-                                changed.notify_one();
-                            }
-                        }
-                    }
-                }
-            }));
+            self.dialog_handler_task = Some(ff.spawn_auto_dismiss());
             return;
         }
 
@@ -1477,10 +1424,12 @@ impl DaemonState {
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
+                ff.context = ff.top_context.clone();
+                bidi::daemon::reset_page(self);
             }
         }
         if previous_firefox_context != self.firefox.as_ref().map(|ff| ff.top_context.clone()) {
-            bidi::tabs::reset_refs(self);
+            bidi::daemon::reset_page(self);
             self.update_stream_client().await;
         } else if firefox_tabs_changed || self.firefox_tabs_dirty {
             self.broadcast_firefox_tabs().await;
@@ -3166,6 +3115,62 @@ fn append_launch_policy_actions(
     }
 }
 
+/// The error a pending dialog raises for `action`, or `None` when the command may run. A dialog
+/// blocks page work, so a command that would touch the active tab fails fast instead of hanging
+/// until the client read timeout. A dialog on a background tab does not block, because that tab's
+/// renderer is not the one the command would use. Tab and session management stay usable either
+/// way: switching or closing tabs is how an agent escapes a tab blocked by a dialog.
+pub(crate) fn dialog_block_error(action: &str, cmd: &Value, state: &DaemonState) -> Option<String> {
+    let dialog = state.pending_dialog.as_ref()?;
+    let active = state
+        .firefox
+        .as_ref()
+        .map(|ff| ff.top_context.as_str())
+        .or_else(|| {
+            state
+                .browser
+                .as_ref()
+                .and_then(|mgr| mgr.active_session_id().ok())
+        });
+    let on_active_tab = match (&dialog.session_id, active) {
+        (Some(dialog_session), Some(active)) => {
+            dialog.owner_context.as_deref().unwrap_or(dialog_session) == active
+        }
+        // No session on the event means a top-level page dialog; with no browser, fail safe.
+        _ => true,
+    };
+    if !on_active_tab {
+        return None;
+    }
+    let read_touches_active_tab = action == "read"
+        && cmd.get("url").is_none()
+        && cmd.get("llms").is_none()
+        && !cmd
+            .get("requireMd")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    let safe_during_dialog = (skip_launch_action(action) && !read_touches_active_tab)
+        || matches!(
+            action,
+            "dialog"
+                | "screenshot"
+                | "url"
+                | "title"
+                | "tab_list"
+                | "tab_new"
+                | "tab_switch"
+                | "tab_close"
+        );
+    (!safe_during_dialog).then(|| {
+        format!(
+            "A JavaScript {} dialog is blocking the page: \"{}\". Resolve it with `dialog accept` or `dialog dismiss`, then retry `{}`.",
+            dialog.dialog_type, dialog.message, action
+        )
+    })
+}
+
+/// The command future is large; boxing it keeps it off the caller's stack,
+/// which a debug-build test thread would otherwise overflow.
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     execute_command_flow(cmd, state).await
 }
@@ -3650,51 +3655,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return resp;
     }
 
-    // A pending confirm/prompt dialog blocks the renderer's main thread, so
-    // any command that touches the page would hang until the client read
-    // timeout. Fail fast with instructions instead. Actions in skip_launch
-    // never touch the page; dialog/screenshot/url/title are browser-side.
-    // Only a dialog on the ACTIVE tab blocks: one on a background tab leaves
-    // the active tab's renderer responsive.
-    if let Some(dialog) = state.pending_dialog.as_ref().filter(|_| !firefox_routed) {
-        let active_session = state
-            .browser
-            .as_ref()
-            .and_then(|m| m.active_session_id().ok().map(|s| s.to_string()));
-        let on_active_tab = match (&dialog.session_id, &active_session) {
-            (Some(dialog_sid), Some(active_sid)) => dialog_sid == active_sid,
-            // No session on the event = top-level page dialog; no browser = be safe.
-            _ => true,
-        };
-        // Tab and session management must stay usable: switching or closing
-        // tabs is exactly how an agent escapes a tab blocked by a dialog.
-        let read_touches_active_tab = action == "read"
-            && cmd.get("url").is_none()
-            && cmd.get("llms").is_none()
-            && !cmd
-                .get("requireMd")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-        let safe_during_dialog = (skip_launch && !read_touches_active_tab)
-            || matches!(
-                action,
-                "dialog"
-                    | "screenshot"
-                    | "url"
-                    | "title"
-                    | "tab_list"
-                    | "tab_new"
-                    | "tab_switch"
-                    | "tab_close"
-            );
-        if on_active_tab && !safe_during_dialog {
-            let mut resp = error_response(
-                &id,
-                &format!(
-                    "A JavaScript {} dialog is blocking the page: \"{}\". Resolve it with `dialog accept` or `dialog dismiss`, then retry `{}`.",
-                    dialog.dialog_type, dialog.message, action
-                ),
-            );
+    if !firefox_routed {
+        if let Some(error) = dialog_block_error(action, cmd, state) {
+            let mut resp = error_response(&id, &error);
             attach_settings_outcome(&mut resp, &settings_outcome);
             return resp;
         }
@@ -4285,18 +4248,6 @@ fn should_blank_existing_url(url: &str, filter: &DomainFilter) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn check_url_allowed_by_filter(
-    filter: Option<&DomainFilter>,
-    url: &str,
-) -> Result<(), String> {
-    if let Some(filter) = filter {
-        if url != "about:blank" {
-            filter.check_url(url)?;
-        }
-    }
-    Ok(())
-}
-
 fn network_controls_required(filter: Option<&DomainFilter>, handle_auth_requests: bool) -> bool {
     filter.is_some() || handle_auth_requests
 }
@@ -4310,7 +4261,7 @@ fn should_defer_url_until_network_controls(
         return Ok(false);
     };
 
-    check_url_allowed_by_filter(filter, url)?;
+    network::check_navigation_allowed(filter, url)?;
     Ok(filter.is_some_and(|filter| !filter.allowed_domains.is_empty()) || handle_auth_requests)
 }
 
@@ -5383,8 +5334,8 @@ async fn load_state_path_for_engine(
     state: &mut DaemonState,
     path: &str,
 ) -> Option<Result<Vec<String>, String>> {
-    if let Some(ff) = state.firefox.as_mut() {
-        return Some(bidi::storage::load_state_path(ff, path).await);
+    if state.firefox.is_some() {
+        return Some(bidi::storage::load_state_path(state, path).await);
     }
     if let Some(mgr) = state.browser.as_ref() {
         if let Ok(session_id) = mgr.active_session_id() {
@@ -6659,12 +6610,7 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
 
-    {
-        let df = state.domain_filter.read().await;
-        if let Some(ref filter) = *df {
-            filter.check_url(url)?;
-        }
-    }
+    state.ensure_navigation_allowed(url).await?;
 
     // WebDriver backend path
     if let Some(ref wb) = state.webdriver_backend {
@@ -9410,7 +9356,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     {
         let domain_filter = state.domain_filter.read().await;
         if let Some(url) = recording_url {
-            check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
+            network::check_navigation_allowed(domain_filter.as_ref(), url)?;
         }
     }
 
@@ -9475,7 +9421,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
     {
         let domain_filter = state.domain_filter.read().await;
         if let Some(ref url) = recording_url {
-            check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
+            network::check_navigation_allowed(domain_filter.as_ref(), url)?;
         }
     }
 
@@ -13683,6 +13629,9 @@ fn unix_timestamp_millis() -> u128 {
 }
 
 async fn har_browser_metadata(state: &DaemonState) -> Option<Value> {
+    if let Some(ff) = state.firefox.as_ref() {
+        return Some(json!({ "name": "Firefox", "version": ff.browser_version }));
+    }
     let mgr = state.browser.as_ref()?;
     if !mgr.is_connection_alive().await {
         return None;
@@ -24263,6 +24212,31 @@ mod firefox_routing_tests {
         assert!(error.contains("Firefox executable not found"), "{error}");
     }
 
+    /// Firefox enforces the allowlist through its own network intercepts, so the launch keeps the
+    /// filter installed and only fails on the browser it cannot find.
+    #[tokio::test]
+    async fn firefox_allowed_domains_launch_keeps_the_filter() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "engine": "firefox",
+                "allowedDomains": ["example.com"],
+                "executablePath": "/nonexistent/firefox",
+            }),
+            &mut state,
+        )
+        .await;
+        let error = resp["error"].as_str().unwrap_or_default();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+        let filter = state.domain_filter.read().await.clone();
+        let filter = filter.expect("the allowlist stays installed");
+        assert!(filter.is_allowed("example.com"));
+        assert!(!filter.is_allowed("evil.example"));
+    }
+
     #[tokio::test]
     async fn failed_launch_keeps_the_existing_proxy_credentials() {
         let _guard = clean_env();
@@ -24313,6 +24287,7 @@ mod firefox_routing_tests {
         let _guard = clean_env();
         let mut state = DaemonState::new();
         state.session_name = Some("k".into());
+        *state.domain_filter.write().await = Some(network::DomainFilter::new("a.test"));
         let options = state.settings.launch_options();
         let e = launch_firefox(
             &mut state,

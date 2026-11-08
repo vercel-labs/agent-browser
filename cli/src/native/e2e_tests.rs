@@ -15692,6 +15692,44 @@ async fn e2e_firefox_form_entry() {
     )
     .await;
     assert_success(&inserted);
+    firefox_eval(
+        &mut state,
+        "document.body.insertAdjacentHTML('beforeend', '<input id=key-cancelled>'); document.querySelector('#key-cancelled').addEventListener('keydown', event => event.preventDefault()); true",
+    )
+    .await;
+    assert_success(
+        &firefox_act(
+            &mut state,
+            "type",
+            "#key-cancelled",
+            json!({ "text": "literal" }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "document.querySelector('#key-cancelled').value").await,
+        "literal"
+    );
+    firefox_eval(
+        &mut state,
+        "document.body.insertAdjacentHTML('beforeend', '<input id=checkbox type=checkbox value=sentinel>'); document.querySelector('#checkbox').focus(); true",
+    )
+    .await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "checkbox-insert", "action": "inserttext", "text": "changed" }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "JSON.stringify([checkbox.checked, checkbox.value])"
+        )
+        .await,
+        "[false,\"sentinel\"]"
+    );
     let raw_char = firefox_command(
         &mut state,
         json!({ "id": "char", "action": "input_keyboard", "type": "char", "text": "!" }),
@@ -15786,6 +15824,40 @@ async fn e2e_firefox_form_entry() {
     .await;
     assert_success(&inserted);
     assert_eq!(firefox_eval(&mut state, "literal.value").await, "a\tb");
+    firefox_close(&mut state).await;
+}
+
+/// History and reload report the document they land on, like Chrome's handlers.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_history_and_reload_land_on_the_traversed_document() {
+    required_firefox_binary();
+    let home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    _env.set("HOME", home.path().to_str().unwrap());
+    let fixture = firefox_fixture().await;
+    let second = format!("{}/page", fixture.other);
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_open(&mut state, &second).await;
+
+    for (action, expected) in [
+        ("back", fixture.url.clone()),
+        ("forward", second.clone()),
+        ("reload", second.clone()),
+    ] {
+        let resp = firefox_command(&mut state, json!({ "id": action, "action": action })).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["url"], expected, "{action}");
+        assert_eq!(
+            firefox_command(&mut state, json!({ "id": "url", "action": "url" })).await["data"]
+                ["url"],
+            expected,
+            "{action} leaves the tab on the same document"
+        );
+    }
     firefox_close(&mut state).await;
 }
 
@@ -16074,6 +16146,33 @@ async fn e2e_firefox_core_flow_and_ref_stability() {
     firefox_close(&mut state).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(!firefox_processes_using(tmp.path()));
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_hidden_checkbox_and_disabled_hover() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &format!("{}forms.html", fixture.url)).await;
+    firefox_eval(&mut state, "document.body.insertAdjacentHTML('afterbegin', `<input id=\"hidden-check\" type=\"checkbox\" style=\"display:none\"><button id=\"disabled-hover\" disabled>Disabled</button>`); window.__hovered = false; document.querySelector('#disabled-hover').addEventListener('pointerover', () => window.__hovered = true)").await;
+    for (action, checked) in [("check", true), ("uncheck", false)] {
+        assert_success(&firefox_act(&mut state, action, "#hidden-check", json!({})).await);
+        assert_eq!(
+            firefox_eval(
+                &mut state,
+                "document.querySelector('#hidden-check').checked"
+            )
+            .await,
+            checked
+        );
+    }
+    assert_success(&firefox_act(&mut state, "hover", "#disabled-hover", json!({})).await);
+    assert_eq!(firefox_eval(&mut state, "window.__hovered").await, true);
+    firefox_close(&mut state).await;
 }
 
 #[tokio::test]
@@ -16420,7 +16519,9 @@ async fn e2e_firefox_dialog() {
     firefox_open(&mut state, &fixture.url).await;
 
     let ask = firefox_ref(&mut state, "Ask").await;
-    assert_success(&firefox_act(&mut state, "click", &ask, json!({})).await);
+    let resp = firefox_act(&mut state, "click", &ask, json!({})).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["dialogOpened"], true, "{resp}");
     let resp = firefox_command(
         &mut state,
         json!({ "id": "d", "action": "dialog", "response": "accept" }),
@@ -16428,6 +16529,46 @@ async fn e2e_firefox_dialog() {
     .await;
     assert_success(&resp);
     assert_eq!(firefox_title(&mut state).await, "confirmed");
+
+    firefox_eval(
+        &mut state,
+        "document.getElementById('go').addEventListener('mousedown', () => confirm('mousedown'), { once: true }); true",
+    )
+    .await;
+    let go = firefox_ref(&mut state, "Go").await;
+    let resp = firefox_act(&mut state, "click", &go, json!({})).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["dialogOpened"], true, "{resp}");
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "release", "action": "dialog", "response": "dismiss" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.mouse_state.buttons, 0);
+    assert_success(&firefox_act(&mut state, "click", &go, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "Hello");
+
+    firefox_eval(
+        &mut state,
+        "document.body.insertAdjacentHTML('beforeend', '<div id=drag-source draggable=true></div><div id=drag-target></div>'); document.querySelector('#drag-source').addEventListener('dragstart', () => confirm('drag')); true",
+    )
+    .await;
+    let drag = firefox_command(
+        &mut state,
+        json!({"id":"dialog-drag", "action":"drag", "source":"#drag-source", "target":"#drag-target"}),
+    )
+    .await;
+    assert_success(&drag);
+    assert_eq!(get_data(&drag)["dragged"], false, "{drag}");
+    assert_eq!(get_data(&drag)["dialogOpened"], true, "{drag}");
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "drag-dismiss", "action": "dialog", "response": "dismiss" }),
+        )
+        .await,
+    );
     firefox_close(&mut state).await;
 }
 
@@ -17125,6 +17266,12 @@ async fn e2e_firefox_allowed_domains_block_worker_and_websocket() {
     )
     .await;
     assert_eq!(file["success"], false, "{file}");
+    let blank = firefox_command(
+        &mut state,
+        json!({ "id": "blank", "action": "navigate", "url": "about:blank" }),
+    )
+    .await;
+    assert_eq!(blank["success"], true, "{blank}");
     let target = json!({ "id": "tab", "action": "tab_new", "url": &fixture.other });
     assert_eq!(firefox_command(&mut state, target).await["success"], false);
     firefox_open(&mut state, &fixture.url).await;

@@ -1,18 +1,20 @@
+//! Firefox keyboard and form commands.
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::actions::session;
+use super::daemon::session;
 use super::input::{key_chord_actions, key_event_actions, key_text_actions, pointer_click, Origin};
-use super::interact::{perform, prepare};
+use super::interact::{act_element, perform_actions, PointerAction};
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
-use crate::native::actions::{upload_files, DaemonState};
+use crate::native::actions::DaemonState;
 use crate::native::element::ELEMENT_CHECKED_JS;
 use crate::native::interaction::{
-    CLEAR_INPUT_JS, CLEAR_VALUE_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
+    CLEAR_INPUT_JS, CLEAR_VALUE_JS, CLICK_CHECKBOX_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
 };
 
 const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
@@ -46,7 +48,7 @@ const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
         }
         return nativeEdit() || 'unsupported';
     }
-    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return 'unsupported';
+    if (!(el instanceof HTMLTextAreaElement) && !(el instanceof HTMLInputElement && ['text', 'search', 'url', 'tel', 'email', 'password', 'number'].includes(el.type))) return 'unsupported';
     let start;
     let end;
     try {
@@ -77,7 +79,7 @@ const FOCUSED_FRAME_CONTEXT_JS: &str = r#"() => {
     return el && el.matches('iframe,frame') ? el.contentWindow : null;
 }"#;
 
-pub(super) fn require<'a>(cmd: &'a Value, key: &str) -> Result<&'a str, String> {
+fn require<'a>(cmd: &'a Value, key: &str) -> Result<&'a str, String> {
     cmd.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("Missing '{key}' parameter"))
@@ -97,6 +99,54 @@ pub(super) async fn run(
     .await
 }
 
+async fn focused_context(ff: &FirefoxSession, context: &str) -> Result<String, String> {
+    let mut focused = ff.top_context.clone();
+    let mut visited = HashSet::new();
+    while visited.insert(focused.clone()) {
+        let child = ff
+            .bidi
+            .call_function_in_sandbox(&focused, "agent-browser", FOCUSED_FRAME_CONTEXT_JS, vec![])
+            .await?;
+        let Some(child) = child.as_str() else {
+            break;
+        };
+        focused = child.to_string();
+    }
+    Ok(if focused == ff.top_context {
+        context.to_string()
+    } else {
+        focused
+    })
+}
+
+async fn literal_edit_in_context(
+    ff: &FirefoxSession,
+    context: &str,
+    target: Option<&Target>,
+    text: &str,
+    replace: bool,
+) -> Result<bool, String> {
+    let result = ff
+        .race_prompt(
+            context,
+            ff.bidi.call_function(
+                context,
+                LITERAL_EDIT_JS,
+                target.map(Target::node_ref),
+                vec![json!(text), json!(replace), json!(target.is_none())],
+            ),
+        )
+        .await?;
+    let Some(result) = result else {
+        return Ok(true);
+    };
+    match result.as_str() {
+        Some("ok" | "canceled") => Ok(false),
+        Some("unsupported") if target.is_none() => Ok(false),
+        _ => Err("Text input is not supported for the focused element".to_string()),
+    }
+}
+
 async fn literal_edit(
     ff: &FirefoxSession,
     context: &str,
@@ -105,49 +155,17 @@ async fn literal_edit(
     replace: bool,
 ) -> Result<(), String> {
     let context = if target.is_none() {
-        let mut focused = ff.top_context.clone();
-        let mut visited = HashSet::new();
-        while visited.insert(focused.clone()) {
-            let child = ff
-                .bidi
-                .call_function_in_sandbox(
-                    &focused,
-                    "agent-browser",
-                    FOCUSED_FRAME_CONTEXT_JS,
-                    vec![],
-                )
-                .await?;
-            let Some(child) = child.as_str() else {
-                break;
-            };
-            focused = child.to_string();
-        }
-        if focused == ff.top_context {
-            context.to_string()
-        } else {
-            focused
-        }
+        focused_context(ff, context).await?
     } else {
         context.to_string()
     };
-    let result = ff
-        .race_prompt(
-            &context,
-            ff.bidi.call_function(
-                &context,
-                LITERAL_EDIT_JS,
-                target.map(Target::node_ref),
-                vec![json!(text), json!(replace), json!(target.is_none())],
-            ),
-        )
-        .await?;
-    let Some(result) = result else {
-        return Ok(());
-    };
-    match result.as_str() {
-        Some("ok" | "canceled") => Ok(()),
-        _ => Err("Text input is not supported for the focused element".to_string()),
-    }
+    literal_edit_in_context(ff, &context, target, text, replace)
+        .await
+        .map(|_| ())
+}
+
+async fn focus_target(ff: &FirefoxSession, target: &Target) -> Result<bool, String> {
+    Ok(run(ff, target, FOCUS_JS, vec![]).await?.is_some())
 }
 
 async fn send_text(
@@ -159,20 +177,22 @@ async fn send_text(
     if text.is_empty() {
         return Ok(());
     }
-    match delay_ms {
-        Some(delay) if delay > 0 => {
-            for ch in text.chars() {
-                if perform(ff, context, key_text_actions(&ch.to_string())).await? {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(delay)).await;
-            }
-            Ok(())
+    let context = focused_context(ff, context).await?;
+    for ch in text.chars() {
+        let text = ch.to_string();
+        let dialog_opened = if matches!(ch, '\n' | '\r' | '\t') {
+            perform_actions(ff, &context, key_text_actions(&text)).await?
+        } else {
+            literal_edit_in_context(ff, &context, None, &text, false).await?
+        };
+        if dialog_opened {
+            break;
         }
-        _ => perform(ff, context, key_text_actions(text))
-            .await
-            .map(|_| ()),
+        if let Some(delay) = delay_ms.filter(|delay| *delay > 0) {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
     }
+    Ok(())
 }
 
 fn select_values(cmd: &Value) -> Vec<String> {
@@ -188,6 +208,23 @@ fn select_values(cmd: &Value) -> Vec<String> {
             .map(|value| vec![value.to_string()])
             .unwrap_or_default(),
     }
+}
+
+fn upload_files(cmd: &Value) -> Vec<String> {
+    cmd.get("files")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .or_else(|| {
+            cmd.get("file")
+                .and_then(Value::as_str)
+                .map(|file| vec![file.to_string()])
+        })
+        .unwrap_or_default()
 }
 
 fn absolute_files(files: &[String]) -> Vec<String> {
@@ -215,7 +252,7 @@ pub async fn fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
     let value = require(cmd, "value")?;
     let target = resolve_target(state, selector).await?;
     let ff = session(state)?;
-    if run(ff, &target, FOCUS_JS, vec![]).await?.is_some() {
+    if focus_target(ff, &target).await? {
         literal_edit(ff, &target.context, Some(&target), value, true).await?;
     }
     Ok(json!({ "filled": selector }))
@@ -229,7 +266,7 @@ pub async fn type_text(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     let delay = cmd.get("delay").and_then(Value::as_u64);
     let target = resolve_target(state, selector).await?;
     let ff = session(state)?;
-    if run(ff, &target, FOCUS_JS, vec![]).await?.is_some()
+    if focus_target(ff, &target).await?
         && (!clear || run(ff, &target, CLEAR_INPUT_JS, vec![]).await?.is_some())
     {
         send_text(ff, &target.context, text, delay).await?;
@@ -241,7 +278,7 @@ pub async fn type_text(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 pub async fn press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let key = require(cmd, "key")?;
     let ff = session(state)?;
-    perform(ff, &ff.context, key_chord_actions(key)).await?;
+    perform_actions(ff, &ff.context, key_chord_actions(key)).await?;
     Ok(json!({ "pressed": key }))
 }
 
@@ -249,7 +286,7 @@ pub async fn press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 pub async fn keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let key = require(cmd, "key")?;
     let ff = session(state)?;
-    perform(ff, &ff.context, key_event_actions("keyDown", key)).await?;
+    perform_actions(ff, &ff.context, key_event_actions("keyDown", key)).await?;
     Ok(json!({ "keydown": key }))
 }
 
@@ -257,7 +294,7 @@ pub async fn keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 pub async fn keyup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let key = require(cmd, "key")?;
     let ff = session(state)?;
-    perform(ff, &ff.context, key_event_actions("keyUp", key)).await?;
+    perform_actions(ff, &ff.context, key_event_actions("keyUp", key)).await?;
     Ok(json!({ "keyup": key }))
 }
 
@@ -294,7 +331,7 @@ pub async fn input_keyboard(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         .or_else(|| cmd.get("text").and_then(Value::as_str))
         .unwrap_or("");
     let ff = session(state)?;
-    perform(ff, &ff.context, key_event_actions(event_type, key)).await?;
+    perform_actions(ff, &ff.context, key_event_actions(event_type, key)).await?;
     Ok(json!({ "dispatched": event_type }))
 }
 
@@ -341,20 +378,47 @@ pub async fn select(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     Ok(json!({ "selected": values }))
 }
 
+async fn set_checked(
+    state: &mut DaemonState,
+    target: &Target,
+    selector: &str,
+    checked: bool,
+) -> Result<(), String> {
+    if run(session(state)?, target, ELEMENT_CHECKED_JS, vec![]).await? != Some(json!(!checked)) {
+        return Ok(());
+    }
+    let visible = run(
+        session(state)?,
+        target,
+        "function() { const r = this.getClientRects()[0]; return !!r && r.width > 0 && r.height > 0; }",
+        vec![],
+    )
+    .await?;
+    if visible == Some(json!(true)) {
+        let outcome = act_element(
+            state,
+            target,
+            selector,
+            PointerAction::Check,
+            pointer_click(&Origin::Element(target.shared_id.clone()), "left", 1),
+            json!({}),
+        )
+        .await?;
+        if outcome.dialog_opened {
+            return Ok(());
+        }
+    }
+    if run(session(state)?, target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(!checked)) {
+        run(session(state)?, target, CLICK_CHECKBOX_JS, vec![]).await?;
+    }
+    Ok(())
+}
+
 /// Checks a checkbox or radio unless it is already checked.
 pub async fn check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = require(cmd, "selector")?;
     let target = resolve_target(state, selector).await?;
-    let ff = session(state)?;
-    if run(ff, &target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(false)) {
-        let (x, y) = prepare(ff, &target, selector, true).await?;
-        perform(
-            ff,
-            &target.context,
-            pointer_click(&Origin::Viewport { x, y }, "left", 1),
-        )
-        .await?;
-    }
+    set_checked(state, &target, selector, true).await?;
     Ok(json!({ "checked": selector }))
 }
 
@@ -362,16 +426,7 @@ pub async fn check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 pub async fn uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = require(cmd, "selector")?;
     let target = resolve_target(state, selector).await?;
-    let ff = session(state)?;
-    if run(ff, &target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(true)) {
-        let (x, y) = prepare(ff, &target, selector, true).await?;
-        perform(
-            ff,
-            &target.context,
-            pointer_click(&Origin::Viewport { x, y }, "left", 1),
-        )
-        .await?;
-    }
+    set_checked(state, &target, selector, false).await?;
     Ok(json!({ "unchecked": selector }))
 }
 
@@ -444,10 +499,7 @@ mod tests {
         if req["method"] == "script.callFunction"
             && req["params"]["functionDeclaration"]
                 .as_str()
-                .is_some_and(|js| {
-                    js == crate::native::element::IS_CONNECTED_JS
-                        || js.contains("ownerDocument === document")
-                })
+                .is_some_and(|js| js == crate::native::element::IS_CONNECTED_JS)
         {
             script(json!({"type": "boolean", "value": true}))
         } else {
@@ -604,7 +656,9 @@ mod tests {
                 "input.performActions",
                 "input.performActions",
                 "input.performActions",
-                "input.performActions",
+                "script.callFunction",
+                "script.callFunction",
+                "script.callFunction",
                 "script.callFunction",
                 "script.callFunction",
                 "input.performActions",
@@ -673,7 +727,9 @@ mod tests {
                 "script.callFunction",
                 "script.callFunction",
                 "script.callFunction",
-                "input.performActions",
+                "script.callFunction",
+                "script.callFunction",
+                "script.callFunction",
             ],
         );
     }
@@ -682,7 +738,6 @@ mod tests {
     async fn fill_and_type_resolve_snapshot_refs() {
         let (mut ff, _tx, calls) = fake_session_with(connected_node_responder).await;
         ff.refs.insert(("ctx-active".into(), "node-1".into()), 7);
-        ff.documents.insert("ctx-active".into(), "node-1".into());
         let mut state = state_with(ff);
         state
             .ref_map
@@ -708,7 +763,9 @@ mod tests {
                 "script.callFunction",
                 "script.callFunction",
                 "script.callFunction",
-                "input.performActions",
+                "script.callFunction",
+                "script.callFunction",
+                "script.callFunction",
             ],
         );
     }
@@ -761,7 +818,7 @@ mod tests {
                 .unwrap(),
             json!({"checked": "#agree"})
         );
-        assert_eq!(calls.lock().unwrap().len(), 4);
+        assert_eq!(calls.lock().unwrap().len(), 5);
 
         let (ff, _tx, calls) = fake_session_with(checkbox_responder(true)).await;
         let mut state = state_with(ff);
@@ -781,7 +838,7 @@ mod tests {
                 .unwrap(),
             json!({"unchecked": "#agree"})
         );
-        assert_eq!(calls.lock().unwrap().len(), 4);
+        assert_eq!(calls.lock().unwrap().len(), 5);
     }
 
     #[tokio::test]

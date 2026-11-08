@@ -4410,7 +4410,7 @@ Core Commands:
   type <sel> <text>          Type into element
   fill <sel> <text>          Clear and fill
   press <key>                Press key (Enter, Tab, Control+a)
-  keyboard type <text>       Type text with real keystrokes (no selector)
+  keyboard type <text>       Type at current focus (no selector)
   keyboard inserttext <text> Insert text without key events
   hover <sel>                Hover element
   focus <sel>                Focus element
@@ -4693,6 +4693,9 @@ Options:
                              Explicit Obscura launches validate this invocation's resolved
                              bypass settings, even with an existing daemon; stale daemon
                              environment values are not reused when bypass is cleared.
+                             Firefox rejects authenticated proxies, --cdp, --auto-connect, --provider,
+                             profiles, extensions, --args, --allow-file-access, --webgpu, --ca-cert,
+                             --enable, --init-script, and --capture flow.
                              Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --relaunch                 Relaunch the session's browser even when no setting changed

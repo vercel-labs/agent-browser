@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use base64::Engine;
 use serde_json::{json, Value};
 
-use super::actions::session;
 use super::client::remote_to_json;
+use super::daemon::session;
 use super::query;
 use super::target::{resolve_target, Target};
 use crate::native::actions::{pdf_save_path, DaemonState};

@@ -6,9 +6,10 @@ use crate::native::actions::{
 };
 use crate::native::interaction::{char_to_key_info, key_text, named_key_info};
 
-/// Target of a pointer action: a viewport position.
+/// Target of a pointer action: a shared element id or a viewport position.
 #[derive(Clone, Debug)]
 pub(crate) enum Origin {
+    Element(String),
     Viewport { x: f64, y: f64 },
 }
 
@@ -32,12 +33,12 @@ pub(crate) fn key_chord_actions(chord: &str) -> Value {
 
     let mut actions = Vec::new();
     for modifier in &modifiers {
-        actions.push(json!({ "type": "keyDown", "value": key_value(modifier) }));
+        actions.push(json!({ "type": "keyDown", "value": modifier_value(modifier) }));
     }
     actions.push(json!({ "type": "keyDown", "value": value }));
     actions.push(json!({ "type": "keyUp", "value": value }));
     for modifier in modifiers.iter().rev() {
-        actions.push(json!({ "type": "keyUp", "value": key_value(modifier) }));
+        actions.push(json!({ "type": "keyUp", "value": modifier_value(modifier) }));
     }
     key_source(actions)
 }
@@ -144,8 +145,20 @@ pub(crate) fn pointer_wheel(origin: &Origin, delta_x: f64, delta_y: f64) -> Valu
     }])
 }
 
-/// Build the BiDi actions for a `pointer_type` drag or swipe between two points, emitting `steps` intermediate moves.
-pub(crate) fn pointer_path(pointer_type: &str, from: &Origin, to: &Origin, steps: u32) -> Value {
+/// Build the BiDi actions for a touch tap.
+pub(crate) fn touch_tap(origin: &Origin) -> Value {
+    pointer_source(
+        "touch",
+        vec![
+            pointer_move(origin),
+            json!({ "type": "pointerDown", "button": 0 }),
+            json!({ "type": "pointerUp", "button": 0 }),
+        ],
+    )
+}
+
+/// Build the BiDi actions for a touch swipe with intermediate moves toward `to`.
+pub(crate) fn touch_swipe_path(from: &Origin, to: &Origin, steps: u32) -> Value {
     let (fx, fy, _) = origin_json(from);
     let (tx, ty, _) = origin_json(to);
     let steps = steps.max(1);
@@ -163,19 +176,7 @@ pub(crate) fn pointer_path(pointer_type: &str, from: &Origin, to: &Origin, steps
         }));
     }
     actions.push(json!({ "type": "pointerUp", "button": 0 }));
-    pointer_source(pointer_type, actions)
-}
-
-/// Build the BiDi actions for a touch tap.
-pub(crate) fn touch_tap(origin: &Origin) -> Value {
-    pointer_source(
-        "touch",
-        vec![
-            pointer_move(origin),
-            json!({ "type": "pointerDown", "button": 0 }),
-            json!({ "type": "pointerUp", "button": 0 }),
-        ],
-    )
+    pointer_source("touch", actions)
 }
 
 /// Build the BiDi actions for one raw touch event over `points`.
@@ -223,7 +224,34 @@ fn pointer_move(origin: &Origin) -> Value {
 
 fn origin_json(origin: &Origin) -> (f64, f64, Value) {
     match origin {
+        Origin::Element(id) => (
+            0.0,
+            0.0,
+            json!({ "type": "element", "element": { "sharedId": id } }),
+        ),
         Origin::Viewport { x, y } => (*x, *y, json!("viewport")),
+    }
+}
+
+pub(crate) fn mouse_button_mask(button: u8) -> i32 {
+    match button {
+        0 => 1,
+        1 => 4,
+        2 => 2,
+        3 => 8,
+        4 => 16,
+        _ => 0,
+    }
+}
+
+pub(crate) fn mouse_button_name(button: u8) -> &'static str {
+    match button {
+        0 => "left",
+        1 => "middle",
+        2 => "right",
+        3 => "back",
+        4 => "forward",
+        _ => "left",
     }
 }
 
@@ -231,6 +259,8 @@ fn mouse_button(button: &str) -> u8 {
     match button.to_ascii_lowercase().as_str() {
         "middle" => 1,
         "right" => 2,
+        "back" => 3,
+        "forward" => 4,
         _ => 0,
     }
 }
@@ -266,6 +296,16 @@ fn key_value(key_name: &str) -> String {
             Some(n @ 1..=12) => char::from_u32(0xE030 + n).unwrap().to_string(),
             _ => key_text(key_name).unwrap_or_else(|| key_name.to_string()),
         },
+    }
+}
+
+fn modifier_value(modifier: &str) -> String {
+    match modifier {
+        "Control" => "\u{E009}".to_string(),
+        "Shift" => "\u{E008}".to_string(),
+        "Alt" => "\u{E00A}".to_string(),
+        "Meta" => "\u{E03D}".to_string(),
+        _ => modifier.to_string(),
     }
 }
 
@@ -449,7 +489,7 @@ mod tests {
 
     #[test]
     fn touch_tap_uses_touch_pointer_type() {
-        let origin = Origin::Viewport { x: 10.0, y: 20.0 };
+        let origin = Origin::Element("node-1".to_string());
         let actions = touch_tap(&origin);
 
         assert_eq!(actions[0]["parameters"]["pointerType"], "touch");

@@ -2,14 +2,10 @@
 
 use serde_json::{json, Value};
 
-use super::actions::session;
+use super::daemon::session;
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
-use crate::native::element::{build_find_element_js, parse_ref, RefEntry};
-
-/// A node is live only while it is attached to the context's current document, not a replaced one.
-const IS_LIVE_JS: &str =
-    "function() { return this.isConnected && this.ownerDocument === document; }";
+use crate::native::element::{build_find_element_js, parse_ref, RefEntry, IS_CONNECTED_JS};
 
 /// A node handle: the BiDi browsing context that owns it and its `sharedId`.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,7 +34,12 @@ pub async fn find_element(
 async fn is_connected(ff: &FirefoxSession, target: &Target) -> bool {
     let r = ff
         .bidi
-        .call_function(&target.context, IS_LIVE_JS, Some(target.node_ref()), vec![])
+        .call_function(
+            &target.context,
+            IS_CONNECTED_JS,
+            Some(target.node_ref()),
+            vec![],
+        )
         .await;
     r.is_ok_and(|v| v == true)
 }
@@ -96,7 +97,9 @@ async fn recover(
     if entry.nth.is_some() {
         return Err(format!("Stale ref for role={role} name={name} cannot be recovered: the snapshot had several matching elements. Run snapshot again and use a fresh ref."));
     }
-    let context = context.unwrap_or_else(|| ff.context.clone());
+    let context = context
+        .or_else(|| entry.frame_id.clone())
+        .unwrap_or_else(|| ff.context.clone());
     let document = ff
         .bidi
         .call_function(&context, "() => document", None, vec![])

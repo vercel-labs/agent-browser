@@ -1,13 +1,13 @@
 //! Firefox cookies, web storage and saved state. Formats must match `cookies.rs` and `state.rs`.
 
+use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-use super::actions::session;
-use super::forms::require;
+use super::daemon::session;
+use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
-use super::types::{BytesValue, Cookie as BidiCookie, GetCookies};
-use crate::native::actions::{self as chrome, DaemonState};
+use crate::native::actions::DaemonState;
 use crate::native::cookies::Cookie;
 use crate::native::state::{self, OriginStorage, StorageState};
 use crate::validation::{is_valid_session_name, session_name_error};
@@ -36,8 +36,8 @@ fn storage_js_name(storage_type: &str) -> &'static str {
     }
 }
 
-fn same_site_to_state(value: &str) -> Option<String> {
-    match value.to_ascii_lowercase().as_str() {
+fn same_site_to_state(value: &Value) -> Option<String> {
+    match value.as_str()?.to_ascii_lowercase().as_str() {
         "strict" => Some("Strict".to_string()),
         "lax" => Some("Lax".to_string()),
         "none" => Some("None".to_string()),
@@ -52,49 +52,73 @@ fn same_site_to_bidi(value: &Value) -> Option<String> {
         .filter(|s| matches!(s.as_str(), "strict" | "lax" | "none"))
 }
 
+/// Wraps a cookie value in the BiDi `BytesValue` shape expected by `storage.setCookie`.
+fn bidi_bytes_value(value: &str) -> Value {
+    json!({ "type": "string", "value": value })
+}
+
+/// Decodes a BiDi `BytesValue` (`string` or `base64`) back to plain text.
+fn decode_bytes_value(value: &Value) -> String {
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    let Some(object) = value.as_object() else {
+        return String::new();
+    };
+    let text = object.get("value").and_then(Value::as_str).unwrap_or("");
+    match object.get("type").and_then(Value::as_str) {
+        Some("base64") => base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default(),
+        _ => text.to_string(),
+    }
+}
+
 /// Converts a BiDi `storage.getCookies` cookie to the `state.rs` cookie shape.
-fn bidi_cookie_to_state(cookie: &BidiCookie) -> Cookie {
+fn bidi_cookie_to_state(cookie: &Value) -> Cookie {
+    let expiry = cookie.get("expiry").and_then(Value::as_f64);
     Cookie {
-        name: cookie.name.clone(),
-        value: cookie.value.text(),
-        domain: cookie.domain.clone(),
-        path: if cookie.path.is_empty() {
-            "/".to_string()
-        } else {
-            cookie.path.clone()
-        },
-        expires: cookie.expiry.map_or(-1.0, |e| e as f64),
-        size: cookie.size.unwrap_or(0),
-        http_only: cookie.http_only,
-        secure: cookie.secure,
-        session: cookie.expiry.is_none(),
-        same_site: cookie.same_site.as_deref().and_then(same_site_to_state),
+        name: cookie["name"].as_str().unwrap_or("").to_string(),
+        value: decode_bytes_value(&cookie["value"]),
+        domain: cookie["domain"].as_str().unwrap_or("").to_string(),
+        path: cookie["path"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .unwrap_or("/")
+            .to_string(),
+        expires: expiry.unwrap_or(-1.0),
+        size: cookie["size"].as_i64().unwrap_or(0),
+        http_only: cookie["httpOnly"].as_bool().unwrap_or(false),
+        secure: cookie["secure"].as_bool().unwrap_or(false),
+        session: expiry.is_none(),
+        same_site: cookie.get("sameSite").and_then(same_site_to_state),
     }
 }
 
 /// Converts a `state.rs` cookie to the BiDi `storage.setCookie` cookie shape.
 /// Chrome-only fields are absent from the source struct and therefore dropped.
-fn state_cookie_to_bidi(cookie: &Cookie) -> BidiCookie {
-    BidiCookie {
-        name: cookie.name.clone(),
-        value: BytesValue::string(&cookie.value),
-        domain: cookie.domain.clone(),
-        path: if cookie.path.is_empty() {
-            "/".to_string()
-        } else {
-            cookie.path.clone()
-        },
-        size: None,
-        http_only: cookie.http_only,
-        secure: cookie.secure,
-        same_site: cookie.same_site.as_deref().map(str::to_ascii_lowercase),
-        expiry: (cookie.expires > 0.0).then_some(cookie.expires as u64),
+fn state_cookie_to_bidi(cookie: &Cookie) -> Value {
+    let mut out = json!({
+        "name": cookie.name,
+        "value": bidi_bytes_value(&cookie.value),
+        "domain": cookie.domain,
+        "path": if cookie.path.is_empty() { "/" } else { cookie.path.as_str() },
+        "httpOnly": cookie.http_only,
+        "secure": cookie.secure,
+    });
+    if cookie.expires > 0.0 {
+        out["expiry"] = json!(cookie.expires as u64);
     }
+    if let Some(same_site) = cookie.same_site.as_deref() {
+        out["sameSite"] = json!(same_site.to_ascii_lowercase());
+    }
+    out
 }
 
 /// Converts a `cookies set` payload to BiDi `storage.setCookie` params. Fields Chrome knows
 /// but BiDi does not (`priority`, `sourceScheme`, `sameParty`, `partitionKey`) are ignored.
-fn command_cookie_to_bidi(cookie: &Value, current_url: Option<&str>) -> Result<BidiCookie, String> {
+fn command_cookie_to_bidi(cookie: &Value, current_url: Option<&str>) -> Result<Value, String> {
     let name = cookie
         .get("name")
         .and_then(Value::as_str)
@@ -123,27 +147,25 @@ fn command_cookie_to_bidi(cookie: &Value, current_url: Option<&str>) -> Result<B
         .ok_or("Cookie requires a 'domain' or a current page URL")?;
     let path = explicit_path.unwrap_or("/").to_string();
 
-    Ok(BidiCookie {
-        name: name.to_string(),
-        value: BytesValue::string(value),
-        domain,
-        path,
-        size: None,
-        http_only: cookie
-            .get("httpOnly")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        secure: cookie
-            .get("secure")
-            .and_then(Value::as_bool)
-            .unwrap_or_else(|| parsed.as_ref().is_some_and(|u| u.scheme() == "https")),
-        same_site: same_site_to_bidi(&cookie["sameSite"]),
-        expiry: cookie
-            .get("expires")
-            .and_then(Value::as_f64)
-            .filter(|e| *e > 0.0)
-            .map(|e| e as u64),
-    })
+    let mut out = json!({
+        "name": name,
+        "value": bidi_bytes_value(value),
+        "domain": domain,
+        "path": path,
+        "httpOnly": cookie.get("httpOnly").and_then(Value::as_bool).unwrap_or(false),
+        "secure": cookie.get("secure").and_then(Value::as_bool).unwrap_or_else(|| {
+            parsed.as_ref().is_some_and(|u| u.scheme() == "https")
+        }),
+    });
+    if let Some(expires) = cookie.get("expires").and_then(Value::as_f64) {
+        if expires > 0.0 {
+            out["expiry"] = json!(expires as u64);
+        }
+    }
+    if let Some(same_site) = same_site_to_bidi(&cookie["sameSite"]) {
+        out["sameSite"] = json!(same_site);
+    }
+    Ok(out)
 }
 
 fn cookie_applies_to_url(cookie: &Cookie, url: &url::Url) -> bool {
@@ -196,8 +218,13 @@ async fn cookie_urls(ff: &FirefoxSession) -> Result<Vec<url::Url>, String> {
 }
 
 async fn get_all_cookies(ff: &FirefoxSession) -> Result<Vec<Cookie>, String> {
-    let result: GetCookies = ff.bidi.send_typed("storage.getCookies", &json!({})).await?;
-    Ok(result.cookies.iter().map(bidi_cookie_to_state).collect())
+    let result = ff.bidi.send("storage.getCookies", json!({})).await?;
+    Ok(result["cookies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(bidi_cookie_to_state)
+        .collect())
 }
 
 /// Returns cookies for requested URLs or active page and frames when omitted.
@@ -294,8 +321,14 @@ pub async fn storage_get(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 pub async fn storage_set(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
     let storage_type = cmd.get("type").and_then(Value::as_str).unwrap_or("local");
-    let key = require(cmd, "key")?;
-    let value = require(cmd, "value")?;
+    let key = cmd
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'key' parameter")?;
+    let value = cmd
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'value' parameter")?;
     let js = format!(
         "{}.setItem({}, {})",
         storage_js_name(storage_type),
@@ -378,10 +411,12 @@ async fn read_origins_in(
 ) -> Result<Vec<OriginStorage>, String> {
     let mut found = Vec::new();
     for origin in origins {
-        if let Some(filter) = ff.net.domain_filter.read().await.as_ref() {
-            if filter.check_url(origin).is_err() {
-                continue;
-            }
+        let allowed = {
+            let filter = ff.net.domain_filter.read().await;
+            crate::native::network::check_navigation_allowed(filter.as_ref(), origin).is_ok()
+        };
+        if !allowed {
+            continue;
         }
         ff.bidi
             .send(
@@ -556,8 +591,7 @@ pub async fn state_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     Ok(json!({ "saved": true, "path": saved_path }))
 }
 
-/// Saves the `--session-name` state file used by restore-on-close/autosave. A complete candidate
-/// is validated and then swapped in, so a failed save never damages the last good file.
+/// Saves the `--session-name` state file used by restore-on-close/autosave.
 pub async fn save_auto_state(
     ff: &mut FirefoxSession,
     session_name: &str,
@@ -582,14 +616,16 @@ const RESTORE_STORAGE_JS: &str = r#"(expectedOrigin, payload) => {
 }"#;
 
 /// Loads the cookies and origin storage in a `state.rs` JSON file, dropping fields BiDi
-/// does not support, like Chrome's `handle_state_load`. Origins that redirect elsewhere are skipped and returned.
-pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<String>, String> {
+/// does not support, like Chrome's `handle_state_load`. Origins that cannot be loaded, or that
+/// land somewhere else, are skipped and returned.
+pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<String>, String> {
     let json_str = state::read_state_json(path)?;
-    let state: StorageState =
+    let saved: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {e}"))?;
 
-    for cookie in &state.cookies {
-        ff.bidi
+    for cookie in &saved.cookies {
+        session(state)?
+            .bidi
             .send(
                 "storage.setCookie",
                 json!({ "cookie": state_cookie_to_bidi(cookie) }),
@@ -597,33 +633,33 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
             .await?;
     }
 
-    let context = ff.context.clone();
     let mut skipped = Vec::new();
-    for origin in &state.origins {
-        if !has_entries(origin) {
+    for origin in &saved.origins {
+        if origin.local_storage.is_empty() && origin.session_storage.is_empty() {
             continue;
         }
         let nav_url = format!("{}/", origin.origin.trim_end_matches('/'));
-        if ff
-            .bidi
-            .send(
-                "browsingContext.navigate",
-                json!({ "context": context, "url": nav_url, "wait": "complete" }),
-            )
-            .await
-            .is_err()
+        let landing = match navigation::load(
+            state,
+            Load::Url {
+                url: &nav_url,
+                wait: Wait::Complete,
+            },
+        )
+        .await
         {
-            skipped.push(origin.origin.clone());
-            continue;
-        }
-        ff.refs.clear();
-        ff.note_visit(&nav_url);
+            Ok(landing) if !landing.prompt => landing,
+            _ => {
+                skipped.push(origin.origin.clone());
+                continue;
+            }
+        };
 
         let payload = serde_json::to_string(origin).map_err(|e| e.to_string())?;
-        let restored = ff
+        let restored = session(state)?
             .bidi
             .call_function_in_sandbox(
-                &context,
+                &landing.context,
                 "agent-browser",
                 RESTORE_STORAGE_JS,
                 vec![json!(origin.origin), json!(payload)],
@@ -632,8 +668,6 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
             .map_err(|e| format!("Failed to restore storage for {}: {e}", origin.origin))?;
         if restored != json!(true) {
             skipped.push(origin.origin.clone());
-        } else {
-            ff.note_visit(&origin.origin);
         }
     }
 
@@ -643,10 +677,16 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
 /// Loads a `state.rs` JSON file, dropping Chrome-only cookie fields, like Chrome's
 /// `handle_state_load`. `--session-name` restore reuses this through `load_state_path`.
 pub async fn state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let path = require(cmd, "path")?;
-    chrome::ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    let ff = session(state)?;
-    let skipped = load_state_path(ff, path).await?;
+    let path = cmd
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'path' parameter")?;
+    crate::native::actions::ensure_state_replay_supported_by_active_domain_filter(
+        state,
+        "state load",
+    )
+    .await?;
+    let skipped = load_state_path(state, path).await?;
     crate::native::actions::mark_explicit_storage_state_loaded(state, path);
     Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
 }
@@ -896,12 +936,19 @@ mod tests {
         )
         .unwrap();
 
-        let skipped = load_state_path(&mut ff, path.to_str().unwrap())
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        let skipped = load_state_path(&mut state, path.to_str().unwrap())
             .await
             .unwrap();
 
         assert_eq!(skipped, vec!["https://unreachable.example".to_string()]);
-        assert!(ff.visited_origins.contains("https://reachable.example"));
+        assert!(state
+            .firefox
+            .as_ref()
+            .unwrap()
+            .visited_origins
+            .contains("https://reachable.example"));
         server.abort();
     }
 
@@ -929,7 +976,7 @@ mod tests {
             "origins": []
         }"#;
         let parsed: StorageState = serde_json::from_str(json_str).unwrap();
-        let params = serde_json::to_value(state_cookie_to_bidi(&parsed.cookies[0])).unwrap();
+        let params = state_cookie_to_bidi(&parsed.cookies[0]);
         assert_eq!(
             params,
             json!({
@@ -958,12 +1005,9 @@ mod tests {
 
     #[test]
     fn cookies_set_sends_the_current_page_host_and_a_string_bytes_value() {
-        let params = serde_json::to_value(
-            command_cookie_to_bidi(
-                &json!({"name": "demo", "value": "42"}),
-                Some("https://example.com"),
-            )
-            .unwrap(),
+        let params = command_cookie_to_bidi(
+            &json!({"name": "demo", "value": "42"}),
+            Some("https://example.com"),
         )
         .unwrap();
         assert_eq!(
@@ -981,26 +1025,20 @@ mod tests {
 
     #[test]
     fn bidi_cookie_values_decode_from_string_and_base64_bytes_values() {
-        let text = bidi_cookie_to_state(
-            &serde_json::from_value(json!({
-                "name": "demo",
-                "value": {"type": "string", "value": "42"},
-                "domain": "example.com",
-                "path": "/",
-            }))
-            .unwrap(),
-        );
+        let text = bidi_cookie_to_state(&json!({
+            "name": "demo",
+            "value": {"type": "string", "value": "42"},
+            "domain": "example.com",
+            "path": "/",
+        }));
         assert_eq!(text.value, "42");
 
-        let encoded = bidi_cookie_to_state(
-            &serde_json::from_value(json!({
-                "name": "demo",
-                "value": {"type": "base64", "value": "NDI="},
-                "domain": "example.com",
-                "path": "/",
-            }))
-            .unwrap(),
-        );
+        let encoded = bidi_cookie_to_state(&json!({
+            "name": "demo",
+            "value": {"type": "base64", "value": "NDI="},
+            "domain": "example.com",
+            "path": "/",
+        }));
         assert_eq!(encoded.value, "42");
     }
 
@@ -1018,27 +1056,24 @@ mod tests {
             session: true,
             same_site: None,
         };
-        let params = serde_json::to_value(state_cookie_to_bidi(&cookie)).unwrap();
+        let params = state_cookie_to_bidi(&cookie);
         assert!(params.get("expiry").is_none());
         assert!(params.get("sameSite").is_none());
     }
 
     #[test]
     fn bidi_cookies_convert_to_the_state_cookie_format() {
-        let persistent = bidi_cookie_to_state(
-            &serde_json::from_value(json!({
-                "name": "sid",
-                "value": "abc",
-                "domain": "example.com",
-                "path": "/",
-                "size": 3,
-                "httpOnly": true,
-                "secure": true,
-                "sameSite": "strict",
-                "expiry": 1700000000u64,
-            }))
-            .unwrap(),
-        );
+        let persistent = bidi_cookie_to_state(&json!({
+            "name": "sid",
+            "value": "abc",
+            "domain": "example.com",
+            "path": "/",
+            "size": 3,
+            "httpOnly": true,
+            "secure": true,
+            "sameSite": "strict",
+            "expiry": 1700000000u64,
+        }));
         assert_eq!(
             serde_json::to_value(&persistent).unwrap(),
             json!({
@@ -1055,18 +1090,15 @@ mod tests {
             })
         );
 
-        let session = bidi_cookie_to_state(
-            &serde_json::from_value(json!({
-                "name": "temp",
-                "value": "v",
-                "domain": "example.com",
-                "path": "/",
-                "size": 1,
-                "httpOnly": false,
-                "secure": false,
-            }))
-            .unwrap(),
-        );
+        let session = bidi_cookie_to_state(&json!({
+            "name": "temp",
+            "value": "v",
+            "domain": "example.com",
+            "path": "/",
+            "size": 1,
+            "httpOnly": false,
+            "secure": false,
+        }));
         assert_eq!(session.expires, -1.0);
         assert!(session.session);
         assert!(session.same_site.is_none());
