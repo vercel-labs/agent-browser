@@ -931,6 +931,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn click_scrolls_checks_and_performs_the_pointer_action() {
+        let (mut state, calls) = state_with_refs(connected).await;
+
+        let result = click(&json!({ "selector": "@e1" }), &mut state)
+            .await
+            .unwrap();
+
+        assert_eq!(result, json!({ "clicked": "@e1" }));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "script.callFunction",
+                "script.callFunction",
+                "input.performActions"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn a_covered_target_fails_before_any_pointer_action() {
         let (mut state, calls) = state_with_refs(blocked).await;
 
@@ -942,6 +961,80 @@ mod tests {
         assert_eq!(
             *calls.lock().unwrap(),
             ["script.callFunction", "script.callFunction"]
+        );
+    }
+
+    #[tokio::test]
+    async fn element_commands_return_chrome_shapes() {
+        let (mut state, _calls) = state_with_refs(connected).await;
+
+        assert_eq!(
+            focus(&json!({ "selector": "@e1" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "focused": "@e1" })
+        );
+        assert_eq!(
+            scrollintoview(&json!({ "selector": "@e1" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "scrolled": "@e1" })
+        );
+        assert_eq!(
+            highlight(&json!({ "selector": "@e1" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "highlighted": "@e1" })
+        );
+        assert_eq!(
+            dispatch(
+                &json!({ "selector": "@e1", "event": "click", "eventInit": { "bubbles": true } }),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({ "dispatched": "click", "selector": "@e1" })
+        );
+        assert_eq!(
+            scroll(
+                &json!({ "selector": "@e1", "direction": "down", "amount": 120 }),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({ "scrolled": true })
+        );
+        assert_eq!(
+            scroll(&json!({ "y": 80 }), &mut state).await.unwrap(),
+            json!({ "scrolled": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_pointer_commands_return_chrome_shapes() {
+        let (mut state, _calls) = state_with_refs(connected).await;
+
+        assert_eq!(
+            wheel(&json!({ "x": 5, "y": 6, "deltaY": 100 }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "scrolled": true, "deltaX": 0.0, "deltaY": 100.0 })
+        );
+        assert_eq!(
+            swipe(&json!({ "direction": "up" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "swiped": "up" })
+        );
+        assert_eq!(
+            swipe(&json!({}), &mut state).await.unwrap(),
+            json!({ "swiped": true, "from": [200.0, 400.0], "to": [200.0, 100.0] })
+        );
+        assert_eq!(
+            drag(&json!({ "source": "@e1", "target": "@e2" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "dragged": true, "source": "@e1", "target": "@e2" })
         );
     }
 
@@ -996,5 +1089,41 @@ mod tests {
             2
         );
         assert!(state.firefox.as_ref().unwrap().touches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dialog_reports_and_dismisses_the_pending_prompt() {
+        let (mut state, calls) = state_with_refs(connected).await;
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "prompt".into(),
+            message: "name?".into(),
+            default_prompt: Some("Ada".into()),
+            session_id: Some("ctx-active".into()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            dialog(&json!({ "response": "status" }), &mut state)
+                .await
+                .unwrap(),
+            json!({
+                "hasDialog": true,
+                "type": "prompt",
+                "message": "name?",
+                "defaultPrompt": "Ada",
+            })
+        );
+        assert_eq!(
+            dialog(
+                &json!({ "response": "dismiss", "promptText": "Bob" }),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({ "handled": true, "accepted": false })
+        );
+
+        assert!(state.pending_dialog.is_none());
+        assert_eq!(*calls.lock().unwrap(), ["browsingContext.handleUserPrompt"]);
     }
 }

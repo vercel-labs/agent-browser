@@ -426,11 +426,28 @@ mod tests {
     }
 
     #[test]
+    fn color_scheme_dark_maps_to_color_scheme_simulation() {
+        let config = validate_media(&media_with_feature("prefers-color-scheme", "dark")).unwrap();
+        assert_eq!(config["colorSchemeSimulation"], "dark");
+    }
+
+    #[test]
     fn reduced_motion_lists_supported_features() {
         let error = validate_media(&media_with_feature("prefers-reduced-motion", "reduce"))
             .expect_err("reduced motion is not supported");
         assert!(error.contains("prefers-reduced-motion"));
         assert!(error.contains("prefers-color-scheme"));
+    }
+
+    #[test]
+    fn offline_toggles_network_conditions() {
+        let (method, params) = offline(true);
+        assert_eq!(method, "emulation.setNetworkConditions");
+        assert_eq!(params["networkConditions"]["type"], "offline");
+
+        let (method, params) = offline(false);
+        assert_eq!(method, "emulation.setNetworkConditions");
+        assert!(params["networkConditions"].is_null());
     }
 
     async fn session_state() -> (DaemonState, crate::native::bidi::session::tests::Calls) {
@@ -561,6 +578,93 @@ mod tests {
             Some("Desktop Agent")
         );
         assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn media_dark_accepts_reduced_motion_no_preference() {
+        let (ff, _, _, _, rdp) = fake_session_with_rdp().await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        set_media(
+            &json!({"colorScheme": "dark", "reducedMotion": "no-preference"}),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        let messages = rdp.lock().unwrap().clone();
+        let update = messages
+            .iter()
+            .find(|m| m["type"] == "updateConfiguration")
+            .expect("no updateConfiguration message");
+        assert_eq!(update["configuration"]["colorSchemeSimulation"], "dark");
+    }
+
+    #[tokio::test]
+    async fn timezone_locale_and_offline_are_scoped_to_the_active_context() {
+        let (ff, _, _, bidi, _) = fake_session_with_rdp().await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        set_timezone(&json!({"timezoneId": "Asia/Tokyo"}), &mut state)
+            .await
+            .unwrap();
+        set_locale(&json!({"locale": "fr-FR"}), &mut state)
+            .await
+            .unwrap();
+        set_offline(&json!({"offline": true}), &mut state)
+            .await
+            .unwrap();
+
+        let messages = bidi.lock().unwrap().clone();
+        let find = |method: &str| {
+            messages
+                .iter()
+                .find(|m| m["method"] == method)
+                .unwrap_or_else(|| panic!("no {method} message"))
+        };
+        assert_eq!(
+            find("emulation.setTimezoneOverride")["params"]["timezone"],
+            "Asia/Tokyo"
+        );
+        assert_eq!(
+            find("emulation.setTimezoneOverride")["params"]["contexts"],
+            json!(["ctx-active"])
+        );
+        assert_eq!(
+            find("emulation.setLocaleOverride")["params"]["locale"],
+            "fr-FR"
+        );
+        assert_eq!(
+            find("emulation.setNetworkConditions")["params"]["networkConditions"]["type"],
+            "offline"
+        );
+    }
+
+    #[tokio::test]
+    async fn permissions_are_granted_for_the_page_origin() {
+        let (ff, _, _, bidi, _) = fake_session_with_rdp().await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        let result = set_permissions(
+            &json!({"permissions": ["geolocation", "notifications"]}),
+            &mut state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, json!({"granted": ["geolocation", "notifications"]}));
+
+        let messages = bidi.lock().unwrap().clone();
+        let grants: Vec<&Value> = messages
+            .iter()
+            .filter(|m| m["method"] == "permissions.setPermission")
+            .collect();
+        assert_eq!(grants.len(), 2);
+        assert_eq!(grants[0]["params"]["descriptor"]["name"], "geolocation");
+        assert_eq!(grants[0]["params"]["origin"], "https://example.com");
+        assert_eq!(grants[0]["params"]["state"], "granted");
     }
 
     #[tokio::test]

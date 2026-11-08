@@ -340,6 +340,19 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn viewport_png_maps_to_bidi_screenshot() {
+        let params = screenshot_params(&json!({}), "ctx-1").unwrap();
+        assert_eq!(
+            params,
+            json!({
+                "context": "ctx-1",
+                "origin": "viewport",
+                "format": {"type": "image/png"},
+            })
+        );
+    }
+
+    #[test]
     fn full_page_jpeg_carries_quality_as_a_fraction() {
         let params = screenshot_params(
             &json!({"fullPage": true, "format": "jpeg", "quality": 55}),
@@ -366,6 +379,25 @@ mod tests {
         assert_eq!(png["format"], json!({"type": "image/png"}));
         let e = screenshot_params(&json!({"format": "webp"}), "c").unwrap_err();
         assert!(e.contains("Unsupported screenshot format"), "{e}");
+    }
+
+    #[test]
+    fn element_clip_is_a_bidi_element_reference() {
+        assert_eq!(
+            element_clip("node-7"),
+            json!({"type": "element", "element": {"sharedId": "node-7"}})
+        );
+    }
+
+    #[test]
+    fn element_and_annotated_screenshots_build_params() {
+        let element = screenshot_params(&json!({"selector": "#main"}), "c").unwrap();
+        assert_eq!(element["origin"], "viewport");
+        let annotated = screenshot_params(&json!({"annotate": true}), "c").unwrap();
+        assert_eq!(annotated["origin"], "viewport");
+        let options = screenshot_options(&json!({"selector": "#main", "annotate": true}));
+        assert_eq!(options.selector.as_deref(), Some("#main"));
+        assert!(options.annotate);
     }
 
     #[test]

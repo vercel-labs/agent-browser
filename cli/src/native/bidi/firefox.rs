@@ -393,6 +393,11 @@ mod tests {
     }
 
     #[test]
+    fn validate_accepts_plain_options() {
+        assert!(validate_firefox_options(&ok(), None, false, None).is_ok());
+    }
+
+    #[test]
     fn validate_rejects_each_option_naming_it() {
         let mut o = ok();
         o.extensions = Some(vec!["x".into()]);
@@ -552,5 +557,17 @@ mod tests {
             .unwrap();
         assert!(start.elapsed() < Duration::from_secs(10));
         assert!(e.contains("bad profile"), "{e}");
+    }
+
+    #[test]
+    #[ignore = "requires FIREFOX_BIN"]
+    fn real_firefox_smoke() {
+        let bin = std::env::var("FIREFOX_BIN").expect("FIREFOX_BIN");
+        let p = FirefoxProcess::launch(Path::new(&bin), true, None, false, Duration::from_secs(30))
+            .unwrap();
+        assert!(p.bidi_url.starts_with("ws://127.0.0.1:"), "{}", p.bidi_url);
+        let profile = p.profile_dir.clone();
+        drop(p);
+        assert!(!profile.exists());
     }
 }
