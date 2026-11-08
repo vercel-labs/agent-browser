@@ -1583,4 +1583,38 @@ mod tests {
         assert!(state.pending_dialog.is_none());
         assert_eq!(*calls.lock().unwrap(), ["browsingContext.handleUserPrompt"]);
     }
+    #[tokio::test]
+    async fn dialog_targets_the_tab_that_opened_the_prompt() {
+        use crate::native::bidi::session::tests::{fake_session_with_replies, FakeReply};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let (mut ff, _tx, _calls) = fake_session_with_replies(move |request| {
+            recorded.lock().unwrap().push(request.clone());
+            FakeReply::Result(json!({}))
+        })
+        .await;
+        ff.context = "ctx-active".into();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "confirm".into(),
+            message: "sure?".into(),
+            session_id: Some("ctx-other".into()),
+            ..Default::default()
+        });
+
+        dialog(&json!({ "response": "accept" }), &mut state)
+            .await
+            .unwrap();
+
+        let params = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request["method"] == "browsingContext.handleUserPrompt")
+            .map(|request| request["params"].clone())
+            .expect("the prompt command is sent");
+        assert_eq!(params["context"], "ctx-other");
+        assert!(state.pending_dialog.is_none());
+    }
 }
