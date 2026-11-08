@@ -7348,6 +7348,64 @@ async fn e2e_screenshot_selector_beyond_viewport() {
     assert_success(&resp);
 }
 
+/// Annotation boxes for elements inside a same-origin iframe must use top
+/// viewport coordinates (frame origin plus border plus the element's
+/// frame-local position), like main-frame boxes do (Issue #2462).
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_annotate_iframe_children_use_page_coordinates() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<body style='margin:0'>\
+        <button style='display:block;height:30px;margin:20px 0 0 30px'>Main</button>\
+        <iframe style='display:block;margin:200px 0 0 100px;width:400px;height:150px;border:3px solid black' \
+        srcdoc=\"<body style='margin:0'><button style='display:block;margin:10px 0 0 40px'>Inner</button>\"></iframe>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "screenshot", "annotate": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let annotations = get_data(&resp)["annotations"]
+        .as_array()
+        .expect("Annotated screenshot should return annotations");
+    let box_for = |name: &str| {
+        annotations
+            .iter()
+            .find(|a| a["name"] == name)
+            .map(|a| {
+                (
+                    a["box"]["x"].as_i64().unwrap(),
+                    a["box"]["y"].as_i64().unwrap(),
+                )
+            })
+            .unwrap_or_else(|| panic!("annotation for {name}: {annotations:?}"))
+    };
+
+    assert_eq!(box_for("Main"), (30, 20));
+    // The iframe's border box starts at (100, 20 + 30 + 200); add its 3px
+    // border and the button's (40, 10) offset inside the frame.
+    assert_eq!(box_for("Inner"), (100 + 3 + 40, 250 + 3 + 10));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verifies that `screenshot --annotate` completes in bounded time even with
 /// many interactive elements. Guards against the sequential CDP round-trip
 /// regression that caused hangs over high-latency WSS (Issue #841).
