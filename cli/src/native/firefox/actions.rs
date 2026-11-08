@@ -253,20 +253,48 @@ mod tests {
 
     #[tokio::test]
     async fn dialog_command_targets_the_tab_that_opened_the_prompt() {
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::{Arc, Mutex};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                recorded.lock().unwrap().push(request.clone());
+                let reply = json!({"type": "success", "id": request["id"], "result": {}});
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
+            }
+        });
         let mut state = DaemonState::new();
-        let (mut ff, _tx, calls) = fake_session().await;
+        let (mut ff, _tx, _) = fake_session().await;
         ff.context = "ctx-active".into();
+        ff.bidi = super::super::bidi::BidiClient::connect(&url)
+            .await
+            .unwrap()
+            .into();
         state.firefox = Some(ff);
         state.pending_dialog = Some(dialog("ctx-other"));
+
         execute("dialog", &json!({"response": "accept"}), &mut state)
             .await
             .unwrap();
-        assert!(calls
+
+        let params = seen
             .lock()
             .unwrap()
             .iter()
-            .any(|method| method == "browsingContext.handleUserPrompt"));
+            .find(|request| request["method"] == "browsingContext.handleUserPrompt")
+            .map(|request| request["params"].clone())
+            .expect("the prompt command is sent");
+        assert_eq!(params["context"], "ctx-other");
         assert!(state.pending_dialog.is_none());
+        server.abort();
     }
 
     #[tokio::test]
