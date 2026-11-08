@@ -2510,6 +2510,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_proxy_no_protocol_with_auth() {
+        let result = parse_proxy("user:secret@proxy.com:8080");
+        assert_eq!(result.server, "proxy.com:8080");
+        assert_eq!(result.username.as_deref(), Some("user"));
+        assert_eq!(result.password.as_deref(), Some("secret"));
+        assert!(!result.server.contains("secret"));
+    }
+
+    #[test]
+    fn test_parse_proxy_no_protocol_password_can_contain_at() {
+        let result = parse_proxy("user:p@ss@proxy.com:8080");
+        assert_eq!(result.server, "proxy.com:8080");
+        assert_eq!(result.username.as_deref(), Some("user"));
+        assert_eq!(result.password.as_deref(), Some("p@ss"));
+    }
+
+    #[test]
     fn test_parse_proxy_socks5() {
         let result = parse_proxy("socks5://proxy.com:1080");
         assert_eq!(result.server, "socks5://proxy.com:1080");
