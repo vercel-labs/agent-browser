@@ -33,7 +33,7 @@
     "test:launcher": "node --test test/launcher.test.mjs",
     "test:installer": "node --test test/installer.test.mjs",
     "build:dashboard": "cd packages/dashboard && pnpm build",
-    "build:source": "pnpm install --frozen-lockfile --filter dashboard && pnpm run build:dashboard && pnpm run build:native"
+    "build:source": "pnpm install --frozen-lockfile --ignore-scripts --filter dashboard && pnpm run build:dashboard && pnpm run build:native"
   },
   "keywords": [
     "browser",

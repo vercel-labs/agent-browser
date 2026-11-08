@@ -10,6 +10,23 @@ import { downloadFile } from '../scripts/download.js';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
+test('source and release builds do not require an already published native binary', async () => {
+  const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+  assert.match(packageJson.scripts['build:source'], /--ignore-scripts\b/);
+  for (const workflow of ['ci.yml', 'release.yml']) {
+    const content = await readFile(join(root, '.github', 'workflows', workflow), 'utf8');
+    const sourceInstalls = content.split('\n').filter((line) => /^\s*run:\s*pnpm install\b/.test(line));
+    assert.ok(sourceInstalls.length > 0, `${workflow} must include source dependency installs`);
+    for (const command of sourceInstalls) assert.match(command, /--ignore-scripts\b/, workflow);
+    if (workflow === 'ci.yml') {
+      assert.ok(content.includes('pnpm run test:installer'));
+      const smokeInstall = content.split('\n').find((line) => line.includes('npm install -g agent-browser-*.tgz'));
+      assert.ok(smokeInstall, 'packaged installation smoke test must remain enabled');
+      assert.ok(!smokeInstall.includes('--ignore-scripts'), 'end user installation must still verify binaries');
+    }
+  }
+});
+
 async function directory(t) {
   const path = await mkdtemp(join(tmpdir(), 'agent-browser-download-'));
   t.after(() => rm(path, { recursive: true, force: true }));
