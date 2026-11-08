@@ -557,9 +557,7 @@ pub async fn validate_restore(
 
 /// Saves cookies and origin storage in the `state.rs` JSON format, like Chrome's `handle_state_save`.
 pub async fn state_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    if let Some(ff) = state.firefox.as_mut() {
-        ff.drain_events(&mut state.pending_dialog);
-    }
+    state.drain_firefox_events();
     let explicit_path = cmd.get("path").and_then(Value::as_str);
     let session_name = state.session_name.clone();
     let session_id = state.session_id.clone();

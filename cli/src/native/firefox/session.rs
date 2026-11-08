@@ -184,6 +184,11 @@ impl FirefoxSession {
             events,
         };
         if let Some(contexts) = tree["contexts"].as_array() {
+            for context in contexts {
+                if let Some(id) = context["context"].as_str() {
+                    session.tab_id(id);
+                }
+            }
             session.record_context_origins(contexts);
         }
         if let Some(viewport) = options.viewport_size {
@@ -247,23 +252,58 @@ impl FirefoxSession {
             .await;
     }
 
-    /// Applies buffered BiDi events to the pending dialog slot.
-    pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) {
+    /// Applies buffered BiDi events and returns whether the active context was destroyed.
+    pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> bool {
+        let mut active_destroyed = false;
         loop {
             match self.events.try_recv() {
                 Ok(e) => {
-                    if e["method"] == "browsingContext.contextDestroyed"
-                        && e["params"]["context"] == self.top_context
-                    {
-                        self.top_context.clear();
-                    }
-                    if matches!(
-                        e["method"].as_str(),
-                        Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
-                    ) {
-                        if let Some(url) = e["params"]["url"].as_str() {
-                            self.note_visit(url);
+                    let params = &e["params"];
+                    match e["method"].as_str() {
+                        Some("browsingContext.contextCreated") => {
+                            if params["parent"].is_null() {
+                                if let Some(context) = params["context"].as_str() {
+                                    self.tab_id(context);
+                                }
+                            }
+                            if let Some(url) = params["url"].as_str() {
+                                self.note_visit(url);
+                            }
                         }
+                        Some("browsingContext.domContentLoaded") => {
+                            if let Some(url) = params["url"].as_str() {
+                                self.note_visit(url);
+                            }
+                        }
+                        Some("browsingContext.contextDestroyed") if params["parent"].is_null() => {
+                            if let Some(context) = params["context"].as_str() {
+                                let parents = &self.context_parents;
+                                self.refs
+                                    .retain(|(id, _), _| owner_context(id, parents) != context);
+                                self.documents
+                                    .retain(|id, _| owner_context(id, parents) != context);
+                                if dialog.as_ref().is_some_and(|d| {
+                                    d.owner_context.as_deref() == Some(context)
+                                        || d.session_id.as_deref() == Some(context)
+                                }) {
+                                    *dialog = None;
+                                }
+                                self.tab_ids.remove(context);
+                                self.tab_labels.remove(context);
+                                if self.top_context == context {
+                                    self.top_context = self
+                                        .tab_ids
+                                        .iter()
+                                        .min_by_key(|(_, id)| *id)
+                                        .map(|(context, _)| context.clone())
+                                        .unwrap_or_default();
+                                    self.context = self.top_context.clone();
+                                    self.refs.clear();
+                                    active_destroyed = true;
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                     apply_event(
                         &e,
@@ -276,6 +316,7 @@ impl FirefoxSession {
                 Err(_) => break,
             }
         }
+        active_destroyed
     }
 
     /// Runs `fut` until it finishes or a prompt opens in `context` or its owning tab. Returns `None` for the prompt.
@@ -578,6 +619,85 @@ pub(crate) mod tests {
         assert_eq!(s.tab_id("ctx-new"), 2);
         assert_eq!(s.tab_id("ctx-active"), 1);
         assert_eq!(s.tab_id("ctx-later"), 3);
+    }
+
+    #[tokio::test]
+    async fn destroyed_contexts_reconcile_tabs_and_active_state() {
+        let (mut session, tx, _) = fake_session().await;
+        session.tab_id("survivor");
+        session
+            .tab_labels
+            .insert("ctx-active".into(), "docs".into());
+        session.refs.insert(("child".into(), "node".into()), 1);
+        let mut state = crate::native::actions::DaemonState::new();
+        state.firefox = Some(session);
+        state.active_frame_id = Some("child".into());
+
+        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"child", "parent":"ctx-active"}})).unwrap();
+        tx.send(json!({"type":"event", "method":"browsingContext.domContentLoaded", "params":{"url":"https://child-event.example/"}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                state.drain_firefox_events();
+                if state
+                    .firefox
+                    .as_ref()
+                    .unwrap()
+                    .visited_origins
+                    .contains("https://child-event.example")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-active");
+        assert_eq!(state.active_frame_id.as_deref(), Some("child"));
+        assert_eq!(state.firefox.as_ref().unwrap().refs.len(), 1);
+
+        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                state.drain_firefox_events();
+                if state.firefox.as_ref().unwrap().context == "survivor" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let ff = state.firefox.as_ref().unwrap();
+        assert!(!ff.tab_ids.contains_key("ctx-active"));
+        assert!(!ff.tab_labels.contains_key("ctx-active"));
+        assert!(state.active_frame_id.is_none());
+        ff.eval("1 + 1").await.unwrap();
+        let err = super::super::tabs::tab_new(&json!({"label":"docs"}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Firefox did not return a context id for the new tab");
+
+        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
+        tx.send(json!({"type":"event", "method":"browsingContext.contextCreated", "params":{"context":"third", "parent":null}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                state.drain_firefox_events();
+                if state
+                    .firefox
+                    .as_ref()
+                    .unwrap()
+                    .tab_ids
+                    .contains_key("third")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.firefox.as_ref().unwrap().context, "survivor");
     }
 
     #[tokio::test]

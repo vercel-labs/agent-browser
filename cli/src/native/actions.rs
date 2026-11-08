@@ -1388,9 +1388,21 @@ impl DaemonState {
         recording::stop_recording_task(&mut self.recording_state).await
     }
 
+    pub(crate) fn drain_firefox_events(&mut self) {
+        if self
+            .firefox
+            .as_mut()
+            .is_some_and(|ff| ff.drain_events(&mut self.pending_dialog))
+        {
+            self.ref_map.invalidate_all_documents();
+            self.active_iframe_sessions.clear();
+            self.active_frame_id = None;
+        }
+    }
+
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
+        self.drain_firefox_events();
         if let Some(ff) = self.firefox.as_mut() {
-            ff.drain_events(&mut self.pending_dialog);
             if ff.top_context.is_empty() {
                 let tree = ff
                     .bidi
@@ -1400,6 +1412,7 @@ impl DaemonState {
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
+                ff.context = ff.top_context.clone();
                 firefox::tabs::reset_refs(self);
             }
         }
@@ -5460,9 +5473,7 @@ pub(crate) async fn auto_save_restore_state(
     }
 
     let session_id = state.session_id.clone();
-    if let Some(ff) = state.firefox.as_mut() {
-        ff.drain_events(&mut state.pending_dialog);
-    }
+    state.drain_firefox_events();
     if let Some(ff) = state.firefox.as_ref() {
         return match firefox::storage::save_auto_state(ff, &session_name, &session_id).await {
             Ok(path) => {
