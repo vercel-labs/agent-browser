@@ -1,5 +1,7 @@
 //! Private, atomic writes for browser credentials and saved session state.
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
@@ -49,47 +51,112 @@ fn restrict(path: &Path, directory: bool) -> Result<(), String> {
 }
 
 #[cfg(windows)]
+struct PrivateDescriptor(windows_sys::Win32::Security::PSECURITY_DESCRIPTOR);
+
+#[cfg(windows)]
+impl PrivateDescriptor {
+    fn new() -> Result<Self, String> {
+        use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+        // Replace inherited access with owner and SYSTEM access, including children.
+        let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)\0"
+            .encode_utf16()
+            .collect();
+        let mut descriptor = std::ptr::null_mut();
+        unsafe {
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                return Err(format!(
+                    "Failed to build private ACL: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        Ok(Self(descriptor))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PrivateDescriptor {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::LocalFree(self.0 as _);
+        }
+    }
+}
+
+#[cfg(windows)]
 fn restrict(path: &Path, _directory: bool) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows_sys::Win32::Security::{
         SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
     };
-    // Replace inherited access with owner and SYSTEM access, including children.
-    let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)\0"
-        .encode_utf16()
-        .collect();
+    let descriptor = PrivateDescriptor::new()?;
     let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut descriptor = std::ptr::null_mut();
     unsafe {
-        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut descriptor,
-            std::ptr::null_mut(),
+        if SetFileSecurityW(
+            name.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor.0,
         ) == 0
         {
             return Err(format!(
-                "Failed to build private ACL: {}",
+                "Failed to restrict permissions on {}: {}",
+                path.display(),
                 std::io::Error::last_os_error()
-            ));
-        }
-        let result = SetFileSecurityW(
-            name.as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            descriptor,
-        );
-        let error = std::io::Error::last_os_error();
-        LocalFree(descriptor as _);
-        if result == 0 {
-            return Err(format!(
-                "Failed to restrict permissions on {}: {error}",
-                path.display()
             ));
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn create_private_file(path: &Path) -> Result<fs::File, String> {
+    use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    };
+    let descriptor = PrivateDescriptor::new()?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // Apply the DACL at creation, not after opening a publicly inherited file.
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            0,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            0,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(unsafe { fs::File::from_raw_handle(handle as _) })
+}
+
+#[cfg(not(windows))]
+fn create_private_file(path: &Path) -> Result<fs::File, String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).map_err(|error| error.to_string())
 }
 
 /// Stage in the same directory and restrict access before writing any secrets.
@@ -115,15 +182,7 @@ fn write_private_inner(path: &Path, bytes: &[u8], replace: bool) -> Result<bool,
         .to_string_lossy();
     let temporary = path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> Result<bool, String> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
-        private_file(&temporary)?;
+        let mut file = create_private_file(&temporary)?;
         file.write_all(bytes).map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
