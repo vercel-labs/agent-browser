@@ -143,7 +143,12 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .map(|response| response == "accept")
         .or_else(|| cmd.get("accept").and_then(Value::as_bool))
         .unwrap_or(true);
-    let context = session(state)?.context.clone();
+    let recorded = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|dialog| dialog.session_id.clone());
+    let ff = session(state)?;
+    let context = recorded.unwrap_or_else(|| ff.context.clone());
     let mut params = serde_json::json!({ "context": context, "accept": accept });
     if let Some(text) = cmd.get("promptText").and_then(Value::as_str) {
         params["userText"] = serde_json::json!(text);
@@ -244,6 +249,24 @@ mod tests {
             "a rejected prompt command must not keep the dialog recorded"
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn dialog_command_targets_the_tab_that_opened_the_prompt() {
+        let mut state = DaemonState::new();
+        let (mut ff, _tx, calls) = fake_session().await;
+        ff.context = "ctx-active".into();
+        state.firefox = Some(ff);
+        state.pending_dialog = Some(dialog("ctx-other"));
+        execute("dialog", &json!({"response": "accept"}), &mut state)
+            .await
+            .unwrap();
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|method| method == "browsingContext.handleUserPrompt"));
+        assert!(state.pending_dialog.is_none());
     }
 
     #[tokio::test]
