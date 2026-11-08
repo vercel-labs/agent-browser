@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
@@ -700,17 +700,89 @@ pub fn state_clean(max_age_days: u64) -> Result<Value, String> {
     Ok(json!({ "cleaned": deleted, "keptCount": kept, "days": max_age_days }))
 }
 
-pub fn state_rename(old_path: &str, new_name: &str) -> Result<Value, String> {
-    let old = PathBuf::from(old_path);
-    if !old.exists() {
-        return Err(format!("State file not found: {}", old_path));
+fn is_explicit_state_path(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        || path.contains('/')
+        || path.contains('\\')
+        || path.ends_with(".json")
+        || path.ends_with(".json.enc")
+        || path.ends_with(".previous")
+}
+
+fn renamed_session_filename(old_file: &str, old_name: &str, new_name: &str) -> String {
+    let prefixed = format!("{old_name}-");
+    if let Some(rest) = old_file.strip_prefix(&prefixed) {
+        format!("{new_name}-{rest}")
+    } else if let Some(rest) = old_file.strip_prefix(old_name) {
+        format!("{new_name}{rest}")
+    } else {
+        format!("{new_name}.json")
     }
+}
 
-    let fallback = PathBuf::from(".");
-    let dir = old.parent().unwrap_or(&fallback);
-    let new_path = dir.join(format!("{}.json", new_name));
+fn resolve_named_state(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let direct = [
+        dir.join(name),
+        dir.join(format!("{name}.json")),
+        dir.join(format!("{name}.json.enc")),
+    ];
+    for candidate in &direct {
+        if candidate.is_file() {
+            return Ok(candidate.clone());
+        }
+    }
+    let prefix = format!("{name}-");
+    let mut matches = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_state_file(&path) {
+                continue;
+            }
+            let fname = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if fname.starts_with(&prefix) {
+                matches.push(path);
+            }
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(format!("State file not found: {name}")),
+        _ => Err(format!(
+            "State name '{name}' matches more than one file. Pass the filename."
+        )),
+    }
+}
 
-    fs::rename(&old, &new_path).map_err(|e| format!("Failed to rename state: {}", e))?;
+pub fn state_rename(old_path: &str, new_name: &str) -> Result<Value, String> {
+    let given = PathBuf::from(old_path);
+    let (old, new_path) = if given.is_file() && is_explicit_state_path(old_path) {
+        let fallback = PathBuf::from(".");
+        let dir = given.parent().unwrap_or(&fallback).to_path_buf();
+        (given, dir.join(format!("{new_name}.json")))
+    } else {
+        let old = resolve_named_state(&get_sessions_dir(), old_path)?;
+        let fname = old
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let fallback = PathBuf::from(".");
+        let dir = old.parent().unwrap_or(&fallback).to_path_buf();
+        let new_path = dir.join(renamed_session_filename(&fname, old_path, new_name));
+        if new_path != old && new_path.exists() {
+            return Err(format!("State file already exists: {}", new_path.display()));
+        }
+        (old, new_path)
+    };
+
+    if new_path != old {
+        fs::rename(&old, &new_path).map_err(|e| format!("Failed to rename state: {}", e))?;
+    }
 
     Ok(json!({
         "renamed": true,
@@ -812,17 +884,23 @@ pub fn dispatch_state_command(cmd: &Value) -> Option<Result<Value, String>> {
             let days = cmd.get("days").and_then(|v| v.as_u64()).unwrap_or(30);
             Some(state_clean(days))
         }
-        "state_rename" => Some(
-            cmd.get("path")
+        "state_rename" => {
+            let path = cmd
+                .get("path")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| "Missing 'path' parameter".to_string())
-                .and_then(|path| {
-                    cmd.get("name")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "Missing 'name' parameter".to_string())
-                        .and_then(|name| state_rename(path, name))
-                }),
-        ),
+                .or_else(|| cmd.get("oldName").and_then(|v| v.as_str()));
+            let name = cmd
+                .get("name")
+                .and_then(|v| v.as_str())
+                .or_else(|| cmd.get("newName").and_then(|v| v.as_str()));
+            Some(
+                path.ok_or_else(|| "Missing 'path' parameter".to_string())
+                    .and_then(|path| {
+                        name.ok_or_else(|| "Missing 'name' parameter".to_string())
+                            .and_then(|name| state_rename(path, name))
+                    }),
+            )
+        }
         _ => None,
     }
 }
@@ -1049,6 +1127,77 @@ mod tests {
         let result = dispatch_state_command(&cmd).unwrap();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Missing 'path' parameter");
+    }
+
+    fn isolated_sessions_dir() -> (
+        crate::test_utils::EnvGuard<'static>,
+        tempfile::TempDir,
+        PathBuf,
+    ) {
+        let guard =
+            crate::test_utils::EnvGuard::new(&["HOME", "USERPROFILE", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        guard.set("HOME", root);
+        guard.set("USERPROFILE", root);
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        let sessions = get_sessions_dir();
+        assert!(
+            sessions.starts_with(dir.path()),
+            "refusing to touch sessions outside the test home: {}",
+            sessions.display()
+        );
+        fs::create_dir_all(&sessions).unwrap();
+        (guard, dir, sessions)
+    }
+
+    #[test]
+    fn test_resolve_named_state_finds_saved_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = dir.path().join("app-session-1.json");
+        fs::write(&saved, "{}").unwrap();
+        let resolved = resolve_named_state(dir.path(), "app-session-1").unwrap();
+        assert_eq!(resolved, saved);
+    }
+
+    #[test]
+    fn test_resolve_named_state_rejects_ambiguous_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("app-a.json"), "{}").unwrap();
+        fs::write(dir.path().join("app-b.json"), "{}").unwrap();
+        let err = resolve_named_state(dir.path(), "app").unwrap_err();
+        assert!(err.contains("more than one"), "{err}");
+    }
+
+    #[test]
+    fn test_state_rename_keeps_saved_session_suffix() {
+        let (_guard, _dir, sessions) = isolated_sessions_dir();
+        let saved = sessions.join("app-session-1.json");
+        fs::write(&saved, "{}").unwrap();
+
+        let result = state_rename("app", "other").unwrap();
+
+        let dest = sessions.join("other-session-1.json");
+        assert_eq!(result["from"], "app");
+        assert_eq!(result["to"], dest.to_string_lossy().as_ref());
+        assert!(dest.is_file());
+        assert!(!saved.exists());
+    }
+
+    #[test]
+    fn test_dispatch_state_rename_accepts_legacy_field_names() {
+        let (_guard, _dir, sessions) = isolated_sessions_dir();
+        fs::write(sessions.join("app-session-1.json"), "{}").unwrap();
+        let cmd = serde_json::json!({
+            "action": "state_rename",
+            "oldName": "app",
+            "newName": "other"
+        });
+
+        let result = dispatch_state_command(&cmd).unwrap().unwrap();
+
+        assert_eq!(result["renamed"], true);
+        assert!(sessions.join("other-session-1.json").is_file());
     }
 
     #[test]
