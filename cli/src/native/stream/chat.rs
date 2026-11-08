@@ -570,10 +570,48 @@ pub(crate) async fn execute_chat_tool(session: &str, command: &str, was_open: bo
     }
 }
 
+/// Reject malformed or failed gateway events instead of treating them as empty answers.
+pub(crate) fn parse_gateway_event(data: &str) -> Result<Value, String> {
+    let event: Value = serde_json::from_str(data)
+        .map_err(|error| format!("Invalid gateway stream event: {}", error))?;
+    if let Some(error) = event.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Gateway error");
+        return Err(format!("Gateway stream failed: {}", message));
+    }
+    if let Some(reason) = event
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+    {
+        if !matches!(reason, "stop" | "tool_calls" | "function_call") {
+            return Err(format!("Gateway response did not complete: {}", reason));
+        }
+    }
+    Ok(event)
+}
+
+pub(crate) fn validate_gateway_tool_calls(
+    calls: &[(String, String, String)],
+) -> Result<(), String> {
+    for (id, name, arguments) in calls {
+        let input: Value = serde_json::from_str(arguments)
+            .map_err(|_| "Gateway returned incomplete tool arguments".to_string())?;
+        if id.is_empty()
+            || name != "agent_browser"
+            || input.get("command").and_then(Value::as_str).is_none()
+        {
+            return Err("Gateway returned an invalid browser tool call".into());
+        }
+    }
+    Ok(())
+}
+
 async fn stream_gateway_response(
     stream: &mut tokio::net::TcpStream,
     gw_response: reqwest::Response,
-) -> Vec<(String, String, String)> {
+) -> Result<Vec<(String, String, String)>, String> {
     use futures_util::StreamExt as _;
 
     let mut text_part_id = uuid::Uuid::new_v4().to_string();
@@ -587,7 +625,7 @@ async fn stream_gateway_response(
     while let Some(chunk_result) = byte_stream.next().await {
         let chunk = match chunk_result {
             Ok(c) => c,
-            Err(_) => break,
+            Err(error) => return Err(format!("Gateway stream interrupted: {}", error)),
         };
 
         buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -614,11 +652,10 @@ async fn stream_gateway_response(
                         tool_calls.push(tc);
                     }
                 }
-                return tool_calls;
+                validate_gateway_tool_calls(&tool_calls)?;
+                return Ok(tool_calls);
             }
-            let Ok(sse_json) = serde_json::from_str::<Value>(data) else {
-                continue;
-            };
+            let sse_json = parse_gateway_event(data)?;
             let delta = sse_json
                 .get("choices")
                 .and_then(|c| c.get(0))
@@ -633,7 +670,7 @@ async fn stream_gateway_response(
                             json!({"type":"text-start","id":text_part_id})
                         );
                         if stream.write_all(ev.as_bytes()).await.is_err() {
-                            return tool_calls;
+                            return Err("Chat client disconnected".into());
                         }
                         text_started = true;
                     }
@@ -642,7 +679,7 @@ async fn stream_gateway_response(
                         json!({"type":"text-delta","id":text_part_id,"delta":text})
                     );
                     if stream.write_all(ev.as_bytes()).await.is_err() {
-                        return tool_calls;
+                        return Err("Chat client disconnected".into());
                     }
                 }
             }
@@ -699,14 +736,7 @@ async fn stream_gateway_response(
         let ev = format!("data: {}\n\n", json!({"type":"text-end","id":text_part_id}));
         let _ = stream.write_all(ev.as_bytes()).await;
     }
-    let mut indices: Vec<usize> = tool_call_args.keys().copied().collect();
-    indices.sort();
-    for idx in indices {
-        if let Some(tc) = tool_call_args.remove(&idx) {
-            tool_calls.push(tc);
-        }
-    }
-    tool_calls
+    Err("Gateway stream ended before its completion marker; no pending tools were executed.".into())
 }
 
 pub(super) async fn handle_chat_request(
@@ -898,6 +928,7 @@ pub(super) async fn handle_chat_request(
     const TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
     let was_open = crate::connection::daemon_ready(&session);
 
+    let mut completed = false;
     for _step in 0..50 {
         if tokio::time::Instant::now() >= total_deadline {
             let ev = format!(
@@ -949,9 +980,17 @@ pub(super) async fn handle_chat_request(
             break;
         }
 
-        let tool_calls = stream_gateway_response(stream, gw_response).await;
+        let tool_calls = match stream_gateway_response(stream, gw_response).await {
+            Ok(calls) => calls,
+            Err(error) => {
+                let event = format!("data: {}\n\n", json!({"type":"error","errorText":error}));
+                let _ = stream.write_all(event.as_bytes()).await;
+                return;
+            }
+        };
 
         if tool_calls.is_empty() {
+            completed = true;
             let finish_step_ev = "data: {\"type\":\"finish-step\"}\n\n";
             let _ = stream.write_all(finish_step_ev.as_bytes()).await;
             break;
@@ -1011,6 +1050,14 @@ pub(super) async fn handle_chat_request(
         let _ = stream.write_all(finish_step_ev.as_bytes()).await;
     }
 
+    if !completed {
+        let event = format!(
+            "data: {}\n\n",
+            json!({"type":"error","errorText":"Chat stopped before completing the task."})
+        );
+        let _ = stream.write_all(event.as_bytes()).await;
+        return;
+    }
     let finish_ev = "data: {\"type\":\"finish\"}\n\n";
     let _ = stream.write_all(finish_ev.as_bytes()).await;
     let done_ev = "data: [DONE]\n\n";
