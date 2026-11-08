@@ -237,6 +237,8 @@ fn mouse_button(button: &str) -> u8 {
     match button.to_ascii_lowercase().as_str() {
         "middle" => 1,
         "right" => 2,
+        "back" => 3,
+        "forward" => 4,
         _ => 0,
     }
 }

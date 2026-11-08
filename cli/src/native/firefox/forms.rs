@@ -14,7 +14,7 @@ use super::target::{resolve_target, Target};
 use crate::native::actions::DaemonState;
 use crate::native::element::ELEMENT_CHECKED_JS;
 use crate::native::interaction::{
-    CLEAR_INPUT_JS, CLEAR_VALUE_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
+    CLEAR_INPUT_JS, CLEAR_VALUE_JS, CLICK_CHECKBOX_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
 };
 
 const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
@@ -148,6 +148,7 @@ async fn literal_edit(
     };
     match result.as_str() {
         Some("ok" | "canceled") => Ok(()),
+        Some("unsupported") if target.is_none() => Ok(()),
         _ => Err("Text input is not supported for the focused element".to_string()),
     }
 }
@@ -360,20 +361,45 @@ pub async fn select(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     Ok(json!({ "selected": values }))
 }
 
-/// Checks a checkbox or radio unless it is already checked.
-pub async fn check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = require(cmd, "selector")?;
-    let target = resolve_target(state, selector).await?;
-    let ff = session(state)?;
-    if run(ff, &target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(false)) {
-        prepare(ff, &target, selector, true).await?;
-        perform(
+async fn set_checked(
+    ff: &FirefoxSession,
+    target: &Target,
+    selector: &str,
+    checked: bool,
+) -> Result<(), String> {
+    if run(ff, target, ELEMENT_CHECKED_JS, vec![]).await? != Some(json!(!checked)) {
+        return Ok(());
+    }
+    let visible = run(
+        ff,
+        target,
+        "function() { const r = this.getClientRects()[0]; return !!r && r.width > 0 && r.height > 0; }",
+        vec![],
+    )
+    .await?;
+    if visible == Some(json!(true)) {
+        prepare(ff, target, selector, false).await?;
+        if perform(
             ff,
             &target.context,
             pointer_click(&Origin::Element(target.shared_id.clone()), "left", 1),
         )
-        .await?;
+        .await?
+        {
+            return Ok(());
+        }
     }
+    if run(ff, target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(!checked)) {
+        run(ff, target, CLICK_CHECKBOX_JS, vec![]).await?;
+    }
+    Ok(())
+}
+
+/// Checks a checkbox or radio unless it is already checked.
+pub async fn check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = require(cmd, "selector")?;
+    let target = resolve_target(state, selector).await?;
+    set_checked(session(state)?, &target, selector, true).await?;
     Ok(json!({ "checked": selector }))
 }
 
@@ -381,16 +407,7 @@ pub async fn check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 pub async fn uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = require(cmd, "selector")?;
     let target = resolve_target(state, selector).await?;
-    let ff = session(state)?;
-    if run(ff, &target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(true)) {
-        prepare(ff, &target, selector, true).await?;
-        perform(
-            ff,
-            &target.context,
-            pointer_click(&Origin::Element(target.shared_id.clone()), "left", 1),
-        )
-        .await?;
-    }
+    set_checked(session(state)?, &target, selector, false).await?;
     Ok(json!({ "unchecked": selector }))
 }
 
@@ -731,7 +748,7 @@ mod tests {
                 .unwrap(),
             json!({"checked": "#agree"})
         );
-        assert_eq!(calls.lock().unwrap().len(), 4);
+        assert_eq!(calls.lock().unwrap().len(), 5);
 
         let (ff, _tx, calls) = fake_session_with(checkbox_responder(true)).await;
         let mut state = state_with(ff);
@@ -751,7 +768,7 @@ mod tests {
                 .unwrap(),
             json!({"unchecked": "#agree"})
         );
-        assert_eq!(calls.lock().unwrap().len(), 4);
+        assert_eq!(calls.lock().unwrap().len(), 5);
     }
 
     #[tokio::test]

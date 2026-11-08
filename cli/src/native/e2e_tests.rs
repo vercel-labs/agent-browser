@@ -15765,6 +15765,33 @@ async fn e2e_firefox_core_flow_and_ref_stability() {
 
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_hidden_checkbox_and_disabled_hover() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &format!("{}forms.html", fixture.url)).await;
+    firefox_eval(&mut state, "document.body.insertAdjacentHTML('afterbegin', `<input id=\"hidden-check\" type=\"checkbox\" style=\"display:none\"><button id=\"disabled-hover\" disabled>Disabled</button>`); window.__hovered = false; document.querySelector('#disabled-hover').addEventListener('pointerover', () => window.__hovered = true)").await;
+    for (action, checked) in [("check", true), ("uncheck", false)] {
+        assert_success(&firefox_act(&mut state, action, "#hidden-check", json!({})).await);
+        assert_eq!(
+            firefox_eval(
+                &mut state,
+                "document.querySelector('#hidden-check').checked"
+            )
+            .await,
+            checked
+        );
+    }
+    assert_success(&firefox_act(&mut state, "hover", "#disabled-hover", json!({})).await);
+    assert_eq!(firefox_eval(&mut state, "window.__hovered").await, true);
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_html5_drag_drops_payload() {
     required_firefox_binary();
     let tmp = tempfile::tempdir().unwrap();

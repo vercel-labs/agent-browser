@@ -185,7 +185,7 @@ pub async fn hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
     let actions = pointer_hover(&Origin::Element(target.shared_id.clone()));
 
     let ff = session(state)?;
-    let position = prepare(ff, &target, selector, true).await?;
+    let position = prepare(ff, &target, selector, false).await?;
     let same_context = target.context == ff.top_context;
     let dialog_opened = perform(ff, &target.context, actions).await?;
     if same_context && !dialog_opened {
@@ -223,7 +223,7 @@ pub async fn tap(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> 
     let actions = touch_tap(&Origin::Element(target.shared_id.clone()));
 
     let ff = session(state)?;
-    prepare(ff, &target, selector, true).await?;
+    prepare(ff, &target, selector, false).await?;
     perform(ff, &target.context, actions).await?;
     Ok(json!({ "tapped": selector }))
 }
@@ -289,8 +289,9 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
         return Err("Dragging between different frames is not supported on Firefox".to_string());
     }
 
-    let ff = session(state)?;
-    let (sx, sy) = prepare(ff, &source_target, source, true).await?;
+    let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
+    let top_level = source_target.context == ff.top_context;
+    let (sx, sy) = prepare(ff, &source_target, source, false).await?;
     let html5 = ff
         .bidi
         .call_function(
@@ -301,8 +302,8 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
         )
         .await?;
     if html5 == true {
-        let (tx, ty) = prepare(ff, &target, target_selector, true).await?;
-        ff.race_prompt(
+        let (tx, ty) = prepare(ff, &target, target_selector, false).await?;
+        let completed = ff.race_prompt(
             &source_target.context,
             ff.bidi.call_function(
                 &source_target.context,
@@ -345,6 +346,10 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
             ),
         )
         .await?;
+        if top_level && completed.is_some() {
+            (state.mouse_state.x, state.mouse_state.y) = (tx, ty);
+            state.mouse_state.buttons = 0;
+        }
         return Ok(json!({ "dragged": true, "source": source, "target": target_selector }));
     }
     let source_origin = Origin::Viewport { x: sx, y: sy };
@@ -359,23 +364,43 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
         {
             return Ok(());
         }
-        let (tx, ty) = prepare(ff, &target, target_selector, true).await?;
+        if top_level {
+            (state.mouse_state.x, state.mouse_state.y) = (sx, sy);
+            state.mouse_state.buttons = 1;
+        }
+        let (tx, ty) = prepare(ff, &target, target_selector, false).await?;
         let target_origin = Origin::Viewport { x: tx, y: ty };
         release_at = target_origin.clone();
         if perform(ff, &source_target.context, pointer_hover(&target_origin)).await? {
             return Ok(());
         }
-        perform(
+        if top_level {
+            (state.mouse_state.x, state.mouse_state.y) = (tx, ty);
+        }
+        if !perform(
             ff,
             &source_target.context,
             pointer_up(&target_origin, "left"),
         )
-        .await?;
+        .await?
+            && top_level
+        {
+            state.mouse_state.buttons = 0;
+        }
         Ok(())
     }
     .await;
     if let Err(error) = result {
-        let _ = perform(ff, &source_target.context, pointer_up(&release_at, "left")).await;
+        if matches!(
+            perform(ff, &source_target.context, pointer_up(&release_at, "left")).await,
+            Ok(false)
+        ) && top_level
+        {
+            if let Origin::Viewport { x, y } = release_at {
+                (state.mouse_state.x, state.mouse_state.y) = (x, y);
+            }
+            state.mouse_state.buttons = 0;
+        }
         return Err(error);
     }
 
@@ -801,6 +826,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extra_buttons_dispatch_and_track_the_same_button() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        for (button, code, mask) in [("back", 3, 8), ("forward", 4, 16)] {
+            mousedown(&json!({"button": button}), &mut state)
+                .await
+                .unwrap();
+            assert_eq!(state.mouse_state.buttons, mask);
+            mouseup(&json!({"button": button}), &mut state)
+                .await
+                .unwrap();
+            assert_eq!(state.mouse_state.buttons, 0);
+            let requests = requests.lock().unwrap();
+            let down = &requests[requests.len() - 2]["params"]["actions"][0]["actions"][1];
+            let up = &requests[requests.len() - 1]["params"]["actions"][0]["actions"][1];
+            assert_eq!(down, &json!({"type": "pointerDown", "button": code}));
+            assert_eq!(up, &json!({"type": "pointerUp", "button": code}));
+        }
+    }
+
+    #[tokio::test]
     async fn wheel_uses_and_commits_each_coordinate_independently() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
@@ -1059,6 +1112,26 @@ mod tests {
             scroll(&json!({ "y": 80 }), &mut state).await.unwrap(),
             json!({ "scrolled": true })
         );
+    }
+
+    #[tokio::test]
+    async fn drag_updates_position_for_following_wheel() {
+        let (mut state, _) = state_with_refs(connected).await;
+        state.mouse_state.x = 17.0;
+        state.mouse_state.y = 23.0;
+        drag(&json!({"source": "@e1", "target": "@e2"}), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                state.mouse_state.x,
+                state.mouse_state.y,
+                state.mouse_state.buttons
+            ),
+            (40.0, 50.0, 0)
+        );
+        wheel(&json!({"deltaY": 12}), &mut state).await.unwrap();
+        assert_eq!((state.mouse_state.x, state.mouse_state.y), (40.0, 50.0));
     }
 
     #[tokio::test]
