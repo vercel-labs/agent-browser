@@ -19,9 +19,13 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         validate_tab_label(session(state)?, label)?;
     }
 
+    let mut create = json!({"type": "tab"});
+    if let Some(partition) = session(state)?.active_partition() {
+        create["userContext"] = partition["userContext"].clone();
+    }
     let created = session(state)?
         .bidi
-        .send("browsingContext.create", json!({"type": "tab"}))
+        .send("browsingContext.create", create)
         .await?;
     let context = created["context"]
         .as_str()
