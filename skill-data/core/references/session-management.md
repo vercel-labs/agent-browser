@@ -56,7 +56,7 @@ Each session has independent:
 
 Firefox attaches over WebDriver BiDi with `connect <port|url>` or `--cdp <port|url>`, for example `agent-browser connect 9222`. Start Firefox 150 or newer with `--remote-debugging-port 9222 --start-debugger-server 6000 -profile <dir>` and the DevTools prefs listed in [commands.md](commands.md). A `ws://` or `wss://` URL whose path is `/session` is treated as Firefox, and `?devtools=<port>` overrides the DevTools port, which defaults to 6000.
 
-The attached browser is externally owned, so `close` ends the BiDi session and leaves Firefox running. Only one client can hold a Firefox BiDi session at a time, so close the other client before attaching. Firefox's DevTools companion uses unencrypted RDP, so remote Firefox requires forwarding both the BiDi and DevTools ports through an encrypted tunnel such as `ssh -L`, then connecting to `127.0.0.1`.
+The attached browser is externally owned, so `close` ends the BiDi session and leaves Firefox running. Only one client can hold a Firefox BiDi session at a time, so close the other client before attaching; a client that exits without ending its session keeps it until Firefox restarts. `--download-path` and `--user-agent` apply to the attached browser and `close` resets both. `download` is refused on an attached Firefox; `wait --download` reports the path Firefox saved to. Firefox's DevTools companion uses unencrypted RDP, so remote Firefox requires forwarding both the BiDi and DevTools ports through an encrypted tunnel such as `ssh -L`, then connecting to `127.0.0.1`.
 
 ## Tab Pinning in a Shared Browser
 

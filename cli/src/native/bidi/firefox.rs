@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use crate::native::cdp::chrome::LaunchOptions;
 #[cfg(windows)]
 pub(crate) use crate::native::cdp::windows_process::Child;
+use crate::session_settings::Connection;
 #[cfg(not(windows))]
 pub(crate) use std::process::Child;
 
@@ -41,13 +42,12 @@ pub struct FirefoxProcess {
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Rejects options Firefox cannot honour. `auto_connect` and `provider` are resolved from flags, env and config by the caller.
+/// Rejects options a Firefox session cannot honour, for the connection it would use.
 pub fn validate_firefox_options(
     options: &LaunchOptions,
-    auto_connect: bool,
-    provider: Option<&str>,
-    attached: bool,
+    connection: &Connection,
 ) -> Result<(), String> {
+    let attached = matches!(connection, Connection::Cdp(_));
     let unsupported = |flag: &str| {
         Err(if attached {
             format!("{flag} is not supported when attaching to Firefox")
@@ -55,10 +55,10 @@ pub fn validate_firefox_options(
             format!("{flag} is not supported with --engine firefox")
         })
     };
-    if auto_connect {
+    if matches!(connection, Connection::AutoConnect) {
         return unsupported("--auto-connect");
     }
-    if provider.is_some() {
+    if matches!(connection, Connection::Provider(_)) {
         return unsupported("--provider");
     }
     if options.extensions.as_ref().is_some_and(|e| !e.is_empty()) {
@@ -78,6 +78,30 @@ pub fn validate_firefox_options(
     }
     if options.ca_cert.is_some() {
         return unsupported("--ca-cert");
+    }
+    Ok(())
+}
+
+/// Rejects launch features, init scripts and launch-mutator plugins, which Firefox does not apply.
+pub fn validate_firefox_settings(
+    enable_features: &[String],
+    init_scripts: &[String],
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<(), String> {
+    let unsupported = |flag: &str| Err(format!("{flag} is not supported with --engine firefox"));
+    if !enable_features.is_empty() {
+        return unsupported("--enable");
+    }
+    if !init_scripts.is_empty() {
+        return unsupported("--init-script");
+    }
+    if !crate::plugins::resolved_plugins_with_capability(
+        plugins,
+        crate::plugins::CAPABILITY_LAUNCH_MUTATE,
+    )
+    .is_empty()
+    {
+        return unsupported("launch-mutator plugins");
     }
     Ok(())
 }
@@ -408,12 +432,12 @@ mod tests {
     }
 
     fn err_of(o: &LaunchOptions) -> String {
-        validate_firefox_options(o, false, None, false).unwrap_err()
+        validate_firefox_options(o, &Connection::Local).unwrap_err()
     }
 
     #[test]
     fn validate_accepts_plain_options() {
-        assert!(validate_firefox_options(&ok(), false, None, false).is_ok());
+        assert!(validate_firefox_options(&ok(), &Connection::Local).is_ok());
     }
 
     #[test]
@@ -436,10 +460,26 @@ mod tests {
         let mut o = ok();
         o.ca_cert = Some("c".into());
         assert!(err_of(&o).contains("--ca-cert"));
-        let e = validate_firefox_options(&ok(), true, None, false).unwrap_err();
-        assert!(e.contains("--auto-connect"));
-        let e = validate_firefox_options(&ok(), false, Some("browserbase"), false).unwrap_err();
-        assert!(e.contains("--provider"));
+        let e = validate_firefox_options(&ok(), &Connection::AutoConnect).unwrap_err();
+        assert!(e.contains("--auto-connect"), "{e}");
+        assert!(e.contains("--engine firefox"), "{e}");
+        let e = validate_firefox_options(&ok(), &Connection::Provider("browserbase".into()))
+            .unwrap_err();
+        assert!(e.contains("--provider"), "{e}");
+    }
+
+    #[test]
+    fn validate_blames_attach_for_options_only_an_attach_refuses() {
+        let mut o = ok();
+        o.profile = Some("p".into());
+        assert_eq!(
+            validate_firefox_options(&o, &Connection::Cdp("9333".into())).unwrap_err(),
+            "--profile is not supported when attaching to Firefox"
+        );
+        assert_eq!(
+            validate_firefox_options(&o, &Connection::Local).unwrap_err(),
+            "--profile is not supported with --engine firefox"
+        );
     }
 
     #[test]

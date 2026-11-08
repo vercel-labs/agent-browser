@@ -398,7 +398,6 @@ pub fn apply_attach_launch_options(cmd: &mut Value, flags: &Flags) {
     }
 }
 
-/// Stamps `timeout` on a wait-family command that has none.
 /// Stamps `timeout` on a wait-family command or `flow_save` that has none,
 /// so the client read timeout follows it.
 pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {

@@ -66,7 +66,7 @@ agent-browser connect 9222
 
 A WebSocket URL whose path is `/session` is treated as Firefox BiDi. Other targets try CDP first, then probe for Firefox. Pass `--engine firefox` to skip the CDP attempt. Firefox uses DevTools port 6000 unless the URL sets `?devtools=<port>`. `close` ends the BiDi session but leaves Firefox running. Firefox allows one BiDi client at a time, and `--auto-connect` does not support Firefox.
 
-The Firefox DevTools companion uses unencrypted RDP. For remote Firefox, forward both ports through an encrypted tunnel and connect to `127.0.0.1`. Firefox attach rejects `--allowed-domains` and `--pin-tab`; launch-only options such as `--headed`, `--executable-path`, and `--profile` do not apply to an already-running browser.
+The Firefox DevTools companion uses unencrypted RDP. For remote Firefox, forward both ports through an encrypted tunnel and connect to `127.0.0.1`. Firefox attach rejects `--allowed-domains`, `--pin-tab`, and the options that need a launch (`--profile`, `--args`, `--extension`, `--allow-file-access`, `--webgpu`, `--ca-cert`); `--headed` and `--executable-path` have no effect on a browser that is already running. `--download-path` and `--user-agent` apply to the attached browser and `close` resets them.
 
 ## Auto-Connect
 

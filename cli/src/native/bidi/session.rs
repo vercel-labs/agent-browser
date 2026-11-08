@@ -22,6 +22,7 @@ const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 const DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 const ATTACH_DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const ATTACHED_RESET_TIMEOUT: Duration = Duration::from_secs(1);
 const CONTEXT_EVENTS: [&str; 3] = [
     "browsingContext.contextCreated",
     "browsingContext.contextDestroyed",
@@ -32,10 +33,18 @@ const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptClosed",
 ];
 
+/// Changes a session made to a browser someone else runs. Firefox keeps them after
+/// `session.end`, so close undoes every one the session recorded.
+#[derive(Default)]
+struct AttachedChanges {
+    download_behavior: bool,
+    user_agent: bool,
+}
+
 /// A Firefox session. Dropping it releases protocol clients and kills only an owned process.
 pub struct FirefoxSession {
     process: Option<FirefoxProcess>,
-    pub headless: bool,
+    headless: bool,
     pub bidi: Arc<BidiClient>,
     pub auto_dialog: Arc<AtomicBool>,
     pub auto_dialog_changed: Arc<Notify>,
@@ -66,6 +75,8 @@ pub struct FirefoxSession {
     pub emulation: Arc<std::sync::RwLock<EmulationSettings>>,
     /// Launch download directory, restored after `download` redirects it.
     pub download_dir: Option<String>,
+    /// Settings this session changed in a browser it does not own.
+    attached_changes: AttachedChanges,
     events: mpsc::Receiver<Value>,
     pub net: NetContext,
     /// True once the single global network intercept is installed; it is never installed twice.
@@ -216,7 +227,7 @@ impl FirefoxSession {
         let created = match within_attach_deadline(deadline, create_session).await {
             Err(error) if attached && error.contains("Maximum number of active sessions") => {
                 return Err(format!(
-                    "Firefox at {} already has a WebDriver BiDi session. Another client is attached; close it and retry.",
+                    "Firefox at {} already has a WebDriver BiDi session. End it from the client that holds it, or restart Firefox: a session whose client exited without ending it stays until Firefox restarts.",
                     super::attach::target_label(&target.bidi_url)
                 ));
             }
@@ -237,12 +248,22 @@ impl FirefoxSession {
             ),
         )
         .await;
-        if attached && result.is_err() {
-            let _ = cleanup_bidi
-                .send_timeout("session.end", json!({}), SHUTDOWN_TIMEOUT)
-                .await;
+        let mut session = match result {
+            Ok(session) => session,
+            Err(error) => {
+                if attached {
+                    let _ = cleanup_bidi
+                        .send_timeout("session.end", json!({}), SHUTDOWN_TIMEOUT)
+                        .await;
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = session.apply_launch_options(options).await {
+            session.close().await;
+            return Err(error);
         }
-        result
+        Ok(session)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -365,6 +386,7 @@ impl FirefoxSession {
             shadow_ids: Default::default(),
             emulation,
             download_dir: options.download_path.clone(),
+            attached_changes: AttachedChanges::default(),
             events,
             net,
             intercepting: false,
@@ -431,13 +453,84 @@ impl FirefoxSession {
             || self.bidi.is_closed()
     }
 
-    /// Returns whether this session attached to an existing Firefox.
-    pub fn is_attached(&self) -> bool {
+    /// Returns whether this session attached to a Firefox someone else runs.
+    fn is_attached(&self) -> bool {
         self.process.is_none()
     }
 
-    /// Ends the BiDi session and releases any owned Firefox process.
+    /// Whether downloaded files land on this machine, which only a browser this
+    /// session launched guarantees.
+    pub fn downloads_are_local(&self) -> bool {
+        self.process.is_some()
+    }
+
+    /// Whether the default idle timeout must leave this browser running: the daemon
+    /// never stops a headed browser or one it does not own on a timer.
+    pub fn blocks_default_idle_shutdown(&self) -> bool {
+        self.is_attached() || !self.headless
+    }
+
+    /// Records the overrides that close must undo in a browser someone else runs, and
+    /// applies the launch options that only take effect once the session is connected.
+    async fn apply_launch_options(&mut self, options: &LaunchOptions) -> Result<(), String> {
+        if !self.is_attached() {
+            return Ok(());
+        }
+        self.attached_changes.user_agent |= options.user_agent.is_some();
+        let Some(path) = options.download_path.as_deref() else {
+            return Ok(());
+        };
+        self.attached_changes.download_behavior = true;
+        self.bidi
+            .send(
+                "browser.setDownloadBehavior",
+                json!({"downloadBehavior": {"type": "allowed", "destinationFolder": path}}),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                format!("Unable to apply --download-path to attached Firefox: {error}")
+            })
+    }
+
+    /// Records that the user agent was overridden, so close resets it for a browser it does not own.
+    pub(crate) fn record_user_agent_override(&mut self) {
+        self.attached_changes.user_agent = true;
+    }
+
+    /// Undoes the overrides this session applied to a browser it does not own.
+    async fn undo_attached_changes(&self) {
+        if !self.is_attached() {
+            return;
+        }
+        if self.attached_changes.download_behavior {
+            let _ = self
+                .bidi
+                .send_timeout(
+                    "browser.setDownloadBehavior",
+                    json!({"downloadBehavior": null}),
+                    ATTACHED_RESET_TIMEOUT,
+                )
+                .await;
+        }
+        if self.attached_changes.user_agent {
+            let contexts: Vec<&String> = self.tab_ids.keys().collect();
+            if !contexts.is_empty() {
+                let _ = self
+                    .bidi
+                    .send_timeout(
+                        "emulation.setUserAgentOverride",
+                        json!({"userAgent": null, "contexts": contexts}),
+                        ATTACHED_RESET_TIMEOUT,
+                    )
+                    .await;
+            }
+        }
+    }
+
+    /// Undoes what it changed, ends the BiDi session and releases any owned Firefox process.
     pub async fn close(self) {
+        self.undo_attached_changes().await;
         let _ = self
             .bidi
             .send_timeout("session.end", json!({}), SHUTDOWN_TIMEOUT)
@@ -966,7 +1059,7 @@ pub(crate) mod tests {
     ) -> FirefoxSession {
         FirefoxSession {
             process: None,
-            headless: true,
+            headless: false,
             bidi,
             auto_dialog: Arc::new(AtomicBool::new(false)),
             auto_dialog_changed: Arc::new(Notify::new()),
@@ -988,12 +1081,71 @@ pub(crate) mod tests {
             shadow_ids: Default::default(),
             emulation: Arc::default(),
             download_dir: None,
+            attached_changes: AttachedChanges::default(),
             visited_origins: HashSet::new(),
             events,
             net: NetContext::default(),
             intercepting: false,
             inflight: HashMap::new(),
             dispatcher: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn attached_launch_options_are_undone_before_session_end() {
+        for (download_path, user_agent, reject) in [
+            (None, None, false),
+            (Some("/downloads"), None, false),
+            (Some("/downloads"), None, true),
+            (None, Some("Agent/1.0"), false),
+        ] {
+            let (url, _tx, _calls, messages) = fake_bidi_with_replies(move |message| {
+                if reject && message["method"] == "browser.setDownloadBehavior" {
+                    FakeReply::Error {
+                        error: "unknown error",
+                        message: "failed",
+                    }
+                } else {
+                    FakeReply::Result(json!({}))
+                }
+            })
+            .await;
+            let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+            let mut session = session_over_bidi(bidi).await;
+            let options = LaunchOptions {
+                download_path: download_path.map(str::to_string),
+                user_agent: user_agent.map(str::to_string),
+                ..LaunchOptions::default()
+            };
+            assert_eq!(
+                session.apply_launch_options(&options).await.is_err(),
+                reject
+            );
+            session.close().await;
+            let messages = messages.lock().unwrap();
+            let commands: Vec<_> = messages
+                .iter()
+                .map(|message| (message["method"].clone(), message["params"].clone()))
+                .collect();
+            let mut expected = Vec::new();
+            if download_path.is_some() {
+                expected.push((
+                    json!("browser.setDownloadBehavior"),
+                    json!({"downloadBehavior": {"type": "allowed", "destinationFolder": "/downloads"}}),
+                ));
+                expected.push((
+                    json!("browser.setDownloadBehavior"),
+                    json!({"downloadBehavior": null}),
+                ));
+            }
+            if user_agent.is_some() {
+                expected.push((
+                    json!("emulation.setUserAgentOverride"),
+                    json!({"userAgent": null, "contexts": ["ctx-active"]}),
+                ));
+            }
+            expected.push((json!("session.end"), json!({})));
+            assert_eq!(commands, expected);
         }
     }
 
@@ -1122,7 +1274,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn attach_reports_another_client_holding_the_bidi_session() {
+    async fn attach_reports_the_session_another_client_holds() {
         let error = attach_error(
             &[(
                 "session.new",
@@ -1135,7 +1287,11 @@ pub(crate) mod tests {
             None,
         )
         .await;
-        assert!(error.contains("Another client is attached"), "{error}");
+        assert!(
+            error.contains("already has a WebDriver BiDi session"),
+            "{error}"
+        );
+        assert!(error.contains("restart Firefox"), "{error}");
     }
 
     #[tokio::test]

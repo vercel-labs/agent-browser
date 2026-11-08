@@ -987,7 +987,7 @@ async fn wait_download(
 /// `download`: clicks the ref or selector and saves the resulting file at `path`.
 /// Only an owned browser may name files on the daemon's filesystem.
 pub async fn download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    if session(state)?.is_attached() {
+    if !session(state)?.downloads_are_local() {
         return Err(
             "Saving downloads from an attached Firefox is not supported; launch Firefox with --engine firefox instead"
                 .to_string(),
@@ -1070,7 +1070,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             saved.display()
         ));
     }
-    if !chrome::may_move_download(saved, !ff.is_attached(), Some(download_dir)) {
+    if !chrome::may_move_download(saved, ff.downloads_are_local(), Some(download_dir)) {
         return Err(format!(
             "Refusing to move downloaded file from {}",
             saved.display()
@@ -1089,7 +1089,7 @@ pub async fn waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Val
     let ff = session(state)?;
     let downloads = ff.net.downloads.clone();
     let download_dir = ff.download_dir.clone();
-    let launched_locally = !ff.is_attached();
+    let launched_locally = ff.downloads_are_local();
     let record = wait_download(
         &downloads,
         0,
@@ -1232,7 +1232,7 @@ mod tests {
             std::fs::write(&saved, b"private data").unwrap();
             std::fs::write(&destination, b"keep destination").unwrap();
             let (mut ff, _tx, _) = fake_session().await;
-            assert!(ff.is_attached());
+            assert!(!ff.downloads_are_local());
             if configured_directory {
                 ff.download_dir = Some(directory.path().to_string_lossy().into_owned());
             }
