@@ -94,6 +94,8 @@ fn get_encryption_key() -> Result<Vec<u8>, String> {
 
     let key_file = get_key_file_path();
     if key_file.exists() {
+        super::private_fs::private_dir(&get_agent_browser_dir())?;
+        super::private_fs::private_file(&key_file)?;
         let hex = fs::read_to_string(&key_file)
             .map_err(|e| format!("Failed to read encryption key file: {}", e))?;
         return parse_key_hex(&hex).ok_or_else(|| {
@@ -122,20 +124,11 @@ fn ensure_encryption_key() -> Result<Vec<u8>, String> {
     let key_hex = key.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
     let dir = get_agent_browser_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create directory: {}", e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
-    }
+    super::private_fs::private_dir(&dir)?;
 
     let key_file = get_key_file_path();
-    fs::write(&key_file, format!("{}\n", key_hex))
-        .map_err(|e| format!("Failed to write encryption key: {}", e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600));
+    if !super::private_fs::write_private_new(&key_file, format!("{}\n", key_hex).as_bytes())? {
+        return get_encryption_key();
     }
 
     let _ = writeln!(
@@ -235,21 +228,12 @@ fn decrypt_profile(data: &[u8]) -> Result<AuthProfile, String> {
 
 fn save_profile(profile: &AuthProfile) -> Result<(), String> {
     let dir = get_auth_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create auth dir: {}", e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
-    }
+    super::private_fs::private_dir(&get_agent_browser_dir())?;
+    super::private_fs::private_dir(&dir)?;
 
     let encrypted_json = encrypt_profile(profile)?;
     let path = get_profile_path(&profile.name);
-    fs::write(&path, &encrypted_json).map_err(|e| format!("Failed to write profile: {}", e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
+    super::private_fs::write_private(&path, encrypted_json.as_bytes())?;
     Ok(())
 }
 

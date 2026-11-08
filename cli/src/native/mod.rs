@@ -28,6 +28,7 @@ pub mod interaction;
 pub mod network;
 #[allow(dead_code)]
 pub mod policy;
+pub(crate) mod private_fs;
 #[allow(dead_code)]
 pub mod providers;
 #[allow(dead_code)]
