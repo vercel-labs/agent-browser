@@ -76,6 +76,10 @@
     ],
     "/configuration": [
       {
+        "from": "Browser engine to use: chrome (default), lightpanda, obscura (experimental).",
+        "to": "Browser engine to use: chrome (default), lightpanda, firefox, obscura (experimental)."
+      },
+      {
         "from": "<code>chrome</code> (default), <code>lightpanda</code>, <code>obscura</code> (experimental)",
         "to": "<code>chrome</code> (default), <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code> (experimental)"
       },
