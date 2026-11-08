@@ -166,6 +166,16 @@ async fn collect_storage_in_target(
         .await?;
 
     let temp_session = &attach_result.session_id;
+    // Private routing excludes both broadcast subscribers and method taps, so
+    // the daemon cannot consume this target's intercepted requests first.
+    let mut event_rx = client.subscribe_session(temp_session);
+    struct SessionRoute<'a>(&'a CdpClient, &'a str);
+    impl Drop for SessionRoute<'_> {
+        fn drop(&mut self) {
+            self.0.unsubscribe_session(self.1);
+        }
+    }
+    let _private_route = SessionRoute(client, temp_session);
 
     client
         .send_command_no_params("Page.enable", Some(temp_session))
@@ -185,7 +195,6 @@ async fn collect_storage_in_target(
         )
         .await?;
 
-    let mut event_rx = client.subscribe();
     let mut results = Vec::new();
 
     for target_origin in origins {
@@ -210,7 +219,7 @@ async fn collect_storage_in_target(
         let mut page_loaded = false;
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(tokio::time::Duration::from_secs(2), event_rx.recv()).await {
-                Ok(Ok(evt)) if evt.session_id.as_deref() == Some(temp_session) => {
+                Ok(Some(evt)) => {
                     if evt.method == "Fetch.requestPaused" {
                         if let Some(request_id) =
                             evt.params.get("requestId").and_then(|v| v.as_str())
@@ -235,9 +244,8 @@ async fn collect_storage_in_target(
                         break;
                     }
                 }
-                Ok(Ok(_)) => continue,  // event for a different session
-                Ok(Err(_)) => continue, // lagged or closed — retry within deadline
-                Err(_) => break,        // outer timeout elapsed
+                Ok(None) => return Err("Storage capture event stream closed".into()),
+                Err(_) => break,
             }
         }
 
@@ -948,6 +956,25 @@ mod tests {
                     continue;
                 };
                 let method = request["method"].as_str().unwrap_or("");
+                if mode == "closed" {
+                    let event = match method {
+                        "Page.navigate" => Some(
+                            json!({"method":"Fetch.requestPaused","sessionId":"other","params":{"requestId":"capture","request":{"url":"https://other.example/"}}}),
+                        ),
+                        "Fetch.fulfillRequest" => Some(
+                            json!({"method":"Page.loadEventFired","sessionId":"other","params":{}}),
+                        ),
+                        _ => None,
+                    };
+                    if let Some(event) = event {
+                        socket
+                            .send(tokio_tungstenite::tungstenite::Message::Text(
+                                event.to_string(),
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                }
                 let result = match method {
                     "Network.getAllCookies" if mode == "cookies" => json!({"cookies":"invalid"}),
                     "Network.getAllCookies" => json!({"cookies":[]}),
@@ -1016,6 +1043,30 @@ mod tests {
             );
             assert_eq!(fs::read_to_string(&previous).unwrap(), usable, "{mode}");
         }
+    }
+
+    #[tokio::test]
+    async fn closed_origin_capture_owns_its_fetch_events() {
+        let client = capture_fixture("closed").await;
+        let mut daemon_events = client.subscribe_methods(&["Fetch.requestPaused"]);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        save_state(
+            &client,
+            "active",
+            Some(path.to_str().unwrap()),
+            None,
+            "id",
+            &HashSet::from(["https://other.example".to_string()]),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            daemon_events.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        let saved: StorageState = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved.origins.len(), 2);
     }
 
     #[tokio::test]
