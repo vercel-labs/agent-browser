@@ -2,6 +2,10 @@
   "pages": {
     "/commands": [
       {
+        "from": "--engine <name>          # Browser engine: chrome (default), lightpanda, obscura (experimental)",
+        "to": "--engine <name>          # Browser engine: chrome (default), lightpanda, obscura, firefox"
+      },
+      {
         "from": "agent-browser type <sel> <text>       # Type into element",
         "to": "agent-browser type <sel> <text>       # Type without clearing"
       },
@@ -180,16 +184,8 @@
         "to": "<tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code>)</td></tr>"
       },
       {
-        "from": "Browser engine to use: chrome (default), lightpanda, obscura (experimental).",
-        "to": "Browser engine to use: chrome (default), lightpanda, firefox, obscura (experimental)."
-      },
-      {
         "from": "string (chrome, lightpanda, obscura)",
         "to": "string (chrome, lightpanda, firefox, obscura)"
-      },
-      {
-        "from": "Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>, <code>obscura</code> (experimental).",
-        "to": "Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code> (experimental)."
       },
       {
         "from": "anthropic/claude-sonnet-4.6",
