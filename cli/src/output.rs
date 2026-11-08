@@ -4693,9 +4693,10 @@ Options:
                              Explicit Obscura launches validate this invocation's resolved
                              bypass settings, even with an existing daemon; stale daemon
                              environment values are not reused when bypass is cleared.
-                             Firefox rejects authenticated proxies, --cdp, --auto-connect, --provider,
-                             profiles, extensions, --args, --allow-file-access, --webgpu, --ca-cert,
-                             --enable, --init-script, and --capture flow.
+                             Firefox rejects --cdp, --auto-connect, --provider, profiles, extensions,
+                             --args, --allow-file-access, --webgpu, --ca-cert, --enable,
+                             --init-script, and --capture flow. Authenticated proxies work through
+                             --proxy with credentials.
                              Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --relaunch                 Relaunch the session's browser even when no setting changed
