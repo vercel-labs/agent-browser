@@ -378,6 +378,26 @@ mod tests {
     }
 
     #[test]
+    fn named_keys_use_webdriver_code_points() {
+        for (name, code) in [
+            ("Enter", "\u{E007}"),
+            ("Tab", "\u{E004}"),
+            ("ArrowLeft", "\u{E012}"),
+            ("Escape", "\u{E00C}"),
+            ("Backspace", "\u{E003}"),
+            ("Insert", "\u{E016}"),
+            ("F1", "\u{E031}"),
+            ("F12", "\u{E03C}"),
+        ] {
+            let actions = key_chord_actions(name);
+            let steps = steps(&actions);
+
+            assert_eq!(steps[0]["value"], code, "{name} keyDown value");
+            assert_eq!(steps[1]["value"], code, "{name} keyUp value");
+        }
+    }
+
+    #[test]
     fn control_chord_presses_and_releases_modifier_around_key() {
         let actions = key_chord_actions("Control+a");
 
@@ -401,5 +421,38 @@ mod tests {
         let ups = steps.iter().filter(|s| s["type"] == "pointerUp").count();
 
         assert_eq!((downs, ups), (2, 2));
+    }
+
+    #[test]
+    fn single_key_event_uses_webdriver_code_points_and_the_requested_direction() {
+        let down = key_event_actions("keyDown", "Enter");
+        assert_eq!(
+            steps(&down),
+            &[json!({"type": "keyDown", "value": "\u{E007}"})]
+        );
+
+        let up = key_event_actions("keyUp", "Tab");
+        assert_eq!(steps(&up), &[json!({"type": "keyUp", "value": "\u{E004}"})]);
+
+        let printable = key_event_actions("keyDown", "a");
+        assert_eq!(
+            steps(&printable),
+            &[json!({"type": "keyDown", "value": "a"})]
+        );
+
+        let modifier = key_event_actions("keyDown", "Shift");
+        assert_eq!(
+            steps(&modifier),
+            &[json!({"type": "keyDown", "value": "\u{E008}"})]
+        );
+    }
+
+    #[test]
+    fn touch_tap_uses_touch_pointer_type() {
+        let origin = Origin::Viewport { x: 10.0, y: 20.0 };
+        let actions = touch_tap(&origin);
+
+        assert_eq!(actions[0]["parameters"]["pointerType"], "touch");
+        assert_eq!(actions[0]["actions"][1]["type"], "pointerDown");
     }
 }

@@ -588,6 +588,40 @@ mod tests {
         BidiClient::connect(&url).await.unwrap()
     }
 
+    #[test]
+    fn attribute_locators_are_css() {
+        assert_eq!(
+            semantic_locator("placeholder", "Email")["value"],
+            r#"input[placeholder="Email"], textarea[placeholder="Email"]"#
+        );
+        assert_eq!(
+            semantic_locator("alttext", "Logo")["value"],
+            r#"[alt="Logo"]"#
+        );
+        assert_eq!(
+            semantic_locator("title", "Help")["value"],
+            r#"[title="Help"]"#
+        );
+        assert_eq!(
+            semantic_locator("testid", "save")["value"],
+            r#"[data-testid="save"]"#
+        );
+    }
+
+    #[test]
+    fn nth_supports_negative_indexes() {
+        let js = nth_js("#row", -1);
+        assert!(js.contains("els.length + -1"), "{js}");
+        assert!(js.contains(r##"querySelectorAll("#row")"##), "{js}");
+    }
+
+    #[test]
+    fn styles_js_requests_only_the_named_properties() {
+        let js = styles_js(&["color".to_string(), "display".to_string()]);
+        assert!(js.contains(r#"["color","display"]"#), "{js}");
+        assert!(js.contains("getPropertyValue"), "{js}");
+    }
+
     #[tokio::test]
     async fn mainframe_returns_to_the_active_tab() {
         let mut state = DaemonState::new();
@@ -602,6 +636,62 @@ mod tests {
         );
         assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-active");
         assert!(state.active_frame_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn locate_nodes_sends_the_locator_and_start_nodes() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let bidi = mock_once(json!({"nodes": [{"sharedId": "node-1"}]}), requests.clone()).await;
+
+        let nodes = locate_nodes(
+            &bidi,
+            "ctx",
+            semantic_locator("title", "Save"),
+            Some(vec![json!({"sharedId": "shadow-root"})]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(nodes[0]["sharedId"], "node-1");
+        let request = requests.lock().unwrap()[0].clone();
+        assert_eq!(request["method"], "browsingContext.locateNodes");
+        assert_eq!(request["params"]["context"], "ctx");
+        assert_eq!(
+            request["params"]["startNodes"],
+            json!([{"sharedId": "shadow-root"}])
+        );
+        assert_eq!(request["params"]["locator"]["type"], "css");
+        assert_eq!(request["params"]["serializationOptions"]["maxDomDepth"], 0);
+    }
+
+    #[tokio::test]
+    async fn element_rect_runs_the_shared_box_js_on_the_handle() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let bidi = mock_once(
+            json!({"type": "success", "result": {"type": "object", "value": [
+                ["x", {"type": "number", "value": 3}],
+                ["y", {"type": "number", "value": 4}],
+                ["width", {"type": "number", "value": 30}],
+                ["height", {"type": "number", "value": 40}]
+            ]}}),
+            requests.clone(),
+        )
+        .await;
+        let target = Target {
+            context: "ctx".into(),
+            shared_id: "node-9".into(),
+        };
+
+        let rect = element_rect(&bidi, &target).await.unwrap().unwrap();
+        assert_eq!(rect, json!({"x": 3, "y": 4, "width": 30, "height": 40}));
+
+        let request = requests.lock().unwrap()[0].clone();
+        assert_eq!(request["method"], "script.callFunction");
+        assert_eq!(request["params"]["this"], json!({"sharedId": "node-9"}));
+        assert_eq!(
+            request["params"]["functionDeclaration"],
+            json!(ELEMENT_BOUNDING_BOX_JS)
+        );
     }
 
     #[tokio::test]

@@ -1071,4 +1071,24 @@ mod tests {
         assert!(session.session);
         assert!(session.same_site.is_none());
     }
+
+    #[test]
+    fn chrome_state_origins_roundtrip_through_the_state_format() {
+        let json_str = r#"{
+            "cookies": [],
+            "origins": [{
+                "origin": "https://example.com",
+                "localStorage": [{"name": "key", "value": "value"}],
+                "sessionStorage": [{"name": "s", "value": "t"}]
+            }]
+        }"#;
+        let parsed: StorageState = serde_json::from_str(json_str).unwrap();
+        assert_eq!(parsed.origins[0].local_storage.len(), 1);
+        assert_eq!(parsed.origins[0].local_storage[0].name, "key");
+        assert_eq!(parsed.origins[0].local_storage[0].value, "value");
+        assert_eq!(parsed.origins[0].session_storage[0].name, "s");
+        let reparsed: StorageState =
+            serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+        assert_eq!(reparsed.origins[0].origin, "https://example.com");
+    }
 }

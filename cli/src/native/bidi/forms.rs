@@ -544,6 +544,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn key_commands_send_bidi_key_actions_and_return_chrome_shapes() {
+        let (ff, _tx, calls) = fake_session_with(node_responder).await;
+        let mut state = state_with(ff);
+
+        assert_eq!(
+            press(&json!({"key": "Control+a"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"pressed": "Control+a"})
+        );
+        assert_eq!(
+            keydown(&json!({"key": "Tab"}), &mut state).await.unwrap(),
+            json!({"keydown": "Tab"})
+        );
+        assert_eq!(
+            keyup(&json!({"key": "Shift"}), &mut state).await.unwrap(),
+            json!({"keyup": "Shift"})
+        );
+        assert_eq!(
+            keyboard(&json!({"subaction": "type", "text": "hi"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"typed": "hi"})
+        );
+        assert_eq!(
+            keyboard(
+                &json!({"subaction": "insertText", "text": "hi"}),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({"inserted": true})
+        );
+        assert_eq!(
+            keyboard(&json!({"eventType": "keyUp", "key": "Enter"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"dispatched": "keyUp"})
+        );
+        assert_eq!(
+            input_keyboard(&json!({"type": "keyDown", "key": "a"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"dispatched": "keyDown"})
+        );
+        assert_eq!(
+            inserttext(&json!({"text": ""}), &mut state).await.unwrap(),
+            json!({"inserted": true})
+        );
+        assert_eq!(
+            inserttext(&json!({"text": "x"}), &mut state).await.unwrap(),
+            json!({"inserted": true})
+        );
+
+        assert_all(
+            &calls,
+            &[
+                "input.performActions",
+                "input.performActions",
+                "input.performActions",
+                "input.performActions",
+                "script.callFunction",
+                "script.callFunction",
+                "input.performActions",
+                "input.performActions",
+                "script.callFunction",
+                "script.callFunction",
+            ],
+        );
+    }
+
+    #[tokio::test]
     async fn key_commands_require_their_arguments() {
         let (ff, _tx, calls) = fake_session().await;
         let mut state = state_with(ff);
@@ -710,5 +782,22 @@ mod tests {
             json!({"unchecked": "#agree"})
         );
         assert_eq!(calls.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn upload_resolves_files_and_reports_how_many_were_set() {
+        let (ff, _tx, calls) = fake_session_with(node_responder).await;
+        let mut state = state_with(ff);
+        let result = upload(
+            &json!({"selector": "input[type=file]", "files": ["a.txt", "/b.txt"]}),
+            &mut state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            json!({"uploaded": 2, "selector": "input[type=file]"})
+        );
+        assert_all(&calls, &["script.callFunction", "input.setFiles"]);
     }
 }

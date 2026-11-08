@@ -373,6 +373,11 @@ impl FirefoxSession {
             dispatcher,
         };
         if let Some(contexts) = tree["contexts"].as_array() {
+            for context in contexts {
+                if let Some(id) = context["context"].as_str() {
+                    session.tab_id(id);
+                }
+            }
             session.record_context_origins(contexts);
         }
         emulation::apply_to_context(&session, &session.context).await?;
@@ -444,6 +449,7 @@ impl FirefoxSession {
         let mut drained = Vec::new();
         while let Ok(e) = self.events.try_recv() {
             self.track_request(&e);
+            self.track_tabs(&e, dialog);
             if e["method"] == "browsingContext.contextCreated" {
                 if let (Some(context), Some(opener)) = (
                     e["params"]["context"].as_str(),
@@ -491,6 +497,38 @@ impl FirefoxSession {
             drained.push(e);
         }
         drained
+    }
+
+    /// Registers new top-level tabs and drops the ids, labels, refs and prompts of destroyed ones.
+    fn track_tabs(&mut self, event: &Value, dialog: &mut Option<PendingDialog>) {
+        let params = &event["params"];
+        if !params["parent"].is_null() {
+            return;
+        }
+        let Some(context) = params["context"].as_str() else {
+            return;
+        };
+        match event["method"].as_str() {
+            Some("browsingContext.contextCreated") => {
+                self.tab_id(context);
+            }
+            Some("browsingContext.contextDestroyed") => {
+                let parents = &self.context_parents;
+                self.refs
+                    .retain(|(id, _), _| owner_tab(id, parents) != context);
+                self.documents
+                    .retain(|id, _| owner_tab(id, parents) != context);
+                if dialog.as_ref().is_some_and(|d| {
+                    d.owner_context.as_deref() == Some(context)
+                        || d.session_id.as_deref() == Some(context)
+                }) {
+                    *dialog = None;
+                }
+                self.tab_ids.remove(context);
+                self.tab_labels.remove(context);
+            }
+            _ => {}
+        }
     }
 
     /// Tracks request lifetimes and removes requests belonging to destroyed contexts.
@@ -1258,6 +1296,35 @@ pub(crate) mod tests {
         assert_eq!(s.tab_id("ctx-new"), 2);
         assert_eq!(s.tab_id("ctx-active"), 1);
         assert_eq!(s.tab_id("ctx-later"), 3);
+    }
+
+    #[tokio::test]
+    async fn destroyed_tab_drops_its_ids_labels_and_refs() {
+        let (mut ff, tx, _) = fake_session().await;
+        ff.tab_id("ctx-active");
+        ff.tab_id("survivor");
+        ff.tab_labels.insert("ctx-active".into(), "docs".into());
+        ff.refs.insert(("ctx-active".into(), "node".into()), 1);
+        ff.refs.insert(("survivor".into(), "node".into()), 2);
+        ff.refs.insert(("child".into(), "node".into()), 3);
+        let mut received = ff.bidi.subscribe_buffered();
+        let child_created = json!({"type":"event", "method":"browsingContext.contextCreated", "params":{"context":"child", "parent":"ctx-active"}});
+        let tab_destroyed = json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}});
+        for event in [&child_created, &tab_destroyed] {
+            tx.send(event.clone()).unwrap();
+            received.recv().await.unwrap();
+        }
+        ff.drain_events(&mut None);
+        assert!(!ff.tab_ids.contains_key("ctx-active"));
+        assert!(ff.tab_ids.contains_key("survivor"));
+        assert!(ff.tab_labels.is_empty());
+        let mut kept: Vec<_> = ff
+            .refs
+            .keys()
+            .map(|(context, _)| context.as_str())
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(kept, ["survivor"]);
     }
 
     #[tokio::test]
