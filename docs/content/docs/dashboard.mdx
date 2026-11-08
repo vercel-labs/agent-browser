@@ -137,6 +137,8 @@ The dashboard includes an optional AI chat panel powered by the [Vercel AI Gatew
 
 Chat stops on tool timeouts and cancels its command subprocess. An operation already accepted by the browser may still finish, so inspect the session before retrying a consequential action. Gateway connections and reads have bounded timeouts.
 
+In CLI interactive chat, a failed or canceled turn clears the conversation history before the next prompt. Ctrl+C cancels an active turn or exits when the prompt is waiting for input.
+
 ### Setup
 
 The Chat tab is always visible. Set the API key to enable responses:

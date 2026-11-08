@@ -512,6 +512,8 @@ Profiles:
 - `debug` - Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 
 If `chat` reports a timed out tool, stop and inspect the browser state before retrying. The command subprocess is canceled, but an action already accepted by the browser has an unknown outcome. MCP clients should apply the same caution to interrupted browser tool calls.
+
+Failed or canceled CLI interactive turns clear chat history so unanswered tool calls cannot corrupt the next request. Ctrl+C cancels an active turn or exits at the prompt.
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
 - `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
