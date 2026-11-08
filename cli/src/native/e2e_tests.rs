@@ -148,6 +148,7 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "webmcp_frame_probe" => include_str!("test_fixtures/webmcp_frame_probe.html"),
         "webmcp_probe" => include_str!("test_fixtures/webmcp_probe.html"),
         "webmcp_context_probe" => include_str!("test_fixtures/webmcp_context_probe.html"),
+        "find_role_probe" => include_str!("test_fixtures/find_role_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
     }
 }
@@ -3354,6 +3355,133 @@ async fn e2e_getbyrole_uses_accessibility_tree_for_implicit_roles() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["result"], "services");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Runs one daemon command and returns its response plus the number of CDP
+/// commands it sent.
+async fn run_counting_cdp(state: &mut DaemonState, cmd: Value) -> (Value, u64) {
+    let client = state
+        .browser
+        .as_ref()
+        .expect("Browser not launched")
+        .client
+        .clone();
+    let before = client.commands_sent();
+    let resp = execute_command(&cmd, state).await;
+    (resp, client.commands_sent() - before)
+}
+
+/// Records CDP command counts per daemon command on a fixed page. Run with
+/// --nocapture to see the table. Asserts only that each command succeeds.
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_call_audit() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("find_role_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut rows: Vec<(&str, u64)> = Vec::new();
+
+    let (resp, calls) = run_counting_cdp(
+        &mut state,
+        json!({ "id": "3", "action": "snapshot", "interactive": true }),
+    )
+    .await;
+    assert_success(&resp);
+    rows.push(("snapshot -i (cold)", calls));
+
+    let refs = get_data(&resp)["refs"]
+        .as_object()
+        .expect("snapshot refs should be an object")
+        .clone();
+
+    let (resp, calls) = run_counting_cdp(
+        &mut state,
+        json!({ "id": "3b", "action": "snapshot", "interactive": true }),
+    )
+    .await;
+    assert_success(&resp);
+    rows.push(("snapshot -i (warm)", calls));
+    let ref_for = |role: &str, name: &str| -> String {
+        refs.iter()
+            .find(|(_, meta)| {
+                meta["role"].as_str() == Some(role) && meta["name"].as_str() == Some(name)
+            })
+            .map(|(reference, _)| reference.clone())
+            .unwrap_or_else(|| panic!("no {role} named {name} in snapshot refs"))
+    };
+    let save_ref = ref_for("button", "Save changes");
+    let email_ref = ref_for("textbox", "Email");
+
+    let (resp, calls) = run_counting_cdp(
+        &mut state,
+        json!({ "id": "4", "action": "click", "selector": format!("@{save_ref}") }),
+    )
+    .await;
+    assert_success(&resp);
+    rows.push(("click @eN", calls));
+
+    let (resp, calls) = run_counting_cdp(
+        &mut state,
+        json!({
+            "id": "5",
+            "action": "getbyrole",
+            "role": "button",
+            "name": "Submit",
+            "exact": false,
+            "subaction": "click"
+        }),
+    )
+    .await;
+    assert_success(&resp);
+    rows.push(("find role button click --name", calls));
+
+    let (resp, calls) = run_counting_cdp(
+        &mut state,
+        json!({ "id": "6", "action": "fill", "selector": format!("@{email_ref}"), "value": "a@b.c" }),
+    )
+    .await;
+    assert_success(&resp);
+    rows.push(("fill @eN", calls));
+
+    let (resp, calls) = run_counting_cdp(
+        &mut state,
+        json!({ "id": "7", "action": "wait", "timeout": 100 }),
+    )
+    .await;
+    assert_success(&resp);
+    rows.push(("wait <timeout>", calls));
+
+    let (resp, calls) = run_counting_cdp(
+        &mut state,
+        json!({ "id": "8", "action": "wait", "selector": "#done", "state": "visible", "timeout": 5000 }),
+    )
+    .await;
+    assert_success(&resp);
+    rows.push(("wait #done visible", calls));
+
+    for (label, calls) in &rows {
+        eprintln!("CDP_AUDIT {label} = {calls}");
+    }
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::Shutdown;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -163,6 +163,8 @@ pub struct CdpClient {
     close_lock: Mutex<()>,
     cancel_tx: watch::Sender<bool>,
     next_id: AtomicU64,
+    #[cfg(test)]
+    commands_sent: AtomicU64,
     pending: PendingMap,
     event_tx: broadcast::Sender<CdpEvent>,
     raw_tx: broadcast::Sender<RawCdpMessage>,
@@ -170,6 +172,7 @@ pub struct CdpClient {
     keepalive_handle: Mutex<Option<JoinHandle<()>>>,
     private_sessions: PrivateSessions,
     method_taps: MethodTaps,
+    dom_ax_sessions: std::sync::Mutex<HashSet<String>>,
 }
 
 /// Removes a pending entry if `send_command` is cancelled mid-await (e.g. an
@@ -432,6 +435,8 @@ impl CdpClient {
             close_lock: Mutex::new(()),
             cancel_tx,
             next_id: AtomicU64::new(1),
+            #[cfg(test)]
+            commands_sent: AtomicU64::new(0),
             pending,
             event_tx,
             raw_tx,
@@ -439,6 +444,7 @@ impl CdpClient {
             keepalive_handle: Mutex::new(Some(keepalive_handle)),
             private_sessions,
             method_taps,
+            dom_ax_sessions: std::sync::Mutex::new(HashSet::new()),
         })
     }
 
@@ -480,6 +486,13 @@ impl CdpClient {
         self.close_complete.store(true, Ordering::SeqCst);
     }
 
+    /// Number of CDP commands written so far. Tests diff this around a daemon
+    /// command to count the protocol calls it caused.
+    #[cfg(test)]
+    pub fn commands_sent(&self) -> u64 {
+        self.commands_sent.load(Ordering::SeqCst)
+    }
+
     pub async fn send_command(
         &self,
         method: &str,
@@ -487,6 +500,8 @@ impl CdpClient {
         session_id: Option<&str>,
     ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        #[cfg(test)]
+        self.commands_sent.fetch_add(1, Ordering::SeqCst);
 
         let cmd = CdpCommand {
             id,
@@ -623,6 +638,29 @@ impl CdpClient {
         self.send_command(method, None, session_id).await
     }
 
+    /// Enable the DOM and Accessibility domains on a session, once per
+    /// connection. Both stay enabled until disabled, and nothing here disables
+    /// them, so repeat snapshots skip the two round trips.
+    pub async fn ensure_dom_ax_enabled(&self, session_id: &str) -> Result<(), String> {
+        let enabled = self
+            .dom_ax_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(session_id);
+        if enabled {
+            return Ok(());
+        }
+        self.send_command_no_params("DOM.enable", Some(session_id))
+            .await?;
+        self.send_command_no_params("Accessibility.enable", Some(session_id))
+            .await?;
+        self.dom_ax_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string());
+        Ok(())
+    }
+
     /// Send a CDP command without waiting for its response.
     ///
     /// This is useful for best-effort commands where Chrome may not emit a
@@ -635,6 +673,8 @@ impl CdpClient {
         session_id: Option<&str>,
     ) -> Result<(), String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        #[cfg(test)]
+        self.commands_sent.fetch_add(1, Ordering::SeqCst);
         let cmd = CdpCommand {
             id,
             method: method.to_string(),

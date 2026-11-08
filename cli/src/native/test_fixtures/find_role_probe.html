@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Find role probe</title>
+</head>
+<body>
+  <h1>Settings</h1>
+  <label for="email">Email</label>
+  <input id="email" type="text">
+  <button id="save" type="button">Save changes</button>
+  <button id="submit" type="button" onclick="window.__submitted = true">Submit</button>
+  <a href="#details">Details</a>
+  <ul id="items"></ul>
+  <div id="done" style="display:none">Done</div>
+  <script>
+    const list = document.getElementById('items');
+    for (let i = 0; i < 300; i++) {
+      const li = document.createElement('li');
+      li.textContent = 'Item ' + i;
+      list.appendChild(li);
+    }
+    setTimeout(() => { document.getElementById('done').style.display = 'block'; }, 300);
+  </script>
+</body>
+</html>

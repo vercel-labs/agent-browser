@@ -324,12 +324,7 @@ pub async fn take_snapshot(
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
-    client
-        .send_command_no_params("DOM.enable", Some(session_id))
-        .await?;
-    client
-        .send_command_no_params("Accessibility.enable", Some(session_id))
-        .await?;
+    client.ensure_dom_ax_enabled(session_id).await?;
 
     // If a CSS selector is provided, resolve the set of backendNodeIds that
     // belong to the DOM subtree rooted at the matched element.  We use this
