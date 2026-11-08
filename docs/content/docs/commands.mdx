@@ -708,7 +708,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script r
 
 In a `batch`, `--relaunch` relaunches the browser once: the first command that can launch a browser carries it. Commands that never launch one, such as `read`, and commands denied by policy or waiting for confirmation pass it on to the next command.
 
-Firefox rejects authenticated proxies, `--cdp`, `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`.
+Firefox rejects `--cdp`, `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. Authenticated proxies work through `--proxy` with credentials.
 
 See [Configuration](/configuration) for config files and environment variables. See [Proxy](/proxy) for proxy server, bypass, and credential settings.
 
