@@ -238,7 +238,7 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
 mod tests {
     use super::*;
     use crate::native::actions::PendingDialog;
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::firefox::session::tests::{fake_session, fake_session_with};
     use serde_json::json;
 
     fn dialog(context: &str, owner_context: Option<&str>) -> PendingDialog {
@@ -392,5 +392,32 @@ mod tests {
             ..Default::default()
         });
         assert!(blocked(&state, "navigate"));
+    }
+    #[tokio::test]
+    async fn dialog_command_targets_the_tab_that_opened_the_prompt() {
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let (mut ff, _tx, _) = fake_session_with(move |request| {
+            recorded.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        ff.context = "ctx-active".into();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.pending_dialog = Some(dialog("ctx-other", Some("ctx-other")));
+        execute("dialog", &json!({"response": "accept"}), &mut state)
+            .await
+            .unwrap();
+        let params = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request["method"] == "browsingContext.handleUserPrompt")
+            .map(|request| request["params"].clone())
+            .expect("the prompt command is sent");
+        assert_eq!(params["context"], "ctx-other");
+        assert!(state.pending_dialog.is_none());
     }
 }
