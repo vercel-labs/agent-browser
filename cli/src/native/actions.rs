@@ -1413,6 +1413,7 @@ impl DaemonState {
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
+                ff.context = ff.top_context.clone();
                 firefox::tabs::reset_refs(self);
             }
         }

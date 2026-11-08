@@ -247,6 +247,11 @@ impl FirefoxSession {
             visited_origins: HashSet::new(),
         };
         if let Some(contexts) = tree["contexts"].as_array() {
+            for context in contexts {
+                if let Some(id) = context["context"].as_str() {
+                    session.tab_id(id);
+                }
+            }
             session.record_context_origins(contexts);
         }
         emulation::apply_to_context(&session, &session.context).await?;
@@ -313,11 +318,7 @@ impl FirefoxSession {
         let mut drained = Vec::new();
         while let Ok(e) = self.events.try_recv() {
             self.track_request(&e);
-            if e["method"] == "browsingContext.contextDestroyed"
-                && e["params"]["context"] == self.top_context
-            {
-                self.top_context.clear();
-            }
+            self.track_tabs(&e, dialog);
             if matches!(
                 e["method"].as_str(),
                 Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
@@ -335,6 +336,48 @@ impl FirefoxSession {
             drained.push(e);
         }
         drained
+    }
+
+    /// Registers new top-level tabs and drops destroyed ones, falling back to a surviving tab when the active one is lost.
+    fn track_tabs(&mut self, event: &Value, dialog: &mut Option<PendingDialog>) {
+        let params = &event["params"];
+        if !params["parent"].is_null() {
+            return;
+        }
+        let Some(context) = params["context"].as_str() else {
+            return;
+        };
+        match event["method"].as_str() {
+            Some("browsingContext.contextCreated") => {
+                self.tab_id(context);
+            }
+            Some("browsingContext.contextDestroyed") => {
+                let parents = &self.context_parents;
+                self.refs
+                    .retain(|(id, _), _| owner_context(id, parents) != context);
+                self.documents
+                    .retain(|id, _| owner_context(id, parents) != context);
+                if dialog.as_ref().is_some_and(|d| {
+                    d.owner_context.as_deref() == Some(context)
+                        || d.session_id.as_deref() == Some(context)
+                }) {
+                    *dialog = None;
+                }
+                self.tab_ids.remove(context);
+                self.tab_labels.remove(context);
+                if self.top_context == context {
+                    self.top_context = self
+                        .tab_ids
+                        .iter()
+                        .min_by_key(|(_, id)| *id)
+                        .map(|(context, _)| context.clone())
+                        .unwrap_or_default();
+                    self.context = self.top_context.clone();
+                    self.refs.clear();
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Tracks request lifetimes and removes requests belonging to destroyed contexts.
@@ -867,6 +910,85 @@ pub(crate) mod tests {
         assert_eq!(s.tab_id("ctx-new"), 2);
         assert_eq!(s.tab_id("ctx-active"), 1);
         assert_eq!(s.tab_id("ctx-later"), 3);
+    }
+
+    #[tokio::test]
+    async fn destroyed_contexts_reconcile_tabs_and_active_state() {
+        let (mut session, tx, _) = fake_session().await;
+        session.tab_id("survivor");
+        session
+            .tab_labels
+            .insert("ctx-active".into(), "docs".into());
+        session.refs.insert(("child".into(), "node".into()), 1);
+        let mut state = crate::native::actions::DaemonState::new();
+        state.firefox = Some(session);
+        state.active_frame_id = Some("child".into());
+
+        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"child", "parent":"ctx-active"}})).unwrap();
+        tx.send(json!({"type":"event", "method":"browsingContext.domContentLoaded", "params":{"url":"https://child-event.example/"}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                crate::native::firefox::network::drain(&mut state).await;
+                if state
+                    .firefox
+                    .as_ref()
+                    .unwrap()
+                    .visited_origins
+                    .contains("https://child-event.example")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-active");
+        assert_eq!(state.active_frame_id.as_deref(), Some("child"));
+        assert_eq!(state.firefox.as_ref().unwrap().refs.len(), 1);
+
+        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                crate::native::firefox::network::drain(&mut state).await;
+                if state.firefox.as_ref().unwrap().context == "survivor" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let ff = state.firefox.as_ref().unwrap();
+        assert!(!ff.tab_ids.contains_key("ctx-active"));
+        assert!(!ff.tab_labels.contains_key("ctx-active"));
+        assert!(state.active_frame_id.is_none());
+        ff.eval("1 + 1").await.unwrap();
+        let err = super::super::tabs::tab_new(&json!({"label":"docs"}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Firefox did not return a context id for the new tab");
+
+        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
+        tx.send(json!({"type":"event", "method":"browsingContext.contextCreated", "params":{"context":"third", "parent":null}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                crate::native::firefox::network::drain(&mut state).await;
+                if state
+                    .firefox
+                    .as_ref()
+                    .unwrap()
+                    .tab_ids
+                    .contains_key("third")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.firefox.as_ref().unwrap().context, "survivor");
     }
 
     #[tokio::test]

@@ -499,7 +499,13 @@ fn auth_response(
 /// Drains buffered BiDi events and applies them to the daemon's dialog, network and console state.
 pub async fn drain(state: &mut DaemonState) {
     if let Some(ff) = state.firefox.as_mut() {
+        let top_context = ff.top_context.clone();
         let events = ff.drain_events(&mut state.pending_dialog);
+        if ff.top_context != top_context {
+            state.ref_map.invalidate_all_documents();
+            state.active_iframe_sessions.clear();
+            state.active_frame_id = None;
+        }
         apply_events(state, events).await;
     }
 }
