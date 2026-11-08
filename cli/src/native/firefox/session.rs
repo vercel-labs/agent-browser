@@ -40,6 +40,8 @@ pub struct FirefoxSession {
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
     pub tab_labels: HashMap<String, String>,
+    /// BiDi user context created for a window opened by `window new`, keyed by its top-level context.
+    pub window_contexts: HashMap<String, String>,
     pub visited_origins: HashSet<String>,
     events: broadcast::Receiver<Value>,
 }
@@ -123,6 +125,7 @@ impl FirefoxSession {
             context,
             refs: HashMap::new(),
             tab_labels: HashMap::new(),
+            window_contexts: HashMap::new(),
             visited_origins: HashSet::new(),
             events,
         };
@@ -512,6 +515,7 @@ pub(crate) mod tests {
             next_tab_id: 2,
             refs: HashMap::new(),
             tab_labels: HashMap::new(),
+            window_contexts: HashMap::new(),
             visited_origins: HashSet::new(),
             events,
         };
