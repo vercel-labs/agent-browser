@@ -1,7 +1,7 @@
 //! Firefox read/query commands, semantic locators, frame switching and eval handles.
 
-use super::actions::session;
 use super::bidi::BidiClient;
+use super::daemon::session;
 use super::target::{resolve_target, Target};
 use crate::native::actions::{self as chrome, DaemonState};
 use crate::native::element::{

@@ -5,8 +5,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, RwLock};
 
-use super::actions::session;
 use super::bidi::BidiClient;
+use super::daemon::session;
 use super::session::FirefoxSession;
 use super::target::resolve_target;
 use crate::native::actions::{
@@ -491,12 +491,13 @@ fn auth_response(
 }
 
 /// Drains buffered BiDi events into the daemon: tab bookkeeping and dialogs first, then the
-/// recorders, which only see events from the active tab.
+/// recorders, which only see events from the active tab. When the drained events dropped the
+/// active context, or its tab, the daemon's element refs and frame scope go with it.
 pub async fn drain(state: &mut DaemonState) {
     if let Some(ff) = state.firefox.as_mut() {
-        let top_context = ff.top_context.clone();
+        let active = ff.context.clone();
         let events = ff.drain_events(&mut state.pending_dialog);
-        if ff.top_context != top_context {
+        if ff.context != active {
             state.ref_map.invalidate_all_documents();
             state.active_iframe_sessions.clear();
             state.active_frame_id = None;

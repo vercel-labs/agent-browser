@@ -1,7 +1,7 @@
 use serde_json::{json, Map, Value};
 
-use super::actions::session;
 use super::bidi::BidiClient;
+use super::daemon::session;
 use super::rdp::RdpClient;
 use super::session::FirefoxSession;
 use crate::native::actions::{DaemonState, EmulatedMedia};

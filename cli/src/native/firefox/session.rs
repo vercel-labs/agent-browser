@@ -316,7 +316,8 @@ impl FirefoxSession {
             .await;
     }
 
-    /// Applies buffered BiDi events to the pending dialog slot and returns them for further handling.
+    /// Applies buffered BiDi events to the session's own bookkeeping and returns them for the
+    /// recorders, which read the batch once through the single intake in `network.rs`.
     pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> Vec<Value> {
         let mut drained = Vec::new();
         while let Ok(e) = self.events.try_recv() {
@@ -341,43 +342,21 @@ impl FirefoxSession {
         drained
     }
 
-    /// Registers new top-level tabs and drops destroyed ones, falling back to a surviving tab when the active one is lost.
+    /// Registers new top-level tabs and drops every destroyed context, frames included, through
+    /// the one cleanup path.
     fn track_tabs(&mut self, event: &Value, dialog: &mut Option<PendingDialog>) {
         let params = &event["params"];
-        if !params["parent"].is_null() {
-            return;
-        }
         let Some(context) = params["context"].as_str() else {
             return;
         };
         match event["method"].as_str() {
             Some("browsingContext.contextCreated") => {
-                self.tab_id(context);
+                if params["parent"].is_null() {
+                    self.tab_id(context);
+                }
             }
             Some("browsingContext.contextDestroyed") => {
-                let parents = &self.context_parents;
-                self.refs
-                    .retain(|(id, _), _| owner_context(id, parents) != context);
-                self.documents
-                    .retain(|id, _| owner_context(id, parents) != context);
-                if dialog.as_ref().is_some_and(|d| {
-                    d.owner_context.as_deref() == Some(context)
-                        || d.session_id.as_deref() == Some(context)
-                }) {
-                    *dialog = None;
-                }
-                self.tab_ids.remove(context);
-                self.tab_labels.remove(context);
-                if self.top_context == context {
-                    self.top_context = self
-                        .tab_ids
-                        .iter()
-                        .min_by_key(|(_, id)| *id)
-                        .map(|(context, _)| context.clone())
-                        .unwrap_or_default();
-                    self.context = self.top_context.clone();
-                    self.refs.clear();
-                }
+                self.forget_context(context, dialog);
             }
             _ => {}
         }
@@ -448,6 +427,116 @@ impl FirefoxSession {
             return true;
         }
         self.refresh_frame_tree().await.is_ok() && self.context_is_in_active_tab(context)
+    }
+
+    /// Forgets a browsing context that is gone along with every context nested inside it: stable
+    /// ids, labels, element refs, documents, shadow ids and any prompt they owned. Returns true
+    /// when the active context was among them, which then falls back to its top-level tab, or to
+    /// the lowest surviving tab id when that tab itself is gone.
+    pub fn forget_context(&mut self, context: &str, dialog: &mut Option<PendingDialog>) -> bool {
+        let gone: HashSet<String> = self
+            .context_parents
+            .keys()
+            .filter(|id| is_context_or_descendant(id, context, &self.context_parents))
+            .cloned()
+            .chain(std::iter::once(context.to_string()))
+            .collect();
+        let stale_ids: HashSet<i64> = self
+            .refs
+            .iter()
+            .filter(|((id, _), _)| gone.contains(id))
+            .map(|(_, id)| *id)
+            .collect();
+        self.refs.retain(|(id, _), _| !gone.contains(id));
+        self.documents.retain(|id, _| !gone.contains(id));
+        self.shadow_ids.retain(|id| !stale_ids.contains(id));
+        if dialog.as_ref().is_some_and(|d| {
+            [&d.owner_context, &d.session_id]
+                .into_iter()
+                .flatten()
+                .any(|owner| gone.contains(owner))
+        }) {
+            *dialog = None;
+        }
+        self.context_parents.retain(|id, _| !gone.contains(id));
+        if self.tab_ids.remove(context).is_some() {
+            self.tab_labels.remove(context);
+            if self.top_context == context {
+                self.top_context = self
+                    .tab_ids
+                    .iter()
+                    .min_by_key(|(_, id)| *id)
+                    .map(|(context, _)| context.clone())
+                    .unwrap_or_default();
+                self.context = self.top_context.clone();
+                self.refs.clear();
+                return true;
+            }
+        }
+        if !gone.contains(&self.context) {
+            return false;
+        }
+        self.context = self.top_context.clone();
+        true
+    }
+
+    /// Accepts the prompts the daemon answers itself, following `auto_dialog` as it changes.
+    pub fn spawn_auto_dismiss(&self) -> tokio::task::JoinHandle<()> {
+        let client = Arc::clone(&self.bidi);
+        let mut events = client.subscribe_buffered();
+        let enabled = Arc::clone(&self.auto_dialog);
+        let changed = Arc::clone(&self.auto_dialog_changed);
+        tokio::spawn(async move {
+            let mut pending = HashSet::<String>::new();
+            let track = |event: &Value, pending: &mut HashSet<String>| {
+                let params = &event["params"];
+                let Some(context) = params["context"].as_str() else {
+                    return;
+                };
+                match event["method"].as_str() {
+                    Some("browsingContext.userPromptOpened") => {
+                        pending.remove(context);
+                        if params["handler"] != "accept" && auto_handles_prompt(params, true) {
+                            pending.insert(context.to_string());
+                        }
+                    }
+                    Some("browsingContext.userPromptClosed") => {
+                        pending.remove(context);
+                    }
+                    _ => {}
+                }
+            };
+            loop {
+                tokio::select! {
+                    biased;
+                    event = events.recv() => match event {
+                        Some(event) => track(&event, &mut pending),
+                        None => break,
+                    },
+                    _ = changed.notified() => {}
+                }
+                while let Ok(event) = events.try_recv() {
+                    track(&event, &mut pending);
+                }
+                if enabled.load(Ordering::Acquire) {
+                    if let Some(context) = pending.iter().next().cloned() {
+                        pending.remove(&context);
+                        if let Err(error) = client
+                            .send(
+                                "browsingContext.handleUserPrompt",
+                                json!({"context": context, "accept": true}),
+                            )
+                            .await
+                        {
+                            eprintln!("[auto-dismiss] failed to accept Firefox dialog: {error}");
+                        }
+                        if !pending.is_empty() {
+                            changed.notify_one();
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Runs `fut` until it finishes or a prompt opens in `context` or its owning tab. Returns `None` for the prompt.
@@ -586,6 +675,22 @@ fn apply_event(
     }
 }
 
+fn is_context_or_descendant<'a>(
+    mut context: &'a str,
+    root: &str,
+    parents: &'a HashMap<String, String>,
+) -> bool {
+    loop {
+        if context == root {
+            return true;
+        }
+        let Some(parent) = parents.get(context).filter(|parent| !parent.is_empty()) else {
+            return false;
+        };
+        context = parent;
+    }
+}
+
 fn owner_context<'a>(mut context: &'a str, parents: &'a HashMap<String, String>) -> &'a str {
     while let Some(parent) = parents.get(context).filter(|parent| !parent.is_empty()) {
         context = parent;
@@ -680,13 +785,14 @@ pub(crate) mod tests {
         .await
     }
 
-    /// A BiDi command reply: a `result` payload or a protocol `error`/`message` pair.
+    /// A BiDi command reply: a `result` payload, a protocol `error`/`message` pair, or no reply.
     pub(crate) enum FakeReply {
         Result(Value),
         Error {
             error: &'static str,
             message: &'static str,
         },
+        Silent,
     }
 
     /// Same as `fake_session`, with `responder` deciding each command's `result`.
@@ -700,8 +806,8 @@ pub(crate) mod tests {
         fake_session_with_replies(move |v: &Value| FakeReply::Result(responder(v))).await
     }
 
-    /// Same as `fake_session_with`, but `responder` can also reject a command the way Firefox
-    /// does with a BiDi `error` reply.
+    /// Same as `fake_session_with`, but `responder` chooses the reply, so a test can reject a
+    /// command the way Firefox does or leave it unanswered.
     pub(crate) async fn fake_session_with_replies(
         responder: impl Fn(&Value) -> FakeReply + Send + 'static,
     ) -> (
@@ -723,18 +829,22 @@ pub(crate) mod tests {
                         let Some(Ok(Message::Text(t))) = m else { break };
                         let v: Value = serde_json::from_str(&t).unwrap();
                         log.lock().unwrap().push(v["method"].as_str().unwrap().to_string());
-                        let reply = match responder(&v) {
+                        match responder(&v) {
                             FakeReply::Result(result) => {
-                                json!({"type":"success","id":v["id"],"result":result})
+                                let reply = json!({"type":"success","id":v["id"],"result":result});
+                                ws.send(Message::Text(reply.to_string())).await.unwrap();
                             }
-                            FakeReply::Error { error, message } => json!({
-                                "type": "error",
-                                "id": v["id"],
-                                "error": error,
-                                "message": message
-                            }),
-                        };
-                        ws.send(Message::Text(reply.to_string())).await.unwrap();
+                            FakeReply::Error { error, message } => {
+                                let reply = json!({
+                                    "type": "error",
+                                    "id": v["id"],
+                                    "error": error,
+                                    "message": message
+                                });
+                                ws.send(Message::Text(reply.to_string())).await.unwrap();
+                            }
+                            FakeReply::Silent => {}
+                        }
                     }
                     Some(ev) = rx.recv() => {
                         ws.send(Message::Text(ev.to_string())).await.unwrap();
@@ -946,8 +1056,17 @@ pub(crate) mod tests {
         session
             .tab_labels
             .insert("ctx-active".into(), "docs".into());
+        session.context = "child".into();
+        session
+            .context_parents
+            .insert("child".into(), "ctx-active".into());
         session.refs.insert(("child".into(), "node".into()), 1);
+        session.documents.insert("child".into(), "document".into());
+        session.shadow_ids.insert(1);
         let mut state = crate::native::actions::DaemonState::new();
+        state
+            .ref_map
+            .add_with_frame("e1".into(), Some(1), "button", "OK", None, Some("child"));
         state.firefox = Some(session);
         state.active_frame_id = Some("child".into());
 
@@ -970,9 +1089,13 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-active");
-        assert_eq!(state.active_frame_id.as_deref(), Some("child"));
-        assert_eq!(state.firefox.as_ref().unwrap().refs.len(), 1);
+        let ff = state.firefox.as_ref().unwrap();
+        assert_eq!(ff.context, "ctx-active");
+        assert!(state.active_frame_id.is_none());
+        assert!(ff.refs.is_empty());
+        assert!(ff.documents.is_empty());
+        assert!(ff.shadow_ids.is_empty());
+        assert!(state.ref_map.get("e1").is_none());
 
         tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {

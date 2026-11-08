@@ -4,10 +4,12 @@
 pub mod actions;
 pub mod bidi;
 pub mod capture;
+pub mod daemon;
 pub mod emulation;
 pub mod forms;
 pub mod input;
 pub mod interact;
+pub mod navigation;
 pub mod network;
 pub mod page;
 pub mod process;

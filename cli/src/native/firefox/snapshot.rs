@@ -10,7 +10,7 @@ use super::target::find_element;
 use crate::native::actions::{self as chrome, DaemonState};
 use crate::native::cdp::types::{AXNode, AXProperty, AXValue};
 use crate::native::element::RefMap;
-use crate::native::snapshot::{snapshot_from_ax_nodes, SnapshotOptions};
+use crate::native::snapshot::{snapshot_from_ax_nodes, SnapshotOptions, SnapshotRefContext};
 
 const PAINT_WAIT: Duration = Duration::from_millis(500);
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(30);
@@ -305,7 +305,14 @@ async fn annotate(
             .as_deref()
             != Some(sid)
         {
+            let stale_ids: HashSet<i64> = ff
+                .refs
+                .iter()
+                .filter(|((c, _), _)| c == context)
+                .map(|(_, id)| *id)
+                .collect();
             ff.refs.retain(|(c, _), _| c != context);
+            ff.shadow_ids.retain(|id| !stale_ids.contains(id));
         }
     }
     for (path, window) in frames {
@@ -373,6 +380,7 @@ pub async fn take_snapshot(
         }
     };
     let mut urls = HashMap::new();
+    let mut node_contexts = HashMap::new();
     let FirefoxSession {
         refs,
         next_node_id,
@@ -380,14 +388,13 @@ pub async fn take_snapshot(
         ..
     } = ff;
     let mut durable_id = |n: &Value| {
-        let key = (
-            n["abCtx"].as_str()?.to_string(),
-            n["abSid"].as_str()?.to_string(),
-        );
+        let context = n["abCtx"].as_str()?.to_string();
+        let key = (context.clone(), n["abSid"].as_str()?.to_string());
         let id = *refs.entry(key).or_insert_with(|| {
             *next_node_id += 1;
             *next_node_id
         });
+        node_contexts.insert(id, context);
         if n["abShadow"] == true {
             shadow_ids.insert(id);
         }
@@ -404,7 +411,16 @@ pub async fn take_snapshot(
     let document_id = frame_root["abSid"].as_str();
     let known = ref_map.observe_document(&context, None, &context, document_id);
     Ok(snapshot_from_ax_nodes(
-        &nodes, &urls, options, ref_map, &context, None, known,
+        &nodes,
+        &urls,
+        options,
+        ref_map,
+        SnapshotRefContext {
+            node_contexts: &node_contexts,
+            session_id: &context,
+            frame_id: None,
+            document_is_known: known,
+        },
     ))
 }
 
@@ -438,7 +454,7 @@ pub async fn diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
 mod tests {
     use super::*;
     use crate::native::element::RefMap;
-    use crate::native::snapshot::{snapshot_from_ax_nodes, SnapshotOptions};
+    use crate::native::snapshot::{snapshot_from_ax_nodes, SnapshotOptions, SnapshotRefContext};
     use std::collections::{HashMap, HashSet};
 
     fn leaf(role: &str, name: &str, sel: &str, states: &[&str]) -> Value {
@@ -570,7 +586,18 @@ mod tests {
             urls: false,
         };
         let known = ref_map.observe_document("s", None, "s", Some(document_id));
-        snapshot_from_ax_nodes(&nodes, &HashMap::new(), &options, ref_map, "s", None, known)
+        snapshot_from_ax_nodes(
+            &nodes,
+            &HashMap::new(),
+            &options,
+            ref_map,
+            SnapshotRefContext {
+                node_contexts: &HashMap::new(),
+                session_id: "s",
+                frame_id: None,
+                document_is_known: known,
+            },
+        )
     }
 
     #[test]
@@ -620,6 +647,41 @@ mod tests {
         render_with(&root, &mut map, &mut HashMap::new(), "loader");
         assert_eq!(map.get("e1").unwrap().nth, Some(0));
         assert_eq!(map.get("e2").unwrap().nth, Some(1));
+    }
+
+    #[test]
+    fn duplicate_names_in_different_frames_do_not_get_nth() {
+        let mut root = page(vec![
+            leaf("button", "OK", "#top", &[]),
+            leaf("button", "OK", "#child", &[]),
+        ]);
+        tag_snapshot_nodes(&mut root, "top", "document", true);
+        root["children"][1]["abCtx"] = json!("child");
+        let mut contexts = HashMap::new();
+        let mut next_id = 0;
+        let mut durable_id = |node: &Value| {
+            next_id += 1;
+            contexts.insert(next_id, node["abCtx"].as_str()?.to_string());
+            Some(next_id)
+        };
+        let nodes = ax_nodes_from_snapshot(&root, &mut durable_id);
+        let mut refs = RefMap::new();
+
+        snapshot_from_ax_nodes(
+            &nodes,
+            &HashMap::new(),
+            &SnapshotOptions::default(),
+            &mut refs,
+            SnapshotRefContext {
+                node_contexts: &contexts,
+                session_id: "top",
+                frame_id: None,
+                document_is_known: false,
+            },
+        );
+
+        assert_eq!(refs.get("e1").unwrap().nth, None);
+        assert_eq!(refs.get("e2").unwrap().nth, None);
     }
 
     #[test]
@@ -730,7 +792,18 @@ mod tests {
             };
             let hrefs = HashMap::from([(5, "https://x.test/docs".to_string())]);
             let mut map = RefMap::new();
-            snapshot_from_ax_nodes(&nodes, &hrefs, &options, &mut map, "s", None, false)
+            snapshot_from_ax_nodes(
+                &nodes,
+                &hrefs,
+                &options,
+                &mut map,
+                SnapshotRefContext {
+                    node_contexts: &HashMap::new(),
+                    session_id: "s",
+                    frame_id: None,
+                    document_is_known: false,
+                },
+            )
         };
         assert_eq!(render(false), "- link \"Docs\" [ref=e1]");
         assert_eq!(

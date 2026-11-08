@@ -4,9 +4,10 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-use super::actions::session;
+use super::daemon::session;
+use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
-use crate::native::actions::{self as chrome, DaemonState};
+use crate::native::actions::DaemonState;
 use crate::native::cookies::Cookie;
 use crate::native::state::{self, OriginStorage, StorageState};
 use crate::validation::{is_valid_session_name, session_name_error};
@@ -590,14 +591,16 @@ const RESTORE_STORAGE_JS: &str = r#"(expectedOrigin, payload) => {
 }"#;
 
 /// Loads the cookies and origin storage in a `state.rs` JSON file, dropping fields BiDi
-/// does not support, like Chrome's `handle_state_load`. Origins that redirect elsewhere are skipped and returned.
-pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<String>, String> {
+/// does not support, like Chrome's `handle_state_load`. Origins that cannot be loaded, or that
+/// land somewhere else, are skipped and returned.
+pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<String>, String> {
     let json_str = state::read_state_json(path)?;
-    let state: StorageState =
+    let saved: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {e}"))?;
 
-    for cookie in &state.cookies {
-        ff.bidi
+    for cookie in &saved.cookies {
+        session(state)?
+            .bidi
             .send(
                 "storage.setCookie",
                 json!({ "cookie": state_cookie_to_bidi(cookie) }),
@@ -605,32 +608,33 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
             .await?;
     }
 
-    let context = ff.context.clone();
     let mut skipped = Vec::new();
-    for origin in &state.origins {
+    for origin in &saved.origins {
         if origin.local_storage.is_empty() && origin.session_storage.is_empty() {
             continue;
         }
         let nav_url = format!("{}/", origin.origin.trim_end_matches('/'));
-        if ff
-            .bidi
-            .send(
-                "browsingContext.navigate",
-                json!({ "context": context, "url": nav_url, "wait": "complete" }),
-            )
-            .await
-            .is_err()
+        let landing = match navigation::load(
+            state,
+            Load::Url {
+                url: &nav_url,
+                wait: Wait::Complete,
+            },
+        )
+        .await
         {
-            skipped.push(origin.origin.clone());
-            continue;
-        }
-        ff.refs.clear();
+            Ok(landing) if !landing.prompt => landing,
+            _ => {
+                skipped.push(origin.origin.clone());
+                continue;
+            }
+        };
 
         let payload = serde_json::to_string(origin).map_err(|e| e.to_string())?;
-        let restored = ff
+        let restored = session(state)?
             .bidi
             .call_function_in_sandbox(
-                &context,
+                &landing.context,
                 "agent-browser",
                 RESTORE_STORAGE_JS,
                 vec![json!(origin.origin), json!(payload)],
@@ -639,8 +643,6 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
             .map_err(|e| format!("Failed to restore storage for {}: {e}", origin.origin))?;
         if restored != json!(true) {
             skipped.push(origin.origin.clone());
-        } else {
-            ff.note_visit(&origin.origin);
         }
     }
 
@@ -654,9 +656,12 @@ pub async fn state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .get("path")
         .and_then(Value::as_str)
         .ok_or("Missing 'path' parameter")?;
-    chrome::ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    let ff = session(state)?;
-    let skipped = load_state_path(ff, path).await?;
+    crate::native::actions::ensure_state_replay_supported_by_active_domain_filter(
+        state,
+        "state load",
+    )
+    .await?;
+    let skipped = load_state_path(state, path).await?;
     crate::native::actions::mark_explicit_storage_state_loaded(state, path);
     Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
 }
@@ -767,12 +772,19 @@ mod tests {
         )
         .unwrap();
 
-        let skipped = load_state_path(&mut ff, path.to_str().unwrap())
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        let skipped = load_state_path(&mut state, path.to_str().unwrap())
             .await
             .unwrap();
 
         assert_eq!(skipped, vec!["https://unreachable.example".to_string()]);
-        assert!(ff.visited_origins.contains("https://reachable.example"));
+        assert!(state
+            .firefox
+            .as_ref()
+            .unwrap()
+            .visited_origins
+            .contains("https://reachable.example"));
         server.abort();
     }
 

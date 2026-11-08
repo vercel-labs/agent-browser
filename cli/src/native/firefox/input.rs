@@ -233,10 +233,34 @@ fn origin_json(origin: &Origin) -> (f64, f64, Value) {
     }
 }
 
+pub(crate) fn mouse_button_mask(button: u8) -> i32 {
+    match button {
+        0 => 1,
+        1 => 4,
+        2 => 2,
+        3 => 8,
+        4 => 16,
+        _ => 0,
+    }
+}
+
+pub(crate) fn mouse_button_name(button: u8) -> &'static str {
+    match button {
+        0 => "left",
+        1 => "middle",
+        2 => "right",
+        3 => "back",
+        4 => "forward",
+        _ => "left",
+    }
+}
+
 fn mouse_button(button: &str) -> u8 {
     match button.to_ascii_lowercase().as_str() {
         "middle" => 1,
         "right" => 2,
+        "back" => 3,
+        "forward" => 4,
         _ => 0,
     }
 }

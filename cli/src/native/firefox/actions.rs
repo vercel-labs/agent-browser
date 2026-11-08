@@ -2,7 +2,6 @@
 
 use serde_json::Value;
 
-use super::session::FirefoxSession;
 use super::{capture, emulation, forms, interact, network, page, query, snapshot, storage, tabs};
 use crate::native::actions::{self as chrome, DaemonState};
 
@@ -148,46 +147,9 @@ pub const CHROME_ONLY_ACTIONS: &[&str] = &[
     "react_suspense",
 ];
 
-const SAFE_DURING_DIALOG: &[&str] = &[
-    "dialog",
-    "screenshot",
-    "url",
-    "title",
-    "tab_list",
-    "tab_new",
-    "tab_switch",
-    "tab_close",
-    "close",
-    "confirm",
-    "deny",
-];
-
 /// True when the Firefox module answers `action` itself, including with a Chrome-only error.
 pub fn handles(action: &str) -> bool {
     SUPPORTED_ACTIONS.contains(&action) || CHROME_ONLY_ACTIONS.contains(&action)
-}
-
-/// The launched Firefox session, or the standard not-launched error.
-pub fn session(state: &mut DaemonState) -> Result<&mut FirefoxSession, String> {
-    state.firefox.as_mut().ok_or("Browser not launched".into())
-}
-
-/// Fails when a dialog on the active tab would block `action`; a dialog on a background tab does not.
-fn dialog_guard(action: &str, state: &DaemonState) -> Result<(), String> {
-    let (Some(dialog), Some(ff)) = (&state.pending_dialog, &state.firefox) else {
-        return Ok(());
-    };
-    let on_active_tab = dialog
-        .owner_context
-        .as_deref()
-        .is_none_or(|context| context == ff.top_context);
-    if on_active_tab && !SAFE_DURING_DIALOG.contains(&action) {
-        return Err(format!(
-            "A JavaScript {} dialog is blocking the page: \"{}\". Resolve it with `dialog accept` or `dialog dismiss`, then retry `{}`.",
-            dialog.dialog_type, dialog.message, action
-        ));
-    }
-    Ok(())
 }
 
 /// Runs one command on the Firefox session.
@@ -200,7 +162,9 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
     if !SUPPORTED_ACTIONS.contains(&action) {
         return Err(format!("`{action}` is not supported on Firefox"));
     }
-    dialog_guard(action, state)?;
+    if let Some(error) = chrome::dialog_block_error(action, cmd, state) {
+        return Err(error);
+    }
     match action {
         "navigate" => page::navigate(cmd, state).await,
         "back" => page::back(cmd, state).await,
@@ -311,7 +275,8 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
         "offline" => emulation::set_offline(cmd, state).await,
         "set_media" | "emulatemedia" => emulation::set_media(cmd, state).await,
         "close" => chrome::handle_close(state).await,
-        _ => chrome::handle_deny(cmd, state).await,
+        "deny" => chrome::handle_deny(cmd, state).await,
+        _ => Err(format!("`{action}` is not an action Firefox can run")),
     }
 }
 
@@ -405,23 +370,73 @@ mod tests {
         assert_eq!(result, json!({ "state": "none" }));
     }
 
+    /// A prompt that is already gone must not leave a record that blocks every later command.
+    #[tokio::test]
+    async fn a_rejected_prompt_command_still_clears_the_pending_dialog() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let reply = json!({
+                    "type": "error",
+                    "id": request["id"],
+                    "error": "no such alert",
+                    "message": "no user prompt is open",
+                });
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
+            }
+        });
+        let mut state = DaemonState::new();
+        let (ff, _tx, _) = fake_session().await;
+        state.firefox = Some(ff);
+        state.firefox.as_mut().unwrap().bidi = super::super::bidi::BidiClient::connect(&url)
+            .await
+            .unwrap()
+            .into();
+        state.pending_dialog = Some(dialog("ctx-active", Some("ctx-active")));
+
+        let error = execute("dialog", &json!({"response": "accept"}), &mut state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("no such alert"), "{error}");
+        assert!(
+            state.pending_dialog.is_none(),
+            "a rejected prompt command must not keep the dialog recorded"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn dialog_blocks_only_the_active_tab() {
         let mut state = DaemonState::new();
-        let (mut ff, _tx, _) = fake_session().await;
-        ff.tab_ids.insert("ctx-background".to_string(), 2);
+        let (ff, _tx, _) = fake_session().await;
         state.firefox = Some(ff);
+        let blocked = |state: &DaemonState, action: &str| {
+            chrome::dialog_block_error(action, &json!({}), state)
+                .is_some_and(|error| error.contains("confirm dialog is blocking the page"))
+        };
+
         state.pending_dialog = Some(dialog("ctx-active", Some("ctx-active")));
-        let e = dialog_guard("navigate", &state).unwrap_err();
-        assert!(e.contains("confirm dialog is blocking the page"), "{e}");
-        assert!(dialog_guard("tab_list", &state).is_ok());
+        assert!(blocked(&state, "navigate"));
+        assert!(!blocked(&state, "tab_list"));
+
         state.pending_dialog = Some(dialog("ctx-iframe", Some("ctx-background")));
-        assert!(dialog_guard("navigate", &state).is_ok());
+        assert!(!blocked(&state, "navigate"));
+
         state.pending_dialog = Some(dialog("ctx-iframe", Some("ctx-active")));
-        assert!(dialog_guard("navigate", &state).is_err());
-        state.pending_dialog = Some(dialog("ctx-iframe", None));
-        assert!(dialog_guard("navigate", &state).is_err());
-        state.pending_dialog = Some(dialog("ctx-background", Some("ctx-background")));
-        assert!(dialog_guard("navigate", &state).is_ok());
+        assert!(blocked(&state, "navigate"));
+
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "confirm".into(),
+            message: "sure?".into(),
+            ..Default::default()
+        });
+        assert!(blocked(&state, "navigate"));
     }
 }
