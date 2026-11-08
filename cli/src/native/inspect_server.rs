@@ -6,6 +6,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::InspectProxyHandle;
@@ -112,7 +114,7 @@ async fn handle_connection(
     let peek = String::from_utf8_lossy(&peek_buf[..n]);
 
     if peek.starts_with("GET /ws") {
-        return handle_ws_proxy(stream, proxy, target_id).await;
+        return handle_ws_proxy(stream, proxy, target_id, chrome_host_port).await;
     }
 
     if peek.starts_with("GET / ") {
@@ -172,14 +174,27 @@ async fn handle_http_redirect(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 async fn handle_ws_proxy(
     stream: tokio::net::TcpStream,
     proxy: Arc<InspectProxyHandle>,
     target_id: String,
+    chrome_host_port: String,
 ) -> Result<(), String> {
-    let ws_stream = tokio_tungstenite::accept_async(stream)
-        .await
-        .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
+    let ws_stream = tokio_tungstenite::accept_hdr_async(stream, |req: &Request, resp: Response| {
+        let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
+        if inspect_origin_allowed(origin, &chrome_host_port) {
+            Ok(resp)
+        } else {
+            let err: ErrorResponse = Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Some("Forbidden".to_string()))
+                .unwrap();
+            Err(err)
+        }
+    })
+    .await
+    .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
 
     // Create a dedicated CDP session for this DevTools connection.
     // Each connection gets its own session so domain enablements (DOM.enable, etc.)
@@ -295,6 +310,14 @@ async fn handle_ws_proxy(
     Ok(())
 }
 
+/// Return whether a WebSocket handshake Origin points at the local Chrome instance.
+fn inspect_origin_allowed(origin: Option<&str>, chrome_host_port: &str) -> bool {
+    match origin {
+        None => true,
+        Some(o) => o.eq_ignore_ascii_case(&format!("http://{}", chrome_host_port)),
+    }
+}
+
 fn inject_session_id(json: &str, session_id: &str) -> String {
     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(json) {
         if let Some(obj) = val.as_object_mut() {
@@ -348,6 +371,24 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
         assert!(parsed.get("sessionId").is_none());
         assert_eq!(parsed["id"], 1);
+    }
+
+    #[test]
+    fn test_inspect_origin_allowed() {
+        assert!(inspect_origin_allowed(None, "127.0.0.1:9222"));
+        assert!(inspect_origin_allowed(
+            Some("http://127.0.0.1:9222"),
+            "127.0.0.1:9222"
+        ));
+        assert!(!inspect_origin_allowed(
+            Some("https://evil.example"),
+            "127.0.0.1:9222"
+        ));
+        assert!(!inspect_origin_allowed(
+            Some("http://localhost:3000"),
+            "127.0.0.1:9222"
+        ));
+        assert!(!inspect_origin_allowed(Some("null"), "127.0.0.1:9222"));
     }
 
     #[test]

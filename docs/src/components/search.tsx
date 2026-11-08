@@ -48,6 +48,8 @@ export function Search() {
     if (open) {
       setTimeout(() => inputRef.current?.focus(), 0);
     } else {
+      // ESLint's React Compiler rule skipped this component; follow-up: derive this state.
+      // oxlint-disable-next-line react/set-state-in-effect
       setQuery("");
       setResults([]);
     }
@@ -56,6 +58,8 @@ export function Search() {
   useEffect(() => {
     const q = query.trim();
     if (!q) {
+      // ESLint's React Compiler rule skipped this component; follow-up: derive this state.
+      // oxlint-disable-next-line react/set-state-in-effect
       setResults([]);
       setLoading(false);
       return;
@@ -91,6 +95,8 @@ export function Search() {
   }, [query]);
 
   useEffect(() => {
+    // ESLint's React Compiler rule skipped this component; follow-up: derive this state.
+    // oxlint-disable-next-line react/set-state-in-effect
     setActiveIndex(0);
   }, [results]);
 

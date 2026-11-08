@@ -199,6 +199,8 @@ export function DocsChat({
       launcher.style.setProperty("--chat-launcher-bottom", `${24 + overlap}px`);
     };
     const schedule = () => {
+      // `frame` is local to this effect, not render state; oxlint's react/immutability misreads it.
+      // oxlint-disable-next-line react/immutability
       if (!frame) frame = requestAnimationFrame(update);
     };
     const resize = new ResizeObserver(schedule);

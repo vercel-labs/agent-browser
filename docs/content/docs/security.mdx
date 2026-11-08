@@ -5,7 +5,17 @@ navTitle: "Security"
 
 agent-browser includes security features to protect against credential exposure, prompt injection via untrusted page content, and unauthorized browser actions.
 
-All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.
+Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust.
+
+## Project config trust
+
+The auto-discovered `./agent-browser.json` accepts only `headed`, `json`, `debug`, `userAgent`, `hideScrollbars`, `annotate`, `colorScheme`, `maxOutput`, `screenshotQuality`, `screenshotFormat`, and `idleTimeout`. Other runtime keys, including `extensions`, `initScripts`, state, trust, policy, session, connection, and path settings, are ignored with a warning. The `$schema` metadata key is ignored silently. Put advanced settings in `~/.agent-browser/config.json` or load a trusted file with `--config` or `AGENT_BROWSER_CONFIG`. An explicit config replaces default discovery and loads only that file. See [Configuration](/configuration) for details.
+
+## Browser version check
+
+When a command drives a Chrome, Chromium, or HeadlessChrome browser, agent-browser reads the browser version and compares it with the Stable Channel Update for Desktop posts on the [Chrome Releases blog](https://chromereleases.googleblog.com/). If the browser is behind the current stable release and later Stable releases fixed CVEs, the command response includes a `warning` with the CVE count and up to three IDs. Update the browser to clear it, or run `agent-browser install` for agent-browser's own Chrome.
+
+The warning appears once per browser version in each session. It never blocks a command. If the blog cannot be reached within a few seconds, or no CVEs are listed for later releases, nothing is shown. The request uses agent-browser's built-in root certificates, so a proxy that requires a custom CA blocks it and no warning appears. Cloud provider sessions are not checked, and neither are browsers whose reported product is not Chrome, Chromium, or HeadlessChrome. Set `AGENT_BROWSER_NO_VERSION_CHECK=1` to turn the check and its request off.
 
 ## Threat Model
 
@@ -87,7 +97,7 @@ File permissions are enforced on both Unix (`chmod 600`/`700`) and Windows (`ica
 
 ### Plugins
 
-Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol. Configure them in `agent-browser.json`:
+Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol. Configure them in `~/.agent-browser/config.json`, set `AGENT_BROWSER_PLUGINS`, or load a trusted file with `--config`. The auto-discovered `./agent-browser.json` ignores `plugins` with a warning, and an explicitly loaded file replaces default config discovery.
 
 See [Plugins](/plugins) for the plugin author protocol and implementation examples. Use `agent-browser plugin add <ref>` to create plugin config automatically.
 
@@ -204,6 +214,8 @@ Supports exact match (`github.com`) and wildcard prefix (`*.example.com`, which 
 
 > **Note:** WebSocket and EventSource blocking is best-effort because it overrides browser constructors via an init script. If the `eval` action category is allowed, page scripts could theoretically restore those original constructors. The WebRTC replacement is installed as a non-configurable constructor, with the Chrome UDP policy providing defense in depth for local launches. For maximum protection, deny the `eval` category via `--action-policy` and enforce operating-system egress policy when using `--allowed-domains`.
 
+The allowlist, the action policy and the confirm categories persist with the session. They are stored in an owner-only `<session>.settings` file in the socket directory and are applied again when the daemon restarts, so a crash, idle expiry or `kill` does not remove containment for the next command. A new value replaces the stored one, and a successful `close` removes the file (`close --all` also closes sessions whose daemon is gone, under their stored policy). A relative policy path is stored as an absolute path. A denied or confirmation-pending `close`, and the daemon restarts the CLI does for upgrades or changed options, keep the file. If the file is unreadable, corrupt or (on Unix) accessible by other users, the daemon refuses to start and prints the file name; run `agent-browser --session <name> close` to clear it. While a stored allowlist is active, `--state` and `state load` stay rejected.
+
 Config file:
 
 ```json
@@ -245,6 +257,8 @@ Example policy (restrictive):
   "allow": ["navigate", "snapshot", "click", "scroll", "wait", "get"]
 }
 ```
+
+A missing or invalid policy file blocks every command until it is fixed (`close --all` can still shut the daemon down); an empty `allow` list falls back to `default`.
 
 <table>
   <thead>
