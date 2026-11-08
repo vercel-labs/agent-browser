@@ -11,7 +11,14 @@ pub(crate) const DEFAULT_AI_GATEWAY_URL: &str = "https://ai-gateway.vercel.sh";
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 pub(crate) fn http_client() -> &'static reqwest::Client {
-    HTTP_CLIENT.get_or_init(reqwest::Client::new)
+    HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .expect("valid gateway HTTP client")
+    })
 }
 
 pub(crate) fn is_chat_enabled() -> bool {
@@ -267,6 +274,7 @@ pub(crate) async fn summarize_for_compaction(
 
     let resp = client
         .post(url)
+        .timeout(std::time::Duration::from_secs(30))
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .body(body.to_string())
@@ -532,20 +540,22 @@ fn chat_command_args(session: &str, command: &str) -> Result<Vec<String>, String
 
 /// Runs one chat tool call in `session`. When the session was open at the start
 /// of the turn and has since closed, refuses instead of relaunching it.
-pub(crate) async fn execute_chat_tool(session: &str, command: &str, was_open: bool) -> String {
-    let args = match chat_command_args(session, command) {
-        Ok(args) => args,
-        Err(e) => return e,
-    };
+pub(crate) async fn execute_chat_tool(
+    session: &str,
+    command: &str,
+    was_open: bool,
+    limit: std::time::Duration,
+) -> Result<String, String> {
+    let args = chat_command_args(session, command)?;
     if was_open && !crate::connection::daemon_ready(session) {
-        return format!(
+        return Err(format!(
             "Session '{}' was closed. Stop and tell the user; do not retry.",
             session
-        );
+        ));
     }
     let exe = match std::env::current_exe() {
         Ok(p) => p,
-        Err(e) => return format!("Failed to resolve executable: {}", e),
+        Err(e) => return Err(format!("Failed to resolve executable: {}", e)),
     };
 
     let mut cmd = tokio::process::Command::new(&exe);
@@ -554,19 +564,78 @@ pub(crate) async fn execute_chat_tool(session: &str, command: &str, was_open: bo
         .env_remove("AGENT_BROWSER_DASHBOARD_PORT")
         .env_remove("AGENT_BROWSER_STREAM_PORT");
 
-    match cmd.output().await {
+    match run_chat_process(cmd, limit).await {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if stdout.is_empty() && !stderr.is_empty() {
+            Ok(if stdout.is_empty() && !stderr.is_empty() {
                 stderr
             } else if stdout.is_empty() {
                 "Command completed with no output.".to_string()
             } else {
                 stdout
-            }
+            })
         }
-        Err(e) => format!("Failed to execute command: {}", e),
+        Err(e) => Err(e),
+    }
+}
+
+/// A client timeout cannot undo work already accepted by the daemon.
+/// Reap the child, stop the turn, and never encourage an automatic retry.
+async fn run_chat_process(
+    mut command: tokio::process::Command,
+    limit: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    use tokio::io::AsyncReadExt;
+    if limit.is_zero() {
+        return Err("Chat deadline expired before starting the command.".into());
+    }
+    command
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Failed to execute command: {e}"))?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let mut out = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let mut err = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let status = match tokio::time::timeout(limit, child.wait()).await {
+        Ok(Ok(status)) => status,
+        result => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            out.abort();
+            err.abort();
+            let reason = match result {
+                Ok(Err(error)) => error.to_string(),
+                _ => "tool execution timed out".into(),
+            };
+            return Err(format!("{reason}. The browser action's outcome is unknown; stop and inspect the session before retrying."));
+        }
+    };
+    let output = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(&mut out, &mut err)
+    })
+    .await;
+    match output {
+        Ok((Ok(Ok(stdout)), Ok(Ok(stderr)))) => Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        _ => {
+            out.abort();
+            err.abort();
+            Err("Command output did not close. The action's outcome is unknown; inspect the session before retrying.".into())
+        }
     }
 }
 
@@ -905,7 +974,7 @@ pub(super) async fn handle_chat_request(
                 json!({"type":"error","errorText":"Chat session timed out (5 minute limit)."})
             );
             let _ = stream.write_all(ev.as_bytes()).await;
-            break;
+            return;
         }
 
         let step_ev = "data: {\"type\":\"start-step\"}\n\n";
@@ -922,6 +991,7 @@ pub(super) async fn handle_chat_request(
 
         let gw_response = match client
             .post(&url)
+            .timeout(total_deadline.saturating_duration_since(tokio::time::Instant::now()))
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .body(gateway_body.to_string())
@@ -935,7 +1005,7 @@ pub(super) async fn handle_chat_request(
                     json!({"type":"error","errorText":format!("Gateway request failed: {}", e)})
                 );
                 let _ = stream.write_all(ev.as_bytes()).await;
-                break;
+                return;
             }
         };
 
@@ -946,10 +1016,22 @@ pub(super) async fn handle_chat_request(
                 json!({"type":"error","errorText":body_text})
             );
             let _ = stream.write_all(ev.as_bytes()).await;
-            break;
+            return;
         }
 
-        let tool_calls = stream_gateway_response(stream, gw_response).await;
+        let tool_calls = match tokio::time::timeout_at(
+            total_deadline,
+            stream_gateway_response(stream, gw_response),
+        )
+        .await
+        {
+            Ok(calls) => calls,
+            Err(_) => {
+                let event = "data: {\"type\":\"error\",\"errorText\":\"Gateway turn timed out; pending tools were not executed.\"}\n\n";
+                let _ = stream.write_all(event.as_bytes()).await;
+                return;
+            }
+        };
 
         if tool_calls.is_empty() {
             let finish_step_ev = "data: {\"type\":\"finish-step\"}\n\n";
@@ -979,14 +1061,20 @@ pub(super) async fn handle_chat_request(
                 return;
             }
 
-            let result = match tokio::time::timeout(
-                TOOL_TIMEOUT,
-                execute_chat_tool(&session, command, was_open),
-            )
-            .await
-            {
+            let limit = TOOL_TIMEOUT
+                .min(total_deadline.saturating_duration_since(tokio::time::Instant::now()));
+            let mut disconnected = [0u8; 1];
+            let execution = tokio::select! {
+                result = execute_chat_tool(&session, command, was_open, limit) => result,
+                _ = tokio::io::AsyncReadExt::read(stream, &mut disconnected) => return,
+            };
+            let result = match execution {
                 Ok(r) => r,
-                Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
+                Err(error) => {
+                    let event = format!("data: {}\n\n", json!({"type":"error","errorText":error}));
+                    let _ = stream.write_all(event.as_bytes()).await;
+                    return;
+                }
             };
 
             let frontend_output = enrich_tool_output(&result);
@@ -1020,6 +1108,40 @@ pub(super) async fn handle_chat_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chat_process_timeout_reaps_child_and_reports_unknown_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("echo $$ > \"$1\"; exec sleep 30")
+            .arg("sh")
+            .arg(&pid_file);
+        let error = run_chat_process(command, std::time::Duration::from_millis(150))
+            .await
+            .unwrap_err();
+        assert!(error.contains("outcome is unknown"));
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child must be reaped");
+    }
+
+    #[tokio::test]
+    async fn chat_process_preserves_completed_output() {
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command.arg("--list");
+        let output = run_chat_process(command, std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!output.stdout.is_empty());
+    }
 
     #[test]
     fn chat_allows_webmcp_command() {

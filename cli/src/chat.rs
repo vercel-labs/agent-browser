@@ -199,6 +199,24 @@ async fn run_chat_turn(
     verbosity: Verbosity,
     json_mode: bool,
 ) -> bool {
+    tokio::select! {
+        result = run_chat_turn_inner(session, model, openai_messages, verbosity, json_mode) => result,
+        _ = tokio::signal::ctrl_c() => {
+            let error = "Chat canceled. A browser action may already have completed; inspect the session before retrying.";
+            if json_mode { println!("{}", json!({"success":false,"error":error})); }
+            else { eprintln!("\n{} {}", color::error_indicator(), error); }
+            false
+        }
+    }
+}
+
+async fn run_chat_turn_inner(
+    session: &str,
+    model: &str,
+    openai_messages: &mut Vec<Value>,
+    verbosity: Verbosity,
+    json_mode: bool,
+) -> bool {
     let gateway_url = std::env::var("AI_GATEWAY_URL")
         .unwrap_or_else(|_| chat::DEFAULT_AI_GATEWAY_URL.to_string())
         .trim_end_matches('/')
@@ -255,6 +273,7 @@ async fn run_chat_turn(
 
         let gw_response = match client
             .post(&url)
+            .timeout(total_deadline.saturating_duration_since(tokio::time::Instant::now()))
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .body(gateway_body.to_string())
@@ -289,8 +308,23 @@ async fn run_chat_turn(
             return false;
         }
 
-        let (text_chunks, tool_calls) =
-            parse_gateway_stream(gw_response, verbosity, json_mode).await;
+        let (text_chunks, tool_calls) = match tokio::time::timeout_at(
+            total_deadline,
+            parse_gateway_stream(gw_response, verbosity, json_mode),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => {
+                let error = "Gateway turn timed out; pending tools were not executed.";
+                if json_mode {
+                    println!("{}", json!({"success":false,"error":error}));
+                } else {
+                    eprintln!("\n{} {}", color::error_indicator(), error);
+                }
+                return false;
+            }
+        };
 
         if !text_chunks.is_empty() {
             let text = text_chunks.join("");
@@ -350,14 +384,18 @@ async fn run_chat_turn(
                 eprintln!("{}", color::dim(&format!("> {}", command)));
             }
 
-            let result = match tokio::time::timeout(
-                tool_timeout,
-                chat::execute_chat_tool(session, command, was_open),
-            )
-            .await
-            {
+            let limit = tool_timeout
+                .min(total_deadline.saturating_duration_since(tokio::time::Instant::now()));
+            let result = match chat::execute_chat_tool(session, command, was_open, limit).await {
                 Ok(r) => r,
-                Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
+                Err(error) => {
+                    if json_mode {
+                        println!("{}", json!({"success":false,"error":error}));
+                    } else {
+                        eprintln!("\n{} {}", color::error_indicator(), error);
+                    }
+                    return false;
+                }
             };
 
             if !json_mode && verbosity == Verbosity::Verbose {

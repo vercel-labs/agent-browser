@@ -4123,6 +4123,9 @@ Requires AI_GATEWAY_API_KEY to be set.
 
 In interactive mode, type "quit", "exit", or "q" to leave the REPL.
 
+Chat stops after a tool timeout. An action already accepted by the browser may
+still finish; inspect the session before retrying a consequential action.
+
 Chat Options:
   --model <name>         AI model (or AI_GATEWAY_MODEL env, default: anthropic/claude-sonnet-4.6)
   -v, --verbose          Show tool commands and their raw output
