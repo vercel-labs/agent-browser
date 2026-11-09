@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use super::{
-    build_flow, carries_secret, describe_command, dropped_name, may_become_candidate,
-    save_start_url, write_flow, HostPolicy, SaveInput,
+    build_flow, carries_secret, classify_header, describe_command, dropped_name,
+    may_become_candidate, save_start_url, write_flow, HeaderClass, HostPolicy, SaveInput,
 };
 use crate::native::actions::{HarEntry, FIND_ACTIONS};
 use crate::native::element::RefMap;
@@ -58,6 +58,7 @@ pub struct StepMeta {
 #[derive(Default)]
 pub struct FlowRecorder {
     capturing: bool,
+    suspended: bool,
     pub(super) commands: Vec<(u64, Value)>,
     pub(super) meta: HashMap<u64, StepMeta>,
     /// HAR request id to the sequence number of the command that was
@@ -247,10 +248,18 @@ impl FlowRecorder {
             .count()
     }
 
+    /// Commands run by a replay are not part of the recording.
+    pub fn set_suspended(&mut self, suspended: bool) {
+        if suspended && !self.suspended {
+            self.windows.push((now(), None));
+        }
+        self.suspended = suspended;
+    }
+
     /// Record a command and return its sequence number. The step counts as
     /// failed until `finish_command` says otherwise.
     pub fn records(&self, action: &str) -> bool {
-        self.active() && is_recordable(action)
+        self.active() && !self.suspended && is_recordable(action)
     }
 
     pub(super) fn begin_command(
@@ -271,7 +280,7 @@ impl FlowRecorder {
         from_url: Option<String>,
         traits: Option<&FieldTraits>,
     ) -> Option<u64> {
-        if !self.active() || !is_recordable(action) {
+        if !self.active() || self.suspended || !is_recordable(action) {
             return None;
         }
         self.next_seq += 1;
@@ -283,6 +292,7 @@ impl FlowRecorder {
         if !is_key {
             self.reset_keys();
         }
+        self.secrets.extend(redact_headers(&mut recorded));
         if let Some(secret) = redact_secret(&mut recorded, traits) {
             self.secrets.push(secret);
         } else if is_key {
@@ -721,7 +731,7 @@ fn has_secret_marker(text: &str) -> bool {
     SECRET_MARKERS.iter().any(|m| text.contains(m))
 }
 
-const SECRET_MARKERS: &[&str] = &[
+pub(super) const SECRET_MARKERS: &[&str] = &[
     "pass",
     "contraseña",
     "secret",
@@ -750,8 +760,33 @@ fn typed_field(cmd: &Value) -> Option<&'static str> {
     cmd[field].as_str().map(|_| field)
 }
 
+/// Headers a command sends, such as `navigate --headers`, are classified like
+/// a request's: a credential or cookie value is never stored. The step is
+/// marked redacted, and the values count as secrets.
+fn redact_headers(cmd: &mut Value) -> Vec<String> {
+    let mut found = Vec::new();
+    let Some(headers) = cmd.get_mut("headers").and_then(|h| h.as_object_mut()) else {
+        return found;
+    };
+    for (name, value) in headers.iter_mut() {
+        let lower = name.to_ascii_lowercase();
+        let secret = classify_header(&lower) == HeaderClass::Credential
+            || matches!(lower.as_str(), "cookie" | "set-cookie");
+        if secret {
+            if let Some(text) = value.as_str().filter(|t| !t.is_empty()) {
+                found.push(text.to_string());
+            }
+            *value = json!(REDACTED);
+        }
+    }
+    if !found.is_empty() || headers.values().any(|v| v == REDACTED) {
+        cmd["redacted"] = json!(true);
+    }
+    found
+}
+
 /// A value typed into a field that looks like a password or code is never
-/// stored; the flow keeps a marker only.
+/// stored; the flow keeps a marker and cannot be replayed through the UI.
 /// Returns the removed value. `fill` stores input in `value`, `type` in `text`.
 fn redact_secret(cmd: &mut Value, traits: Option<&FieldTraits>) -> Option<String> {
     let typed = typed_field(cmd);
