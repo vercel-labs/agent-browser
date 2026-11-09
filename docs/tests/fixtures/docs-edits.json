@@ -234,6 +234,10 @@
       {
         "from": "For actions that require explicit approval, use `--confirm-actions` to specify categories that require confirmation:",
         "to": "For actions that require explicit approval, use `--confirm-actions` to specify categories that require confirmation. The categories are the ones in the action policy table above, and an exact action name also matches."
+      },
+      {
+        "from": "For actions that require explicit approval, use --confirm-actions to specify categories that require confirmation:",
+        "to": "For actions that require explicit approval, use --confirm-actions to specify categories that require confirmation. The categories are the ones in the action policy table above, and an exact action name also matches."
       }
     ],
     "/init-scripts": [
