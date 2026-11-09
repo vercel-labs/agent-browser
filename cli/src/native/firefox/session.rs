@@ -55,7 +55,9 @@ pub struct FirefoxSession {
     pub touches: Vec<(f64, f64)>,
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
     pub shadow_ids: std::collections::HashSet<i64>,
-    /// BiDi user context created for a window opened by `window new`, keyed by its top-level context.
+    /// BiDi user context of the window a top-level context belongs to, keyed by that context.
+    /// `window new` and every `tab new` inside such a window insert here, so several tabs can
+    /// share one user context.
     pub window_contexts: HashMap<String, String>,
     pub visited_origins: HashSet<String>,
     events: broadcast::Receiver<Value>,
@@ -226,6 +228,14 @@ impl FirefoxSession {
                 self.visited_origins.insert(origin);
             }
         }
+    }
+
+    /// The BiDi storage partition for the active tab, set by `window new` and `tab new` inside
+    /// that window.
+    pub fn active_partition(&self) -> Option<Value> {
+        self.window_contexts
+            .get(&self.context)
+            .map(|user_context| json!({"type": "storageKey", "userContext": user_context}))
     }
 
     /// Returns the stable `t<N>` id for `context`, assigning the next id the first time it is seen.

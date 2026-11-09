@@ -150,6 +150,22 @@ pub fn bind_refs(
     Ok(out)
 }
 
+/// Bind what is known in one pass. A param with no value and a reference
+/// stay in the text as placeholders.
+pub fn bind_known(parts: &[Part], slot: Slot, values: &HashMap<String, String>) -> String {
+    parts
+        .iter()
+        .map(|part| match part {
+            Part::Lit(text) => text.clone(),
+            Part::Param(name) => values
+                .get(name)
+                .map(|v| encode(v, slot))
+                .unwrap_or_else(|| format!("{{{{{}}}}}", name)),
+            other => show(std::slice::from_ref(other)),
+        })
+        .collect()
+}
+
 /// The template as text, with what is still unbound shown as placeholders.
 pub fn show(parts: &[Part]) -> String {
     parts
