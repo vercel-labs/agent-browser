@@ -5,6 +5,7 @@ import { useAtomValue } from "jotai/react";
 import { activeSessionNameAtom } from "@/store/sessions";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { cn } from "@/lib/utils";
+import { createLatestRequest } from "@/lib/latest-request";
 import { Separator } from "@/components/ui/separator";
 import { Loader2, RefreshCw } from "lucide-react";
 
@@ -56,65 +57,61 @@ export function StoragePanel() {
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const lastSessionRef = useRef(sessionName);
+  const requests = useRef(createLatestRequest());
 
   const fetchData = useCallback(
     async (which: StorageTab) => {
-      if (!sessionName) return;
+      if (!sessionName) {
+        setLoading(false);
+        return;
+      }
       setLoading(true);
-      try {
-        if (which === "cookies") {
-          const res = await execCommand(sessionArgs(sessionName, "cookies"));
-          if (res.success && res.stdout) {
-            try {
-              const parsed = JSON.parse(res.stdout);
+      const args = which === "cookies"
+        ? sessionArgs(sessionName, "cookies")
+        : sessionArgs(sessionName, "storage", which === "localStorage" ? "local" : "session");
+      await requests.current.run(
+        () => execCommand(args),
+        (res) => {
+          if (!res.success || !res.stdout) return;
+          try {
+            const parsed = JSON.parse(res.stdout);
+            if (which === "cookies") {
               setCookies(parsed.cookies ?? []);
-            } catch {
-              setCookies([]);
-            }
-          }
-        } else {
-          const storageType = which === "localStorage" ? "local" : "session";
-          const res = await execCommand(
-            sessionArgs(sessionName, "storage", storageType),
-          );
-          if (res.success && res.stdout) {
-            try {
-              const parsed = JSON.parse(res.stdout);
+            } else {
               const entries: StorageEntry[] = [];
               if (parsed.entries && typeof parsed.entries === "object") {
-                for (const [k, v] of Object.entries(parsed.entries)) {
-                  entries.push({ key: k, value: String(v) });
+                for (const [key, value] of Object.entries(parsed.entries)) {
+                  entries.push({ key, value: String(value) });
                 }
               } else if (typeof parsed === "object") {
-                for (const [k, v] of Object.entries(parsed)) {
-                  if (k !== "length") {
-                    entries.push({ key: k, value: String(v) });
-                  }
+                for (const [key, value] of Object.entries(parsed)) {
+                  if (key !== "length") entries.push({ key, value: String(value) });
                 }
               }
               if (which === "localStorage") setLocal(entries);
               else setSession(entries);
-            } catch {
-              if (which === "localStorage") setLocal([]);
-              else setSession([]);
             }
+          } catch {
+            if (which === "cookies") setCookies([]);
+            else if (which === "localStorage") setLocal([]);
+            else setSession([]);
           }
-        }
-      } finally {
-        setLoading(false);
-      }
+        },
+        () => setLoading(false),
+      );
     },
     [sessionName],
   );
 
   useEffect(() => {
-    if (sessionName && sessionName !== lastSessionRef.current) {
+    if (sessionName !== lastSessionRef.current) {
       lastSessionRef.current = sessionName;
       setCookies([]);
       setLocal([]);
       setSession([]);
     }
-    fetchData(tab);
+    void fetchData(tab);
+    return () => requests.current.invalidate();
   }, [tab, sessionName, fetchData]);
 
   const handleRefresh = () => fetchData(tab);
