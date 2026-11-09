@@ -5,7 +5,7 @@ import { useEffect } from "react";
 import { useAtomValue, useSetAtom } from "jotai/react";
 import type { ActivityEvent } from "@/types";
 import { streamEventsAtom } from "@/store/stream";
-import { activeSessionNameAtom } from "@/store/sessions";
+import { activePortAtom, activeSessionNameAtom } from "@/store/sessions";
 
 const PERSIST_KEY = "ab-persist-activity";
 const MAX_PERSISTED = 500;
@@ -53,6 +53,7 @@ export const persistActivityAtom = atom(
 );
 
 export const restoredEventsAtom = atom<ActivityEvent[]>([]);
+const restoredSessionAtom = atom<{ session: string; port: number } | null>(null);
 
 // ---------------------------------------------------------------------------
 // Derived atoms
@@ -62,8 +63,11 @@ export const combinedEventsAtom = atom((get) => {
   const persist = get(persistActivityAtom);
   const restored = get(restoredEventsAtom);
   const streamEvents = get(streamEventsAtom);
+  const restoredSession = get(restoredSessionAtom);
+  const matchesSession = restoredSession?.session === get(activeSessionNameAtom) &&
+    restoredSession?.port === get(activePortAtom);
 
-  if (persist && restored.length > 0) {
+  if (persist && matchesSession && restored.length > 0) {
     return [...restored, ...streamEvents].slice(-MAX_PERSISTED);
   }
   return streamEvents;
@@ -99,22 +103,31 @@ export const clearActivityAtom = atom(null, (get, set) => {
 export function useActivitySync() {
   const persist = useAtomValue(persistActivityAtom);
   const session = useAtomValue(activeSessionNameAtom);
+  const port = useAtomValue(activePortAtom);
+  const restoredSession = useAtomValue(restoredSessionAtom);
   const combinedEvents = useAtomValue(combinedEventsAtom);
   const setRestored = useSetAtom(restoredEventsAtom);
+  const setRestoredSession = useSetAtom(restoredSessionAtom);
 
-  // Load persisted events when session changes
+  // A daemon restart can keep the session name while changing its stream port.
   useEffect(() => {
     if (persist && session) {
       setRestored(loadPersistedEvents(session));
+      setRestoredSession({ session, port });
     } else {
       setRestored([]);
+      setRestoredSession(null);
     }
-  }, [persist, session, setRestored]);
+  }, [persist, session, port, setRestored, setRestoredSession]);
 
-  // Save combined events to localStorage when persist is on
+  // Do not save a render's old history under a newly selected session.
   useEffect(() => {
-    if (persist && session && combinedEvents.length > 0) {
+    if (
+      persist && session &&
+      restoredSession?.session === session && restoredSession.port === port &&
+      combinedEvents.length > 0
+    ) {
       savePersistedEvents(session, combinedEvents);
     }
-  }, [persist, session, combinedEvents]);
+  }, [persist, session, port, restoredSession, combinedEvents]);
 }
