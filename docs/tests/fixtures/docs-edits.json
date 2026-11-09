@@ -361,6 +361,22 @@
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
       }
+    ],
+    "/snapshots": [
+      {
+        "from": "agent-browser snapshot -c                 # Compact (remove empty elements)",
+        "to": "agent-browser snapshot -c                 # Compact (fit in about 2000 tokens)\nagent-browser snapshot -c --max-tokens 800  # Compact with a smaller budget"
+      },
+      {
+        "from": "Remove empty structural elements",
+        "to": "Fit the snapshot in a token budget, keeping the most important lines"
+      }
+    ],
+    "/diffing": [
+      {
+        "from": "Use compact snapshot format",
+        "to": "Remove empty structural elements (no token budget)"
+      }
     ]
   },
   "resources": {

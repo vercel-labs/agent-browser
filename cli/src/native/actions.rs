@@ -6570,6 +6570,10 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
+    let compact = cmd
+        .get("compact")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let options = SnapshotOptions {
         selector: cmd
             .get("selector")
@@ -6579,10 +6583,13 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .get("interactive")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        compact: cmd
-            .get("compact")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        compact,
+        // 0 disables the cap; collapsing and truncation still apply.
+        max_tokens: compact.then(|| match cmd.get("maxTokens").and_then(|v| v.as_u64()) {
+            Some(0) => usize::MAX,
+            Some(n) => n as usize,
+            None => snapshot::DEFAULT_MAX_TOKENS,
+        }),
         depth: cmd
             .get("maxDepth")
             .and_then(|v| v.as_u64())
@@ -6638,6 +6645,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         "selector": options.selector,
         "interactive": options.interactive,
         "compact": options.compact,
+        "maxTokens": options.max_tokens,
         "depth": options.depth,
         "urls": options.urls,
     }))

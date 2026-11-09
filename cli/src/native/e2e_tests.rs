@@ -7587,6 +7587,155 @@ async fn e2e_snapshot_continuous_static_text() {
     assert_success(&resp);
 }
 
+/// Budgeted compact snapshots collapse long tables, keep the focused row, and
+/// print the same refs as the full snapshot. Refs for rows hidden by
+/// compaction still drive actions.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_compact_budget_and_ref_stability() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "about:blank" }),
+            &mut state,
+        )
+        .await,
+    );
+    let rows: String = (1..=300)
+        .map(|i| format!("<tr><td>Customer {i}</td><td><button onclick=\"document.title='edit {i}'\">Edit {i}</button></td></tr>"))
+        .collect();
+    let html = format!(
+        "<main><h1>Customers</h1><label>Search <input id='q'></label>\
+         <table><thead><tr><th>Name</th><th>Actions</th></tr></thead><tbody>{rows}</tbody></table>\
+         <p>{}</p></main>",
+        "Long text. ".repeat(40)
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "setcontent", "html": html }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_evaluate(
+        &mut state,
+        "4",
+        "[...document.querySelectorAll('button')][149].focus(); document.activeElement.textContent",
+        json!("Edit 150"),
+    )
+    .await;
+
+    let full = execute_command(&json!({ "id": "5", "action": "snapshot" }), &mut state).await;
+    assert_success(&full);
+    let full_text = get_data(&full)["snapshot"].as_str().unwrap().to_string();
+    let compact = execute_command(
+        &json!({ "id": "6", "action": "snapshot", "compact": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&compact);
+    let compact_text = get_data(&compact)["snapshot"].as_str().unwrap().to_string();
+
+    assert!(compact_text.len() * 10 < full_text.len(), "{compact_text}");
+    assert!(compact_text.contains("more rows"), "{compact_text}");
+    assert!(
+        compact_text.contains("button \"Edit 150\""),
+        "{compact_text}"
+    );
+    assert!(
+        compact_text.contains("textbox \"Search\""),
+        "{compact_text}"
+    );
+    assert!(
+        compact_text.contains("…\""),
+        "long text is truncated: {compact_text}"
+    );
+    assert!(
+        !compact_text.contains("button \"Edit 100\""),
+        "{compact_text}"
+    );
+    let full_lines: Vec<&str> = full_text.lines().map(str::trim).collect();
+    for line in compact_text.lines().filter(|l| l.contains("[ref=")) {
+        if line.contains("…\"") {
+            continue;
+        }
+        assert!(
+            full_lines.contains(&line.trim()),
+            "compact line not in full snapshot: {line}"
+        );
+    }
+    assert_eq!(get_data(&full)["refs"], get_data(&compact)["refs"]);
+
+    // -i combines with -c and a custom budget.
+    let tight = execute_command(
+        &json!({ "id": "11", "action": "snapshot", "compact": true, "interactive": true, "maxTokens": 200 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&tight);
+    let tight_text = get_data(&tight)["snapshot"].as_str().unwrap();
+    assert!(tight_text.contains("button \"Edit 150\""), "{tight_text}");
+    assert!(!tight_text.contains("Long text"), "{tight_text}");
+    assert!(tight_text.len() < 1200, "{tight_text}");
+
+    let refs = get_data(&compact)["refs"].as_object().unwrap().clone();
+    let ref_for = |role: &str, name: &str| {
+        refs.iter()
+            .find(|(_, node)| node["role"] == role && node["name"] == name)
+            .map(|(ref_id, _)| format!("@{ref_id}"))
+            .unwrap()
+    };
+    // A ref printed by the compact snapshot.
+    let search = ref_for("textbox", "Search");
+    assert!(compact_text.contains(&format!("[ref={}]", &search[1..])));
+    assert_success(
+        &execute_command(
+            &json!({ "id": "7", "action": "fill", "selector": search, "value": "acme" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_evaluate(
+        &mut state,
+        "8",
+        "document.getElementById('q').value",
+        json!("acme"),
+    )
+    .await;
+    // A ref hidden by compaction.
+    let hidden = ref_for("button", "Edit 100");
+    assert_success(
+        &execute_command(
+            &json!({ "id": "9", "action": "click", "selector": hidden }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_evaluate(&mut state, "10", "document.title", json!("edit 100")).await;
+
+    // Clicking moved focus to the hidden row, so it is shown now.
+    let after = execute_command(
+        &json!({ "id": "12", "action": "snapshot", "compact": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&after);
+    let after_text = get_data(&after)["snapshot"].as_str().unwrap();
+    assert!(
+        after_text.contains(&format!("button \"Edit 100\" [ref={}]", &hidden[1..])),
+        "{after_text}"
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 /// Test that a selector-scoped snapshot renders each element once when plain
 /// wrapper elements (ignored in the AX tree) sit between the matched element
 /// and its descendants.

@@ -963,7 +963,8 @@ fn tools() -> Vec<Value> {
             "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
-                "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text." },
+                "compact": { "type": "boolean", "default": false, "description": "Budget mode: drop empty structure, collapse long tables and lists, truncate long text, and keep the highest-priority lines (controls first, then headings and landmarks, labels, other text) within maxTokens. Omitted content is marked with lines such as '… 480 more rows'. Refs match the full snapshot." },
+                "maxTokens": { "type": "integer", "minimum": 0, "description": "Approximate token budget for compact snapshots (default 2000, 0 for no cap). Implies compact." },
                 "depth": { "type": "integer", "minimum": 0, "description": "Limit tree depth." },
                 "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector." },
                 "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." },
@@ -3065,6 +3066,10 @@ fn snapshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError
     if optional_bool(arguments, "compact")?.unwrap_or(false) {
         args.push("-c".to_string());
     }
+    if let Some(max_tokens) = optional_u64(arguments, "maxTokens")? {
+        args.push("--max-tokens".to_string());
+        args.push(max_tokens.to_string());
+    }
     if optional_bool(arguments, "includeUrls")?.unwrap_or(false) {
         args.push("-u".to_string());
     }
@@ -4827,6 +4832,8 @@ mod tests {
             json!({}),
             json!({"interactive": false, "selector": "#content"}),
             json!({"compact": true, "interactive": false}),
+            json!({"maxTokens": 500}),
+            json!({"compact": true, "maxTokens": 0}),
         ] {
             let args = snapshot_command_args(&arguments).unwrap();
             let flags = crate::flags::parse_flags(&args);
@@ -4837,9 +4844,10 @@ mod tests {
                 command["interactive"].as_bool().unwrap_or(false),
                 arguments["interactive"].as_bool().unwrap_or(true)
             );
-            if arguments["compact"] == true {
+            if arguments["compact"] == true || arguments.get("maxTokens").is_some() {
                 assert_eq!(command["compact"], true);
             }
+            assert_eq!(command.get("maxTokens"), arguments.get("maxTokens"));
         }
     }
 

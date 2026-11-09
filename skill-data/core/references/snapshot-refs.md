@@ -36,7 +36,23 @@ agent-browser snapshot
 agent-browser snapshot -i
 ```
 
-Compact snapshots (`-c`) keep visible text, status text, and their direct ancestors. Empty sibling branches are removed. Interactive snapshots (`-i`) filter out noninteractive content. MCP snapshots default to interactive; set `interactive: false` to retain visible text and status text.
+Interactive snapshots (`-i`) filter out noninteractive content. MCP snapshots default to interactive; set `interactive: false` to retain visible text and status text.
+
+### Compact snapshots
+
+Use `-c` when a page is large (long tables, feeds, documentation pages) and you need the controls and outline rather than every row. It combines with `-i`.
+
+```bash
+agent-browser snapshot -c                    # fit in about 2000 tokens
+agent-browser snapshot -i -c --max-tokens 800  # smaller budget; --max-tokens implies -c
+agent-browser snapshot -c --max-tokens 0     # no cap, still collapses and shortens
+```
+
+- Long runs of rows, list items, options, and links keep their first 5 and last 2 items, plus items holding a focused, selected, or checked element. A marker such as `- … 493 more rows (500 total)` replaces the rest.
+- Text over 100 characters is shortened with `…`. Interactive names are never shortened.
+- When over budget, controls are kept first, then headings and landmarks, then labels, then other text. The focused element, viewport content, and open dialogs rank higher.
+- Each parent with omitted children gets one `- … N more <role>` marker, and a final `(compact: showing X of Y lines; ...)` line says how much was cut.
+- Refs are identical to the full snapshot's, and refs of hidden lines still work. To read hidden content, scope with `-s <selector>`, raise `--max-tokens`, or drop `-c`.
 
 ### Snapshot Output Format
 
