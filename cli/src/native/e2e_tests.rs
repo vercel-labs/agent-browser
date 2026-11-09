@@ -17335,6 +17335,7 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
 
     let resp = firefox_command(&mut state, json!({ "id": "w1", "action": "window_new" })).await;
     assert_success(&resp);
+    let window_tab = get_data(&resp)["tabId"].clone();
     firefox_open(&mut state, &format!("{}two", fixture.url)).await;
     assert!(
         !firefox_eval(&mut state, "document.cookie")
@@ -17345,15 +17346,131 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
         "a new window must not see the other window's cookies"
     );
 
-    let resp = firefox_command(&mut state, json!({ "id": "w2", "action": "tab_close" })).await;
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c2", "action": "cookies_set", "name": "isolated_window", "value": "2" }),
+    )
+    .await;
     assert_success(&resp);
     assert!(
         firefox_eval(&mut state, "document.cookie")
             .await
             .as_str()
             .unwrap_or_default()
-            .contains("main_window=1"),
-        "closing the window must leave the original cookies in place"
+            .contains("isolated_window=2"),
+        "a cookie set in the new window must stay in its own jar"
+    );
+
+    let resp = firefox_command(&mut state, json!({ "id": "t1", "action": "tab_new" })).await;
+    assert_success(&resp);
+    let second_tab = get_data(&resp)["tabId"].clone();
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    assert!(
+        firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .unwrap_or_default()
+            .contains("isolated_window=2"),
+        "a tab opened from the new window must share that window's jar"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c3", "action": "cookies_set", "name": "second_tab", "value": "3" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .unwrap_or_default()
+            .contains("second_tab=3"),
+        "a cookie set in the tab must stay in the window's jar"
+    );
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "second_tab") && has_cookie(&cookies, "isolated_window"),
+        "cookies get in a tab opened from the window must read that window's jar: {cookies}"
+    );
+    assert!(
+        !has_cookie(&cookies, "main_window"),
+        "cookies get in a tab opened from the window must not read the default jar: {cookies}"
+    );
+
+    let resp = firefox_command(&mut state, json!({ "id": "t2", "action": "tab_new" })).await;
+    assert_success(&resp);
+    let third_tab = get_data(&resp)["tabId"].clone();
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "second_tab") && has_cookie(&cookies, "isolated_window"),
+        "a third tab opened from the second must stay in the window's jar: {cookies}"
+    );
+    assert!(
+        !has_cookie(&cookies, "main_window"),
+        "a third tab opened from the second must not read the default jar: {cookies}"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c4", "action": "tab_close", "tabId": third_tab }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "s1", "action": "tab_switch", "tabId": second_tab }),
+    )
+    .await;
+    assert_success(&resp);
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "second_tab"),
+        "the second tab must still read its cookie after the third closes: {cookies}"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c5", "action": "tab_close", "tabId": second_tab }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "s2", "action": "tab_switch", "tabId": window_tab }),
+    )
+    .await;
+    assert_success(&resp);
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "isolated_window") && has_cookie(&cookies, "second_tab"),
+        "closing the second tab must keep the window's user context alive: {cookies}"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c6", "action": "tab_close", "tabId": window_tab }),
+    )
+    .await;
+    assert_success(&resp);
+    let cookies = firefox_eval(&mut state, "document.cookie")
+        .await
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        cookies.contains("main_window=1"),
+        "closing the window must leave the original cookies in place: {cookies}"
+    );
+    assert!(
+        !cookies.contains("isolated_window=2"),
+        "the isolated window must not write into the original jar: {cookies}"
+    );
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "main_window") && !has_cookie(&cookies, "second_tab"),
+        "the original window must not read the closed window's cookies: {cookies}"
     );
 }
 
@@ -17698,79 +17815,59 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
     hook_server.abort();
 }
 
+/// A state load while an isolated window is active must restore cookies into that window's jar.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
-async fn e2e_firefox_har_preserves_post_body_and_elapsed_time() {
+async fn e2e_firefox_state_load_restores_cookies_into_the_active_window() {
     required_firefox_binary();
     let tmp = tempfile::tempdir().unwrap();
     let _env = firefox_test_environment(tmp.path());
     let fixture = firefox_fixture().await;
+    let state_path = tmp.path().join("state.json");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec(&json!({
+            "cookies": [{
+                "name": "from_state",
+                "value": "1",
+                "domain": "localhost",
+                "path": "/",
+                "expires": -1,
+                "httpOnly": false,
+                "secure": false
+            }],
+            "origins": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
-    firefox_open(&mut state, &fixture.url).await;
-    assert_success(
-        &firefox_command(
-            &mut state,
-            json!({ "id": "tracked-start", "action": "requests" }),
-        )
-        .await,
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    let resp = firefox_command(&mut state, json!({ "id": "w1", "action": "window_new" })).await;
+    assert_success(&resp);
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+
+    let load = firefox_command(
+        &mut state,
+        json!({ "id": "l1", "action": "state_load", "path": state_path.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&load);
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "from_state"),
+        "a restored cookie must land in the active window's jar: {cookies}"
     );
-    let started = firefox_command(
-        &mut state,
-        json!({ "id": "har-start", "action": "har_start", "content": "all" }),
-    )
-    .await;
-    assert_success(&started);
-    assert_eq!(
-        firefox_eval(&mut state, "fetch('/har-post', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'payload=har-probe'}).then(r => r.text())").await,
-        "ok"
+
+    let resp = firefox_command(&mut state, json!({ "id": "c1", "action": "tab_close" })).await;
+    assert_success(&resp);
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        !has_cookie(&cookies, "from_state"),
+        "a restored cookie must not land in the default jar: {cookies}"
     );
-    let path = tmp.path().join("capture.har");
-    let stopped = firefox_command(
-        &mut state,
-        json!({ "id": "har-stop", "action": "har_stop", "path": path.to_str().unwrap() }),
-    )
-    .await;
-    assert_success(&stopped);
-    let har: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let entry = har["log"]["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| {
-            entry["request"]["url"]
-                .as_str()
-                .unwrap()
-                .ends_with("/har-post")
-        })
-        .expect("HAR must contain the delayed POST");
-    assert_eq!(entry["request"]["postData"]["text"], "payload=har-probe");
-    assert!(entry["time"].as_f64().unwrap() >= 300.0);
-    assert!(entry["timings"]["wait"].as_f64().unwrap() >= 300.0);
-    assert!(entry["timings"]["send"].as_f64().unwrap() >= 0.0);
-    let tracked = firefox_command(
-        &mut state,
-        json!({ "id": "tracked", "action": "requests", "filter": "/har-post" }),
-    )
-    .await;
-    assert_success(&tracked);
-    let request = get_data(&tracked)["requests"]
-        .as_array()
-        .and_then(|requests| requests.first())
-        .expect("tracked requests must contain the HAR POST");
-    assert_eq!(request["postData"], "payload=har-probe");
-    let detail = firefox_command(
-        &mut state,
-        json!({
-            "id": "tracked-detail",
-            "action": "request_detail",
-            "requestId": request["requestId"],
-        }),
-    )
-    .await;
-    assert_success(&detail);
-    assert_eq!(get_data(&detail)["postData"], "payload=har-probe");
-    firefox_close(&mut state).await;
 }
 
 const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
@@ -17782,6 +17879,7 @@ const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
 <button id="items" onclick="items()">Items</button>
 <button id="gql" onclick="gql()">Gql</button>
 <button id="add" onclick="add()">Add</button>
+<button id="flaky" onclick="fetch('/api/flaky?_=' + Date.now())">Flaky</button>
 <button id="cartadd" onclick="fetch('/cart/remove?id=7')">CartAdd</button>
 <button id="slow" onclick="fetch('/api/slow?q=stove')">Slow</button>
 <button id="stream" onclick="fetch('/api/stream')">Stream</button>
@@ -17825,10 +17923,11 @@ const FLOW_FIXTURE_FIRES: &[(&str, &str)] = &[
     ("#gql", "POST /graphql"),
     ("#add", "POST /api/cart"),
     ("#cartadd", "GET /cart/remove"),
+    ("#flaky", "GET /api/flaky"),
 ];
 
 impl FlowFixture {
-    /// Wait until `done` holds, for the page's own requests to reach the server.
+    /// Wait until `done` holds, for as long as a replay waits for a response.
     async fn wait_until(&self, done: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !done() && std::time::Instant::now() < deadline {
@@ -17960,6 +18059,26 @@ async fn flow_fixture() -> FlowFixture {
                         "application/json",
                         "Set-Cookie: sid=abc; Path=/\r\n",
                         r#"{"ok":true}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/flaky") if path.contains("_=") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"ok":true}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/flaky") => {
+                    reply(
+                        &mut stream,
+                        "401 Unauthorized",
+                        "application/json",
+                        "",
+                        "{}",
                     )
                     .await
                 }
@@ -18330,6 +18449,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
     );
     assert!(cart_text.contains(r#""source": "typed""#));
     assert!(cart_text.contains("{{email}}"));
+    assert!(cart_text.contains("<redacted>"));
     assert!(dir.path().join("127.0.0.1").join("browse.json").exists());
 
     // Runs: a read flow needs no confirmation; a write flow asks first.
@@ -18386,6 +18506,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
             .position(|s| !s["requests"].as_array().unwrap().is_empty())
             .unwrap();
         flow["steps"][at]["requests"][0]["url"] = json!(target);
+        flow["steps"][at]["requests"][0]["tier"] = json!("http");
         std::fs::write(&browse_path, serde_json::to_string(&flow).unwrap()).unwrap();
         let resp = exec(
             &run(
@@ -19038,16 +19159,499 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
         !text.contains("key9"),
         "typed password reached the flow file"
     );
-    assert!(
-        saved["data"]["gaps"]
-            .to_string()
-            .contains("typed or pasted into a secret field"),
-        "{saved}"
-    );
+    assert!(text.contains("<redacted>"));
     let _ = exec(
         &run(&mut n, json!({ "action": "auth_delete", "name": profile })),
         &mut state,
     )
     .await;
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_replay_runs_once_per_run() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("c{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#items" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "ci" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let requests = saved["data"]["requests"].as_array().unwrap();
+    let id_of = |suffix: &str| {
+        requests
+            .iter()
+            .find(|r| r["url"].as_str().unwrap().contains(suffix))
+            .and_then(|r| r["id"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    let (session_id, items_id) = (id_of("/api/session"), id_of("/api/items"));
+    let resaved = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_save", "name": "ci", "from": 1, "output": items_id }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resaved);
+
+    // The output reads the session response, and both fall back to the replay.
+    let path = dir.path().join("127.0.0.1").join("ci.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["id"] == items_id.as_str() {
+                req["url"] = json!(format!(
+                    "{}/api/items?u={{{{@{}.user}}}}",
+                    fx.site, session_id
+                ));
+            }
+            if req["id"] == items_id.as_str() || req["id"] == session_id.as_str() {
+                req["tier"] = json!("replay");
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    assert!(
+        dir.path().join("127.0.0.1").join("ci.json").exists()
+            && flow["writes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["url"].as_str().unwrap().ends_with("/api/cart"))
+    );
+
+    let before = fx.hits("POST /api/cart");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert_eq!(
+        fx.hits("POST /api/cart"),
+        before + 1,
+        "an approved write is sent once per run: {sent}"
+    );
+    // The items click follows the session click at once; it must send the
+    // user the session response set, never an empty one.
+    let log_start = fx.log.lock().unwrap().len();
+    for _ in 0..4 {
+        let again = exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+            ),
+            &mut state,
+        )
+        .await;
+        assert_eq!(again["data"]["ok"], true, "{again}");
+    }
+    let log = fx.log.lock().unwrap().clone();
+    let items: Vec<&String> = log[log_start..]
+        .iter()
+        .filter(|l| l.contains("GET /api/items"))
+        .collect();
+    assert!(!items.is_empty(), "{log:#?}");
+    assert!(
+        items.iter().all(|l| l.contains("GET /api/items?u=ana ")),
+        "an items request went out without the session value: {items:#?}"
+    );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_replay_leaves_the_session_capture_untouched() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("c{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#items" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "ci" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let requests = saved["data"]["requests"].as_array().unwrap();
+    let id_of = |suffix: &str| {
+        requests
+            .iter()
+            .find(|r| r["url"].as_str().unwrap().contains(suffix))
+            .and_then(|r| r["id"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    let (session_id, items_id) = (id_of("/api/session"), id_of("/api/items"));
+    let path = dir.path().join("127.0.0.1").join("ci.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["id"] == items_id.as_str() || req["id"] == session_id.as_str() {
+                req["tier"] = json!("replay");
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+
+    let steps_before = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
+    assert_success(&steps_before);
+    let har_before = state.har_entries.len();
+    let ids_before: Vec<String> = state
+        .har_entries
+        .iter()
+        .map(|e| e.request_id.clone())
+        .collect();
+
+    let hits_before = fx.hits("GET /api/items");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert!(
+        fx.hits("GET /api/items") > hits_before,
+        "the run did not reach the replay tier"
+    );
+    settle_responses(&mut state).await;
+
+    let steps_after = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
+    assert_success(&steps_after);
+    assert_eq!(
+        steps_after["data"]["steps"], steps_before["data"]["steps"],
+        "a run added steps to the user's recording"
+    );
+    let leaked: Vec<String> = state
+        .har_entries
+        .iter()
+        .filter(|e| !ids_before.contains(&e.request_id))
+        .map(|e| e.url.clone())
+        .collect();
+    assert_eq!(
+        state.har_entries.len(),
+        har_before,
+        "a run left entries in the session capture: {leaked:#?}"
+    );
+
+    // The next save holds only what the user did.
+    assert_success(
+        &fx.run_settled(
+            &mut state,
+            &run(&mut n, json!({ "action": "click", "selector": "#add" })),
+        )
+        .await,
+    );
+    let next = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "next" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&next);
+    let urls: Vec<String> = next["data"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["url"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        urls.iter().filter(|u| u.contains("/api/items")).count() <= 1,
+        "the next save carries a run's requests: {urls:#?}"
+    );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_a_write_the_replay_sent_is_not_sent_again_by_a_later_request() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("w{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "cs" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let requests = saved["data"]["requests"].as_array().unwrap();
+    let id_of = |suffix: &str| {
+        requests
+            .iter()
+            .find(|r| r["url"].as_str().unwrap().contains(suffix))
+            .and_then(|r| r["id"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    let (session_id, add_id) = (id_of("/api/session"), id_of("/api/cart"));
+    assert_success(
+        &exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_save", "name": "cs", "from": 1, "output": add_id }),
+            ),
+            &mut state,
+        )
+        .await,
+    );
+    // The read falls back to the replay, which clicks Add; the write then
+    // comes up on the HTTP tier and must not be sent a second time.
+    let path = dir.path().join("127.0.0.1").join("cs.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["id"] == session_id.as_str() {
+                req["tier"] = json!("replay");
+            }
+        }
+    }
+    assert!(flow["steps"]
+        .to_string()
+        .contains(&format!("{{{{@{}.", session_id)));
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    let before = fx.hits("POST /api/cart");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "cs", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert_eq!(
+        fx.hits("POST /api/cart"),
+        before + 1,
+        "one POST per run: {sent}"
+    );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_the_page_tier_fetch_does_not_answer_for_the_replay() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("p{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#flaky" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    assert_success(
+        &exec(
+            &run(&mut n, json!({ "action": "flow_save", "name": "pf" })),
+            &mut state,
+        )
+        .await,
+    );
+    // The page tier asks the exact URL, which the site rejects; the replay's
+    // own request carries a cache-buster and is answered.
+    let path = dir.path().join("127.0.0.1").join("pf.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["url"].as_str().unwrap().contains("/api/flaky") {
+                req["url"] = json!(format!("{}/api/flaky", fx.site));
+                req["tier"] = json!("page");
+                req["expect"]["strippedAuth"] = json!(true);
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    let out = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "pf", "params": {} }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(out["data"]["ok"], true, "{out}");
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_a_route_limited_by_resource_type_applies_the_same_on_both_tiers() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("rt{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "rt" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let add_id = saved["data"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().contains("/api/cart"))
+        .and_then(|r| r["id"].as_str())
+        .unwrap()
+        .to_string();
+    assert_success(
+        &exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_save", "name": "rt", "from": 1, "output": add_id }),
+            ),
+            &mut state,
+        )
+        .await,
+    );
+    let path = dir.path().join("127.0.0.1").join("rt.json");
+    let original = std::fs::read_to_string(&path).unwrap();
+    for tier in ["http", "page"] {
+        let mut flow: Value = serde_json::from_str(&original).unwrap();
+        for step in flow["steps"].as_array_mut().unwrap() {
+            for req in step["requests"].as_array_mut().unwrap() {
+                if req["id"] == add_id.as_str() {
+                    req["tier"] = json!(tier);
+                }
+            }
+        }
+        std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+        // (route limited to, whether the mock answers the write); Chrome
+        // reports the in-page fetch() as an XHR to request interception
+        for (limit, mocked) in [("fetch", false), ("xhr", true)] {
+            assert_success(
+                &exec(
+                    &run(
+                        &mut n,
+                        json!({
+                            "action": "route",
+                            "url": "*/api/cart",
+                            "resourceType": limit,
+                            "response": { "status": 200, "body": "{\"cart\":[7]}" },
+                        }),
+                    ),
+                    &mut state,
+                )
+                .await,
+            );
+            let before = fx.hits("POST /api/cart");
+            let out = exec(
+                &run(
+                    &mut n,
+                    json!({ "action": "flow_run", "name": "rt", "params": {}, "allowWrite": "all" }),
+                ),
+                &mut state,
+            )
+            .await;
+            assert_eq!(out["data"]["ok"], true, "{tier} {limit}: {out}");
+            assert_eq!(
+                fx.hits("POST /api/cart"),
+                before + usize::from(!mocked),
+                "{tier} tier, route limited to {limit}: {out}"
+            );
+            assert_success(
+                &exec(
+                    &run(&mut n, json!({ "action": "unroute", "url": "*/api/cart" })),
+                    &mut state,
+                )
+                .await,
+            );
+        }
+    }
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }

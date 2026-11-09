@@ -1,4 +1,4 @@
-//! Saved flows: record a task once in the browser, then send its
+//! Saved flows: record a task once in the browser, then replay its
 //! first-party API requests directly over HTTP.
 
 use std::collections::{BTreeMap, HashMap};
@@ -17,7 +17,9 @@ mod memory;
 mod model;
 pub mod net;
 mod outcome;
+pub mod page;
 mod recorder;
+pub mod replay;
 mod send;
 mod template;
 
@@ -28,6 +30,7 @@ pub use model::*;
 pub use net::{recorded_local_host, RecordedReach};
 pub use outcome::*;
 pub use recorder::*;
+pub use replay::*;
 pub use send::*;
 pub use template::{Body, Parts, Slot};
 
@@ -51,10 +54,13 @@ const TELEMETRY_PATH_MARKERS: &[&str] = &[
 /// How a recorded request header is treated.
 #[derive(PartialEq)]
 enum HeaderClass {
-    /// Carries a credential the session supplies at run time. Never saved.
+    /// Carries a credential the session supplies at run time. Never saved; a
+    /// request recorded with one may get a 401 or 403 over HTTP.
     Credential,
     /// Per-connection or session-owned. Never saved.
     Dropped,
+    /// Set by the browser itself; saved, but not sent by an in-page fetch.
+    BrowserSet,
     Kept,
 }
 
@@ -66,6 +72,10 @@ fn classify_header(name: &str) -> HeaderClass {
         "cookie" | "host" | "content-length" | "connection" | "accept-encoding" => {
             HeaderClass::Dropped
         }
+        "user-agent" | "referer" | "origin" | "accept-language" | "priority" | "dnt" => {
+            HeaderClass::BrowserSet
+        }
+        _ if lower.starts_with("sec-") => HeaderClass::BrowserSet,
         // Per-request tracing and client identity: not part of what a flow replays.
         "x-client-ip" | "x-forwarded-for" | "x-real-ip" | "forwarded" | "traceparent"
         | "tracestate" | "x-request-id" | "request-id" | "x-amzn-trace-id" | "sentry-trace"
@@ -792,8 +802,10 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                     continue;
                 }
                 let class = classify_header(&lower);
-                if class != HeaderClass::Kept {
-                    stripped_auth |= class == HeaderClass::Credential;
+                if matches!(class, HeaderClass::Credential | HeaderClass::Dropped) {
+                    if class == HeaderClass::Credential {
+                        stripped_auth = true;
+                    }
                     if !dropped_headers.contains(&lower) && lower != "host" {
                         dropped_headers.push(lower);
                     }
@@ -826,6 +838,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                     .post_data
                     .as_deref()
                     .map(|b| template::templatize_body(b, &given, &e.request_headers)),
+                tier: None,
                 expect: Expect {
                     status: e.status.map(|s| s as u16),
                     mime: e.mime_type.clone(),
@@ -882,6 +895,8 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         }
         steps.push(Step {
             seq: *seq,
+            ok: input.recorder.is_ok(*seq),
+            command: cmd.clone(),
             requests,
         });
     }
@@ -895,7 +910,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     }
     if request_ids.is_empty() {
         return Err(format!(
-            "no first-party JSON requests were recorded for {}; this flow has nothing to send over HTTP",
+            "no first-party JSON requests were recorded for {}; this flow has nothing to replay over HTTP",
             base
         ));
     }
@@ -1017,7 +1032,6 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         None => default_output(&steps),
     };
 
-    let writes = collect_writes(&steps, input.entries, &policy, &given, &har_ids);
     let item_fields = steps
         .iter()
         .flat_map(|s| s.requests.iter())
@@ -1037,14 +1051,22 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             version: env!("CARGO_PKG_VERSION").to_string(),
         }),
         description: input.description.map(String::from),
+        redacted_steps: commands
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, c))| c["redacted"] == true)
+            .map(|(i, _)| i + 1)
+            .collect(),
         params,
         output: output.clone(),
         item_fields,
         provenance: "observed".to_string(),
         verified_at: None,
-        writes,
+        writes: collect_writes(&input, &policy, &given, &har_ids),
         steps,
     };
+    let mut flow = flow;
+    scrub(&mut flow, &input.recorder.secrets);
 
     let requests_report: Vec<Value> = flow
         .requests()
@@ -1058,7 +1080,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         })
         .collect();
 
-    let report = json!({
+    let mut report = json!({
         "name": input.name,
         "origin": host,
         "steps": input.commands.len(),
@@ -1072,7 +1094,32 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         "droppedHeaders": dropped_headers,
         "verified": false,
     });
+    // The report names commands from the recording; they pass the same
+    // scrub as the file.
+    if let Some(gaps) = report["gaps"].as_array_mut() {
+        for g in gaps {
+            if let Some(text) = g["command"].as_str() {
+                let clean = scrub_command_text(text, &input.recorder.secrets);
+                g["command"] = json!(clean);
+            }
+        }
+    }
     Ok((flow, report))
+}
+
+/// A `describe_command` line with its URL and any known secret scrubbed.
+fn scrub_command_text(text: &str, secrets: &[String]) -> String {
+    if holds_secret(text, secrets) {
+        let action = text.split(' ').next().unwrap_or("");
+        return format!("{action} {REDACTED}");
+    }
+    match text.split_once(' ') {
+        Some((action, target)) => match scrub_url(target) {
+            Some(clean) => format!("{action} {clean}"),
+            None => text.to_string(),
+        },
+        None => text.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1629,6 +1676,10 @@ fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 }
 
 pub fn write_flow(flow: &Flow) -> Result<PathBuf, String> {
+    // Whatever produced the flow, nothing sensitive reaches the file.
+    let mut flow = flow.clone();
+    scrub(&mut flow, &[]);
+    let flow = &flow;
     let path = flow_path(&flow.origin, &flow.name)?;
     if let Some(parent) = path.parent() {
         create_private_dirs(parent)
@@ -1638,6 +1689,206 @@ pub fn write_flow(flow: &Flow) -> Result<PathBuf, String> {
     write_private(&path, &text)
         .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     Ok(path)
+}
+
+/// The one pass over everything a flow file stores, run before it is
+/// written. A known secret, in any encoding, anywhere in a command, a
+/// request or a write becomes `<redacted>`. Credential query parameters
+/// (a token in a navigation's query) are redacted where the browser went,
+/// not where the run must send: in commands, the start URL, the Referer and
+/// Origin headers and the writes, never in a saved request's URL, which the
+/// run sends as recorded. A param named like a credential keeps no recorded
+/// value, so a run must pass it. A step whose command it touches is marked
+/// redacted, so the command replay never sends it.
+pub(super) fn scrub(flow: &mut Flow, secrets: &[String]) {
+    flow.start_url = scrub_url(&flow.start_url).unwrap_or_else(|| flow.start_url.clone());
+    for (index, step) in flow.steps.iter_mut().enumerate() {
+        let hit = scrub_strings(&mut step.command, secrets);
+        for r in &mut step.requests {
+            if holds_secret(&r.url, secrets) {
+                r.url = REDACTED.to_string();
+            }
+            if r.body.as_deref().is_some_and(|b| holds_secret(b, secrets)) {
+                r.body = Some(REDACTED.to_string());
+            }
+            for (name, v) in r.headers.iter_mut() {
+                if holds_secret(v, secrets) {
+                    *v = REDACTED.to_string();
+                } else if matches!(name.to_ascii_lowercase().as_str(), "referer" | "origin") {
+                    // The page the browser was on, not something the run sends.
+                    if let Some(clean) = scrub_url(v) {
+                        *v = clean;
+                    }
+                }
+            }
+        }
+        if hit {
+            step.command["redacted"] = json!(true);
+            if !flow.redacted_steps.contains(&(index + 1)) {
+                flow.redacted_steps.push(index + 1);
+            }
+        }
+    }
+    flow.redacted_steps.sort_unstable();
+    for w in &mut flow.writes {
+        if holds_secret(&w.url, secrets) {
+            w.url = REDACTED.to_string();
+        } else if let Some(clean) = scrub_url(&w.url) {
+            w.url = clean;
+        }
+    }
+    for p in &mut flow.params {
+        if p.example.as_deref().is_some_and(|e| e != REDACTED)
+            && (is_credential_param(&p.name)
+                || p.example
+                    .as_deref()
+                    .is_some_and(|e| holds_secret(e, secrets)))
+        {
+            p.example = None;
+        }
+    }
+}
+
+/// Whether a URL had a credential parameter redacted by the scrub.
+pub(super) fn is_redacted_url(url: &str) -> bool {
+    url.contains(REDACTED) || url.contains(urlencoding::encode(REDACTED).as_ref())
+}
+
+/// Replace every string under `v` that holds a secret; true if any did.
+fn scrub_strings(v: &mut Value, secrets: &[String]) -> bool {
+    match v {
+        Value::String(s) if s != REDACTED && holds_secret(s, secrets) => {
+            *s = REDACTED.to_string();
+            true
+        }
+        Value::String(s) => match scrub_url(s) {
+            Some(clean) => {
+                *s = clean;
+                true
+            }
+            None => false,
+        },
+        // Every item is visited: stopping at the first hit would leave the
+        // rest unscrubbed.
+        Value::Array(items) => {
+            let mut hit = false;
+            for item in items {
+                hit |= scrub_strings(item, secrets);
+            }
+            hit
+        }
+        Value::Object(map) => {
+            let mut hit = false;
+            for item in map.values_mut() {
+                hit |= scrub_strings(item, secrets);
+            }
+            hit
+        }
+        _ => false,
+    }
+}
+
+/// The URL with credential parameter values redacted, if it had any, in
+/// its query or in a fragment of `k=v` pairs (an OAuth implicit-grant
+/// callback). Only those values change; the rest stays byte for byte, so a
+/// template (`{{name}}`, `{{@s1r1.token}}`), which a run fills, is kept, and
+/// so is a name with no value.
+fn scrub_url(url: &str) -> Option<String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return None;
+    }
+    let (before_fragment, fragment) = match url.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (url, None),
+    };
+    let (head, query) = match before_fragment.split_once('?') {
+        Some((h, q)) => (h, Some(q)),
+        None => (before_fragment, None),
+    };
+    let query = query.map(scrub_pairs);
+    // A hash-router fragment (`#/callback?k=v`) carries its pairs after `?`.
+    let fragment = fragment.map(|f| match f.split_once('?') {
+        Some((route, pairs)) => {
+            let (pairs, hit) = scrub_pairs(pairs);
+            (format!("{route}?{pairs}"), hit)
+        }
+        None => scrub_pairs(f),
+    });
+    let changed = query.as_ref().is_some_and(|q| q.1) || fragment.as_ref().is_some_and(|f| f.1);
+    changed.then(|| {
+        let mut out = head.to_string();
+        if let Some((q, _)) = query {
+            out.push('?');
+            out.push_str(&q);
+        }
+        if let Some((f, _)) = fragment {
+            out.push('#');
+            out.push_str(&f);
+        }
+        out
+    })
+}
+
+/// `k=v&k=v` with credential values redacted, and whether any were.
+fn scrub_pairs(pairs: &str) -> (String, bool) {
+    let redacted = urlencoding::encode(REDACTED);
+    let mut changed = false;
+    let parts: Vec<String> = pairs
+        .split('&')
+        .map(|part| {
+            let Some((k, v)) = part.split_once('=') else {
+                return part.to_string();
+            };
+            let name = url::form_urlencoded::parse(k.as_bytes())
+                .next()
+                .map(|(k, _)| k.into_owned())
+                .unwrap_or_default();
+            let value = percent_decode_lossless(&v.replace('+', " "));
+            if is_credential_param(&name)
+                && !value.is_empty()
+                && value != REDACTED
+                && !value.contains("{{")
+            {
+                changed = true;
+                format!("{k}={redacted}")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect();
+    (parts.join("&"), changed)
+}
+
+/// A query parameter that carries a credential: named like a credential
+/// header (`authorization`, anything with `token` or `csrf`) except a
+/// pagination cursor (`pageToken`, `nextPageToken`, `continuation_token`), or
+/// one word of its name is a secret-field marker (`pass`, `secret`, `otp`,
+/// `pin`, `cvv`, `card`), `password`, or a common credential name (`auth`,
+/// `apikey`, `signature`, `jwt`). Bare `key`, `sig` and `sid` are left out:
+/// publishable keys (Algolia, Google) ride in the query. Words split on
+/// punctuation and match whole, so `passengers` and `shipping` are not
+/// secrets.
+fn is_credential_param(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let squashed: String = lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let cursor = squashed.ends_with("pagetoken")
+        || squashed.contains("continuation")
+        || squashed.contains("cursor");
+    if cursor {
+        return false;
+    }
+    if classify_header(name) == HeaderClass::Credential {
+        return true;
+    }
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| {
+            recorder::SECRET_MARKERS.contains(&word)
+                || matches!(word, "password" | "auth" | "apikey" | "signature" | "jwt")
+        })
 }
 
 /// A flow file on disk, with the directory it was found in.
@@ -1986,53 +2237,90 @@ fn has_mutating_segment(url: &str) -> bool {
     })
 }
 
+/// The writes a recording caused, kept as requests or not: each one is
+/// sent again by a run (or by the command replay) and must be allowed.
+/// `suspected` marks a GET whose path has a whole mutating segment.
 fn collect_writes(
-    steps: &[Step],
-    entries: &[HarEntry],
+    input: &SaveInput<'_>,
     policy: &HostPolicy,
     given: &[(String, String)],
     har_ids: &HashMap<String, String>,
 ) -> Vec<Write> {
-    let mut writes = Vec::new();
-    for (index, step) in steps.iter().enumerate() {
-        for r in &step.requests {
-            let Some(e) = har_ids
-                .get(&r.id)
-                .and_then(|har| entries.iter().find(|e| &e.request_id == har))
-            else {
+    let mut writes: Vec<Write> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (index, (seq, _)) in input.commands.iter().enumerate() {
+        let mut extra = 0;
+        for e in input
+            .entries
+            .iter()
+            .filter(|e| input.recorder.request_tags.get(&e.request_id) == Some(seq))
+        {
+            if carries_secret(e, &input.recorder.secrets)
+                || input.recorder.unknown_secret_seqs.contains(seq)
+                || is_telemetry(&e.url)
+            {
                 continue;
-            };
-            let explicit = is_write(&e.method, e.post_data.as_deref());
-            let suspected = !explicit
-                && e.method == "GET"
-                && policy.allows_url(&e.url)
-                && has_mutating_segment(&e.url);
-            if explicit || suspected {
-                writes.push(Write {
-                    id: r.id.clone(),
-                    method: e.method.clone(),
-                    url: template::templatize(&e.url, given, Slot::Url),
-                    kind: if explicit {
-                        WriteKind::Explicit
-                    } else {
-                        WriteKind::Suspected
-                    },
-                    step: index + 1,
-                });
             }
+            let kept = har_ids
+                .iter()
+                .find(|(_, har)| **har == e.request_id)
+                .map(|(id, _)| id.clone());
+            let first_party = policy.allows_url(&e.url);
+            let explicit = is_write(&e.method, e.post_data.as_deref());
+            let suspected =
+                !explicit && e.method == "GET" && first_party && has_mutating_segment(&e.url);
+            if !explicit && !suspected {
+                continue;
+            }
+            let key = format!(
+                "{} {} {}",
+                e.method,
+                e.url,
+                e.post_data.as_deref().unwrap_or("")
+            );
+            // A repeat that only the replay sends is listed once; a saved
+            // request is always listed, or the flow would not load.
+            if kept.is_none() && seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            let id = kept.unwrap_or_else(|| {
+                extra += 1;
+                format!("s{}w{}", index + 1, extra)
+            });
+            writes.push(Write {
+                id,
+                method: e.method.clone(),
+                url: template::templatize(&e.url, given, Slot::Url),
+                kind: if explicit {
+                    WriteKind::Explicit
+                } else {
+                    WriteKind::Suspected
+                },
+                step: index + 1,
+            });
         }
     }
     writes
 }
 
 impl Flow {
-    /// The writes a run sends: the ones among the requests the output needs.
-    /// Each must be allowed or confirmed first.
+    /// The writes a run sends over HTTP or from the page: the ones among the
+    /// requests the output needs. Each must be allowed or confirmed first.
     pub fn run_writes(&self) -> Vec<&Write> {
         let needed = dependencies(self, &self.output);
         self.writes
             .iter()
             .filter(|w| needed.contains(&w.id))
+            .collect()
+    }
+
+    /// Writes the command replay would send beyond the ones a run sends itself.
+    pub fn replay_only_writes(&self) -> Vec<&Write> {
+        let own = self.run_writes();
+        self.writes
+            .iter()
+            .filter(|w| !own.iter().any(|o| o.id == w.id))
             .collect()
     }
 }
@@ -2140,6 +2428,7 @@ pub(crate) fn flow_of(mut v: Value) -> Flow {
 
 #[cfg(test)]
 mod tests {
+    use super::page::*;
     use super::*;
 
     #[test]
@@ -2460,21 +2749,55 @@ mod tests {
         }
     }
 
-    fn attempt(id: &str, outcome: Result<(u16, String), Failure>) -> RequestResult {
-        request_result(&prepared(id), Instant::now(), outcome)
+    fn attempt(id: &str, tier: Tier, outcome: Result<(u16, String), Failure>) -> TierResult {
+        tier_result(&prepared(id), tier, Instant::now(), outcome)
     }
 
     #[test]
-    fn a_changed_shape_marks_the_flow_unverified() {
+    fn a_tier_that_got_a_page_instead_of_data_falls_back_and_the_flow_stays_verified() {
+        let mut flow = flow_of(json!({
+            "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": null,
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
+        }));
+        let attempts = vec![
+            attempt(
+                "s1r1",
+                Tier::Http,
+                Ok((200, "<html>sign in</html>".to_string())),
+            ),
+            attempt(
+                "s1r1",
+                Tier::Page,
+                Ok((200, r#"{"data":[{"id":1}]}"#.to_string())),
+            ),
+        ];
+        let out = finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
+        assert_eq!(out["verified"], true);
+        assert_eq!(out["steps"][0]["tier"], "page");
+        assert_eq!(out["steps"][0]["fellBack"][0]["tier"], "http");
+        assert_eq!(flow.verified_at.as_deref(), Some("now"));
+        assert_eq!(flow.steps[0].requests[0].tier, Some(Tier::Page));
+        assert_eq!(tiers_for(&flow, "s1r1"), vec![Tier::Page, Tier::Replay]);
+    }
+
+    #[test]
+    fn a_changed_shape_marks_the_flow_unverified_even_if_a_lower_tier_answers() {
         let mut flow = flow_of(json!({
             "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": "before",
             "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
         }));
-        let attempts = vec![attempt("s1r1", Ok((200, r#"{"items":[]}"#.to_string())))];
+        let attempts = vec![
+            attempt("s1r1", Tier::Http, Ok((200, r#"{"items":[]}"#.to_string()))),
+            attempt(
+                "s1r1",
+                Tier::Page,
+                Ok((200, r#"{"data":[{"id":1}]}"#.to_string())),
+            ),
+        ];
         let out = finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
-        assert_eq!(out["ok"], false);
+        assert_eq!(out["ok"], true);
         assert_eq!(out["verified"], false);
-        assert_eq!(out["drift"]["step"], 1);
+        assert_eq!(out["drift"]["tier"], "http");
         assert_eq!(flow.verified_at, None);
     }
 
@@ -2490,8 +2813,9 @@ mod tests {
     fn a_list_that_moved_is_drift_not_an_empty_result() {
         let moved =
             r#"{"data":{"products":[{"title":"x","amount":{"value":1,"currency":"USD"}}]}}"#;
-        let result = request_result(
+        let result = tier_result(
             &catalog_request(),
+            Tier::Http,
             Instant::now(),
             Ok((200, moved.to_string())),
         );
@@ -2509,10 +2833,15 @@ mod tests {
         assert_eq!(outcome.data("catalog").unwrap()["status"], "drifted");
     }
 
-    fn drift_of(rec: Value, body: &str) -> RequestResult {
+    fn drift_of(rec: Value, body: &str) -> TierResult {
         let mut req = prepared("s1r1");
         req.expect = expect_of(json!({ "signature": signature(&rec) }));
-        request_result(&req, Instant::now(), Ok((200, body.to_string())))
+        tier_result(
+            &req,
+            Tier::Http,
+            Instant::now(),
+            Ok((200, body.to_string())),
+        )
     }
 
     #[test]
@@ -2648,8 +2977,9 @@ mod tests {
     #[test]
     fn an_empty_list_with_the_same_shape_is_not_drift() {
         for body in [r#"{"items":[],"total":0}"#, r#"{"items":[],"page":1}"#] {
-            let result = request_result(
+            let result = tier_result(
                 &catalog_request(),
+                Tier::Http,
                 Instant::now(),
                 Ok((200, body.to_string())),
             );
@@ -2667,10 +2997,42 @@ mod tests {
             "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": "before",
             "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
         }));
-        let attempts = vec![attempt("s1r1", Ok((400, "{}".to_string())))];
+        let attempts = vec![attempt("s1r1", Tier::Http, Ok((400, "{}".to_string())))];
         let out = finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
         assert_eq!(out["ok"], false);
         assert_eq!(flow.verified_at.as_deref(), Some("before"));
+    }
+
+    #[test]
+    fn page_fetch_leaves_browser_headers_to_the_browser() {
+        let script = page_fetch_script(&prepared("s1r1"));
+        assert!(script.contains("country"));
+        assert!(!script.contains("User-Agent"));
+        assert!(!script.contains("sec-ch-ua"));
+    }
+
+    #[test]
+    fn replay_swaps_params_into_commands_and_refuses_missing_ones() {
+        let flow = flow_of(json!({
+            "params": [{ "name": "q", "example": "film one" }],
+            "steps": [
+                { "command": { "action": "navigate", "url": "https://site.example/search?q=film%20one" } },
+                { "command": { "action": "fill", "selector": "#q", "value": "film one" } },
+            ],
+        }));
+        let cmds = replay_commands(&flow, &[("q".to_string(), "other".to_string())]).unwrap();
+        assert_eq!(cmds[0]["url"], "https://site.example/search?q=other");
+        assert_eq!(cmds[1]["value"], "other");
+        let hidden = flow_of(json!({
+            "params": [{ "name": "theater", "example": "401" }],
+            "steps": [{ "command": { "action": "navigate", "url": "https://site.example/downtown" } }],
+        }));
+        assert!(
+            replay_commands(&hidden, &[("theater".to_string(), "402".to_string())])
+                .unwrap_err()
+                .contains("theater")
+        );
+        assert!(replay_commands(&hidden, &[]).is_ok());
     }
 
     #[test]
@@ -3309,6 +3671,30 @@ mod tests {
     }
 
     #[test]
+    fn replay_match_tells_graphql_operations_apart() {
+        let mut a = entry(
+            "a",
+            "https://api.site.example/graphql",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        a.method = "POST".to_string();
+        a.post_data = Some(r#"{"operationName":"appConfig","variables":{}}"#.to_string());
+        let mut b = a.clone();
+        b.request_id = "b".to_string();
+        b.post_data = Some(r#"{"operationName":"positions","variables":{"t":2}}"#.to_string());
+        let mut req = prepared("s1r1");
+        req.method = "POST".to_string();
+        req.url = "https://api.site.example/graphql".to_string();
+        req.body = Some(r#"{"operationName":"positions","variables":{"t":1}}"#.to_string());
+        let entries = vec![b, a];
+        assert_eq!(replay_lookup(&entries, &req).ok().unwrap().request_id, "b");
+        req.body = Some(r#"{"operationName":"other"}"#.to_string());
+        assert!(replay_lookup(&entries, &req).ok().is_none());
+    }
+
+    #[test]
     fn replace_token_leaves_longer_words_alone() {
         assert_eq!(
             replace_token("theater=401&t=14011", "401", "{{t}}"),
@@ -3430,8 +3816,9 @@ mod tests {
             "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": "before",
             "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
         }));
-        let attempts = vec![request_result(
+        let attempts = vec![tier_result(
             &req,
+            Tier::Http,
             Instant::now(),
             Ok((200, r#"{"payload":{"results":[]}}"#.to_string())),
         )];
@@ -3443,7 +3830,7 @@ mod tests {
     }
 
     #[test]
-    fn secrets_are_not_recorded() {
+    fn secrets_are_not_recorded_and_block_the_replay() {
         let mut r = FlowRecorder::default();
         r.begin_capture(None);
         r.begin_command(
@@ -3460,6 +3847,12 @@ mod tests {
         );
         assert_eq!(r.commands.len(), 1);
         assert_eq!(r.commands[0].1["value"], REDACTED);
+        let flow = flow_of(json!({
+            "params": [],
+            "startUrl": "https://site.example/",
+            "steps": [{ "command": r.commands[0].1.clone() }],
+        }));
+        assert!(replay_commands(&flow, &[]).unwrap_err().contains("secret"));
     }
 
     #[test]
@@ -3469,8 +3862,8 @@ mod tests {
             "buy",
             "https://www.example.com.ar/cart?x=1",
             "XHR",
-            "application/json",
-            r#"{"ok":true}"#,
+            "text/plain",
+            "ok",
         );
         buy.method = "POST".to_string();
         let mut r = rec;
@@ -3503,7 +3896,70 @@ mod tests {
         assert_eq!(writes[0]["method"], "POST");
         assert_eq!(writes[0]["kind"], "explicit");
         assert_eq!(writes[0]["url"], "https://www.example.com.ar/cart?x=1");
-        assert_eq!(writes[0]["id"], "s2r1");
+        assert_eq!(writes[0]["id"], "s2w1");
+        assert!(
+            flow_of(flow.clone()).replay_only_writes().len() == 1
+                && write_ids(&flow_of(flow.clone())).is_empty()
+        );
+    }
+
+    #[test]
+    fn the_same_write_in_two_steps_is_listed_for_each_saved_request() {
+        let mut r = recorder();
+        r.tag_now("add1");
+        r.begin_command(
+            "click",
+            &json!({ "id": "3", "action": "click", "selector": "@e5" }),
+            None,
+            None,
+        );
+        r.tag_now("add2");
+        let post = |id: &str| {
+            let mut e = entry(
+                id,
+                "https://www.example.com.ar/api/cart",
+                "Fetch",
+                "application/json",
+                r#"{"cart":[7]}"#,
+            );
+            e.method = "POST".to_string();
+            e.post_data = Some(r#"{"id":7}"#.to_string());
+            e
+        };
+        let entries = vec![
+            entry(
+                "api",
+                "https://api.example.com.ar/movies",
+                "Fetch",
+                "application/json",
+                r#"{"movies":[]}"#,
+            ),
+            post("add1"),
+            post("add2"),
+        ];
+        let (value, _) = build_flow_value(SaveInput {
+            name: "f",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &entries,
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+            local_names: &[],
+        })
+        .unwrap();
+        let flow = flow_of(value.clone());
+        let posts: Vec<_> = flow.requests().filter(|r| r.method == "POST").collect();
+        assert_eq!(posts.len(), 2, "{value}");
+        for p in posts {
+            assert!(
+                flow.write(&p.id).is_some(),
+                "{} is not listed: {value}",
+                p.id
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -3648,6 +4104,443 @@ mod tests {
     }
 
     #[test]
+    fn credential_headers_on_a_recorded_navigation_are_redacted_and_marked() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://a.test/", "headers": {
+                "Authorization": "Bearer abc123", "Cookie": "sid=s3cret", "X-CSRF-Token": "tok9",
+                "Accept-Language": "es" } }),
+            None,
+            None,
+        );
+        let cmd = &r.commands[0].1;
+        let text = cmd.to_string();
+        for secret in ["abc123", "s3cret", "tok9"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        assert_eq!(cmd["headers"]["Authorization"], REDACTED);
+        assert_eq!(cmd["headers"]["Accept-Language"], "es");
+        assert_eq!(cmd["redacted"], true);
+        // The values count as secrets, so a request that sends one is not saved.
+        assert!(r.secrets.contains(&"Bearer abc123".to_string()));
+        let flow = flow_of(
+            json!({ "startUrl": "https://a.test/", "steps": [{ "command": cmd.clone() }] }),
+        );
+        assert!(replay_commands(&flow, &[]).unwrap_err().contains("secret"));
+    }
+
+    #[test]
+    fn a_token_in_a_navigation_url_never_reaches_the_file() {
+        let mut flow = flow_of(json!({
+            "startUrl": "https://a.test/welcome?magic_token=abc123&lang=es",
+            "steps": [
+                { "command": { "action": "navigate", "url": "https://a.test/welcome?magic_token=abc123&lang=es" } },
+                { "command": { "action": "select", "selector": "#plan", "values": ["hunter two"] }, "requests": [{
+                    "id": "s2r1", "method": "GET",
+                    "url": "https://a.test/api/items?session_token={{@s1r1.token}}&page=1",
+                    "headers": { "Referer": "https://a.test/welcome?magic_token=abc123&lang=es" }
+                }] }
+            ]
+        }));
+        scrub(&mut flow, &["hunter two".to_string()]);
+        // A reference is filled at run time, so it stays byte for byte.
+        assert_eq!(
+            flow.steps[1].requests[0].url,
+            "https://a.test/api/items?session_token={{@s1r1.token}}&page=1"
+        );
+        assert_eq!(
+            scrub_url("https://a.test/x?token=abc&id={{@s1r1.id}}#top").as_deref(),
+            Some("https://a.test/x?token=%3Credacted%3E&id={{@s1r1.id}}#top")
+        );
+        assert_eq!(scrub_url("https://a.test/x?q=a+b&lang=es"), None);
+        let text = serde_json::to_string(&flow).unwrap();
+        for leaked in ["abc123", "hunter two", "hunter%20two", "hunter+two"] {
+            assert!(!text.contains(leaked), "{leaked}: {text}");
+        }
+        assert!(flow.start_url.contains("lang=es"), "{}", flow.start_url);
+        assert_eq!(flow.redacted_steps, vec![1, 2]);
+        assert_eq!(flow.steps[0].command["redacted"], true);
+        // The replay never sends a redacted step.
+        assert!(replay_commands(&flow, &[]).unwrap_err().contains("secret"));
+        // A file written by any path is scrubbed too.
+        let mut raw = flow_of(json!({
+            "name": "scrub-on-write",
+            "origin": "a.test",
+            "startUrl": "https://a.test/?access_token=zzz",
+            "steps": [{ "command": { "action": "navigate", "url": "https://a.test/?access_token=zzz" } }]
+        }));
+        raw.version = FLOW_VERSION;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let path = write_flow(&raw).unwrap();
+        let written = std::fs::read_to_string(path).unwrap();
+        assert!(!written.contains("zzz"), "{written}");
+    }
+
+    #[test]
+    fn the_scrub_hides_where_the_browser_went_and_keeps_what_the_run_sends() {
+        // A recording that began on an open page has no navigate step: the
+        // replay opens the start URL, so it refuses one without its token.
+        let mut flow = flow_of(json!({
+            "startUrl": "https://a.test/inbox?access_token=zzz",
+            "params": [{ "name": "access_token", "example": "zzz", "source": "query" }],
+            "writes": [{ "id": "s1w1", "method": "POST", "url": "https://a.test/api/send?signature=abc", "kind": "explicit", "step": 1 }],
+            "steps": [{ "command": { "action": "click", "selector": "#a" }, "requests": [{
+                "id": "s1r1", "method": "GET",
+                "url": "https://a.test/1/indexes/q?x-algolia-api-key=pub123&x-algolia-application-id=APP",
+                "headers": { "Referer": "https://a.test/inbox?access_token=zzz" }
+            }] }]
+        }));
+        scrub(&mut flow, &[]);
+        let text = serde_json::to_string(&flow).unwrap();
+        assert!(!text.contains("zzz") && !text.contains("abc"), "{text}");
+        // A saved request is sent as recorded: its publishable key stays,
+        // and a header the browser set does not mark the step redacted.
+        assert!(flow.steps[0].requests[0].url.contains("pub123"));
+        assert!(!flow.steps[0].requests[0].expect.stripped_auth);
+        assert!(flow.redacted_steps.is_empty(), "{:?}", flow.redacted_steps);
+        assert!(
+            is_redacted_url(&flow.writes[0].url),
+            "{}",
+            flow.writes[0].url
+        );
+        // A credential-named param keeps no recorded value.
+        assert_eq!(flow.params[0].example, None);
+        let err = replay_commands(&flow, &[]).unwrap_err();
+        assert!(
+            err.contains("start URL") || err.contains("access_token"),
+            "{err}"
+        );
+        let mut only_start = flow_of(json!({
+            "startUrl": "https://a.test/inbox?access_token=zzz",
+            "steps": [{ "command": { "action": "click", "selector": "#a" } }]
+        }));
+        scrub(&mut only_start, &[]);
+        let err = replay_commands(&only_start, &[]).unwrap_err();
+        assert!(err.contains("start URL"), "{err}");
+        // A token in an implicit-grant fragment, and a name with no value.
+        assert_eq!(
+            scrub_url("https://a.test/cb#access_token=t0k&token_type=bearer").as_deref(),
+            Some("https://a.test/cb#access_token=%3Credacted%3E&token_type=%3Credacted%3E")
+        );
+        assert_eq!(scrub_url("https://a.test/x?auth&x=1"), None);
+        assert_eq!(scrub_url("https://a.test/#/login"), None);
+        // A value with `/`, and a hash-router callback.
+        assert_eq!(
+            scrub_url("https://a.test/cb#access_token=abc/def").as_deref(),
+            Some("https://a.test/cb#access_token=%3Credacted%3E")
+        );
+        assert_eq!(
+            scrub_url("https://a.test/#/callback?access_token=abc/def&state=x").as_deref(),
+            Some("https://a.test/#/callback?access_token=%3Credacted%3E&state=x")
+        );
+        assert_eq!(scrub_url("https://a.test/#/items?page=2"), None);
+    }
+
+    #[test]
+    fn the_save_report_never_prints_a_credential_from_the_recording() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/welcome?magic_token=abc123" }),
+            None,
+            None,
+        );
+        r.tag_now("doc");
+        r.begin_command(
+            "click",
+            &json!({ "action": "click", "selector": "@e1" }),
+            None,
+            None,
+        );
+        r.tag_now("api");
+        let entries = vec![
+            entry(
+                "doc",
+                "https://www.example.com.ar/welcome?magic_token=abc123",
+                "Document",
+                "text/html",
+                "<html>",
+            ),
+            entry(
+                "api",
+                "https://api.example.com.ar/movies",
+                "Fetch",
+                "application/json",
+                r#"{"movies":[]}"#,
+            ),
+        ];
+        let (flow, report) = build_flow_value(SaveInput {
+            name: "f",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &entries,
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+            local_names: &[],
+        })
+        .unwrap();
+        // The navigation loaded only a page, so the report names it in a gap.
+        assert!(
+            report["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|g| g["command"].as_str().unwrap_or("").starts_with("navigate")),
+            "{report}"
+        );
+        assert!(!report.to_string().contains("abc123"), "{report}");
+        assert!(!flow.to_string().contains("abc123"), "{flow}");
+    }
+
+    #[test]
+    fn credential_params_are_named_like_credentials() {
+        for name in ["auth", "apikey", "signature", "jwt"] {
+            assert!(is_credential_param(name), "{name}");
+        }
+        // Publishable keys ride in the query and are sent as recorded.
+        for name in ["key", "sig", "sid", "x-algolia-api-key", "sort_key"] {
+            assert!(!is_credential_param(name), "{name}");
+        }
+        for name in [
+            "token",
+            "access_token",
+            "csrf",
+            "X-CSRF",
+            "authorization",
+            "password",
+            "user[password]",
+            "client_secret",
+            "otp",
+            "pin",
+            "cvv",
+            "card",
+            "pass",
+        ] {
+            assert!(is_credential_param(name), "{name}");
+        }
+        for name in [
+            "q",
+            "passengers",
+            "shipping",
+            "cards",
+            "page",
+            "lang",
+            "spinner",
+            "pageToken",
+            "nextPageToken",
+            "continuation_token",
+            "cursor",
+            "keyword",
+            "monkey",
+        ] {
+            assert!(!is_credential_param(name), "{name}");
+        }
+    }
+
+    fn navigating_flow(start: &str, steps: Value, params: Value) -> Flow {
+        flow_of(json!({ "startUrl": start, "params": params, "steps": steps }))
+    }
+
+    #[test]
+    fn a_replayed_url_gets_the_value_encoded_for_its_query() {
+        let flow = navigating_flow(
+            "https://a.test/",
+            json!([{ "command": { "action": "navigate", "url": "https://a.test/?q=kettle&x=1" } }]),
+            json!([{ "name": "q", "example": "kettle" }]),
+        );
+        let cmds = replay_commands(&flow, &[("q".to_string(), "a&b#c d".to_string())]).unwrap();
+        assert_eq!(cmds[0]["url"], "https://a.test/?q=a%26b%23c%20d&x=1");
+    }
+
+    #[test]
+    fn each_swap_reads_the_recorded_text_and_never_an_earlier_result() {
+        let flow = navigating_flow(
+            "https://a.test/",
+            json!([{ "command": { "action": "navigate", "url": "https://a.test/?from=Paris&to=London" } }]),
+            json!([{ "name": "from", "example": "Paris" }, { "name": "to", "example": "London" }]),
+        );
+        let given = [
+            ("from".to_string(), "London".to_string()),
+            ("to".to_string(), "Rome".to_string()),
+        ];
+        let cmds = replay_commands(&flow, &given).unwrap();
+        assert_eq!(cmds[0]["url"], "https://a.test/?from=London&to=Rome");
+    }
+
+    #[test]
+    fn a_param_only_in_the_start_url_of_a_flow_on_an_open_page_is_replayed() {
+        let flow = navigating_flow(
+            "https://a.test/search?q=kettle",
+            json!([{ "command": { "action": "click", "selector": "#go" } }]),
+            json!([{ "name": "q", "example": "kettle" }]),
+        );
+        let cmds = replay_commands(&flow, &[("q".to_string(), "toaster".to_string())]).unwrap();
+        assert_eq!(cmds[0]["action"], "navigate");
+        assert_eq!(cmds[0]["url"], "https://a.test/search?q=toaster");
+        assert_eq!(cmds[1]["action"], "click");
+    }
+
+    struct SilentBrowser;
+
+    #[async_trait::async_trait]
+    impl Browser for SilentBrowser {
+        async fn cookie_header(&mut self, _: &str) -> Option<String> {
+            None
+        }
+        async fn routed_response(&mut self, _: &str) -> Option<RoutedResponse> {
+            None
+        }
+        async fn tab_url(&mut self) -> Option<String> {
+            None
+        }
+        async fn eval(&mut self, _: &str) -> Result<Value, String> {
+            Err("no page".to_string())
+        }
+        async fn ensure_browser(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn begin_capture(&mut self) -> Result<usize, String> {
+            Ok(0)
+        }
+        async fn run(&mut self, _: &Value) -> Value {
+            json!({ "success": true })
+        }
+        async fn captured_since(&mut self, _: usize) -> Vec<HarEntry> {
+            Vec::new()
+        }
+        async fn end_capture(&mut self) {}
+        fn write_approved(&self, _: &Write) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failed_in_page_read_is_transport_and_keeps_the_tier() {
+        let flow = flow_of(json!({
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }]
+        }));
+        let req = prepare_all(&flow, &[]).unwrap().remove(0);
+        for value in [
+            Err("Execution context was destroyed".to_string()),
+            Ok(json!({})),
+        ] {
+            let r = page::page_result(&HostPolicy::of(&flow), &req, Instant::now(), value);
+            assert!(
+                r.transport && !r.drift && r.stop.is_none(),
+                "{:?}",
+                r.reason
+            );
+        }
+        let write = PreparedRequest {
+            write: true,
+            method: "POST".to_string(),
+            ..req
+        };
+        for value in [Err("gone".to_string()), Ok(json!({}))] {
+            let r = page::page_result(&HostPolicy::of(&flow), &write, Instant::now(), value);
+            assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
+        }
+    }
+
+    #[test]
+    fn the_page_tier_never_follows_a_redirect() {
+        let flow = flow_of(json!({
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }]
+        }));
+        let req = prepare_all(&flow, &[]).unwrap().remove(0);
+        // The browser stops at the 3xx, so no hop is sent before a check.
+        assert!(page_fetch_script(&req).contains(r#""redirect":"manual""#));
+        let r = page::page_result(
+            &HostPolicy::of(&flow),
+            &req,
+            Instant::now(),
+            Ok(json!({ "status": 302, "redirected": true, "url": "", "text": "" })),
+        );
+        // A read goes on to the next tier without moving the tier memory.
+        assert!(r.skipped && !r.drift && r.stop.is_none(), "{:?}", r.reason);
+        let write = PreparedRequest {
+            write: true,
+            method: "POST".to_string(),
+            ..req
+        };
+        assert!(page_fetch_script(&write).contains(r#""redirect":"manual""#));
+    }
+
+    #[test]
+    fn the_page_tier_without_a_tab_on_the_site_is_skipped() {
+        let flow = flow_of(json!({
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }]
+        }));
+        let req = prepare_all(&flow, &[]).unwrap().remove(0);
+        let mut browser = SilentBrowser;
+        let result = block_on(page::send(&flow, &mut browser, &req, far()));
+        assert!(!result.ok);
+        assert!(result.skipped, "{:?}", result.reason);
+        // Skipping a tier says nothing about the site.
+        assert!(!result.drift);
+    }
+
+    #[test]
+    fn a_write_the_replay_may_have_sent_without_a_captured_answer_is_unknown() {
+        let flow = flow_of(json!({
+            "output": "s1r1",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [{ "command": { "action": "click", "selector": "#add" }, "requests": [
+                { "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "body": "{}",
+                  "expect": { "signature": signature(&json!({ "ok": true })) } }] }]
+        }));
+        let req = prepare_all(&flow, &[]).unwrap().remove(0);
+        let ledger = WriteLedger::default();
+        let ctx = SendCtx {
+            ledger: &ledger,
+            wanted: &[],
+        };
+        let mut run = None;
+        let mut browser = SilentBrowser;
+        let result = block_on(replay::send(
+            &flow,
+            &[],
+            &mut browser,
+            &mut run,
+            &req,
+            &ctx,
+            far(),
+        ));
+        assert!(!result.ok);
+        assert_eq!(
+            result.stop,
+            Some(Stop::OutcomeUnknown),
+            "{:?}",
+            result.reason
+        );
+        // A read with no captured answer is still drift.
+        let read = PreparedRequest {
+            write: false,
+            method: "GET".to_string(),
+            ..req
+        };
+        let mut run = None;
+        let result = block_on(replay::send(
+            &flow,
+            &[],
+            &mut browser,
+            &mut run,
+            &read,
+            &ctx,
+            far(),
+        ));
+        assert_eq!(result.stop, None);
+        assert!(result.drift);
+    }
+
+    #[test]
     fn capture_accepts_only_flow() {
         assert!(parse_capture(&["flow".to_string()]).is_ok());
         let err = parse_capture(&["har".to_string()]).unwrap_err();
@@ -3704,6 +4597,31 @@ mod tests {
         assert!(r.is_ok(1));
         assert!(!r.is_ok(2));
         assert_eq!(r.commands.len(), 2);
+    }
+
+    #[test]
+    fn a_suspended_recorder_records_nothing() {
+        let mut r = recorded(&[("navigate", true)]);
+        r.set_suspended(true);
+        assert!(r.begin_command("click", &json!({}), None, None).is_none());
+        r.tag_now("late");
+        assert!(r.request_tags.is_empty());
+    }
+
+    #[test]
+    fn replay_skips_failed_steps() {
+        let flow = flow_of(json!({
+            "params": [],
+            "startUrl": "https://a.test/",
+            "steps": [
+                { "ok": true, "command": { "action": "navigate", "url": "https://a.test/" } },
+                { "ok": false, "command": { "action": "click", "selector": "#gone" } },
+                { "ok": true, "command": { "action": "click", "selector": "#go" } }
+            ]
+        }));
+        let cmds = replay_commands(&flow, &[]).unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[1]["selector"], "#go");
     }
 
     #[test]
@@ -3955,12 +4873,13 @@ mod tests {
             .unwrap();
         assert_eq!(param["source"], "typed");
         assert!(param.get("example").is_none(), "{param}");
-        assert_eq!(r.commands[1].1["value"], "{{email}}");
+        assert_eq!(flow["steps"][1]["command"]["value"], "{{email}}");
         assert_eq!(
             flow["steps"][1]["requests"][0]["body"],
             r#"{"email":"{{email}}"}"#
         );
-        assert_eq!(r.commands[2].1["value"], REDACTED);
+        assert_eq!(flow["steps"][2]["command"]["value"], REDACTED);
+        assert_eq!(flow["redactedSteps"], json!([3]));
         let text = serde_json::to_string(&flow).unwrap();
         assert!(!text.contains("482913"));
         // The step holds no literal; only the param keeps the recorded example.
@@ -4004,6 +4923,7 @@ mod tests {
             local_names: &[],
         })
         .unwrap();
+        assert_eq!(flow["steps"][1]["command"]["value"], "{{product}}");
         let names: Vec<&str> = flow["params"]
             .as_array()
             .unwrap()
@@ -4015,6 +4935,26 @@ mod tests {
             flow["steps"][1]["requests"][0]["url"],
             "https://api.example.com.ar/s?q={{product}}"
         );
+    }
+
+    #[test]
+    fn replay_fills_typed_placeholders_with_the_run_value_or_the_example() {
+        let flow = flow_of(json!({
+            "startUrl": "https://a.test/",
+            "params": [{ "name": "email", "example": "ana@example.com", "source": "typed" }],
+            "steps": [
+                { "ok": true, "command": { "action": "navigate", "url": "https://a.test/" } },
+                { "ok": true, "command": { "action": "fill", "selector": "#e", "value": "{{email}}" } }
+            ]
+        }));
+        let given = replay_commands(
+            &flow,
+            &[("email".to_string(), "bo@example.com".to_string())],
+        )
+        .unwrap();
+        assert_eq!(given[1]["value"], "bo@example.com");
+        let recorded_value = replay_commands(&flow, &[]).unwrap();
+        assert_eq!(recorded_value[1]["value"], "ana@example.com");
     }
 
     #[test]
@@ -4035,8 +4975,9 @@ mod tests {
     #[test]
     fn retry_after_is_kept_only_for_rate_limits() {
         let req = prepared("s1r1");
-        let limited = request_result(
+        let limited = tier_result(
             &req,
+            Tier::Http,
             Instant::now(),
             Err(Failure::stop(Stop::RateLimited, 429, "x".into())),
         );
@@ -4046,8 +4987,9 @@ mod tests {
                 .as_deref(),
             Some("30")
         );
-        let auth = request_result(
+        let auth = tier_result(
             &req,
+            Tier::Http,
             Instant::now(),
             Err(Failure::stop(Stop::AuthExpired, 401, "x".into())),
         );
@@ -4059,24 +5001,149 @@ mod tests {
         let request = |id: &str, url: &str, body: &str| json!({ "id": id, "method": "POST", "url": url, "body": body });
         let writes = json!([
             { "id": "s1r1", "method": "POST", "url": "https://a.test/session", "kind": "explicit" },
-            { "id": "s2r1", "method": "POST", "url": "https://a.test/cart", "kind": "explicit" }
+            { "id": "s2r1", "method": "POST", "url": "https://a.test/cart", "kind": "explicit" },
+            { "id": "s3w1", "method": "GET", "url": "https://a.test/x", "kind": "suspected" }
         ]);
         let flow = flow_of(json!({
             "output": "s2r1", "writes": writes,
             "steps": [
-                { "requests": [request("s1r1", "https://a.test/session", "{}")] },
-                { "requests": [request("s2r1", "https://a.test/cart", "{\"csrf\":\"{{@s1r1.csrf}}\"}")] }
+                { "command": {}, "requests": [request("s1r1", "https://a.test/session", "{}")] },
+                { "command": {}, "requests": [request("s2r1", "https://a.test/cart", "{\"csrf\":\"{{@s1r1.csrf}}\"}")] }
             ]
         }));
         assert_eq!(write_ids(&flow), vec!["s1r1", "s2r1"]);
         let only_output = flow_of(json!({
             "output": "s2r1", "writes": writes,
             "steps": [
-                { "requests": [request("s1r1", "https://a.test/session", "{}")] },
-                { "requests": [request("s2r1", "https://a.test/cart", "{}")] }
+                { "command": {}, "requests": [request("s1r1", "https://a.test/session", "{}")] },
+                { "command": {}, "requests": [request("s2r1", "https://a.test/cart", "{}")] }
             ]
         }));
         assert_eq!(write_ids(&only_output), vec!["s2r1"]);
+        let replay: Vec<&str> = only_output
+            .replay_only_writes()
+            .iter()
+            .map(|w| w.id.as_str())
+            .collect();
+        assert_eq!(replay, vec!["s1r1", "s3w1"]);
+    }
+
+    fn denied(id: &str, tier: Tier, status: u16) -> TierResult {
+        let req = PreparedRequest {
+            expect: expect_of(json!({ "signature": signature(&json!({})), "strippedAuth": true })),
+            ..prepared(id)
+        };
+        tier_result(
+            &req,
+            tier,
+            Instant::now(),
+            Err(Failure::stop(
+                Stop::CredentialNotSendable,
+                status,
+                "x".into(),
+            )),
+        )
+    }
+
+    #[test]
+    fn a_401_on_a_request_recorded_with_credentials_falls_through() {
+        let http = denied("s1r1", Tier::Http, 401);
+        assert_eq!(http.stop, None);
+        assert!(http.drift);
+        let page = denied("s1r1", Tier::Page, 403);
+        assert_eq!(page.stop, None);
+        let replay = denied("s1r1", Tier::Replay, 401);
+        assert_eq!(replay.stop, Some(Stop::CredentialNotSendable));
+        // Without stripped credentials the first 401 still stops the run.
+        let req = prepared("s1r1");
+        let plain = tier_result(
+            &req,
+            Tier::Http,
+            Instant::now(),
+            Err(Failure::stop(Stop::AuthExpired, 401, "x".into())),
+        );
+        assert_eq!(plain.stop, Some(Stop::AuthExpired));
+        // When no way gets through, the run reports that the credential cannot be sent.
+        let all = vec![
+            denied("s1r1", Tier::Http, 401),
+            denied("s1r1", Tier::Page, 403),
+        ];
+        assert!(denied_everywhere(&all).is_some());
+        let recovered = vec![
+            denied("s1r1", Tier::Http, 401),
+            attempt(
+                "s1r1",
+                Tier::Page,
+                Ok((200, r#"{"data":[{"id":1}]}"#.to_string())),
+            ),
+        ];
+        assert!(denied_everywhere(&recovered).is_none());
+    }
+
+    #[test]
+    fn save_records_whether_credential_headers_were_stripped() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+            None,
+        );
+        r.tag_now("api");
+        let mut api = entry(
+            "api",
+            "https://api.example.com.ar/items",
+            "Fetch",
+            "application/json",
+            r#"{"items":[{"id":1}]}"#,
+        );
+        api.request_headers = vec![
+            ("Authorization".into(), "Bearer abc".into()),
+            ("Accept".into(), "*/*".into()),
+        ];
+        let (flow, _) = build_flow_value(SaveInput {
+            name: "t",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[api],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+            local_names: &[],
+        })
+        .unwrap();
+        assert_eq!(
+            flow["steps"][0]["requests"][0]["expect"]["strippedAuth"],
+            true
+        );
+        assert!(!serde_json::to_string(&flow).unwrap().contains("Bearer"));
+    }
+
+    #[test]
+    fn replay_runs_only_plain_interactions_on_the_flows_site() {
+        let flow =
+            flow_of(json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com"] }));
+        let ok = vec![
+            json!({ "action": "navigate", "url": "https://example.com/a" }),
+            json!({ "action": "click", "selector": "a[href='https://other.test']" }),
+            json!({ "action": "tab_new", "url": "https://www.example.com/" }),
+        ];
+        assert!(check_replay_commands(&flow, &ok).is_ok());
+        for bad in [
+            json!({ "action": "evaluate", "script": "fetch('https://evil.test')" }),
+            json!({ "action": "tab_new", "url": "https://evil.test/" }),
+            json!({ "action": "window_new", "url": "https://example.com/" }),
+            json!({ "action": "click", "selector": "x", "extra": { "url": "https://evil.test" } }),
+            json!({ "action": "navigate", "url": "javascript:alert(1)" }),
+            json!({ "action": "click", "script": "fetch('/x')" }),
+        ] {
+            assert!(
+                check_replay_commands(&flow, std::slice::from_ref(&bad)).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -4168,7 +5235,7 @@ mod tests {
             local_names: &[],
         })
         .unwrap();
-        assert_eq!(r.commands[1].1["value"], "{{q}}");
+        assert_eq!(flow["steps"][1]["command"]["value"], "{{q}}");
         assert_eq!(
             flow["steps"][1]["requests"][0]["url"],
             "https://api.example.com.ar/s?q=ab"
@@ -4206,20 +5273,57 @@ mod tests {
         let flow = flow_of(json!({
             "startUrl": "https://a.test/",
             "params": [{ "name": "email", "source": "typed" }],
-            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
-            "steps": [{ "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/login",
-                "body": "{\"email\":\"{{email}}\"}" }] }]
+            "steps": [{ "ok": true, "command": { "action": "fill", "selector": "#e", "value": "{{email}}" }, "requests": [] }]
         }));
-        assert!(prepare_all(&flow, &[])
-            .err()
-            .unwrap()
+        assert!(replay_commands(&flow, &[])
+            .unwrap_err()
             .contains("missing --param email"));
-        let sent = prepare_all(&flow, &[("email".to_string(), "x@y.z".to_string())]).unwrap();
-        assert!(sent[0].body.as_deref().unwrap().contains("x@y.z"));
+        let cmds = replay_commands(&flow, &[("email".to_string(), "x@y.z".to_string())]).unwrap();
+        assert_eq!(cmds[1]["value"], "x@y.z");
         assert!(input_schema(&flow)["properties"]["email"]["description"]
             .as_str()
             .unwrap()
             .contains("pass a value"));
+    }
+
+    #[test]
+    fn urls_hidden_by_whatwg_stripping_are_still_host_checked() {
+        let flow =
+            flow_of(json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com"] }));
+        for bad in [
+            "ht\ttps://evil.com/x",
+            "\u{1}https://evil.com/x",
+            " https://evil.com/x",
+            "https://evil.com\n/x",
+            "java\tscript:alert(1)",
+        ] {
+            let cmd = json!({ "action": "tab_new", "url": bad });
+            assert!(check_replay_commands(&flow, &[cmd]).is_err(), "{bad:?}");
+            let nested = json!({ "action": "click", "selector": "x", "arg": bad });
+            assert!(check_replay_commands(&flow, &[nested]).is_err(), "{bad:?}");
+        }
+        // A URL key is checked even when the value is not an http URL.
+        let odd = json!({ "action": "tab_new", "url": "chrome://settings" });
+        assert!(check_replay_commands(&flow, &[odd]).is_err());
+        let fine = json!({ "action": "tab_new", "url": "/relative/path" });
+        assert!(check_replay_commands(&flow, &[fine]).is_ok());
+        let blank = json!({ "action": "navigate", "url": "about:blank" });
+        assert!(check_replay_commands(&flow, &[blank]).is_ok());
+    }
+
+    #[test]
+    fn a_write_is_never_retried_by_the_in_page_fetch() {
+        let write = PreparedRequest {
+            method: "POST".to_string(),
+            expect: Expect::default(),
+            write: true,
+            ..prepared("s1r1")
+        };
+        let script = page_fetch_script(&write);
+        assert!(!script.contains("catch"), "{script}");
+        assert_eq!(script.matches("fetch(").count(), 1, "{script}");
+        let read = page_fetch_script(&prepared("s1r1"));
+        assert!(read.contains("catch"));
     }
 
     #[test]
@@ -4356,7 +5460,7 @@ mod tests {
             !text.contains("api.example.com.ar/login"),
             "the login request is dropped"
         );
-        assert_eq!(r.commands[1].1["key"], REDACTED);
+        assert_eq!(flow["steps"][1]["command"]["key"], REDACTED);
     }
 
     fn secret_fill_recording() -> (FlowRecorder, HarEntry) {
@@ -4838,7 +5942,7 @@ mod tests {
         .unwrap();
         let text = serde_json::to_string(&flow).unwrap();
         assert!(!text.contains("pasted-value"));
-        assert_eq!(r.commands[1].1["key"], REDACTED);
+        assert_eq!(flow["steps"][1]["command"]["key"], REDACTED);
         assert_eq!(flow["steps"][1]["requests"], json!([]));
         assert!(
             report["gaps"]
@@ -4987,17 +6091,20 @@ mod tests {
     // ctate review comments, reproduced against the saved-flow code.
 
     #[test]
-    fn a_param_with_quotes_keeps_bodies_urls_and_headers_valid() {
+    fn a_param_with_quotes_keeps_commands_bodies_urls_and_headers_valid() {
         let value = r#"a "quoted" item\"#.to_string();
         let flow = flow_of(json!({
             "startUrl": "https://a.test/",
             "params": [{ "name": "q", "source": "typed" }],
             "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
-            "steps": [{
+            "steps": [{ "ok": true, "command": { "action": "fill", "selector": "#q", "value": "{{q}}" },
                 "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/s?q={{q}}",
                     "headers": { "x-q": "{{q}}" }, "body": "{\"q\":\"{{q}}\"}",
                     "expect": { "signature": signature(&json!({})) } }] }]
         }));
+        let cmds = replay_commands(&flow, &[("q".to_string(), value.clone())]).unwrap();
+        assert_eq!(cmds[1]["value"], value.as_str());
+        assert!(serde_json::from_str::<Value>(&serde_json::to_string(&cmds[1]).unwrap()).is_ok());
         let prepared = prepare_all(&flow, &[("q".to_string(), value.clone())]).unwrap();
         let body: Value = serde_json::from_str(prepared[0].body.as_deref().unwrap()).unwrap();
         assert_eq!(body["q"], value.as_str());
@@ -5194,6 +6301,60 @@ mod tests {
             .any(|x| x["request"] == "s2r1"));
     }
 
+    fn replayed(url: &str) -> HarEntry {
+        let mut e = entry("r", url, "Fetch", "application/json", r#"{"items":[]}"#);
+        e.status = Some(200);
+        e
+    }
+
+    #[test]
+    fn replay_match_keeps_pages_apart_and_ignores_cache_busters() {
+        let entries = vec![
+            replayed("https://api.site.example/items?page=1&_=111"),
+            replayed("https://api.site.example/items?page=2&_=222"),
+        ];
+        let want = |url: &str| PreparedRequest {
+            url: url.to_string(),
+            ..prepared("s1r1")
+        };
+        let one = replay_lookup(&entries, &want("https://api.site.example/items?page=1"))
+            .ok()
+            .unwrap();
+        assert!(one.url.contains("page=1"));
+        let two = replay_lookup(&entries, &want("https://api.site.example/items?page=2"))
+            .ok()
+            .unwrap();
+        assert!(two.url.contains("page=2"));
+        // A recorded value that no replayed request has finds nothing.
+        let err = replay_lookup(&entries, &want("https://api.site.example/items?page=3"))
+            .err()
+            .unwrap();
+        assert!(err.contains("no replayed request"), "{err}");
+        // A request without the query matches both pages, so it fails closed.
+        let err = replay_lookup(&entries, &want("https://api.site.example/items"))
+            .err()
+            .unwrap();
+        assert!(err.contains("several"), "{err}");
+        // The same page twice, differing only by a cache-buster, is ambiguous too.
+        let twice = vec![
+            replayed("https://api.site.example/items?page=1&_=1"),
+            replayed("https://api.site.example/items?page=1&_=2"),
+        ];
+        assert!(replay_lookup(&twice, &want("https://api.site.example/items?page=1")).is_err());
+        // An exact URL still wins.
+        assert!(replay_lookup(&twice, &want("https://api.site.example/items?page=1&_=2")).is_ok());
+        assert!(
+            replay_lookup(&entries, &want("https://api.site.example/items?page=1"))
+                .ok()
+                .is_some()
+        );
+        assert!(
+            replay_lookup(&entries, &want("https://api.site.example/items"))
+                .ok()
+                .is_none()
+        );
+    }
+
     #[test]
     fn a_saved_flow_reads_and_rewrites_byte_for_byte() {
         let dir = std::env::temp_dir().join(format!("ab-flow-roundtrip-{}", std::process::id()));
@@ -5233,8 +6394,24 @@ mod tests {
         flow.run_writes().iter().map(|w| w.id.clone()).collect()
     }
 
-    fn result(ok: bool, status: Option<u16>, drift: bool, kind: Option<Stop>) -> RequestResult {
-        RequestResult {
+    fn flow_with_request(tier: Option<&str>, write: bool) -> Flow {
+        flow_of(json!({
+            "output": "s1r1",
+            "steps": [{ "command": {}, "requests": [{
+                "id": "s1r1", "method": if write { "POST" } else { "GET" },
+                "url": "https://a.test/x", "tier": tier
+            }] }]
+        }))
+    }
+
+    fn result(
+        tier: Tier,
+        ok: bool,
+        status: Option<u16>,
+        drift: bool,
+        kind: Option<Stop>,
+    ) -> TierResult {
+        TierResult {
             id: "s1r1".to_string(),
             step: 1,
             ok,
@@ -5245,9 +6422,149 @@ mod tests {
             drift,
             shape_changed: false,
             empty: false,
+            tier,
             stop: kind,
+            soft_stop: None,
+            transport: false,
+            skipped: false,
             retry_after: None,
         }
+    }
+
+    #[test]
+    fn next_tier_follows_the_order_and_never_resends_a_write() {
+        use Tier::*;
+        // (preferred tier, write, attempts so far, expected next)
+        type Case = (Option<&'static str>, bool, Vec<TierResult>, Option<Tier>);
+        let cases: Vec<Case> = vec![
+            (None, false, vec![], Some(Http)),
+            (Some("page"), false, vec![], Some(Page)),
+            (
+                None,
+                false,
+                vec![result(Http, true, Some(200), false, None)],
+                None,
+            ),
+            (
+                None,
+                false,
+                vec![result(Http, false, Some(200), true, None)],
+                Some(Page),
+            ),
+            (
+                None,
+                false,
+                vec![result(Http, false, Some(400), false, None)],
+                None,
+            ),
+            (
+                None,
+                false,
+                vec![result(
+                    Http,
+                    false,
+                    Some(403),
+                    false,
+                    Some(Stop::AuthExpired),
+                )],
+                None,
+            ),
+            (
+                None,
+                false,
+                vec![
+                    result(Http, false, Some(200), true, None),
+                    result(Page, false, None, true, None),
+                ],
+                Some(Replay),
+            ),
+            (
+                None,
+                false,
+                vec![result(Replay, false, None, true, None)],
+                None,
+            ),
+            // A write the site rejected may go out again; an accepted one may not.
+            (
+                None,
+                true,
+                vec![result(Http, false, Some(500), false, None)],
+                Some(Page),
+            ),
+            (
+                None,
+                true,
+                vec![result(Http, false, Some(401), false, None)],
+                Some(Page),
+            ),
+            (
+                None,
+                true,
+                vec![result(Http, false, Some(303), false, None)],
+                None,
+            ),
+            (
+                None,
+                true,
+                vec![result(Http, false, None, false, Some(Stop::OutcomeUnknown))],
+                None,
+            ),
+        ];
+        for (i, (tier, write, attempts, want)) in cases.into_iter().enumerate() {
+            let flow = flow_with_request(tier, write);
+            let req = PreparedRequest {
+                write,
+                ..prepared("s1r1")
+            };
+            let got = next_tier(&flow, &req, &attempts, &WriteLedger::default());
+            assert_eq!(got, want, "case {i}");
+        }
+    }
+
+    #[test]
+    fn a_sent_write_is_only_read_back_from_the_replay() {
+        let flow = flow_with_request(None, true);
+        let req = PreparedRequest {
+            write: true,
+            ..prepared("s1r1")
+        };
+        let mut ledger = WriteLedger::default();
+        ledger.record(&req, &result(Tier::Http, false, Some(500), false, None));
+        assert!(
+            !ledger.already_sent("s1r1"),
+            "a 5xx is not an accepted write"
+        );
+        ledger.record(&req, &result(Tier::Http, false, Some(401), false, None));
+        assert!(
+            !ledger.already_sent("s1r1"),
+            "a rejection is not a sent write"
+        );
+        ledger.record(
+            &req,
+            &result(Tier::Http, false, None, false, Some(Stop::OutcomeUnknown)),
+        );
+        assert!(ledger.already_sent("s1r1"));
+        assert_eq!(next_tier(&flow, &req, &[], &ledger), None);
+        let mut flow_writes = flow.clone();
+        flow_writes.writes = vec![Write {
+            id: "s1r1".to_string(),
+            method: "POST".to_string(),
+            url: String::new(),
+            kind: WriteKind::Explicit,
+            step: 1,
+        }];
+        let mut after_replay = WriteLedger::default();
+        after_replay.replay_ran(&flow_writes);
+        assert_eq!(
+            next_tier(&flow, &req, &[], &after_replay),
+            Some(Tier::Replay)
+        );
+        assert_eq!(
+            after_replay
+                .first_repeated_by_replay(&flow_writes)
+                .as_deref(),
+            Some("s1r1")
+        );
     }
 
     fn run_flow(rows: Value) -> (Flow, Vec<PreparedRequest>) {
@@ -5275,71 +6592,147 @@ mod tests {
     }
 
     #[test]
-    fn the_run_loop_sends_each_request_once_in_order() {
-        use memory::{MemorySender, Scripted};
-        let (_, requests) = run_flow(json!({
+    fn the_run_loop_sends_an_accepted_write_once_and_falls_back_for_reads() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
             "output": "s2r1",
             "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
             "steps": [
-                { "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] },
-                { "requests": [{ "id": "s2r1", "method": "GET", "url": "https://a.test/items?c={{@s1r1.ok}}", "expect": ok_expect() }] }
+                { "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] },
+                { "command": {}, "requests": [{ "id": "s2r1", "method": "GET", "url": "https://a.test/items?c={{@s1r1.ok}}", "expect": ok_expect() }] }
             ]
         }));
-        let mut sender = MemorySender::default()
-            .answer("s1r1", Scripted::json(200, OK_JSON))
-            .answer("s2r1", Scripted::json(200, OK_JSON));
-        let results = block_on(run_requests(&requests, &mut sender, &|_| Ok(()))).unwrap();
-        assert!(results.iter().all(|r| r.ok));
-        assert_eq!(sender.sent, vec!["s1r1", "s2r1"]);
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::json(200, OK_JSON))
+            .answer(
+                Tier::Http,
+                "s2r1",
+                Scripted::json(200, "<html>sign in</html>"),
+            )
+            .answer(Tier::Page, "s2r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert!(results.iter().all(|r| r.ok || r.tier == Tier::Http));
+        assert_eq!(senders.times("s1r1"), 1);
+        assert_eq!(
+            senders.sent,
+            vec![
+                (Tier::Http, "s1r1".to_string()),
+                (Tier::Http, "s2r1".to_string()),
+                (Tier::Page, "s2r1".to_string()),
+            ]
+        );
     }
 
     #[test]
-    fn the_run_loop_stops_at_the_first_failure_and_never_resends() {
-        use memory::{MemorySender, Scripted};
-        let (_, requests) = run_flow(json!({
+    fn the_run_loop_never_resends_a_write_the_replay_sent() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
             "output": "s2r1",
-            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "writes": [{ "id": "s2r1", "method": "POST", "kind": "explicit" }],
             "steps": [
-                { "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] },
-                { "requests": [{ "id": "s2r1", "method": "GET", "url": "https://a.test/items?c={{@s1r1.ok}}", "expect": ok_expect() }] }
+                { "command": {}, "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/session", "tier": "replay", "expect": ok_expect() }] },
+                { "command": {}, "requests": [{ "id": "s2r1", "method": "POST", "url": "https://a.test/cart?c={{@s1r1.ok}}", "expect": ok_expect() }] }
             ]
         }));
-        let mut sender = MemorySender::default()
-            .answer("s1r1", Scripted::json(200, r#"{"other":1}"#))
-            .answer("s2r1", Scripted::json(200, OK_JSON));
-        let results = block_on(run_requests(&requests, &mut sender, &|_| Ok(()))).unwrap();
-        assert!(!results.last().unwrap().ok);
-        assert_eq!(sender.sent, vec!["s1r1"]);
+        // The replay answers the session read and, having repeated every
+        // command, the write too; the write is then read back, not sent.
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Replay, "s1r1", Scripted::json(200, OK_JSON))
+            .answer(Tier::Replay, "s2r1", Scripted::json(200, OK_JSON))
+            .answer(Tier::Http, "s2r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert!(results.iter().all(|r| r.ok));
+        assert_eq!(
+            senders.sent,
+            vec![
+                (Tier::Replay, "s1r1".to_string()),
+                (Tier::Replay, "s2r1".to_string()),
+            ],
+            "the write is answered by the replay, not by HTTP"
+        );
     }
 
     #[test]
     fn the_run_loop_stops_on_an_unknown_write_outcome() {
-        use memory::{MemorySender, Scripted};
-        let (_, requests) = run_flow(json!({
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
             "output": "s1r1",
             "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
-            "steps": [{ "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] }]
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] }]
         }));
-        let mut sender = MemorySender::default().answer("s1r1", Scripted::unknown());
-        let results = block_on(run_requests(&requests, &mut sender, &|_| Ok(()))).unwrap();
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::unknown())
+            .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
         assert_eq!(results.last().unwrap().stop, Some(Stop::OutcomeUnknown));
-        assert_eq!(sender.times("s1r1"), 1);
+        assert_eq!(senders.times("s1r1"), 1);
+    }
+
+    #[test]
+    fn a_write_answered_with_a_server_error_is_not_sent_again() {
+        use memory::{MemorySenders, Scripted};
+        for status in [500u16, 502, 503, 408] {
+            let (flow, requests) = run_flow(json!({
+                "output": "s1r1",
+                "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+                "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] }]
+            }));
+            let mut senders = MemorySenders::default()
+                .answer(Tier::Http, "s1r1", Scripted::json(status, "{}"))
+                .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
+            let results =
+                block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+            assert_eq!(
+                senders.sent,
+                vec![(Tier::Http, "s1r1".to_string())],
+                "{status}"
+            );
+            assert_eq!(results.last().unwrap().stop, Some(Stop::OutcomeUnknown));
+        }
+        // A 4xx rejection means the write was not applied; the page may still send it.
+        let (flow, requests) = run_flow(json!({
+            "output": "s1r1",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] }]
+        }));
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::json(422, "{}"))
+            .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
+        block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert_eq!(senders.times("s1r1"), 2);
     }
 
     #[test]
     fn the_run_loop_refuses_a_request_the_check_rejects() {
-        use memory::MemorySender;
-        let (_, requests) = run_flow(json!({
+        use memory::MemorySenders;
+        let (flow, requests) = run_flow(json!({
             "output": "s1r1", "writes": [],
-            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://evil.test/x", "expect": ok_expect() }] }]
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "GET", "url": "https://evil.test/x", "expect": ok_expect() }] }]
         }));
-        let mut sender = MemorySender::default();
+        let mut senders = MemorySenders::default();
         let check = |r: &PreparedRequest| Err(format!("{} refused", r.url));
-        let err = block_on(run_requests(&requests, &mut sender, &check))
+        let err = block_on(run_requests(&flow, &requests, &mut senders, &check))
             .err()
             .unwrap();
         assert!(err.contains("evil.test"));
-        assert!(sender.sent.is_empty());
+        assert!(senders.sent.is_empty());
+    }
+
+    #[test]
+    fn the_page_tier_needs_a_tab_on_the_flows_site() {
+        let flow = flow_of(json!({ "startUrl": "https://example.com/" }));
+        for (tab, ok) in [
+            (None, false),
+            (Some("https://evil.test/"), false),
+            (Some("https://app.example.com/x"), true),
+        ] {
+            assert_eq!(tab_on_site(&flow, tab).is_ok(), ok, "{tab:?}");
+        }
+        let err = tab_on_site(&flow, None).unwrap_err();
+        assert!(
+            err.contains("example.com") && err.contains("open the flow's site"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -5642,7 +7035,8 @@ mod tests {
             (429, "{}", Some((Some(Stop::RateLimited), false, false))),
             (400, "{}", Some((None, false, false))),
             (500, "{}", Some((None, false, false))),
-            (407, "{}", Some((None, true, false))),
+            // The proxy refused it: transport, not a change on the site.
+            (407, "{}", Some((None, false, false))),
         ];
         let req = prepared("s1r1");
         for (status, body, want) in cases {
@@ -5850,17 +7244,17 @@ mod tests {
             "name": "f", "origin": "site.example", "output": "s2r1",
             "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
         }));
-        let dependency = RequestResult {
+        let dependency = TierResult {
             id: "s1r1".to_string(),
             empty: true,
             body: Some(json!({ "payload": {} })),
-            ..result(true, Some(200), false, None)
+            ..result(Tier::Http, true, Some(200), false, None)
         };
-        let output = RequestResult {
+        let output = TierResult {
             id: "s2r1".to_string(),
             step: 2,
             body: Some(json!({ "items": [{ "id": 7 }] })),
-            ..result(true, Some(200), false, None)
+            ..result(Tier::Http, true, Some(200), false, None)
         };
         let out = finish_run(
             &mut flow,
@@ -6054,7 +7448,7 @@ mod tests {
         let flow = flow_of(json!({
             "output": "s1r2",
             "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
-            "steps": [{ "requests": [
+            "steps": [{ "command": {}, "requests": [
                 { "id": "s1r1", "method": "POST", "url": "https://a.test/cart" },
                 { "id": "s1r2", "method": "GET", "url": "https://a.test/items" }
             ] }]
@@ -6071,36 +7465,45 @@ mod tests {
     }
 
     fn attempt_result(
+        tier: Tier,
         status: Option<u16>,
         reason: &str,
         drift: bool,
         stop: Option<Stop>,
         retry_after: Option<&str>,
-    ) -> RequestResult {
-        RequestResult {
+    ) -> TierResult {
+        TierResult {
             reason: Some(reason.to_string()),
             retry_after: retry_after.map(String::from),
-            ..result(false, status, drift, stop)
+            ..result(tier, false, status, drift, stop)
         }
     }
 
     #[test]
     fn a_run_outcome_names_what_stopped_the_run() {
         // (results, flow name, expected message, expected data status)
-        let cases: Vec<(Vec<RequestResult>, &str, Option<&str>)> = vec![
+        let cases: Vec<(Vec<TierResult>, &str, Option<&str>)> = vec![
             (
-                vec![attempt_result(Some(429), "HTTP 429", false, Some(Stop::RateLimited), Some("17"))],
-                "flow 'cart' step 1: HTTP 429; retry after 17. Wait before rerunning",
+                vec![attempt_result(Tier::Http, Some(429), "HTTP 429", false, Some(Stop::RateLimited), Some("17"))],
+                "flow 'cart' step 1 (http): HTTP 429; retry after 17. Wait before rerunning",
                 Some("rate_limited"),
             ),
             (
-                vec![attempt_result(Some(401), "HTTP 401", false, Some(Stop::AuthExpired), None)],
-                "flow 'cart' step 1: HTTP 401. Sign in again in the browser, then rerun",
+                vec![attempt_result(Tier::Http, Some(401), "HTTP 401", false, Some(Stop::AuthExpired), None)],
+                "flow 'cart' step 1 (http): HTTP 401. Sign in again in the browser, then rerun",
                 Some("auth_expired"),
             ),
             (
-                vec![attempt_result(None, "sent, no answer", false, Some(Stop::OutcomeUnknown), None)],
-                "flow 'cart' step 1: sent, no answer. Check the site before rerunning; the write is not sent again",
+                vec![
+                    attempt_result(Tier::Http, Some(401), "soft", true, None, None),
+                    attempt_result(Tier::Page, Some(403), "soft", true, None, None),
+                ],
+                "flow 'cart' step 1 (page): soft. The flow cannot send the credential this request needs; use the page UI for this task",
+                Some("credential_not_sendable"),
+            ),
+            (
+                vec![attempt_result(Tier::Http, None, "sent, no answer", false, Some(Stop::OutcomeUnknown), None)],
+                "flow 'cart' step 1 (http): sent, no answer. Check the site before rerunning; the write is not sent again",
                 Some("outcome_unknown"),
             ),
         ];
@@ -6111,32 +7514,50 @@ mod tests {
             assert!(message.starts_with(status.unwrap()), "{message}");
             assert_eq!(outcome.data("cart").unwrap()["status"], status.unwrap());
         }
-        let fine = vec![result(true, Some(200), false, None)];
+        let fine = vec![result(Tier::Http, true, Some(200), false, None)];
         assert_eq!(RunOutcome::stopped(&fine), None);
     }
 
     #[test]
     fn a_failed_run_says_drift_or_rejected_params() {
         let flow = flow_of(json!({ "params": [{ "name": "q", "example": "kettle" }] }));
-        let drift = vec![attempt_result(
-            Some(200),
-            "response is not JSON",
-            true,
-            None,
-            None,
-        )];
+        let drift = vec![
+            attempt_result(
+                Tier::Http,
+                Some(200),
+                "response is not JSON",
+                true,
+                None,
+                None,
+            ),
+            attempt_result(Tier::Page, None, "skipped", true, None, None),
+        ];
         let outcome = RunOutcome::failed(&drift, &flow);
         assert_eq!(
             outcome.message("f"),
-            "flow 'f' failed at step 1: response is not JSON. The flow is now marked unverified; drive the browser for this task instead"
+            "flow 'f' failed at step 1 (http: response is not JSON; page: skipped). The flow is now marked unverified; drive the browser for this task instead"
         );
         assert_eq!(outcome.data("f"), None);
-        let rejected = vec![attempt_result(Some(400), "HTTP 400", false, None, None)];
+        let rejected = vec![attempt_result(
+            Tier::Http,
+            Some(400),
+            "HTTP 400",
+            false,
+            None,
+            None,
+        )];
         assert_eq!(
             RunOutcome::failed(&rejected, &flow).message("f"),
             "flow 'f' failed at step 1: HTTP 400. The site likely rejected the param values; the recorded run used q=kettle"
         );
-        let unreachable = vec![attempt_result(None, "request failed", false, None, None)];
+        let unreachable = vec![attempt_result(
+            Tier::Http,
+            None,
+            "request failed",
+            false,
+            None,
+            None,
+        )];
         assert_eq!(
             RunOutcome::failed(&unreachable, &flow).message("f"),
             "flow 'f' failed at step 1: request failed"
@@ -6161,5 +7582,1337 @@ mod tests {
         r.untag_current();
         r.tag("unrecorded", f64::MAX);
         assert_eq!(r.request_tags.get("unrecorded"), None);
+    }
+
+    #[test]
+    fn a_body_with_unfilled_references_matches_on_the_request_alone() {
+        let mut sent = entry(
+            "w",
+            "https://api.site.example/cart",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        sent.method = "POST".to_string();
+        sent.post_data = Some(r#"{"id":7,"csrf":"tok"}"#.to_string());
+        let want = PreparedRequest {
+            method: "POST".to_string(),
+            url: "https://api.site.example/cart".to_string(),
+            body: Some(r#"{"id":7,"csrf":"{{@s1r1.csrf}}"}"#.to_string()),
+            ..prepared("s2r1")
+        };
+        assert!(replay_lookup(&[sent.clone()], &want).is_ok());
+        let filled = PreparedRequest {
+            body: Some(r#"{"csrf":"other","id":7}"#.to_string()),
+            ..want
+        };
+        assert!(replay_lookup(&[sent], &filled).is_err());
+    }
+
+    fn signed_request(id: &str) -> PreparedRequest {
+        let mut req = prepared(id);
+        req.headers
+            .push(("X-Ts".to_string(), "1730000000".to_string()));
+        req
+    }
+
+    fn denied_attempt(req: &PreparedRequest, tier: Tier, status: u16) -> TierResult {
+        tier_result(req, tier, Instant::now(), Ok((status, "{}".to_string())))
+    }
+
+    #[test]
+    fn a_signed_request_denied_on_http_or_page_falls_to_the_next_tier() {
+        let req = signed_request("s1r1");
+        for tier in [Tier::Http, Tier::Page] {
+            let r = denied_attempt(&req, tier, 401);
+            assert_eq!(r.stop, None, "{tier:?}");
+            assert!(r.drift, "{tier:?}");
+        }
+        let http = denied_attempt(&req, Tier::Http, 403);
+        let page = denied_attempt(&req, Tier::Page, 403);
+        // No replay available: the run reports the signature.
+        let outcome = RunOutcome::stopped(&[http.clone(), page.clone()]).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Stopped {
+                    stop: Stop::RequestSigned,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        // The replay got a real 401 with the site's own signing: signed out.
+        let replay = denied_attempt(&req, Tier::Replay, 401);
+        assert_eq!(replay.stop, Some(Stop::AuthExpired));
+        let outcome = RunOutcome::stopped(&[http, page, replay]).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Stopped {
+                    stop: Stop::AuthExpired,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_replay_that_answered_with_a_changed_shape_is_drift_not_a_soft_stop() {
+        let mut req = signed_request("s1r1");
+        req.expect.signature = signature(&json!({ "ok": true }));
+        let http = denied_attempt(&req, Tier::Http, 401);
+        let page = denied_attempt(&req, Tier::Page, 401);
+        let replay = tier_result(
+            &req,
+            Tier::Replay,
+            Instant::now(),
+            Ok((200, r#"{"moved":1}"#.to_string())),
+        );
+        assert!(replay.shape_changed, "{:?}", replay.reason);
+        let results = [http, page, replay];
+        assert_eq!(RunOutcome::stopped(&results), None);
+        let flow = flow_of(json!({}));
+        assert!(matches!(
+            RunOutcome::failed(&results, &flow),
+            RunOutcome::Drift {
+                shape_changed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_transport_error_does_not_move_the_preferred_tier() {
+        let mut flow = flow_with_request(None, false);
+        let transport = TierResult {
+            transport: true,
+            ..result(Tier::Http, false, None, false, None)
+        };
+        let page = result(Tier::Page, true, Some(200), false, None);
+        finish_run(
+            &mut flow,
+            &[transport.clone(), page.clone()],
+            "now",
+            1,
+            &Shape::default(),
+        );
+        assert_eq!(flow.steps[0].requests[0].tier, None);
+        // A failure that says the site changed does move it.
+        let drifted = result(Tier::Http, false, Some(200), true, None);
+        finish_run(&mut flow, &[drifted, page], "now", 1, &Shape::default());
+        assert_eq!(flow.steps[0].requests[0].tier, Some(Tier::Page));
+        // A transport error on the preferred tier keeps that preference.
+        let replay = result(Tier::Replay, true, Some(200), false, None);
+        let transport = TierResult {
+            transport: true,
+            ..result(Tier::Page, false, None, false, None)
+        };
+        finish_run(&mut flow, &[transport, replay], "now", 1, &Shape::default());
+        assert_eq!(flow.steps[0].requests[0].tier, Some(Tier::Page));
+    }
+
+    #[test]
+    fn a_skipped_tier_does_not_move_the_preferred_tier() {
+        let skipped = |tier| TierResult {
+            skipped: true,
+            ..result(tier, false, None, true, None)
+        };
+        let transport = TierResult {
+            transport: true,
+            ..result(Tier::Http, false, None, false, None)
+        };
+        let replay = result(Tier::Replay, true, Some(200), false, None);
+        let tier_after = |attempts: &[TierResult]| {
+            let mut flow = flow_with_request(None, false);
+            finish_run(&mut flow, attempts, "now", 1, &Shape::default());
+            flow.steps[0].requests[0].tier
+        };
+        // Transport error, skipped page, replay answers: nothing was learned.
+        assert_eq!(
+            tier_after(&[transport, skipped(Tier::Page), replay.clone()]),
+            None
+        );
+        // The http shape changed and the page was not tried: start at the page.
+        let mut shape = result(Tier::Http, false, Some(200), true, None);
+        shape.shape_changed = true;
+        assert_eq!(
+            tier_after(&[shape, skipped(Tier::Page), replay]),
+            Some(Tier::Page)
+        );
+        // The page answered after http drifted: unchanged.
+        let drifted = result(Tier::Http, false, Some(200), true, None);
+        let page = result(Tier::Page, true, Some(200), false, None);
+        assert_eq!(tier_after(&[drifted, page]), Some(Tier::Page));
+    }
+
+    #[test]
+    fn a_skipped_tier_is_not_drift_for_unverify_or_the_outcome() {
+        let skipped = TierResult {
+            skipped: true,
+            reason: Some("not on the site".to_string()),
+            ..result(Tier::Page, false, None, true, None)
+        };
+        let http = TierResult {
+            reason: Some("HTTP 500".to_string()),
+            ..result(Tier::Http, false, Some(500), false, None)
+        };
+        let replay = TierResult {
+            transport: true,
+            reason: Some("request failed".to_string()),
+            ..result(Tier::Replay, false, None, false, None)
+        };
+        let attempts = [http, skipped.clone(), replay];
+        let mut flow = flow_with_request(None, false);
+        flow.verified_at = Some("then".to_string());
+        finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
+        assert_eq!(flow.verified_at.as_deref(), Some("then"));
+        let outcome = RunOutcome::failed(&attempts, &flow);
+        assert!(
+            matches!(&outcome, RunOutcome::Failed { reason, .. } if reason == "request failed"),
+            "{outcome:?}"
+        );
+        // A shape change before the skipped tier still unverifies.
+        let mut shape = result(Tier::Http, false, Some(200), true, None);
+        shape.shape_changed = true;
+        let replay = result(Tier::Replay, true, Some(200), false, None);
+        flow.verified_at = Some("then".to_string());
+        finish_run(
+            &mut flow,
+            &[shape, skipped, replay],
+            "now",
+            1,
+            &Shape::default(),
+        );
+        assert_eq!(flow.verified_at, None);
+    }
+
+    #[test]
+    fn a_routed_write_answered_with_a_5xx_is_not_an_unknown_outcome() {
+        let mut req = prepared("s1r1");
+        req.write = true;
+        let client = block_on(http_client(None, &flow_of(json!({})))).unwrap();
+        let routed = Some(RoutedResponse {
+            abort: false,
+            status: 503,
+            body: String::new(),
+        });
+        let r = block_on(run_http(&client, &req, None, routed, far()));
+        assert_eq!(r.stop, None, "{:?}", r.reason);
+        assert_eq!(r.status, Some(503));
+        assert_eq!(r.reason.as_deref(), Some("HTTP 503"));
+    }
+
+    #[test]
+    fn an_unknown_write_outcome_says_not_sent_again_once() {
+        let mut req = prepared("s1r1");
+        req.write = true;
+        let r = tier_result(&req, Tier::Http, Instant::now(), Ok((503, String::new())));
+        let msg = RunOutcome::stopped(&[r]).unwrap().message("f");
+        assert_eq!(msg.matches("not sent again").count(), 1, "{msg}");
+    }
+
+    #[test]
+    fn a_replay_denial_ignores_the_recorded_credential_and_signature_headers() {
+        let mut req = signed_request("s1r1");
+        req.expect.stripped_auth = true;
+        for status in [401, 403] {
+            let r = denied_attempt(&req, Tier::Replay, status);
+            assert_eq!(r.stop, Some(Stop::AuthExpired), "{status}");
+        }
+    }
+
+    #[test]
+    fn the_run_loop_lets_the_replay_answer_a_signed_request() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
+            "output": "s1r1", "writes": [],
+            "steps": [{ "command": {}, "requests": [{
+                "id": "s1r1", "method": "GET", "url": "https://a.test/x",
+                "headers": { "X-Ts": "1730000000" }, "expect": ok_expect() }] }]
+        }));
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::json(401, "{}"))
+            .answer(Tier::Page, "s1r1", Scripted::json(401, "{}"))
+            .answer(Tier::Replay, "s1r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert!(results.last().unwrap().ok);
+        assert_eq!(RunOutcome::stopped(&results), None);
+        assert_eq!(senders.times("s1r1"), 3);
+    }
+
+    #[test]
+    fn a_failure_is_judged_by_its_own_request() {
+        let flow = flow_of(json!({ "params": [{ "name": "q", "example": "kettle" }] }));
+        let mut r1_http = attempt_result(Tier::Http, Some(200), "shape", true, None, None);
+        r1_http.shape_changed = true;
+        let r1_page = result(Tier::Page, true, Some(200), false, None);
+        let mut r2_http = attempt_result(Tier::Http, Some(404), "HTTP 404", false, None, None);
+        r2_http.id = "s1r2".to_string();
+        let outcome = RunOutcome::failed(&[r1_http, r1_page, r2_http], &flow);
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Failed {
+                    examples: Some(_),
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_falls_through_after_drift_a_transport_error_or_a_5xx_after_drift() {
+        use Tier::*;
+        let flow = flow_with_request(None, false);
+        let req = prepared("s1r1");
+        let transport = TierResult {
+            transport: true,
+            ..result(Http, false, None, false, None)
+        };
+        let cases: Vec<(Vec<TierResult>, Option<Tier>)> = vec![
+            (vec![transport.clone()], Some(Page)),
+            (
+                vec![
+                    result(Http, false, Some(200), true, None),
+                    result(Page, false, Some(500), false, None),
+                ],
+                Some(Replay),
+            ),
+            (vec![result(Http, false, Some(500), false, None)], None),
+            (vec![result(Http, false, Some(404), false, None)], None),
+            (
+                vec![
+                    result(Http, false, Some(200), true, None),
+                    result(Page, false, Some(404), false, None),
+                ],
+                None,
+            ),
+        ];
+        for (i, (attempts, want)) in cases.into_iter().enumerate() {
+            let got = next_tier(&flow, &req, &attempts, &WriteLedger::default());
+            assert_eq!(got, want, "case {i}");
+        }
+    }
+
+    #[test]
+    fn a_write_that_may_have_been_sent_is_not_retried_after_a_transport_error() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
+            "output": "s1r1",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "expect": ok_expect() }] }]
+        }));
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::unknown())
+            .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert_eq!(senders.times("s1r1"), 1);
+        assert_eq!(results.last().unwrap().stop, Some(Stop::OutcomeUnknown));
+    }
+
+    #[test]
+    fn the_run_loop_reads_through_a_transport_error() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
+            "output": "s1r1", "writes": [],
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x", "expect": ok_expect() }] }]
+        }));
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::transport())
+            .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert!(results.last().unwrap().ok);
+        assert_eq!(senders.times("s1r1"), 2);
+    }
+
+    #[test]
+    fn a_run_that_stops_after_a_shape_change_marks_the_flow_unverified() {
+        let mut flow = flow_of(json!({
+            "name": "f", "origin": "site.example", "output": "s1r1",
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
+        }));
+        flow.verified_at = Some("then".to_string());
+        let mut http = attempt_result(Tier::Http, Some(200), "shape", true, None, None);
+        http.shape_changed = true;
+        let limited = attempt_result(
+            Tier::Page,
+            Some(429),
+            "HTTP 429",
+            false,
+            Some(Stop::RateLimited),
+            None,
+        );
+        assert!(!unverify_on_shape_change(
+            &mut flow,
+            std::slice::from_ref(&limited)
+        ));
+        assert!(flow.verified_at.is_some());
+        assert!(unverify_on_shape_change(&mut flow, &[http, limited]));
+        assert_eq!(flow.verified_at, None);
+    }
+
+    /// A browser that answers each replayed command from a script and
+    /// reports a fixed capture.
+    struct ScriptBrowser {
+        tab: Option<String>,
+        replies: Vec<Value>,
+        entries: Vec<HarEntry>,
+        ran: Vec<Value>,
+        page: Result<Value, String>,
+        /// A request that never finishes, started by every command.
+        poll_each_run: Option<String>,
+        /// How long a command, or the in-page eval, takes to answer.
+        delay: Duration,
+        /// Whether reading the tab's URL never returns in time.
+        tab_hangs: bool,
+        /// Why the browser cannot start, if it cannot.
+        launch_error: Option<String>,
+    }
+
+    impl ScriptBrowser {
+        fn new(replies: Vec<Value>, entries: Vec<HarEntry>) -> ScriptBrowser {
+            ScriptBrowser {
+                tab: Some("https://a.test/".to_string()),
+                replies,
+                entries,
+                ran: Vec::new(),
+                page: Err("no page".to_string()),
+                poll_each_run: None,
+                delay: Duration::ZERO,
+                tab_hangs: false,
+                launch_error: None,
+            }
+        }
+
+        fn failing_launch(mut self, reason: &str) -> ScriptBrowser {
+            self.launch_error = Some(reason.to_string());
+            self
+        }
+
+        fn hanging_tab(mut self) -> ScriptBrowser {
+            self.tab_hangs = true;
+            self
+        }
+
+        fn slow(mut self, delay: Duration) -> ScriptBrowser {
+            self.delay = delay;
+            self
+        }
+
+        fn polling(mut self, url: &str) -> ScriptBrowser {
+            self.poll_each_run = Some(url.to_string());
+            self
+        }
+
+        fn answering_in_page(mut self, page: Value) -> ScriptBrowser {
+            self.page = Ok(page);
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Browser for ScriptBrowser {
+        async fn cookie_header(&mut self, _: &str) -> Option<String> {
+            None
+        }
+        async fn routed_response(&mut self, _: &str) -> Option<RoutedResponse> {
+            None
+        }
+        async fn tab_url(&mut self) -> Option<String> {
+            if self.tab_hangs {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            self.tab.clone()
+        }
+        async fn eval(&mut self, _: &str) -> Result<Value, String> {
+            tokio::time::sleep(self.delay).await;
+            self.page.clone()
+        }
+        async fn ensure_browser(&mut self) -> Result<(), String> {
+            self.launch_error.clone().map_or(Ok(()), Err)
+        }
+        async fn begin_capture(&mut self) -> Result<usize, String> {
+            Ok(0)
+        }
+        async fn run(&mut self, cmd: &Value) -> Value {
+            tokio::time::sleep(self.delay).await;
+            let reply = self
+                .replies
+                .get(self.ran.len())
+                .cloned()
+                .unwrap_or_else(|| json!({ "success": true }));
+            self.ran.push(cmd.clone());
+            if let Some(url) = &self.poll_each_run {
+                self.entries.push(entry("p", url, "Fetch", "", ""));
+            }
+            reply
+        }
+        async fn captured_since(&mut self, _: usize) -> Vec<HarEntry> {
+            self.entries.clone()
+        }
+        async fn end_capture(&mut self) {}
+        fn write_approved(&self, _: &Write) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(3600)
+    }
+
+    fn finished(mut e: HarEntry) -> HarEntry {
+        e.loading_finished_timestamp = Some(1.0);
+        e
+    }
+
+    mod repro {
+        use super::*;
+
+        /// Two steps: the first click sends a POST, the second click fails.
+        fn cart_flow() -> Flow {
+            flow_of(json!({
+                "output": "s1r1",
+                "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+                "steps": [
+                    { "command": { "action": "click", "selector": "#add" }, "requests": [
+                        { "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "body": "{}",
+                          "expect": { "signature": signature(&json!({ "ok": true })) } }] },
+                    { "command": { "action": "click", "selector": "#next" } }
+                ]
+            }))
+        }
+
+        fn posted(body: Option<&str>, status: i64) -> HarEntry {
+            let mut e = finished(entry(
+                "w",
+                "https://a.test/cart",
+                "Fetch",
+                "application/json",
+                body.unwrap_or(""),
+            ));
+            e.method = "POST".to_string();
+            e.post_data = Some("{}".to_string());
+            e.status = Some(status);
+            e.response_body = body.map(String::from);
+            e
+        }
+
+        /// navigate (start), click #add, click #next.
+        fn failing_last_command() -> Vec<Value> {
+            vec![
+                json!({ "success": true }),
+                json!({ "success": true }),
+                json!({ "success": false, "error": "element is not clickable" }),
+            ]
+        }
+
+        fn send_write(flow: &Flow, browser: &mut ScriptBrowser) -> TierResult {
+            let req = prepare_all(flow, &[]).unwrap().remove(0);
+            let ledger = WriteLedger::default();
+            let ctx = SendCtx {
+                ledger: &ledger,
+                wanted: &[],
+            };
+            let mut run = None;
+            block_on(replay::send(
+                flow,
+                &[],
+                browser,
+                &mut run,
+                &req,
+                &ctx,
+                far(),
+            ))
+        }
+
+        #[test]
+        fn a_browser_that_cannot_start_does_not_unverify_the_flow() {
+            let mut flow = cart_flow();
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new())
+                .failing_launch("Chrome exited before CDP was ready");
+            let r = send_write(&flow, &mut browser);
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+            assert!(r.stop.is_none(), "{:?}", r.stop);
+            flow.verified_at = Some("then".to_string());
+            finish_run(&mut flow, &[r], "now", 1, &Shape::default());
+            assert_eq!(flow.verified_at.as_deref(), Some("then"));
+        }
+
+        fn pending(url: &str) -> HarEntry {
+            entry("p", url, "Fetch", "", "")
+        }
+
+        fn click_flow() -> Flow {
+            flow_of(json!({ "steps": [
+                { "command": { "action": "click", "selector": "#a" } },
+                { "command": { "action": "click", "selector": "#b" } }
+            ] }))
+        }
+
+        #[test]
+        fn a_third_party_request_that_never_finishes_does_not_hold_the_replay() {
+            let flow = click_flow();
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), vec![pending("https://tracker.example/poll")]);
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(5),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+
+        #[test]
+        fn each_replayed_command_waits_on_its_own_clock() {
+            let flow = click_flow();
+            // A first-party request that never finishes makes every command
+            // wait out its clock; the last command must still get its retry.
+            let mut browser = ScriptBrowser::new(
+                vec![
+                    json!({ "success": true }),
+                    json!({ "success": true }),
+                    json!({ "success": false, "error": "No element found for #b" }),
+                    json!({ "success": true }),
+                ],
+                vec![pending("https://api.a.test/poll")],
+            );
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_millis(400),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            assert_eq!(browser.ran.len(), 4);
+        }
+
+        #[test]
+        fn an_in_page_read_redirected_off_the_site_is_refused() {
+            let flow = click_flow();
+            let req = PreparedRequest {
+                url: "https://a.test/items".to_string(),
+                ..prepared("s1r1")
+            };
+            let answer = |url: &str| {
+                let mut browser = ScriptBrowser::new(Vec::new(), Vec::new()).answering_in_page(
+                    json!({ "status": 200, "text": r#"{"data":[{"id":1}]}"#, "url": url }),
+                );
+                block_on(page::send(&flow, &mut browser, &req, far()))
+            };
+            for off in ["https://evil.test/x", "not a url"] {
+                let r = answer(off);
+                assert!(
+                    !r.ok && !r.drift && r.stop.is_none(),
+                    "{off}: {:?}",
+                    r.reason
+                );
+                assert_eq!(r.status, Some(200));
+                assert!(
+                    r.reason.as_deref().unwrap_or("").contains(off),
+                    "{:?}",
+                    r.reason
+                );
+            }
+            // The site's own hosts, and no URL at all (an opaque redirect), pass.
+            for ok in ["https://a.test/items", "https://api.a.test/v2/items", ""] {
+                let r = answer(ok);
+                assert!(r.ok, "{ok}: {:?}", r.reason);
+            }
+        }
+
+        #[test]
+        fn scheme_relative_urls_are_host_checked_like_a_browser() {
+            let flow = flow_of(
+                json!({ "startUrl": "https://example.com/app", "allowedHosts": ["example.com"] }),
+            );
+            for bad in [
+                "//evil.test/x",
+                "///evil.test/x",
+                "\\\\evil.test/x",
+                "/\\evil.test/x",
+                "\t//evil.test/x",
+                " //evil.test/x",
+                "//example.com.evil.test/x",
+            ] {
+                for cmd in [
+                    json!({ "action": "navigate", "url": bad }),
+                    json!({ "action": "tab_new", "url": bad }),
+                    json!({ "action": "wait", "extra": { "url": bad } }),
+                ] {
+                    assert!(
+                        check_replay_commands(&flow, std::slice::from_ref(&cmd)).is_err(),
+                        "{cmd}"
+                    );
+                }
+            }
+            for ok in [
+                "//example.com/x",
+                "//www.example.com/x",
+                "/cart",
+                "cart?q=1",
+                "?q=1",
+                "#top",
+                "",
+            ] {
+                let cmd = json!({ "action": "navigate", "url": ok });
+                assert!(
+                    check_replay_commands(&flow, &[cmd]).is_ok(),
+                    "{ok:?} is on the site"
+                );
+            }
+            // A value that is not a URL at all fails closed.
+            let broken = json!({ "action": "navigate", "url": "http://[::1" });
+            assert!(check_replay_commands(&flow, &[broken]).is_err());
+        }
+
+        #[test]
+        fn a_flows_tool_text_names_a_run_and_not_a_replay() {
+            let flow = flow_of(json!({ "startUrl": "https://a.test/" }));
+            let text = tool_description(&flow);
+            assert!(text.starts_with("Runs the task recorded on"), "{text}");
+        }
+
+        const CHANGED: &str = r#"{"done":1}"#;
+
+        #[test]
+        fn a_refused_address_ends_the_run_on_every_tier() {
+            for tier in ["http", "page"] {
+                let (flow, requests) = cart_write(tier);
+                let req = &requests[0];
+                let refused = TierResult::fail(
+                    req,
+                    Tier::Http,
+                    Instant::now(),
+                    Failure::refused("a.test resolved to a non-public address".to_string()),
+                );
+                assert_eq!(refused.stop, Some(Stop::AddressRefused));
+                assert_eq!(
+                    next_tier(&flow, req, &[refused], &WriteLedger::default()),
+                    None,
+                    "{tier}"
+                );
+            }
+            let read = PreparedRequest {
+                write: false,
+                method: "GET".to_string(),
+                ..cart_write("http").1[0].clone()
+            };
+            let refused = TierResult::fail(
+                &read,
+                Tier::Http,
+                Instant::now(),
+                Failure::refused("a.test resolved to a non-public address".to_string()),
+            );
+            assert_eq!(
+                next_tier(
+                    &cart_write("http").0,
+                    &read,
+                    &[refused],
+                    &WriteLedger::default()
+                ),
+                None
+            );
+        }
+
+        fn cart_write(tier: &str) -> (Flow, Vec<PreparedRequest>) {
+            run_flow(json!({
+                "output": "s1r1",
+                "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+                "steps": [{ "command": {}, "requests": [
+                    { "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "tier": tier, "expect": ok_expect() }] }]
+            }))
+        }
+
+        #[test]
+        fn an_accepted_write_with_a_changed_shape_ends_as_applied_on_every_tier() {
+            use memory::{MemorySenders, Scripted};
+            let (flow, requests) = cart_write("http");
+            let req = &requests[0];
+            // Each tier's own answer path.
+            let policy = HostPolicy::of(&flow);
+            let entry = {
+                let mut e = posted(Some(CHANGED), 200);
+                e.post_data = None;
+                e
+            };
+            let by_tier = [
+                (
+                    "http",
+                    tier_result(
+                        req,
+                        Tier::Http,
+                        Instant::now(),
+                        Ok((200, CHANGED.to_string())),
+                    ),
+                ),
+                (
+                    "page",
+                    page::page_result(
+                        &policy,
+                        req,
+                        Instant::now(),
+                        Ok(json!({ "status": 200, "text": CHANGED })),
+                    ),
+                ),
+                (
+                    "replay",
+                    replay::replay_result(req, Instant::now(), Some(&entry)),
+                ),
+            ];
+            for (tier, r) in &by_tier {
+                assert_eq!(r.stop, Some(Stop::WriteApplied), "{tier}: {:?}", r.reason);
+                assert!(r.shape_changed && !r.drift && !r.ok, "{tier}");
+            }
+            // A run ends there: no other tier sends it, the flow is
+            // unverified, and the message says not to repeat it.
+            for tier in [Tier::Http, Tier::Page, Tier::Replay] {
+                let (mut flow, requests) = cart_write(tier.name());
+                let mut senders =
+                    MemorySenders::default().answer(tier, "s1r1", Scripted::json(200, CHANGED));
+                flow.verified_at = Some("t".to_string());
+                let results =
+                    block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+                assert_eq!(senders.times("s1r1"), 1, "{tier:?}");
+                assert!(unverify_on_shape_change(&mut flow, &results));
+                assert_eq!(flow.verified_at, None);
+                let message = RunOutcome::stopped(&results).unwrap().message("f");
+                assert!(
+                    message.contains("write_applied") && message.contains("do not repeat"),
+                    "{message}"
+                );
+                assert!(!message.contains("drive the browser"), "{message}");
+            }
+        }
+
+        #[test]
+        fn a_write_answered_with_a_redirect_or_a_page_is_unknown_not_applied() {
+            let (flow, requests) = cart_write("http");
+            let req = &requests[0];
+            let policy = HostPolicy::of(&flow);
+            let login = "<html><body>Sign in</body></html>";
+            let mut redirected = posted(Some(""), 302);
+            redirected.post_data = None;
+            let mut page = posted(Some(login), 200);
+            page.post_data = None;
+            let by_tier = [
+                (
+                    "http 302",
+                    tier_result(req, Tier::Http, Instant::now(), Ok((302, String::new()))),
+                ),
+                (
+                    "http html",
+                    tier_result(
+                        req,
+                        Tier::Http,
+                        Instant::now(),
+                        Ok((200, login.to_string())),
+                    ),
+                ),
+                (
+                    "page 302",
+                    page::page_result(
+                        &policy,
+                        req,
+                        Instant::now(),
+                        Ok(json!({ "status": 302, "text": "" })),
+                    ),
+                ),
+                (
+                    "page html",
+                    page::page_result(
+                        &policy,
+                        req,
+                        Instant::now(),
+                        Ok(json!({ "status": 200, "text": login })),
+                    ),
+                ),
+                (
+                    "replay 302",
+                    replay::replay_result(req, Instant::now(), Some(&redirected)),
+                ),
+                (
+                    "replay html",
+                    replay::replay_result(req, Instant::now(), Some(&page)),
+                ),
+            ];
+            for (name, r) in &by_tier {
+                assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{name}: {:?}", r.reason);
+                assert!(!r.drift && !r.ok, "{name}");
+            }
+        }
+
+        #[test]
+        fn a_replay_with_a_poll_after_every_command_ends_by_the_run_deadline() {
+            let flow = flow_of(json!({ "steps": [
+                { "command": { "action": "click", "selector": "#a" } },
+                { "command": { "action": "click", "selector": "#b" } },
+                { "command": { "action": "click", "selector": "#c" } }
+            ] }));
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), Vec::new()).polling("https://api.a.test/poll");
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_millis(400),
+                started + Duration::from_millis(1000),
+            ))
+            .ok()
+            .unwrap();
+            // Four commands at 400ms each would be 1600ms.
+            assert!(
+                started.elapsed() < Duration::from_millis(1300),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(run.failure.is_some());
+        }
+
+        #[test]
+        fn a_poll_started_by_an_earlier_command_does_not_hold_a_later_one() {
+            let flow = click_flow();
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), vec![pending("https://api.a.test/poll")]);
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(5),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+
+        #[test]
+        fn wait_globs_on_the_site_pass_the_replay_host_check() {
+            let flow = flow_of(
+                json!({ "startUrl": "https://example.com/app", "allowedHosts": ["example.com"] }),
+            );
+            let check = |url: &str| {
+                check_replay_commands(&flow, &[json!({ "action": "wait", "url": url })])
+            };
+            for ok in [
+                "https://example.com:*/x",
+                "**/dashboard",
+                "*/cart",
+                "https://*.example.com/x",
+                "//www.example.com:*/",
+                "https://example.com/**",
+            ] {
+                assert!(check(ok).is_ok(), "{ok}: {:?}", check(ok));
+            }
+            for bad in [
+                "https://evil.test:*/x",
+                "https://*/x",
+                "//*.evil.test/x",
+                "https://example.com@evil.test:*/",
+                "https://*evil.test/",
+                "https://example.com.*/x",
+                "ftp://example.com:*/x",
+            ] {
+                assert!(check(bad).is_err(), "{bad}");
+            }
+        }
+
+        fn soon(ms: u64) -> Instant {
+            Instant::now() + Duration::from_millis(ms)
+        }
+
+        #[test]
+        fn a_replayed_command_cannot_outlast_the_run_deadline() {
+            let flow = click_flow();
+            // Each command takes 5s; the run has 400ms.
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), Vec::new()).slow(Duration::from_secs(5));
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(20),
+                soon(400),
+            ))
+            .ok()
+            .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(run.out_of_time(), "{:?}", run.failure);
+        }
+
+        #[test]
+        fn a_replayed_wait_is_stamped_with_the_time_left() {
+            let flow = flow_of(json!({ "steps": [
+                { "command": { "action": "wait", "selector": "#late", "timeout": 60000 } },
+                { "command": { "action": "wait", "selector": "#other" } }
+            ] }));
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new());
+            block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(20),
+                soon(5000),
+            ))
+            .ok()
+            .unwrap();
+            for cmd in browser.ran.iter().filter(|c| c["action"] == "wait") {
+                let t = cmd["timeout"].as_u64().unwrap_or(u64::MAX);
+                assert!(t <= 5000, "{cmd}");
+            }
+        }
+
+        #[test]
+        fn a_read_that_runs_out_of_time_is_not_drift() {
+            let flow = click_flow();
+            let req = PreparedRequest {
+                url: "https://a.test/items".to_string(),
+                ..prepared("s1r1")
+            };
+            let ledger = WriteLedger::default();
+            let ctx = SendCtx {
+                ledger: &ledger,
+                wanted: &[],
+            };
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), Vec::new()).polling("https://api.a.test/poll");
+            let mut run = None;
+            let r = block_on(replay::send(
+                &flow,
+                &[],
+                &mut browser,
+                &mut run,
+                &req,
+                &ctx,
+                soon(300),
+            ));
+            assert!(!r.ok && !r.drift && !r.skipped, "{:?}", r.reason);
+            assert!(
+                r.reason.as_deref().unwrap_or("").contains("time is up"),
+                "{:?}",
+                r.reason
+            );
+            let mut flow = flow;
+            flow.verified_at = Some("then".to_string());
+            let results = [r];
+            assert!(!unverify_on_shape_change(&mut flow, &results));
+            let outcome = RunOutcome::failed(&results, &flow);
+            assert!(matches!(outcome, RunOutcome::Failed { .. }), "{outcome:?}");
+        }
+
+        #[test]
+        fn the_page_tier_cannot_outlast_the_run_deadline() {
+            let flow = click_flow();
+            let req = PreparedRequest {
+                url: "https://a.test/items".to_string(),
+                ..prepared("s1r1")
+            };
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new())
+                .answering_in_page(json!({ "status": 200, "text": "{}" }))
+                .slow(Duration::from_secs(5));
+            let started = Instant::now();
+            let r = block_on(page::send(&flow, &mut browser, &req, soon(300)));
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+            // A write that may have gone out is unknown.
+            let write = PreparedRequest {
+                write: true,
+                method: "POST".to_string(),
+                ..req
+            };
+            let r = block_on(page::send(&flow, &mut browser, &write, soon(300)));
+            assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
+        }
+
+        #[test]
+        fn the_http_tier_cannot_outlast_the_run_deadline() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/x", listener.local_addr().unwrap());
+            let flow = flow_of(json!({ "startUrl": url }));
+            let client = block_on(http_client(None, &flow)).unwrap();
+            let req = PreparedRequest {
+                url,
+                ..prepared("s1r1")
+            };
+            // The server accepts and never answers.
+            let started = Instant::now();
+            let r = block_on(run_http(&client, &req, None, None, soon(400)));
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+            // With no time left nothing is sent.
+            let r = block_on(run_http(&client, &req, None, None, Instant::now()));
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+            assert!(
+                r.reason.as_deref().unwrap_or("").contains("time is up"),
+                "{:?}",
+                r.reason
+            );
+            drop(listener);
+        }
+
+        #[test]
+        fn a_write_answered_with_a_challenge_page_is_unknown_not_blocked() {
+            let (_, requests) = cart_write("http");
+            let challenge = "<html><body>cf-chl captcha</body></html>";
+            let r = tier_result(
+                &requests[0],
+                Tier::Http,
+                Instant::now(),
+                Ok((200, challenge.to_string())),
+            );
+            assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
+            // A read keeps the challenge stop.
+            let read = PreparedRequest {
+                write: false,
+                method: "GET".to_string(),
+                ..requests[0].clone()
+            };
+            let r = tier_result(
+                &read,
+                Tier::Http,
+                Instant::now(),
+                Ok((200, challenge.to_string())),
+            );
+            assert_eq!(r.stop, Some(Stop::Blocked));
+        }
+
+        #[test]
+        fn a_reference_in_a_path_finds_its_replayed_answer() {
+            let templated = PreparedRequest {
+                url: "https://a.test/items/{{@s1r1.id}}".to_string(),
+                ..prepared("s1r2")
+            };
+            let entries = vec![replayed("https://a.test/items/7")];
+            assert!(replay_lookup(&entries, &templated).is_ok());
+            // The replay does not wait out the clock for it.
+            let flow = click_flow();
+            let mut browser = ScriptBrowser::new(Vec::new(), entries.clone());
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[&templated],
+                Duration::from_secs(20),
+                soon(3000),
+            ))
+            .ok()
+            .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            // With two candidates the unfilled path is ambiguous; the filled
+            // one picks its own.
+            let entries = vec![
+                replayed("https://a.test/items/7"),
+                replayed("https://a.test/items/8"),
+            ];
+            assert!(replay_lookup(&entries, &templated).is_err());
+            let filled = PreparedRequest {
+                url: "https://a.test/items/8".to_string(),
+                ..templated.clone()
+            };
+            assert!(replay_lookup(&entries, &filled)
+                .ok()
+                .unwrap()
+                .url
+                .ends_with("/8"));
+            // A different path or depth is still no match.
+            let other = vec![
+                replayed("https://a.test/orders/7"),
+                replayed("https://a.test/items/7/x"),
+            ];
+            assert!(replay_lookup(&other, &templated).is_err());
+        }
+
+        #[test]
+        fn reading_the_tab_url_cannot_outlast_the_run_deadline() {
+            let flow = click_flow();
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new()).hanging_tab();
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(20),
+                soon(300),
+            ))
+            .ok()
+            .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(run.out_of_time(), "{:?}", run.failure);
+            // The page tier reads the tab first.
+            let req = PreparedRequest {
+                url: "https://a.test/items".to_string(),
+                ..prepared("s1r1")
+            };
+            let started = Instant::now();
+            let r = block_on(page::send(&flow, &mut browser, &req, soon(300)));
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+        }
+
+        /// A server that sends headers and part of a body, then stalls.
+        fn stalling_server() -> (String, std::net::TcpListener) {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/x", listener.local_addr().unwrap());
+            let accepting = listener.try_clone().unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = accepting.accept() {
+                    let mut buf = [0u8; 2048];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"a\"",
+                    );
+                    std::thread::sleep(Duration::from_secs(4));
+                }
+            });
+            (url, listener)
+        }
+
+        #[test]
+        fn a_body_that_stalls_past_the_run_deadline_is_not_drift() {
+            let (url, _listener) = stalling_server();
+            let mut flow = flow_of(json!({ "startUrl": url }));
+            let client = block_on(http_client(None, &flow)).unwrap();
+            let req = PreparedRequest {
+                url,
+                ..prepared("s1r1")
+            };
+            let started = Instant::now();
+            let r = block_on(run_http(&client, &req, None, None, soon(500)));
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(!r.ok && !r.drift, "{:?}", r.reason);
+            flow.verified_at = Some("then".to_string());
+            finish_run(&mut flow, &[r], "now", 1, &Shape::default());
+            assert_eq!(flow.verified_at.as_deref(), Some("then"));
+        }
+
+        #[test]
+        fn a_write_body_that_stalls_is_unknown() {
+            let (url, _listener) = stalling_server();
+            let flow = flow_of(json!({ "startUrl": url }));
+            let client = block_on(http_client(None, &flow)).unwrap();
+            let req = PreparedRequest {
+                url,
+                write: true,
+                method: "POST".to_string(),
+                ..prepared("s1r1")
+            };
+            let r = block_on(run_http(&client, &req, None, None, soon(500)));
+            assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
+        }
+
+        #[test]
+        fn a_write_answer_captured_before_a_failing_command_is_answered_from_the_capture() {
+            let flow = cart_flow();
+            let mut browser = ScriptBrowser::new(
+                failing_last_command(),
+                vec![posted(Some(r#"{"ok":true}"#), 200)],
+            );
+            let result = send_write(&flow, &mut browser);
+            assert!(
+                result.ok && !result.drift,
+                "drift={} stop={:?} {:?}",
+                result.drift,
+                result.stop,
+                result.reason
+            );
+        }
+
+        #[test]
+        fn a_write_after_a_failing_command_without_a_capture_is_unknown() {
+            let flow = cart_flow();
+            let mut browser = ScriptBrowser::new(failing_last_command(), Vec::new());
+            let result = send_write(&flow, &mut browser);
+            assert_eq!(
+                result.stop,
+                Some(Stop::OutcomeUnknown),
+                "{:?}",
+                result.reason
+            );
+            assert!(!result.drift);
+        }
+
+        #[test]
+        fn a_write_without_a_captured_body_is_unknown() {
+            let flow = cart_flow();
+            let req = prepare_all(&flow, &[]).unwrap().remove(0);
+            // A 2xx with no body, a status 0, and a binary body: the site
+            // may have applied the write, so none is drift.
+            let mut binary = posted(Some("AAAA"), 200);
+            binary.response_body_base64 = true;
+            for e in [posted(None, 200), posted(None, 0), binary] {
+                let r = replay::replay_result(&req, Instant::now(), Some(&e));
+                assert_eq!(r.stop, Some(Stop::OutcomeUnknown), "{:?}", r.reason);
+                assert!(!r.drift && !r.ok);
+            }
+            // A read with no body is still drift.
+            let read = PreparedRequest {
+                write: false,
+                method: "GET".to_string(),
+                ..req
+            };
+            let r = replay::replay_result(&read, Instant::now(), Some(&posted(None, 200)));
+            assert!(r.drift && r.stop.is_none());
+        }
     }
 }
