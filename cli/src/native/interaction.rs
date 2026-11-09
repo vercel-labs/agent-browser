@@ -1053,6 +1053,13 @@ async fn dispatch_mouse_or_dialog(
     }
 }
 
+/// How long a click waits for the move that precedes it. Chrome aligns mouse
+/// moves with animation frames, and a hidden tab renders none, so the
+/// acknowledgement only arrives after about five seconds. The press sent next
+/// flushes any queued move, so this wait exists only to notice a dialog opened
+/// by a mouse-move handler before pressing.
+const CLICK_MOVE_ACK_GRACE: std::time::Duration = std::time::Duration::from_millis(15);
+
 async fn dispatch_click(
     client: &CdpClient,
     session_id: &str,
@@ -1062,25 +1069,32 @@ async fn dispatch_click(
     button: &str,
     click_count: i32,
 ) -> Result<ClickResult, String> {
-    // Move
-    if dispatch_mouse_or_dialog(
-        client,
-        session_id,
-        accept_sessions,
-        &DispatchMouseEventParams {
-            event_type: "mouseMoved".to_string(),
-            x,
-            y,
-            button: None,
-            buttons: None,
-            click_count: None,
-            delta_x: None,
-            delta_y: None,
-            modifiers: None,
-        },
+    // Move. The ack is optional (see CLICK_MOVE_ACK_GRACE): in a hidden tab
+    // the press below is what makes Chrome deliver this move.
+    let moved = tokio::time::timeout(
+        CLICK_MOVE_ACK_GRACE,
+        dispatch_mouse_or_dialog(
+            client,
+            session_id,
+            accept_sessions,
+            &DispatchMouseEventParams {
+                event_type: "mouseMoved".to_string(),
+                x,
+                y,
+                button: None,
+                buttons: None,
+                click_count: None,
+                delta_x: None,
+                delta_y: None,
+                modifiers: None,
+            },
+        ),
     )
-    .await?
-    {
+    .await;
+    if let Ok(Err(error)) = moved {
+        return Err(error);
+    }
+    if matches!(moved, Ok(Ok(true))) {
         // No button was pressed yet, nothing to release.
         return Ok(ClickResult {
             position: (x, y),
@@ -1300,6 +1314,92 @@ fn named_key_info(key: &str) -> (String, String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fake browser that records each CDP method and its params.
+    async fn recording_browser(
+        hold_mouse_moves: bool,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use futures_util::{SinkExt, StreamExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log_for_server = log.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(text).unwrap();
+                log_for_server.lock().unwrap().push(request.clone());
+                let is_move = request["method"] == "Input.dispatchMouseEvent"
+                    && request["params"]["type"] == "mouseMoved";
+                if hold_mouse_moves && is_move {
+                    continue;
+                }
+                let reply = serde_json::json!({ "id": request["id"], "result": {} });
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    reply.to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        (url, log, server)
+    }
+
+    /// Chrome does not acknowledge mouseMoved in a hidden tab until a frame
+    /// is produced, about five seconds later. The click must not wait for it.
+    #[tokio::test]
+    async fn click_finishes_promptly_when_the_mouse_move_is_never_acknowledged() {
+        let (url, log, server) = recording_browser(true).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            dispatch_click(&client, "S1", &["S1"], 40.0, 50.0, "left", 1),
+        )
+        .await
+        .expect("click must not wait for the mouseMoved ack")
+        .unwrap();
+        assert!(!result.dialog_opened);
+        assert!(result.button_pressed);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "click took {:?}",
+            started.elapsed()
+        );
+        let methods: Vec<String> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r["params"]["type"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(methods, ["mouseMoved", "mousePressed", "mouseReleased"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn click_with_prompt_ack_still_moves_presses_and_releases_in_order() {
+        let (url, log, server) = recording_browser(false).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        dispatch_click(&client, "S1", &["S1"], 1.0, 2.0, "left", 1)
+            .await
+            .unwrap();
+        let methods: Vec<String> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r["params"]["type"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(methods, ["mouseMoved", "mousePressed", "mouseReleased"]);
+        server.abort();
+    }
 
     /// Verify that `char_to_key_info` returns the correct (key, code,
     /// windowsVirtualKeyCode) triple for every character in Playwright's
