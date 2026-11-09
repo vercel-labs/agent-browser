@@ -198,22 +198,23 @@ mod compact_snapshot_regressions {
             .collect()
     }
 
+    async fn snapshot(
+        client: &CdpClient,
+        refs: &mut RefMap,
+        options: SnapshotOptions,
+    ) -> (String, std::collections::HashSet<String>) {
+        refs.begin_snapshot();
+        let text = take_snapshot(client, "s", &options, refs, None, &HashMap::new())
+            .await
+            .unwrap();
+        (text, refs.ref_ids())
+    }
+
     #[tokio::test]
     async fn compact_refs_match_full_snapshot_and_stay_resolvable() {
         let (url, server) = serve(ax_nodes()).await;
         let client = CdpClient::connect(&url).await.unwrap();
         let mut refs = RefMap::new();
-        async fn snapshot(
-            client: &CdpClient,
-            refs: &mut RefMap,
-            options: SnapshotOptions,
-        ) -> (String, std::collections::HashSet<String>) {
-            refs.begin_snapshot();
-            let text = take_snapshot(client, "s", &options, refs, None, &HashMap::new())
-                .await
-                .unwrap();
-            (text, refs.ref_ids())
-        }
 
         let (full, full_ids) = snapshot(&client, &mut refs, SnapshotOptions::default()).await;
         let (compact, compact_ids) = snapshot(
@@ -280,6 +281,83 @@ mod compact_snapshot_regressions {
         ));
         assert!(compact.contains("A long paragraph of text. A long"));
         assert!(compact.contains("…\""), "{compact}");
+    }
+
+    /// A 40-row table with a header row; each row has a plain-text ID cell
+    /// and an actions cell with Edit and Delete buttons.
+    fn actions_table_nodes() -> Value {
+        let ax = |id: i64, role: &str, name: &str, children: Vec<i64>| {
+            json!({
+                "nodeId": id.to_string(),
+                "role": {"type": "role", "value": role},
+                "name": {"type": "computedString", "value": name},
+                "childIds": children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "backendDOMNodeId": id,
+            })
+        };
+        let rows: Vec<i64> = (0..40).map(|r| 100 + r * 10).collect();
+        let mut nodes = vec![
+            ax(1, "RootWebArea", "Users", vec![2]),
+            ax(2, "table", "Users", [vec![50], rows.clone()].concat()),
+            ax(50, "row", "", vec![51, 52]),
+            ax(51, "columnheader", "ID", vec![]),
+            ax(52, "columnheader", "Actions", vec![]),
+        ];
+        for (r, &row) in rows.iter().enumerate() {
+            nodes.push(ax(row, "row", "", vec![row + 1, row + 2]));
+            nodes.push(ax(row + 1, "cell", &format!("U-{r}"), vec![]));
+            nodes.push(ax(row + 2, "cell", "Edit Delete", vec![row + 3, row + 4]));
+            nodes.push(ax(row + 3, "button", "Edit", vec![]));
+            nodes.push(ax(row + 4, "button", "Delete", vec![]));
+        }
+        Value::Array(nodes)
+    }
+
+    #[tokio::test]
+    async fn interactive_compact_keeps_each_rows_identity() {
+        let (url, server) = serve(actions_table_nodes()).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        let interactive = SnapshotOptions {
+            interactive: true,
+            ..SnapshotOptions::default()
+        };
+        let (plain, plain_ids) = snapshot(&client, &mut refs, interactive).await;
+        let (compact, compact_ids) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                interactive: true,
+                compact: true,
+                max_tokens: Some(DEFAULT_MAX_TOKENS),
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        server.abort();
+
+        // Plain -i output still skips rows; -i -c shows them.
+        assert!(!plain.contains("- row"), "{plain}");
+        assert!(
+            compact.starts_with("- row\n  - columnheader \"ID\""),
+            "{compact}"
+        );
+        assert!(
+            compact.contains("- … 33 more rows (40 total)\n"),
+            "{compact}"
+        );
+        assert_eq!(plain_ids, compact_ids);
+        // Every kept button sits in a row that also shows its ID cell.
+        let rows: Vec<&str> = compact.split("- row\n").skip(2).collect();
+        assert_eq!(rows.len(), 7, "{compact}");
+        for row in rows {
+            assert!(row.contains("button \"Edit\""), "{row}");
+            assert!(row.starts_with("  - cell \"U-"), "{row}");
+        }
+        let plain_lines = ref_lines(&plain);
+        for line in ref_lines(&compact) {
+            assert!(plain_lines.contains(&line), "{line:?}");
+        }
     }
 
     #[test]
@@ -1637,7 +1715,11 @@ fn render_tree(
         return;
     }
 
-    if options.interactive && !node.has_ref {
+    // Budgeted `-i -c` keeps row lines so compaction can collapse whole rows
+    // and keep each row's cells together. Rows have no ref, so this changes
+    // neither plain `-i` output nor ref allocation.
+    let keep_row = options.compact && options.max_tokens.is_some() && role == "row";
+    if options.interactive && !node.has_ref && !keep_row {
         // In interactive mode, skip non-interactive but render children
         for &child in &node.children {
             render_tree(nodes, child, indent, output, options, layout);

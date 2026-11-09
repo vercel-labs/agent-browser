@@ -2730,14 +2730,18 @@ selects to their first and last items (plus focused, selected, or checked
 ones), and shorten text longer than 100 characters. Interactive names are never
 shortened. When the tree is still over budget, the most important lines are
 kept with their ancestors: controls first, then headings and landmarks, then
-labels, then other text. Focused, in-viewport, and open dialog content ranks
-higher; hidden, offscreen, and collapsed content ranks lower. Omitted content
-is marked with lines such as "- … 480 more rows (500 total)".
+labels, then other text. Links in running text rank below headings unless they
+are in the viewport or in the first paragraph under a heading. Focused,
+in-viewport, and open dialog content ranks higher; hidden, offscreen, and
+collapsed content ranks lower. A control kept from a table row is shown with
+the row's identifying cell. Omitted content is marked with lines such as
+"- … 480 more rows (500 total)".
 
 Refs in compact output are the same refs the full snapshot prints, and refs
 of omitted lines keep working with click, fill, and other commands.
 
-Interactive snapshots filter out noninteractive content and combine with -c.
+Interactive snapshots filter out noninteractive content and combine with -c;
+-i -c also prints table rows so each row's cells stay together.
 MCP snapshots default to interactive; set interactive to false to retain
 visible text and status text.
 

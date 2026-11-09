@@ -7682,6 +7682,10 @@ async fn e2e_snapshot_compact_budget_and_ref_stability() {
     assert_success(&tight);
     let tight_text = get_data(&tight)["snapshot"].as_str().unwrap();
     assert!(tight_text.contains("button \"Edit 150\""), "{tight_text}");
+    assert!(
+        tight_text.contains("- row\n  - cell \"Customer 150\""),
+        "the focused button keeps its row's name: {tight_text}"
+    );
     assert!(!tight_text.contains("Long text"), "{tight_text}");
     assert!(tight_text.len() < 1200, "{tight_text}");
 
@@ -7732,6 +7736,79 @@ async fn e2e_snapshot_compact_budget_and_ref_stability() {
         after_text.contains(&format!("button \"Edit 100\" [ref={}]", &hidden[1..])),
         "{after_text}"
     );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+/// `-i -c` on a table whose rows are named by plain-text cells keeps each
+/// kept row's identifying cell next to its buttons, and stays no larger than
+/// `-c`.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_interactive_compact_keeps_row_identity() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let rows: String = (1..=500)
+        .map(|i| format!("<tr><td>U-{i}</td><td>User {i}</td><td>Active</td><td><button>Edit</button> <button>Delete</button></td></tr>"))
+        .collect();
+    let html = format!(
+        "<main><h1>Users</h1><table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Actions</th></tr></thead>\
+         <tbody>{rows}</tbody></table></main>"
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "setcontent", "html": html }),
+            &mut state,
+        )
+        .await,
+    );
+    let snapshot = |id: &str, options: Value| {
+        let mut command = json!({ "id": id, "action": "snapshot" });
+        command
+            .as_object_mut()
+            .unwrap()
+            .extend(options.as_object().unwrap().clone());
+        command
+    };
+    let mut texts = Vec::new();
+    for (id, options) in [
+        ("3", json!({ "compact": true })),
+        ("4", json!({ "compact": true, "interactive": true })),
+        (
+            "5",
+            json!({ "compact": true, "interactive": true, "maxTokens": 300 }),
+        ),
+    ] {
+        let result = execute_command(&snapshot(id, options), &mut state).await;
+        assert_success(&result);
+        texts.push(get_data(&result)["snapshot"].as_str().unwrap().to_string());
+    }
+    let (compact, interactive, tight) = (&texts[0], &texts[1], &texts[2]);
+    assert!(
+        interactive.len() <= compact.len(),
+        "{interactive}\n---\n{compact}"
+    );
+    assert!(
+        interactive.contains("- … 493 more rows (500 total)"),
+        "{interactive}"
+    );
+    for text in [interactive, tight] {
+        let rows: Vec<&str> = text.split("- row\n").skip(1).collect();
+        let with_buttons: Vec<&&str> = rows
+            .iter()
+            .filter(|r| r.contains("button \"Edit\""))
+            .collect();
+        assert!(!with_buttons.is_empty(), "{text}");
+        for row in with_buttons {
+            assert!(row.contains("cell \"U-"), "row without its ID: {row}");
+        }
+    }
 
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }

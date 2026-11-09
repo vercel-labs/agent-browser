@@ -9,7 +9,9 @@
 //!    plus any item that holds a focused, selected, or checked element, and
 //!    items with interactive content when at most a quarter of the run has any;
 //! 3. ranks the remaining content lines and keeps the best ones that fit the
-//!    token budget, together with their ancestors so the output stays a tree;
+//!    token budget, together with their ancestors so the output stays a tree
+//!    and with the line that says where they are (a table row's identifying
+//!    cell, or the heading above a lead paragraph);
 //! 4. marks omitted content: each run of collapsed items gets a marker where
 //!    it was (`- … 493 more rows (500 total)`), and the other omitted children
 //!    of a parent share one marker after its last printed child
@@ -40,7 +42,7 @@ const COLLAPSE_TAIL: usize = 2;
 const SUMMARY_TOKENS: usize = 32;
 
 /// Roles whose sibling runs are treated as repeated structure.
-/// Cells only form long runs in interactive snapshots, which skip rows.
+/// Cells form long runs only in very wide rows.
 const REPEATED_ROLES: &[&str] = &[
     "row",
     "listitem",
@@ -81,6 +83,11 @@ const LABEL_ROLES: &[&str] = &[
     "radiogroup",
     "tooltip",
 ];
+
+/// Roles that can be the lead block under a heading.
+const LEAD_ROLES: &[&str] = &["paragraph", "list", "DescriptionList"];
+/// How many siblings after a heading are searched for its lead block.
+const LEAD_LOOKAHEAD: usize = 3;
 
 /// Roles whose names are decoration rather than content.
 const DECORATIVE_ROLES: &[&str] = &["ListMarker"];
@@ -241,7 +248,8 @@ pub(super) fn compact_lines(
         }
     }
 
-    let scores = score_lines(lines, &tree, &content);
+    let lead = lead_blocks(lines, &tree);
+    let scores = score_lines(lines, &tree, &content, &lead);
 
     // Collapse repeated structure.
     let mut collapsed = vec![false; n];
@@ -264,13 +272,19 @@ pub(super) fn compact_lines(
         let runs = kids
             .chunk_by(|&a, &b| lines[a].role == lines[b].role)
             .filter(|run| REPEATED_ROLES.contains(&lines[run[0]].role.as_str()));
-        for items in runs {
+        let has = |item: usize, pred: &dyn Fn(&SnapshotLine) -> bool| {
+            tree.subtree(item).any(|j| pred(&lines[j]))
+        };
+        for run in runs {
+            // Header rows always stay and are not counted as repeated items.
+            let items: Vec<usize> = run
+                .iter()
+                .copied()
+                .filter(|&item| !has(item, &|l| l.role == "columnheader"))
+                .collect();
             if items.len() <= COLLAPSE_MIN_ITEMS {
                 continue;
             }
-            let has = |item: usize, pred: &dyn Fn(&SnapshotLine) -> bool| {
-                tree.subtree(item).any(|j| pred(&lines[j]))
-            };
             let interactive_items = items
                 .iter()
                 .filter(|&&item| has(item, &|l| l.interactive))
@@ -283,7 +297,7 @@ pub(super) fn compact_lines(
             for (k, &item) in items.iter().enumerate() {
                 let keep = k < COLLAPSE_HEAD
                     || k >= items.len() - COLLAPSE_TAIL
-                    || has(item, &|l| l.focused || l.active || l.role == "columnheader")
+                    || has(item, &|l| l.focused || l.active)
                     || (pin_interactive && has(item, &|l| l.interactive));
                 if !keep {
                     collapsed[item] = true;
@@ -308,6 +322,19 @@ pub(super) fn compact_lines(
         }
     }
 
+    // The line that says where a kept line is: its row's identifying cell,
+    // or the heading above its lead paragraph unless a parent with the same
+    // name (such as a named region) already shows it.
+    let identity = row_identity(lines, &tree, &content);
+    let context: Vec<Option<usize>> = (0..n)
+        .map(|i| {
+            identity[i].or_else(|| {
+                lead[i].filter(|&h| {
+                    !tree.parent[h].is_some_and(|p| lines[p].name.trim() == lines[h].name.trim())
+                })
+            })
+        })
+        .collect();
     let costs: Vec<usize> = lines.iter().map(|l| estimate_tokens(&l.text)).collect();
     let mut candidates: Vec<usize> = (0..n).filter(|&i| content[i] && !hidden[i]).collect();
     candidates.sort_by_key(|&i| (std::cmp::Reverse(scores[i]), i));
@@ -320,21 +347,30 @@ pub(super) fn compact_lines(
         max_tokens.saturating_sub(max_tokens / 10 + SUMMARY_TOKENS)
     };
     loop {
-        let selected = select_lines(lines, &tree, &candidates, &costs, line_budget);
+        let selected = select_lines(lines, &tree, &candidates, &context, &costs, line_budget);
         let output = render(
             lines, &tree, &live, &selected, &collapsed, &group_of, &groups, total_live,
         );
-        let fits = max_tokens == usize::MAX
-            || output.lines().map(estimate_tokens).sum::<usize>() <= max_tokens;
-        if fits || line_budget < 16 {
+        if max_tokens == usize::MAX || line_budget < 16 {
             return output;
         }
-        line_budget = line_budget * 4 / 5;
+        // Markers can take more than the reserve. Shrink by the overshoot
+        // (at least 5%) so the output ends up close to the budget.
+        let used: usize = output.lines().map(estimate_tokens).sum();
+        if used <= max_tokens {
+            return output;
+        }
+        line_budget = line_budget.saturating_sub((used - max_tokens).max(line_budget / 20));
     }
 }
 
 /// Priority score per line; higher is kept first.
-fn score_lines(lines: &[SnapshotLine], tree: &Tree, content: &[bool]) -> Vec<i32> {
+fn score_lines(
+    lines: &[SnapshotLine],
+    tree: &Tree,
+    content: &[bool],
+    lead: &[Option<usize>],
+) -> Vec<i32> {
     let n = lines.len();
     let mut in_dialog = vec![false; n];
     let mut under_collapsed = vec![false; n];
@@ -359,17 +395,28 @@ fn score_lines(lines: &[SnapshotLine], tree: &Tree, content: &[bool]) -> Vec<i32
             });
             // Links inside running text read as part of that text, so they
             // rank just below headings rather than with standalone controls.
+            // In the viewport or in the lead paragraph under a heading they
+            // are what a reader sees first, so they rank as controls there.
             let inline_link = role == "link"
+                && lead[i].is_none()
+                && line.placement != Placement::InViewport
                 && tree.parent[i].is_some_and(|p| {
                     tree.children[p]
                         .iter()
                         .any(|&s| lines[s].role == "StaticText")
                 });
+            // A link that only repeats its heading (a section permalink, or a
+            // post title on an index page) ranks with headings: above text
+            // and in-text links, below standalone controls.
+            let heading_link = role == "link"
+                && tree.parent[i].is_some_and(|p| {
+                    lines[p].role == "heading" && lines[p].name.trim() == line.name.trim()
+                });
             let mut score = if inline_link {
                 250
-            } else if line.interactive {
+            } else if line.interactive && !heading_link {
                 400
-            } else if HEADING_LANDMARK_ROLES.contains(&role) {
+            } else if HEADING_LANDMARK_ROLES.contains(&role) || heading_link {
                 300
             } else if LABEL_ROLES.contains(&role) || near_interactive {
                 200
@@ -399,27 +446,95 @@ fn score_lines(lines: &[SnapshotLine], tree: &Tree, content: &[bool]) -> Vec<i32
         .collect()
 }
 
+/// For each line inside a table row, the line that says which row it is:
+/// the row's first row header, or else its first named cell. Unnamed rows
+/// only; a named row already identifies itself.
+fn row_identity(lines: &[SnapshotLine], tree: &Tree, content: &[bool]) -> Vec<Option<usize>> {
+    let n = lines.len();
+    let named_cell = |c: usize, roles: &[&str]| {
+        content[c] && lines[c].named && roles.contains(&lines[c].role.as_str())
+    };
+    // The identifying cell of each unnamed row line.
+    let mut of_row = vec![None; n];
+    let mut identity = vec![None; n];
+    for i in 0..n {
+        if lines[i].role == "row" && !lines[i].named {
+            let cells = &tree.children[i];
+            of_row[i] = cells
+                .iter()
+                .copied()
+                .find(|&c| named_cell(c, &["rowheader"]))
+                .or_else(|| {
+                    cells
+                        .iter()
+                        .copied()
+                        .find(|&c| named_cell(c, &["cell", "gridcell"]))
+                });
+        }
+        identity[i] = tree.parent[i].and_then(|p| {
+            if lines[p].role == "row" {
+                of_row[p]
+            } else {
+                identity[p]
+            }
+        });
+    }
+    identity
+}
+
+/// For lines inside the lead block of a heading, that heading. The lead
+/// block is the first paragraph, list, or description list among the next
+/// few siblings after the heading, before any other heading.
+fn lead_blocks(lines: &[SnapshotLine], tree: &Tree) -> Vec<Option<usize>> {
+    let mut lead_of = vec![None; lines.len()];
+    for parent in std::iter::once(None).chain((0..lines.len()).map(Some)) {
+        let siblings = tree.children_of(parent);
+        for (k, &h) in siblings.iter().enumerate() {
+            if lines[h].role != "heading" {
+                continue;
+            }
+            let lead = siblings[k + 1..]
+                .iter()
+                .take(LEAD_LOOKAHEAD)
+                .take_while(|&&s| lines[s].role != "heading")
+                .find(|&&s| LEAD_ROLES.contains(&lines[s].role.as_str()));
+            if let Some(&block) = lead {
+                lead_of[tree.subtree(block)].fill(Some(h));
+            }
+        }
+    }
+    lead_of
+}
+
 /// Greedily keep the best candidates, with their ancestors, within `budget`
-/// tokens. Focused lines are always kept.
+/// tokens. Each line brings its `context` line along (the row's
+/// identifying cell, or the heading above a lead paragraph), so a kept
+/// control still says which row or section it belongs to. Focused lines are
+/// always kept.
 fn select_lines(
     lines: &[SnapshotLine],
     tree: &Tree,
     candidates: &[usize],
+    context: &[Option<usize>],
     costs: &[usize],
     budget: usize,
 ) -> Vec<bool> {
     let mut selected = vec![false; lines.len()];
     let mut used = 0usize;
+    let mut take: Vec<usize> = Vec::new();
     for &i in candidates {
-        let mut cost = 0;
-        let mut node = Some(i);
-        while let Some(j) = node {
-            if selected[j] {
-                break;
+        take.clear();
+        for start in [Some(i), context[i]] {
+            let mut node = start;
+            while let Some(j) = node {
+                if selected[j] || take.contains(&j) {
+                    break;
+                }
+                take.push(j);
+                node = tree.parent[j];
             }
-            cost += costs[j];
-            node = tree.parent[j];
         }
+        let cost: usize = take.iter().map(|&j| costs[j]).sum();
         if cost == 0 {
             continue;
         }
@@ -427,13 +542,8 @@ fn select_lines(
             continue;
         }
         used += cost;
-        let mut node = Some(i);
-        while let Some(j) = node {
-            if selected[j] {
-                break;
-            }
+        for &j in &take {
             selected[j] = true;
-            node = tree.parent[j];
         }
     }
     selected
@@ -646,6 +756,118 @@ mod tests {
         assert!(out.contains("columnheader \"Name\""));
     }
 
+    /// Lines as `-i -c` renders a table: row lines without the rowgroup and
+    /// table wrappers, plain-text cells (cells always carry refs), and an
+    /// actions cell holding Edit and Delete buttons.
+    fn interactive_table(rows: usize) -> Vec<SnapshotLine> {
+        let mut lines = vec![line(0, "heading", "Users", Some("h1"))];
+        lines.push(line(0, "row", "", None));
+        for column in ["ID", "Name", "Actions"] {
+            lines.push(line(
+                1,
+                "columnheader",
+                column,
+                Some(&format!("ch{column}")),
+            ));
+        }
+        for r in 0..rows {
+            lines.push(line(0, "row", "", None));
+            lines.push(line(1, "cell", &format!("U-{r}"), Some(&format!("id{r}"))));
+            lines.push(line(
+                1,
+                "cell",
+                &format!("User {r}"),
+                Some(&format!("n{r}")),
+            ));
+            lines.push(line(1, "cell", "Edit Delete", Some(&format!("a{r}"))));
+            lines.push(line(2, "button", "Edit", Some(&format!("e{r}"))));
+            lines.push(line(2, "button", "Delete", Some(&format!("d{r}"))));
+        }
+        lines
+    }
+
+    /// For every printed button, whether its row also prints the row's ID cell.
+    fn buttons_with_row_identity(out: &str) -> (usize, usize) {
+        let lines: Vec<&str> = out.lines().collect();
+        let (mut buttons, mut identified) = (0, 0);
+        for (i, text) in lines.iter().enumerate() {
+            if !text.trim_start().starts_with("- button") {
+                continue;
+            }
+            buttons += 1;
+            let Some(row) = (0..i).rev().find(|&r| lines[r].trim() == "- row") else {
+                continue;
+            };
+            let row_depth = lines[row].len() - lines[row].trim_start().len();
+            if lines[row + 1..]
+                .iter()
+                .take_while(|l| l.len() - l.trim_start().len() > row_depth)
+                .any(|l| l.trim_start().starts_with("- cell \"U-"))
+            {
+                identified += 1;
+            }
+        }
+        (buttons, identified)
+    }
+
+    #[test]
+    fn interactive_compact_collapses_whole_rows_and_keeps_row_identity() {
+        let out = compact_lines(&interactive_table(500), true, DEFAULT_MAX_TOKENS);
+        // The header row is kept and is not counted as one of the rows.
+        assert!(out.contains("- … 493 more rows (500 total)\n"), "{out}");
+        assert!(out.contains("columnheader \"Actions\""), "{out}");
+        let (buttons, identified) = buttons_with_row_identity(&out);
+        assert_eq!(buttons, 14, "{out}");
+        assert_eq!(identified, buttons, "{out}");
+        assert!(out.contains("cell \"U-499\""), "{out}");
+    }
+
+    #[test]
+    fn tight_budget_keeps_each_buttons_row_identity() {
+        let mut lines = interactive_table(500);
+        let focused = lines
+            .iter()
+            .position(|l| l.text.contains("[ref=e250]"))
+            .unwrap();
+        lines[focused].focused = true;
+        for budget in [60, 120, 250] {
+            let out = compact_lines(&lines, true, budget);
+            let (buttons, identified) = buttons_with_row_identity(&out);
+            assert!(buttons > 0, "{out}");
+            assert_eq!(identified, buttons, "budget {budget}:\n{out}");
+            assert!(
+                out.contains("[ref=e250]") && out.contains("cell \"U-250\""),
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn row_identity_prefers_row_headers() {
+        let mut lines = vec![line(0, "table", "", None)];
+        for r in 0..20 {
+            lines.push(line(1, "row", "", None));
+            lines.push(line(
+                2,
+                "cell",
+                &format!("Note {r}"),
+                Some(&format!("c{r}")),
+            ));
+            lines.push(line(
+                2,
+                "rowheader",
+                &format!("Order {r}"),
+                Some(&format!("h{r}")),
+            ));
+            lines.push(line(2, "cell", "", Some(&format!("a{r}"))));
+            lines.push(line(3, "button", "Refund", Some(&format!("b{r}"))));
+        }
+        let out = compact_lines(&lines, true, 150);
+        assert!(out.contains("rowheader \"Order 1\""), "{out}");
+        assert!(out.contains("button \"Refund\" [ref=b1]"), "{out}");
+        assert!(!out.contains("cell \"Note 1\""), "{out}");
+    }
+
     #[test]
     fn short_runs_are_not_collapsed() {
         let out = compact_lines(&table(COLLAPSE_MIN_ITEMS), false, usize::MAX);
@@ -798,6 +1020,130 @@ mod tests {
         assert!(!out.contains("Offscreen"), "{out}");
         assert!(!out.contains("Skip to content"), "{out}");
         assert!(!out.contains("Collapsed child"), "{out}");
+    }
+
+    /// A docs section: a heading with its permalink, a lead paragraph with
+    /// an in-text link, and later paragraphs with more in-text links.
+    fn docs_section(lines: &mut Vec<SnapshotLine>, depth: usize, s: usize) {
+        let heading = format!("Section {s}");
+        lines.push(line(depth, "heading", &heading, Some(&format!("h{s}"))));
+        lines.push(line(depth + 1, "link", &heading, Some(&format!("p{s}"))));
+        for (k, name) in ["lead", "later", "last"].iter().enumerate() {
+            lines.push(line(depth, "paragraph", "", None));
+            lines.push(line(depth + 1, "StaticText", "Read about ", None));
+            lines.push(line(
+                depth + 1,
+                "link",
+                &format!("{name} {s}"),
+                Some(&format!("l{s}{k}")),
+            ));
+            lines.push(line(depth + 1, "StaticText", " for details.", None));
+        }
+    }
+
+    #[test]
+    fn cap_keeps_lead_paragraph_links_with_their_heading() {
+        let mut lines = vec![line(0, "main", "", None)];
+        for s in 0..12 {
+            docs_section(&mut lines, 1, s);
+        }
+        let out = compact_lines(&lines, false, 400);
+        for s in 0..6 {
+            let heading = format!("  - heading \"Section {s}\" [ref=h{s}]\n");
+            let lead = format!("  - paragraph\n    - link \"lead {s}\" [ref=l{s}0]\n");
+            let at = out.find(&heading).expect(&out);
+            assert!(out[at..].contains(&lead), "{out}");
+        }
+        // Links further down a section and heading permalinks rank lower.
+        assert!(!out.contains("link \"later 0\""), "{out}");
+        assert!(!out.contains("link \"Section 0\""), "{out}");
+        let tokens: usize = out.lines().map(estimate_tokens).sum();
+        assert!(tokens <= 400, "{tokens} tokens:\n{out}");
+    }
+
+    #[test]
+    fn heading_links_rank_with_headings_above_text() {
+        let mut lines = vec![line(0, "main", "", None)];
+        for i in 0..40 {
+            lines.push(line(1, "paragraph", "", None));
+            lines.push(line(2, "StaticText", &format!("Teaser text {i} "), None));
+            lines.push(line(
+                2,
+                "link",
+                &format!("read more {i}"),
+                Some(&format!("m{i}")),
+            ));
+        }
+        for i in 0..5 {
+            lines.push(line(1, "heading", &format!("Post {i}"), None));
+            lines.push(line(
+                2,
+                "link",
+                &format!("Post {i}"),
+                Some(&format!("p{i}")),
+            ));
+        }
+        lines.push(line(1, "button", "Load more", Some("b1")));
+        let out = compact_lines(&lines, false, 200);
+        assert!(out.contains("button \"Load more\""), "{out}");
+        for i in 0..5 {
+            assert!(
+                out.contains(&format!("link \"Post {i}\" [ref=p{i}]")),
+                "{out}"
+            );
+        }
+        assert!(!out.contains("read more 39"), "{out}");
+    }
+
+    #[test]
+    fn named_region_stands_in_for_its_heading() {
+        let mut lines = vec![line(0, "main", "", None)];
+        for s in 0..12 {
+            lines.push(line(
+                1,
+                "region",
+                &format!("Section {s}"),
+                Some(&format!("r{s}")),
+            ));
+            docs_section(&mut lines, 2, s);
+        }
+        let out = compact_lines(&lines, false, 300);
+        // The region already names the section, so a lead link does not
+        // bring its heading along.
+        assert!(
+            out.contains(
+                "  - region \"Section 2\" [ref=r2]\n    - paragraph\n      - link \"lead 2\""
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("heading \"Section 2\""), "{out}");
+    }
+
+    #[test]
+    fn in_viewport_text_links_rank_as_controls() {
+        let mut lines = vec![line(0, "main", "", None)];
+        for i in 0..30 {
+            lines.push(line(
+                1,
+                "button",
+                &format!("Tool {i}"),
+                Some(&format!("t{i}")),
+            ));
+        }
+        lines.push(line(1, "paragraph", "", None));
+        lines.push(line(
+            2,
+            "StaticText",
+            "Long running text before the link.",
+            None,
+        ));
+        let mut seen = line(2, "link", "visible link", Some("v1"));
+        seen.placement = Placement::InViewport;
+        lines.push(seen);
+        lines.push(line(2, "link", "other link", Some("o1")));
+        let out = compact_lines(&lines, false, 150);
+        assert!(out.contains("link \"visible link\""), "{out}");
+        assert!(!out.contains("link \"other link\""), "{out}");
     }
 
     #[test]
