@@ -3579,7 +3579,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "recording_stop" => handle_recording_stop(state).await,
         "recording_restart" => handle_recording_restart(cmd, state).await,
         "pdf" => handle_pdf(cmd, state).await,
-        "tab_list" => handle_tab_list(state).await,
+        "tab_list" => handle_tab_list(cmd, state).await,
         "tab_new" => handle_tab_new(cmd, state).await,
         "tab_switch" => handle_tab_switch(cmd, state).await,
         "tab_close" => handle_tab_close(cmd, state).await,
@@ -8382,10 +8382,31 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 // Phase 5 handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let tabs = mgr.tab_list();
+async fn handle_tab_list(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let (filter, limit) = tab_list_options(cmd)?;
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    mgr.refresh_page_target_infos().await;
+    let tabs = mgr.tab_list_filtered(filter, limit);
     Ok(json!({ "tabs": tabs }))
+}
+
+/// Reads the optional `filter` and `limit` of a `tab_list` command. The CLI
+/// parser already validates both; this guards requests sent to the daemon
+/// directly.
+fn tab_list_options(cmd: &Value) -> Result<(Option<&str>, Option<usize>), String> {
+    let filter = match cmd.get("filter") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(filter)) if !filter.is_empty() => Some(filter.as_str()),
+        Some(_) => return Err("tab_list filter must be a non-empty string".to_string()),
+    };
+    let limit = match cmd.get("limit") {
+        None | Some(Value::Null) => None,
+        Some(limit) => match limit.as_u64() {
+            Some(limit) if limit > 0 => Some(usize::try_from(limit).unwrap_or(usize::MAX)),
+            _ => return Err("tab_list limit must be a positive integer".to_string()),
+        },
+    };
+    Ok((filter, limit))
 }
 
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -15504,6 +15525,48 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tab_list_options_accepts_omitted_and_valid_values() {
+        use serde_json::json;
+        assert_eq!(
+            super::tab_list_options(&json!({ "action": "tab_list" })),
+            Ok((None, None))
+        );
+        assert_eq!(
+            super::tab_list_options(&json!({ "filter": null, "limit": null })),
+            Ok((None, None))
+        );
+        assert_eq!(
+            super::tab_list_options(&json!({ "filter": "docs", "limit": 3 })),
+            Ok((Some("docs"), Some(3)))
+        );
+        assert_eq!(
+            super::tab_list_options(&json!({ "limit": u64::MAX })),
+            Ok((None, Some(usize::try_from(u64::MAX).unwrap_or(usize::MAX))))
+        );
+    }
+
+    #[test]
+    fn tab_list_options_rejects_invalid_wire_values() {
+        use serde_json::json;
+        for cmd in [
+            json!({ "filter": "" }),
+            json!({ "filter": 3 }),
+            json!({ "filter": ["docs"] }),
+            json!({ "limit": 0 }),
+            json!({ "limit": -1 }),
+            json!({ "limit": 1.5 }),
+            json!({ "limit": "3" }),
+            json!({ "limit": true }),
+        ] {
+            assert!(
+                super::tab_list_options(&cmd).is_err(),
+                "expected an error for {}",
+                cmd
+            );
+        }
+    }
+
     /// Serves `Browser.getVersion` on one fixed `ws://` address for any number
     /// of connections and counts the calls.
     async fn version_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
