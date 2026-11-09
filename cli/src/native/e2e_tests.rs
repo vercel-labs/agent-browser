@@ -15700,6 +15700,104 @@ async fn e2e_firefox_review_pointer_motion_and_wheel() {
     firefox_close(&mut state).await;
 }
 
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_frame_mouse_uses_local_coordinates() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(&mut state, r#"document.body.innerHTML = '<iframe id="f" style="position:fixed;left:150px;top:100px;width:300px;height:250px;border:10px solid" srcdoc="<button id=target style=width:100px;height:100px>Target</button>"></iframe>'; true"#).await;
+    assert_success(&firefox_act(&mut state, "frame", "#f", json!({})).await);
+    firefox_eval(&mut state, "window.events=[]; for (const t of ['mousedown','mouseup','wheel']) document.addEventListener(t, e => { events.push([t,e.clientX,e.clientY,e.target.id]); if (t === 'wheel') e.preventDefault(); }, {passive:false}); true").await;
+    assert_success(&firefox_act(&mut state, "hover", "#target", json!({})).await);
+    for command in [
+        json!({"id":"down", "action":"mousedown"}),
+        json!({"id":"up", "action":"mouseup"}),
+        json!({"id":"wheel", "action":"wheel", "deltaY":10}),
+        json!({"id":"raw", "action":"input_mouse", "type":"mousePressed"}),
+        json!({"id":"raw-up", "action":"input_mouse", "type":"mouseReleased"}),
+    ] {
+        assert_success(&firefox_command(&mut state, command).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, "events").await,
+        json!([
+            ["mousedown", 58, 58, "target"],
+            ["mouseup", 58, 58, "target"],
+            ["wheel", 58, 58, "target"],
+            ["mousedown", 58, 58, "target"],
+            ["mouseup", 58, 58, "target"]
+        ])
+    );
+    assert_success(&firefox_command(&mut state, json!({"id":"main", "action":"mainframe"})).await);
+    firefox_eval(&mut state, &format!("new Promise(resolve => {{ document.body.innerHTML = '<iframe id=other style=\"position:fixed;left:150px;top:100px;width:300px;height:250px;border:10px solid\" src=\"{}/frame.html\"></iframe>'; document.querySelector('#other').onload = () => resolve(true); }})", fixture.other)).await;
+    assert_success(&firefox_act(&mut state, "frame", "#other", json!({})).await);
+    firefox_eval(&mut state, "document.body.innerHTML='<button id=target style=width:100px;height:100px>Target</button>'; window.events=[]; for (const t of ['mousedown','mouseup','wheel']) document.addEventListener(t, e => { events.push([t,e.clientX,e.clientY,e.target.id]); if (t === 'wheel') e.preventDefault(); }, {passive:false}); true").await;
+    assert_success(&firefox_act(&mut state, "hover", "#target", json!({})).await);
+    for command in [
+        json!({"id":"down2", "action":"mousedown"}),
+        json!({"id":"up2", "action":"mouseup"}),
+        json!({"id":"wheel2", "action":"wheel", "deltaY":10}),
+    ] {
+        assert_success(&firefox_command(&mut state, command).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, "events").await,
+        json!([
+            ["mousedown", 58, 58, "target"],
+            ["mouseup", 58, 58, "target"],
+            ["wheel", 58, 58, "target"]
+        ])
+    );
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_snapshot_tracks_active_window() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "document.body.innerHTML='<button>First window</button>'; true",
+    )
+    .await;
+    assert_success(
+        &firefox_command(&mut state, json!({"id":"window", "action":"window_new"})).await,
+    );
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "document.body.innerHTML='<button>Second window</button>'; true",
+    )
+    .await;
+    for (tab, text) in [
+        ("t1", "First window"),
+        ("t2", "Second window"),
+        ("t1", "First window"),
+    ] {
+        assert_success(
+            &firefox_command(
+                &mut state,
+                json!({"id":"switch", "action":"tab_switch", "tabId":tab}),
+            )
+            .await,
+        );
+        let reference = firefox_ref(&mut state, text).await;
+        assert_success(&firefox_act(&mut state, "click", &reference, json!({})).await);
+    }
+    firefox_close(&mut state).await;
+}
+
 /// PR1: open, title, evaluate, Chrome-only error, and close leaves no process or profile.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
