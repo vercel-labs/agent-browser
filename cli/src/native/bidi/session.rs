@@ -296,6 +296,13 @@ impl FirefoxSession {
         }
     }
 
+    /// The BiDi storage partition for the active tab's window, set only by `window new`.
+    pub fn active_partition(&self) -> Option<Value> {
+        self.window_contexts
+            .get(&self.context)
+            .map(|user_context| json!({"type": "storageKey", "userContext": user_context}))
+    }
+
     /// Returns the stable `t<N>` id for `context`, assigning the next id the first time it is seen.
     pub fn tab_id(&mut self, context: &str) -> u32 {
         if let Some(id) = self.tab_ids.get(context) {
