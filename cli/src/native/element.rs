@@ -348,11 +348,12 @@ async fn isolated_frame_context_id(
 /// Top-level viewport origin of a frame's content box, from the frame
 /// owner's box model. Translates frame-local coordinates (from an
 /// isolated-world evaluation inside the frame) into top-level coordinates.
+/// Also returns the owner's backend node id, for a top-level hit test.
 async fn frame_owner_content_origin(
     client: &CdpClient,
     session_id: &str,
     frame_id: &str,
-) -> Result<(f64, f64), String> {
+) -> Result<(f64, f64, i64), String> {
     let owner = client
         .send_command(
             "DOM.getFrameOwner",
@@ -377,13 +378,104 @@ async fn frame_owner_content_origin(
         .await?;
     let content = &result.model.content;
     if content.len() >= 2 {
-        Ok((content[0], content[1]))
+        Ok((content[0], content[1], backend_node_id))
     } else {
         Err(format!(
             "No content box for the owner element of frame {}",
             frame_id
         ))
     }
+}
+
+/// A parent-page overlay can cover the frame after the frame-local hit test
+/// passed: the frame's document cannot see it. Re-check the click point in
+/// the top-level document, where the frame owner is the element that must be
+/// on top for the click to reach the frame. Fails open when the owner
+/// cannot be resolved.
+async fn check_frame_owner_interception(
+    client: &CdpClient,
+    session_id: &str,
+    owner_backend_node_id: i64,
+    target: &str,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let resolved: Result<DomResolveNodeResult, String> = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(owner_backend_node_id),
+                node_id: None,
+                object_group: Some("agent-browser".to_string()),
+            },
+            Some(session_id),
+        )
+        .await;
+    let Ok(resolved) = resolved else {
+        return Ok(());
+    };
+    let Some(object_id) = resolved.object.object_id else {
+        return Ok(());
+    };
+    // `this` is the frame owner element. The hit test descends from the top
+    // document through accessible frames; it stops at the owner, so a click
+    // that reaches the frame passes. An iframe it cannot descend into only
+    // blocks the click when it does not contain the target frame.
+    let function = r#"function(x, y) {
+            const describe = (node) => {
+                let desc = node.tagName.toLowerCase();
+                if (node.id) desc += '#' + node.id;
+                else if (typeof node.className === 'string' && node.className.trim())
+                    desc += '.' + node.className.trim().split(/\s+/).slice(0, 2).join('.');
+                if (!node.id && node.closest) {
+                    const anchored = node.closest('[id]');
+                    if (anchored && anchored !== node)
+                        desc += ' inside ' + anchored.tagName.toLowerCase() + '#' + anchored.id;
+                }
+                return desc;
+            };
+            let doc = document, lx = x, ly = y;
+            let hit = doc.elementFromPoint(lx, ly);
+            while (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && hit !== this) {
+                if (!hit.contentDocument) {
+                    let contains = false;
+                    for (let f = this; f; f = f.ownerDocument.defaultView?.frameElement) {
+                        if (f === hit) { contains = true; break; }
+                    }
+                    return contains ? null : describe(hit);
+                }
+                const r = hit.getBoundingClientRect();
+                lx -= r.x + hit.clientLeft;
+                ly -= r.y + hit.clientTop;
+                doc = hit.contentDocument;
+                hit = doc.elementFromPoint(lx, ly);
+            }
+            if (!hit || hit === this) return null;
+            return describe(hit);
+        }"#
+    .to_string();
+    let result = client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object_id,
+                "functionDeclaration": function,
+                "arguments": [{ "value": x }, { "value": y }],
+                "returnByValue": true,
+            })),
+            Some(session_id),
+        )
+        .await;
+    if let Ok(value) = result {
+        if let Some(blocker) = value
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+        {
+            return Err(intercepted_error(target, blocker));
+        }
+    }
+    Ok(())
 }
 
 /// Find a selector inside a same-process iframe and return its center in
@@ -448,8 +540,19 @@ async fn resolve_center_in_same_process_frame(
             ));
         }
     };
-    let (ox, oy) = frame_owner_content_origin(client, session_id, frame_id).await?;
-    Ok((x + ox, y + oy))
+    let (ox, oy, owner_backend_node_id) =
+        frame_owner_content_origin(client, session_id, frame_id).await?;
+    let (page_x, page_y) = (x + ox, y + oy);
+    check_frame_owner_interception(
+        client,
+        session_id,
+        owner_backend_node_id,
+        selector,
+        page_x,
+        page_y,
+    )
+    .await?;
+    Ok((page_x, page_y))
 }
 
 /// Find a selector inside a same-process iframe and return its object handle.
