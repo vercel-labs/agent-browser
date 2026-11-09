@@ -5,11 +5,11 @@ navTitle: "Changelog"
 
 ## v0.42.0
 
-<p className="text-[#888] text-sm">November 8, 2026</p>
+<p className="text-[#888] text-sm">November 9, 2026</p>
 
 ### New Features
 
-- Added **saved flows** (experimental): record a browser task once, then replay its requests. Runs send requests only to public addresses, and saving waits for in-flight requests and follows redirects to the end (#2236, #2432, #2433, #2444)
+- Added **saved flows** (experimental): record a browser task once, then replay its requests. A run tries direct HTTP first, then the same request from the page, then a replay of the recorded commands, and saves the tier that worked. Runs send requests only to public addresses, and saving waits for in-flight requests and follows redirects to the end (#2236, #2397, #2432, #2433, #2444)
 - **MCP tools** now list only the shared arguments each tool uses (#2311)
 
 ### Bug Fixes
