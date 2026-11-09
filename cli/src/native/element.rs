@@ -320,10 +320,77 @@ pub(super) async fn frame_owner_object_id(
         .ok_or_else(|| format!("No objectId for the owner element of frame {}", frame_id))
 }
 
+/// Execution context for JavaScript in a frame's own document. A
+/// same-process frame shares the page's CDP session, and a cross-origin
+/// frame's document is unreachable through its owner's contentDocument, so
+/// an isolated world is the only way to run selector lookups inside it.
+async fn isolated_frame_context_id(
+    client: &CdpClient,
+    session_id: &str,
+    frame_id: &str,
+) -> Result<i64, String> {
+    let result = client
+        .send_command(
+            "Page.createIsolatedWorld",
+            Some(serde_json::json!({
+                "frameId": frame_id,
+                "worldName": "agent-browser-frame",
+            })),
+            Some(session_id),
+        )
+        .await?;
+    result
+        .get("executionContextId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("Could not create an isolated world for frame {}", frame_id))
+}
+
+/// Top-level viewport origin of a frame's content box, from the frame
+/// owner's box model. Translates frame-local coordinates (from an
+/// isolated-world evaluation inside the frame) into top-level coordinates.
+async fn frame_owner_content_origin(
+    client: &CdpClient,
+    session_id: &str,
+    frame_id: &str,
+) -> Result<(f64, f64), String> {
+    let owner = client
+        .send_command(
+            "DOM.getFrameOwner",
+            Some(serde_json::json!({ "frameId": frame_id })),
+            Some(session_id),
+        )
+        .await?;
+    let backend_node_id = owner
+        .get("backendNodeId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("Could not resolve the owner element of frame {}", frame_id))?;
+    let result: DomGetBoxModelResult = client
+        .send_command_typed(
+            "DOM.getBoxModel",
+            &DomGetBoxModelParams {
+                backend_node_id: Some(backend_node_id),
+                node_id: None,
+                object_id: None,
+            },
+            Some(session_id),
+        )
+        .await?;
+    let content = &result.model.content;
+    if content.len() >= 2 {
+        Ok((content[0], content[1]))
+    } else {
+        Err(format!(
+            "No content box for the owner element of frame {}",
+            frame_id
+        ))
+    }
+}
+
 /// Find a selector inside a same-process iframe and return its center in
 /// top-level viewport coordinates (input events dispatch in that space).
-/// Same-origin access to contentDocument is what makes this possible; a
-/// cross-origin frame never takes this path because it has its own session.
+/// The frame may be cross-origin, so the selector runs in an isolated world
+/// created for the frame and the frame-local center is translated with the
+/// frame owner's box model.
 async fn resolve_center_in_same_process_frame(
     client: &CdpClient,
     session_id: &str,
@@ -331,38 +398,28 @@ async fn resolve_center_in_same_process_frame(
     selector: &str,
     require_actionable: bool,
 ) -> Result<(f64, f64), String> {
-    let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
-    let find_expr = build_find_element_js_in("doc", selector);
-    let function = format!(
-        r#"function() {{
-            const doc = this.contentDocument;
-            if (!doc) return null;
+    let context_id = isolated_frame_context_id(client, session_id, frame_id).await?;
+    let find_expr = build_find_element_js_in("document", selector);
+    let expression = format!(
+        r#"(() => {{
             const el = {find_expr};
             if (!el) return null;
             if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
             else el.scrollIntoView({{ block: 'center', inline: 'center' }});
             const rect = el.getBoundingClientRect();
-            let x = rect.x + rect.width / 2;
-            let y = rect.y + rect.height / 2;
-            let win = doc.defaultView;
-            while (win && win.frameElement) {{
-                const frameRect = win.frameElement.getBoundingClientRect();
-                x += frameRect.x + win.frameElement.clientLeft;
-                y += frameRect.y + win.frameElement.clientTop;
-                win = win.parent;
-            }}
+            const x = rect.x + rect.width / 2;
+            const y = rect.y + rect.height / 2;
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            const topDoc = win ? win.document : doc;
-            return {{ x: x, y: y, reason: notActionable(topDoc, el, x, y), blocker: blockerAt(topDoc, el, x, y) }};
-        }}"#,
+            return {{ x: x, y: y, reason: notActionable(document, el, x, y), blocker: blockerAt(document, el, x, y) }};
+        }})()"#,
     );
     let result = client
         .send_command(
-            "Runtime.callFunctionOn",
+            "Runtime.evaluate",
             Some(serde_json::json!({
-                "objectId": owner_object_id,
-                "functionDeclaration": function,
+                "contextId": context_id,
+                "expression": expression,
                 "returnByValue": true,
             })),
             Some(session_id),
@@ -382,33 +439,36 @@ async fn resolve_center_in_same_process_frame(
     }
     let x = value.and_then(|v| v.get("x")).and_then(|v| v.as_f64());
     let y = value.and_then(|v| v.get("y")).and_then(|v| v.as_f64());
-    match (x, y) {
-        (Some(x), Some(y)) => Ok((x, y)),
-        _ => Err(format!(
-            "Element not found in the selected frame: {}",
-            selector
-        )),
-    }
+    let (x, y) = match (x, y) {
+        (Some(x), Some(y)) => (x, y),
+        _ => {
+            return Err(format!(
+                "Element not found in the selected frame: {}",
+                selector
+            ));
+        }
+    };
+    let (ox, oy) = frame_owner_content_origin(client, session_id, frame_id).await?;
+    Ok((x + ox, y + oy))
 }
 
 /// Find a selector inside a same-process iframe and return its object handle.
+/// The frame may be cross-origin, so the lookup runs in an isolated world
+/// created for the frame instead of through the owner's contentDocument.
 async fn resolve_object_in_same_process_frame(
     client: &CdpClient,
     session_id: &str,
     frame_id: &str,
     selector: &str,
 ) -> Result<String, String> {
-    let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
-    let find_expr = build_find_element_js_in("doc", selector);
-    let function = format!(
-        "function() {{ const doc = this.contentDocument; if (!doc) return null; return {find_expr}; }}",
-    );
+    let context_id = isolated_frame_context_id(client, session_id, frame_id).await?;
+    let find_expr = build_find_element_js_in("document", selector);
     let result = client
         .send_command(
-            "Runtime.callFunctionOn",
+            "Runtime.evaluate",
             Some(serde_json::json!({
-                "objectId": owner_object_id,
-                "functionDeclaration": function,
+                "contextId": context_id,
+                "expression": find_expr,
                 "returnByValue": false,
             })),
             Some(session_id),
@@ -463,6 +523,7 @@ pub async fn resolve_element_center(
                     x,
                     y,
                     require_actionable,
+                    effective_session_id == session_id,
                 )
                 .await?;
                 return Ok((x, y, effective_session_id.to_string()));
@@ -505,6 +566,7 @@ pub async fn resolve_element_center(
             x,
             y,
             require_actionable,
+            effective_session_id == session_id,
         )
         .await?;
         return Ok((x, y, effective_session_id.to_string()));
@@ -609,6 +671,13 @@ pub async fn session_viewport_offset(
 /// unrelated element (overlay, banner, sticky header) would receive the input
 /// instead. Best effort: resolution failures skip the check rather than block
 /// the interaction.
+///
+/// `top_level_coords` is true when the click point came from a box model in
+/// the page session's viewport space (same-process frames have no dedicated
+/// session). For a cross-origin frame in the page's process the frameElement
+/// walk stops at the frame's own document, so the point is translated into
+/// the frame's coordinates using the element's own rect before hit-testing.
+#[allow(clippy::too_many_arguments)]
 async fn check_node_interception(
     client: &CdpClient,
     session_id: &str,
@@ -617,6 +686,7 @@ async fn check_node_interception(
     x: f64,
     y: f64,
     require_actionable: bool,
+    top_level_coords: bool,
 ) -> Result<(), String> {
     let resolved: Result<DomResolveNodeResult, String> = client
         .send_command_typed(
@@ -639,15 +709,27 @@ async fn check_node_interception(
     // hit-test starts from the top document. For an OOPIF node the
     // frameElement walk stops at the process boundary, where the frame's own
     // document and session-local coordinates are already consistent.
+    // A same-site cross-origin frame has no dedicated session, so its box
+    // model is also top-level while the walk still stops at the frame's
+    // document; in that case translate the point into the frame's own
+    // coordinates with the element's rect, which marks the same point.
     let function = format!(
-        r#"function(x, y) {{
+        r#"function(x, y, topLevel) {{
             let topDoc = this.ownerDocument || document;
             while (topDoc.defaultView && topDoc.defaultView.frameElement) {{
                 topDoc = topDoc.defaultView.frameElement.ownerDocument;
             }}
+            let doc = topDoc, px = x, py = y;
+            const win = this.ownerDocument.defaultView;
+            if (topLevel && win && win !== win.top && !win.frameElement) {{
+                const rect = this.getBoundingClientRect();
+                px = rect.x + rect.width / 2;
+                py = rect.y + rect.height / 2;
+                doc = this.ownerDocument;
+            }}
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            return {{ blocker: blockerAt(topDoc, this, x, y), reason: notActionable(topDoc, this, x, y) }};
+            return {{ blocker: blockerAt(doc, this, px, py), reason: notActionable(doc, this, px, py) }};
         }}"#,
     );
     let result = client
@@ -656,7 +738,7 @@ async fn check_node_interception(
             Some(serde_json::json!({
                 "objectId": object_id,
                 "functionDeclaration": function,
-                "arguments": [{ "value": x }, { "value": y }],
+                "arguments": [{ "value": x }, { "value": y }, { "value": top_level_coords }],
                 "returnByValue": true,
             })),
             Some(session_id),
