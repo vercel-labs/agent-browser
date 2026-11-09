@@ -510,6 +510,11 @@ mod tests {
     use std::str::FromStr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// A run deadline no test reaches.
+    fn far() -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(60)
+    }
+
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
     }
@@ -764,6 +769,7 @@ mod tests {
             &request(&format!("http://app.example.com:{port}/")),
             None,
             None,
+            far(),
         )
         .await;
         assert!(!res.ok);
@@ -773,7 +779,7 @@ mod tests {
             "{reason}"
         );
         assert!(!res.drift);
-        assert!(res.stop.is_none());
+        assert_eq!(res.stop, Some(crate::native::flow::Stop::AddressRefused));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
@@ -789,10 +795,11 @@ mod tests {
         req.method = "POST".into();
         req.write = true;
         req.body = Some("{}".into());
-        let res = run_http(&client, &req, None, None).await;
+        let res = run_http(&client, &req, None, None, far()).await;
         let reason = res.reason.unwrap();
         assert!(reason.contains("non-public address"), "{reason}");
-        assert!(res.stop.is_none(), "a refused write was never sent");
+        // The write was never sent: refused, not an unknown outcome.
+        assert_eq!(res.stop, Some(crate::native::flow::Stop::AddressRefused));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
@@ -854,6 +861,7 @@ mod tests {
             &request(&format!("http://ok.example.com:{port}/")),
             None,
             None,
+            far(),
         )
         .await;
         assert!(!res.ok);
@@ -882,6 +890,7 @@ mod tests {
             &request(&format!("http://localhost:{port}/")),
             None,
             None,
+            far(),
         )
         .await;
         assert!(
@@ -898,7 +907,7 @@ mod tests {
             vec![sock("8.8.8.8")],
             is_non_public,
         );
-        let res = run_http(&client, &request("http://localhost:1/"), None, None).await;
+        let res = run_http(&client, &request("http://localhost:1/"), None, None, far()).await;
         assert!(!res.ok);
         let reason = res.reason.unwrap();
         assert!(
@@ -1009,6 +1018,7 @@ mod tests {
             &request(&format!("http://127.0.0.1:{port}/")),
             None,
             None,
+            far(),
         )
         .await;
         assert!(!res.reason.unwrap_or_default().contains("proxy"));
@@ -1018,7 +1028,14 @@ mod tests {
             asked.lock().unwrap()
         );
         // A request through the proxy looks up the real name, unfiltered.
-        let res = run_http(&client, &request("http://app.localhost/"), None, None).await;
+        let res = run_http(
+            &client,
+            &request("http://app.localhost/"),
+            None,
+            None,
+            far(),
+        )
+        .await;
         assert!(!res.reason.unwrap_or_default().contains("resolved to"));
         assert_eq!(*asked.lock().unwrap(), vec!["proxy.corp".to_string()]);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -1095,7 +1112,14 @@ mod tests {
             Box::leak(format!("http://proxy.corp:{port}").into_boxed_str()) as &str,
         )]));
         let client = proxied_client(env, "", port);
-        let res = run_http(&client, &request("http://app.example.com/"), None, None).await;
+        let res = run_http(
+            &client,
+            &request("http://app.example.com/"),
+            None,
+            None,
+            far(),
+        )
+        .await;
         assert!(!res.reason.unwrap_or_default().contains("resolved to"));
         assert_eq!(
             hits.load(std::sync::atomic::Ordering::SeqCst),
@@ -1117,6 +1141,7 @@ mod tests {
             &request(&format!("http://app.example.com:{port}/")),
             None,
             None,
+            far(),
         )
         .await;
         let reason = res.reason.unwrap_or_default();
@@ -1142,6 +1167,7 @@ mod tests {
             &request(&format!("http://proxy.example.com:{port}/")),
             None,
             None,
+            far(),
         )
         .await;
         assert!(res
@@ -1177,6 +1203,7 @@ mod tests {
             &request(&format!("http://127.0.0.1:{port}/")),
             None,
             None,
+            far(),
         )
         .await;
         assert!(!res.reason.unwrap_or_default().contains("proxy"));
@@ -1206,12 +1233,13 @@ mod tests {
             &request(&format!("http://127.0.0.1:{port}/")),
             None,
             None,
+            far(),
         )
         .await;
         assert!(!res.reason.unwrap_or_default().contains("proxy"));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         // A target that would use the proxy fails with its reason.
-        let res = run_http(&client, &request("http://localhost:9/"), None, None).await;
+        let res = run_http(&client, &request("http://localhost:9/"), None, None, far()).await;
         let reason = res.reason.unwrap_or_default();
         assert!(
             reason.contains("could not resolve proxy proxy.offvpn.invalid"),
@@ -1363,13 +1391,27 @@ mod tests {
             http_client_with(None, flow, Arc::new(resolver), vec![]).unwrap()
         };
         let recorded_local = flow_of(json!({ "startUrl": url, "reach": "local" }));
-        let res = run_http(&client_for(&recorded_local), &request(&url), None, None).await;
+        let res = run_http(
+            &client_for(&recorded_local),
+            &request(&url),
+            None,
+            None,
+            far(),
+        )
+        .await;
         assert!(!res.reason.unwrap_or_default().contains("resolved to"));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         // A flow recorded against a public address is still refused when
         // the name later resolves to loopback.
         let recorded_public = flow_of(json!({ "startUrl": url }));
-        let res = run_http(&client_for(&recorded_public), &request(&url), None, None).await;
+        let res = run_http(
+            &client_for(&recorded_public),
+            &request(&url),
+            None,
+            None,
+            far(),
+        )
+        .await;
         let reason = res.reason.unwrap_or_default();
         assert!(
             reason.contains("resolved to a non-public address"),
