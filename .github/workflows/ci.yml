@@ -70,6 +70,10 @@ jobs:
       - name: Typecheck documentation
         run: pnpm --filter docs type-check
 
+      # Also check with the official TypeScript compiler while tsc-ts is new.
+      - name: Typecheck documentation (tsc)
+        run: pnpm --filter docs type-check:tsc
+
       - name: Build documentation
         run: pnpm --filter docs build
 
