@@ -831,7 +831,7 @@ pub fn dispatch_state_command(cmd: &Value) -> Option<Result<Value, String>> {
 /// `<tempdir>/agent-browser` when the home directory can't be resolved).
 /// This is the parent of `sessions/`, auth storage, and the encryption key.
 pub fn get_state_dir() -> PathBuf {
-    let base = if let Some(home) = dirs::home_dir() {
+    let base = if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser")
     } else {
         std::env::temp_dir().join("agent-browser")

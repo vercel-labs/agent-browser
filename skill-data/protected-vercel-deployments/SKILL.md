@@ -41,7 +41,7 @@ export VERCEL_SCOPE="my-team"
 agent-browser snapshot -i
 ```
 
-Continue the normal workflow in that same session. The header is scoped to the target origin and applies to the document, scripts, styles, fonts, and in-page requests. If the browser session is closed or restarted, repeat the authenticated `open` command.
+Continue the normal workflow in that same session. If your harness runs each command in a new shell, the exported `AGENT_BROWSER_SESSION` is gone afterwards, so pass the same name with `--session` on later commands. The header is scoped to the target origin and applies to the document, scripts, styles, fonts, and in-page requests. If the browser session is closed or restarted, repeat the authenticated `open` command.
 
 Never print the token, paste it into source, or save it in an environment file.
 
