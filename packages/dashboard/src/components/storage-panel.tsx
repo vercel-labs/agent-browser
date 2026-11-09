@@ -5,26 +5,11 @@ import { useAtomValue } from "jotai/react";
 import { activeSessionNameAtom } from "@/store/sessions";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { cn } from "@/lib/utils";
+import { cookieKey, parseCookies, parseStorageEntries, type CookieEntry, type StorageEntry } from "@/lib/storage-data";
 import { Separator } from "@/components/ui/separator";
 import { Loader2, RefreshCw } from "lucide-react";
 
 type StorageTab = "cookies" | "localStorage" | "sessionStorage";
-
-interface CookieEntry {
-  name: string;
-  value: string;
-  domain?: string;
-  path?: string;
-  expires?: number;
-  httpOnly?: boolean;
-  secure?: boolean;
-  sameSite?: string;
-}
-
-interface StorageEntry {
-  key: string;
-  value: string;
-}
 
 const TABS: { key: StorageTab; label: string }[] = [
   { key: "cookies", label: "Cookies" },
@@ -66,8 +51,7 @@ export function StoragePanel() {
           const res = await execCommand(sessionArgs(sessionName, "cookies"));
           if (res.success && res.stdout) {
             try {
-              const parsed = JSON.parse(res.stdout);
-              setCookies(parsed.cookies ?? []);
+              setCookies(parseCookies(res.stdout));
             } catch {
               setCookies([]);
             }
@@ -79,19 +63,7 @@ export function StoragePanel() {
           );
           if (res.success && res.stdout) {
             try {
-              const parsed = JSON.parse(res.stdout);
-              const entries: StorageEntry[] = [];
-              if (parsed.entries && typeof parsed.entries === "object") {
-                for (const [k, v] of Object.entries(parsed.entries)) {
-                  entries.push({ key: k, value: String(v) });
-                }
-              } else if (typeof parsed === "object") {
-                for (const [k, v] of Object.entries(parsed)) {
-                  if (k !== "length") {
-                    entries.push({ key: k, value: String(v) });
-                  }
-                }
-              }
+              const entries = parseStorageEntries(res.stdout);
               if (which === "localStorage") setLocal(entries);
               else setSession(entries);
             } catch {
@@ -211,7 +183,7 @@ function CookiesView({
   return (
     <>
       {cookies.map((c) => {
-        const id = `${c.domain ?? ""}::${c.name}`;
+        const id = cookieKey(c);
         const isExpanded = expanded === id;
         return (
           <div key={id} className="border-b border-border/50">
