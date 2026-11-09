@@ -149,23 +149,131 @@ pub(super) async fn perform_actions(
     Ok(reply.is_none())
 }
 
-const TO_TOP_LEVEL_POINT_JS: &str = r#"function(x, y) {
-    let left = x;
-    let top = y;
+const MAP_POINT_JS: &str = r#"function(x, y, direction) {
     let win = window;
     while (win && win.frameElement) {
-        try {
-            const frame = win.frameElement;
-            const rect = frame.getBoundingClientRect();
-            left += rect.left + frame.clientLeft;
-            top += rect.top + frame.clientTop;
-            win = win.parent;
-        } catch {
-            break;
+        const frame = win.frameElement;
+        const rect = frame.getBoundingClientRect();
+        x += direction * (rect.left + frame.clientLeft);
+        y += direction * (rect.top + frame.clientTop);
+        win = win.parent;
+    }
+    return [x, y, win === win.top];
+}"#;
+
+const FRAME_OFFSETS_JS: &str = r#"function() {
+    const frames = [];
+    const visit = root => {
+        for (const el of root.querySelectorAll('*')) {
+            if ((el.tagName === 'IFRAME' || el.tagName === 'FRAME') && el.contentWindow) {
+                const rect = el.getBoundingClientRect();
+                frames.push([el.contentWindow, rect.left + el.clientLeft, rect.top + el.clientTop]);
+            }
+            if (el.shadowRoot) visit(el.shadowRoot);
+        }
+    };
+    visit(document);
+    return frames;
+}"#;
+
+fn context_path(node: &Value, target: &str, path: &mut Vec<(String, String)>) -> bool {
+    let Some(parent) = node["context"].as_str() else {
+        return false;
+    };
+    if parent == target {
+        return true;
+    }
+    if let Some(children) = node["children"].as_array() {
+        for child in children {
+            let Some(id) = child["context"].as_str() else {
+                continue;
+            };
+            path.push((parent.to_string(), id.to_string()));
+            if context_path(child, target, path) {
+                return true;
+            }
+            path.pop();
         }
     }
-    return [left, top];
-}"#;
+    false
+}
+
+async fn map_mouse_position(
+    ff: &FirefoxSession,
+    context: &str,
+    position: (f64, f64),
+    direction: i32,
+) -> Result<(f64, f64), String> {
+    if context == ff.top_context {
+        return Ok(position);
+    }
+    let point = ff
+        .bidi
+        .call_function(
+            context,
+            MAP_POINT_JS,
+            None,
+            vec![json!(position.0), json!(position.1), json!(direction)],
+        )
+        .await?;
+    if point[2] == false {
+        let tree = ff
+            .bidi
+            .send("browsingContext.getTree", json!({"root": ff.top_context}))
+            .await?;
+        let mut path = Vec::new();
+        if !tree["contexts"].as_array().is_some_and(|roots| {
+            roots
+                .iter()
+                .any(|root| context_path(root, context, &mut path))
+        }) {
+            return Err("Firefox could not find the mouse context".to_string());
+        }
+        let mut mapped = position;
+        for (parent, child) in path {
+            let frames = ff
+                .bidi
+                .call_function(&parent, FRAME_OFFSETS_JS, None, vec![])
+                .await?;
+            let frame = frames
+                .as_array()
+                .and_then(|frames| {
+                    frames
+                        .iter()
+                        .find(|frame| frame[0].as_str() == Some(child.as_str()))
+                })
+                .ok_or("Firefox could not find the mouse frame")?;
+            mapped.0 += f64::from(direction)
+                * frame[1]
+                    .as_f64()
+                    .ok_or("Firefox returned an invalid frame offset")?;
+            mapped.1 += f64::from(direction)
+                * frame[2]
+                    .as_f64()
+                    .ok_or("Firefox returned an invalid frame offset")?;
+        }
+        return Ok(mapped);
+    }
+    Ok((
+        point[0]
+            .as_f64()
+            .ok_or("Firefox returned an invalid mouse position")?,
+        point[1]
+            .as_f64()
+            .ok_or("Firefox returned an invalid mouse position")?,
+    ))
+}
+
+async fn local_mouse_position(state: &DaemonState) -> Result<(f64, f64), String> {
+    let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
+    map_mouse_position(
+        ff,
+        &ff.context,
+        (state.mouse_state.x, state.mouse_state.y),
+        -1,
+    )
+    .await
+}
 
 async fn commit_mouse_position(
     ff: &FirefoxSession,
@@ -173,27 +281,9 @@ async fn commit_mouse_position(
     context: &str,
     position: (f64, f64),
 ) {
-    let position = if context == ff.top_context {
-        position
-    } else {
-        match ff
-            .bidi
-            .call_function(
-                context,
-                TO_TOP_LEVEL_POINT_JS,
-                None,
-                vec![json!(position.0), json!(position.1)],
-            )
-            .await
-        {
-            Ok(point) => (
-                point[0].as_f64().unwrap_or(position.0),
-                point[1].as_f64().unwrap_or(position.1),
-            ),
-            Err(_) => return,
-        }
-    };
-    (mouse_state.x, mouse_state.y) = position;
+    if let Ok(position) = map_mouse_position(ff, context, position, 1).await {
+        (mouse_state.x, mouse_state.y) = position;
+    }
 }
 
 fn apply_mouse_action(mouse_state: &mut MouseState, action: &Value) {
@@ -827,8 +917,16 @@ pub async fn highlight(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "highlighted": selector }))
 }
 
+fn validate_raw_mouse(cmd: &Value) -> Result<(), String> {
+    if cmd.get("clickCount").is_some() {
+        return Err("Raw clickCount is not supported on Firefox".to_string());
+    }
+    Ok(())
+}
+
 /// Raw mouse dispatch: move, press, release or wheel at viewport coordinates.
 pub async fn mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    validate_raw_mouse(cmd)?;
     let event_type = cmd
         .get("eventType")
         .and_then(Value::as_str)
@@ -867,8 +965,9 @@ pub async fn mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if mode == "instant" && duration == 0 && steps.is_none() {
         steps = Some(1);
     }
+    let start = local_mouse_position(state).await?;
     let actions = pointer_mousemove(
-        (state.mouse_state.x, state.mouse_state.y),
+        start,
         (x, y),
         duration,
         steps,
@@ -889,7 +988,7 @@ pub async fn mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 /// Presses a mouse button at the last known position.
 pub async fn mousedown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
-    let position = (state.mouse_state.x, state.mouse_state.y);
+    let position = local_mouse_position(state).await?;
     let origin = Origin::Viewport {
         x: position.0,
         y: position.1,
@@ -907,7 +1006,7 @@ pub async fn mousedown(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 /// Releases a mouse button at the last known position.
 pub async fn mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
-    let position = (state.mouse_state.x, state.mouse_state.y);
+    let position = local_mouse_position(state).await?;
     let origin = Origin::Viewport {
         x: position.0,
         y: position.1,
@@ -922,16 +1021,21 @@ pub async fn mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     .value)
 }
 
+async fn raw_position(cmd: &Value, state: &DaemonState) -> Result<(f64, f64), String> {
+    let x = cmd.get("x").and_then(Value::as_f64);
+    let y = cmd.get("y").and_then(Value::as_f64);
+    match (x, y) {
+        (Some(x), Some(y)) => Ok((x, y)),
+        _ => {
+            let position = local_mouse_position(state).await?;
+            Ok((x.unwrap_or(position.0), y.unwrap_or(position.1)))
+        }
+    }
+}
+
 /// Scrolls at explicit coordinates or the last accepted pointer position.
 pub async fn wheel(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let x = cmd
-        .get("x")
-        .and_then(Value::as_f64)
-        .unwrap_or(state.mouse_state.x);
-    let y = cmd
-        .get("y")
-        .and_then(Value::as_f64)
-        .unwrap_or(state.mouse_state.y);
+    let (x, y) = raw_position(cmd, state).await?;
     let delta_x = cmd.get("deltaX").and_then(Value::as_f64).unwrap_or(0.0);
     let delta_y = cmd.get("deltaY").and_then(Value::as_f64).unwrap_or(0.0);
     let actions = pointer_wheel(&Origin::Viewport { x, y }, delta_x, delta_y);
@@ -948,21 +1052,12 @@ pub async fn wheel(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 
 /// Low-level mouse input, defaulting coordinates to the last known position.
 pub async fn input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    if cmd.get("clickCount").is_some() {
-        return Err("Raw clickCount is not supported on Firefox".to_string());
-    }
+    validate_raw_mouse(cmd)?;
     let event_type = cmd
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("mouseMoved");
-    let x = cmd
-        .get("x")
-        .and_then(Value::as_f64)
-        .unwrap_or(state.mouse_state.x);
-    let y = cmd
-        .get("y")
-        .and_then(Value::as_f64)
-        .unwrap_or(state.mouse_state.y);
+    let (x, y) = raw_position(cmd, state).await?;
     let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
     let delta_x = cmd.get("deltaX").and_then(Value::as_f64).unwrap_or(0.0);
     let delta_y = cmd.get("deltaY").and_then(Value::as_f64).unwrap_or(0.0);
@@ -1312,6 +1407,12 @@ mod tests {
     }
 
     fn connected(params: &Value) -> Value {
+        if params["functionDeclaration"] == MAP_POINT_JS {
+            return json!({ "type": "success", "result": { "type": "array", "value": [
+                { "type": "number", "value": params["arguments"][0]["value"] },
+                { "type": "number", "value": params["arguments"][1]["value"] }
+            ] } });
+        }
         if params["functionDeclaration"]
             .as_str()
             .is_some_and(|js| js.contains("isConnected"))
@@ -1535,7 +1636,14 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(error.contains("clickCount"), "{error}");
+        assert_eq!(error, "Raw clickCount is not supported on Firefox");
+        let error = mouse(
+            &json!({ "eventType": "mousePressed", "x": 80, "y": 90, "clickCount": 2 }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Raw clickCount is not supported on Firefox");
         assert_eq!(state.mouse_state.x, 17.0);
         assert_eq!(state.mouse_state.y, 23.0);
         assert_eq!(state.mouse_state.buttons, 1);

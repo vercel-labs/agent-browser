@@ -352,7 +352,7 @@ mod tests {
         ));
 
         let mut child = Command::new("/bin/sh")
-            .args(["-c", "sleep 5"])
+            .args(["-c", "sleep 30"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

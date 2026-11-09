@@ -869,7 +869,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FLOW_RUN,
             "Run saved flow",
-            "Experimental. Run a saved task directly over HTTP, without driving the page. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
+            "Experimental. Run a saved task by sending its requests directly, falling back to the page, then to a replay of the recorded commands. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
             json!({
                 "name": { "type": "string" },
                 "params": { "type": "object", "additionalProperties": { "type": "string" } },
@@ -877,7 +877,8 @@ fn tools() -> Vec<Value> {
                 "fields": { "type": "string", "description": "Comma-separated fields to return per item, dotted paths allowed." },
                 "limit": { "type": "integer", "minimum": 1 },
                 "origin": { "type": "string" },
-                "allowWrite": { "type": "string", "description": "Writes the run may send without asking: `all`, or comma-separated write ids from flow save. Any other write needs confirmation." }
+                "allowWrite": { "type": "string", "description": "Writes the run may send without asking: `all`, or comma-separated write ids from flow save. Any other write needs confirmation." },
+                "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds the whole run may take, across every tier." }
             }),
             &["name"],
         ),
@@ -4754,6 +4755,51 @@ mod tests {
             text.contains("page_wedged: the active tab was replaced"),
             "{text}"
         );
+    }
+
+    /// Every argument a flow tool declares reaches the daemon command: the
+    /// MCP schema, `flow_args` and the CLI parser cannot drift apart.
+    #[test]
+    fn every_flow_tool_argument_reaches_the_command() {
+        let cases = [
+            (TOOL_FLOW_RUN, "run", "flow_run"),
+            (TOOL_FLOW_SAVE, "save", "flow_save"),
+        ];
+        for (tool_name, sub, action) in cases {
+            let tool = tools()
+                .into_iter()
+                .find(|t| t["name"] == tool_name)
+                .unwrap();
+            let props = tool["inputSchema"]["properties"]
+                .as_object()
+                .unwrap()
+                .clone();
+            let shared = advertised_shared_arguments(tool_name);
+            let mut arguments = serde_json::Map::new();
+            for (key, prop) in &props {
+                if shared.contains(&key.as_str()) {
+                    continue;
+                }
+                let value = match (key.as_str(), prop["type"].as_str()) {
+                    ("allowWrite", _) => json!("all"),
+                    (_, Some("integer")) => json!(7),
+                    (_, Some("object")) => json!({ "k": "v" }),
+                    _ => json!("x"),
+                };
+                arguments.insert(key.clone(), value);
+            }
+            let arguments = Value::Object(arguments);
+            let args = flow_args(&arguments, sub).unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["action"], action);
+            for key in arguments.as_object().unwrap().keys() {
+                assert!(
+                    !command[key.as_str()].is_null(),
+                    "{tool_name}: `{key}` is declared but the command has no `{key}`: {command}"
+                );
+            }
+        }
     }
 
     #[test]
