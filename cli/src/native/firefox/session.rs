@@ -40,7 +40,9 @@ pub struct FirefoxSession {
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
     pub tab_labels: HashMap<String, String>,
-    /// BiDi user context created for a window opened by `window new`, keyed by its top-level context.
+    /// BiDi user context of the window a top-level context belongs to, keyed by that context.
+    /// `window new` and every `tab new` inside such a window insert here, so several tabs can
+    /// share one user context.
     pub window_contexts: HashMap<String, String>,
     pub visited_origins: HashSet<String>,
     events: broadcast::Receiver<Value>,
@@ -171,7 +173,8 @@ impl FirefoxSession {
         }
     }
 
-    /// The BiDi storage partition for the active tab, set only by `window new`.
+    /// The BiDi storage partition for the active tab, set by `window new` and `tab new` inside
+    /// that window.
     pub fn active_partition(&self) -> Option<Value> {
         self.window_contexts
             .get(&self.context)

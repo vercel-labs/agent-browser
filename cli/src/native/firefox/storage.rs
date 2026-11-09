@@ -621,13 +621,15 @@ pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<
     let saved: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {e}"))?;
 
+    let mut command = json!({});
+    if let Some(partition) = session(state)?.active_partition() {
+        command["partition"] = partition;
+    }
     for cookie in &saved.cookies {
+        command["cookie"] = state_cookie_to_bidi(cookie);
         session(state)?
             .bidi
-            .send(
-                "storage.setCookie",
-                json!({ "cookie": state_cookie_to_bidi(cookie) }),
-            )
+            .send("storage.setCookie", command.clone())
             .await?;
     }
 

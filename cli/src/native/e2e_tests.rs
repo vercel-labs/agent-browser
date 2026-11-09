@@ -15603,6 +15603,7 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
 
     let resp = firefox_command(&mut state, json!({ "id": "w1", "action": "window_new" })).await;
     assert_success(&resp);
+    let window_tab = get_data(&resp)["tabId"].clone();
     firefox_open(&mut state, &format!("{}two", fixture.url)).await;
     assert!(
         !firefox_eval(&mut state, "document.cookie")
@@ -15630,6 +15631,7 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
 
     let resp = firefox_command(&mut state, json!({ "id": "t1", "action": "tab_new" })).await;
     assert_success(&resp);
+    let second_tab = get_data(&resp)["tabId"].clone();
     firefox_open(&mut state, &format!("{}two", fixture.url)).await;
     assert!(
         firefox_eval(&mut state, "document.cookie")
@@ -15640,9 +15642,85 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
         "a tab opened from the new window must share that window's jar"
     );
 
-    let resp = firefox_command(&mut state, json!({ "id": "w2", "action": "tab_close" })).await;
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c3", "action": "cookies_set", "name": "second_tab", "value": "3" }),
+    )
+    .await;
     assert_success(&resp);
-    let resp = firefox_command(&mut state, json!({ "id": "w3", "action": "tab_close" })).await;
+    assert!(
+        firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .unwrap_or_default()
+            .contains("second_tab=3"),
+        "a cookie set in the tab must stay in the window's jar"
+    );
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "second_tab") && has_cookie(&cookies, "isolated_window"),
+        "cookies get in a tab opened from the window must read that window's jar: {cookies}"
+    );
+    assert!(
+        !has_cookie(&cookies, "main_window"),
+        "cookies get in a tab opened from the window must not read the default jar: {cookies}"
+    );
+
+    let resp = firefox_command(&mut state, json!({ "id": "t2", "action": "tab_new" })).await;
+    assert_success(&resp);
+    let third_tab = get_data(&resp)["tabId"].clone();
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "second_tab") && has_cookie(&cookies, "isolated_window"),
+        "a third tab opened from the second must stay in the window's jar: {cookies}"
+    );
+    assert!(
+        !has_cookie(&cookies, "main_window"),
+        "a third tab opened from the second must not read the default jar: {cookies}"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c4", "action": "tab_close", "tabId": third_tab }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "s1", "action": "tab_switch", "tabId": second_tab }),
+    )
+    .await;
+    assert_success(&resp);
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "second_tab"),
+        "the second tab must still read its cookie after the third closes: {cookies}"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c5", "action": "tab_close", "tabId": second_tab }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "s2", "action": "tab_switch", "tabId": window_tab }),
+    )
+    .await;
+    assert_success(&resp);
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "isolated_window") && has_cookie(&cookies, "second_tab"),
+        "closing the second tab must keep the window's user context alive: {cookies}"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c6", "action": "tab_close", "tabId": window_tab }),
+    )
+    .await;
     assert_success(&resp);
     let cookies = firefox_eval(&mut state, "document.cookie")
         .await
@@ -15656,6 +15734,11 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
     assert!(
         !cookies.contains("isolated_window=2"),
         "the isolated window must not write into the original jar: {cookies}"
+    );
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "main_window") && !has_cookie(&cookies, "second_tab"),
+        "the original window must not read the closed window's cookies: {cookies}"
     );
 }
 
@@ -15998,6 +16081,61 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
     other_server.abort();
     redirect_server.abort();
     hook_server.abort();
+}
+
+/// A state load while an isolated window is active must restore cookies into that window's jar.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_state_load_restores_cookies_into_the_active_window() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let state_path = tmp.path().join("state.json");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec(&json!({
+            "cookies": [{
+                "name": "from_state",
+                "value": "1",
+                "domain": "localhost",
+                "path": "/",
+                "expires": -1,
+                "httpOnly": false,
+                "secure": false
+            }],
+            "origins": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    let resp = firefox_command(&mut state, json!({ "id": "w1", "action": "window_new" })).await;
+    assert_success(&resp);
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+
+    let load = firefox_command(
+        &mut state,
+        json!({ "id": "l1", "action": "state_load", "path": state_path.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&load);
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "from_state"),
+        "a restored cookie must land in the active window's jar: {cookies}"
+    );
+
+    let resp = firefox_command(&mut state, json!({ "id": "c1", "action": "tab_close" })).await;
+    assert_success(&resp);
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        !has_cookie(&cookies, "from_state"),
+        "a restored cookie must not land in the default jar: {cookies}"
+    );
 }
 
 const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>

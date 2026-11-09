@@ -20,8 +20,11 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }
 
     let mut create = json!({"type": "tab"});
-    if let Some(partition) = session(state)?.active_partition() {
-        create["userContext"] = partition["userContext"].clone();
+    let user_context = session(state)?
+        .active_partition()
+        .and_then(|partition| partition["userContext"].as_str().map(str::to_string));
+    if let Some(user_context) = &user_context {
+        create["userContext"] = json!(user_context);
     }
     let created = session(state)?
         .bidi
@@ -31,7 +34,11 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .as_str()
         .ok_or("Firefox did not return a context id for the new tab")?
         .to_string();
-    let tab_id = session(state)?.tab_id(&context);
+    let ff = session(state)?;
+    if let Some(user_context) = user_context {
+        ff.window_contexts.insert(context.clone(), user_context);
+    }
+    let tab_id = ff.tab_id(&context);
     activate(state, &context).await?;
     if let Some(label) = label {
         session(state)?
