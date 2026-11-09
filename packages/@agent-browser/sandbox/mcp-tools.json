@@ -4200,9 +4200,19 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List tabs.",
+      "description": "List tabs. Use filter and limit to keep the result small when many tabs are open.",
       "inputSchema": {
         "properties": {
+          "filter": {
+            "description": "Keep tabs whose title or URL contains this text, ignoring ASCII case.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "description": "Return at most this many tabs, applied after filter, in tab order.",
+            "minimum": 1,
+            "type": "integer"
+          },
           "session": {
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
