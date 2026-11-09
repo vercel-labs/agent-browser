@@ -10,7 +10,8 @@
     "lint": "oxlint",
     "postinstall": "fumadocs-mdx",
     "prebuild": "fumadocs-mdx",
-    "type-check": "fumadocs-mdx && tsc --noEmit",
+    "type-check": "fumadocs-mdx && tsc-ts --noEmit",
+    "type-check:tsc": "fumadocs-mdx && tsc --noEmit",
     "test": "node --test tests/docs-baseline.test.mjs tests/baseline-oracle.test.mjs",
     "test:routes": "node scripts/test-routes.mjs"
   },
@@ -54,6 +55,7 @@
     "oxlint": "^1.91.0",
     "tailwindcss": "^4",
     "tailwindcss-animate": "^1.0.7",
+    "tsc-ts": "0.1.3",
     "typescript": "^7.0.2"
   }
 }
