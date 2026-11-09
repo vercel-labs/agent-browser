@@ -265,28 +265,30 @@ A missing or invalid policy file blocks every command until it is fixed (`close 
     <tr><th>Category</th><th>Actions</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>navigate</code></td><td>open, back, forward, reload, tab new</td></tr>
+    <tr><td><code>navigate</code></td><td>navigate, back, forward, reload, tab_new, pushstate</td></tr>
     <tr><td><code>click</code></td><td>click, dblclick, tap</td></tr>
-    <tr><td><code>fill</code></td><td>fill, type, keyboard type/inserttext, select, check, uncheck</td></tr>
-    <tr><td><code>eval</code></td><td>eval, evalhandle, addscript, addinitscript, addstyle, expose, setcontent</td></tr>
+    <tr><td><code>fill</code></td><td>fill, type, keyboard, inserttext, select, multiselect, check, uncheck, clear, selectall, setvalue</td></tr>
+    <tr><td><code>eval</code></td><td>evaluate, evalhandle, addscript, addinitscript, removeinitscript, addstyle, expose, setcontent</td></tr>
     <tr><td><code>download</code></td><td>download, waitfordownload</td></tr>
     <tr><td><code>upload</code></td><td>upload</td></tr>
-    <tr><td><code>snapshot</code></td><td>snapshot, screenshot, pdf, diff</td></tr>
+    <tr><td><code>snapshot</code></td><td>snapshot, screenshot, pdf, diff_snapshot, diff_screenshot, diff_url</td></tr>
     <tr><td><code>scroll</code></td><td>scroll, scrollintoview</td></tr>
     <tr><td><code>wait</code></td><td>wait, waitforurl, waitforloadstate, waitforfunction</td></tr>
     <tr><td><code>read</code></td><td>read</td></tr>
-    <tr><td><code>get</code></td><td>get text/html/url/title, count, isvisible, getbyrole, getbytext, getbylabel, etc.</td></tr>
-    <tr><td><code>interact</code></td><td>hover, focus, drag, press, keydown, keyup, mousemove, dispatch</td></tr>
-    <tr><td><code>network</code></td><td>network route/unroute, requests, har start/stop</td></tr>
-    <tr><td><code>state</code></td><td>state save/load, cookies set, storage set</td></tr>
+    <tr><td><code>get</code></td><td>gettext, innerhtml, innertext, content, url, title, getattribute, count, boundingbox, styles, isvisible, isenabled, ischecked, inputvalue, getbyrole, getbytext, getbylabel, getbyplaceholder, getbyalttext, getbytitle, getbytestid, nth, find</td></tr>
+    <tr><td><code>interact</code></td><td>hover, focus, drag, press, keydown, keyup, mousemove, mousedown, mouseup, wheel, mouse, dispatch, swipe, dialog, input_mouse, input_keyboard, input_touch</td></tr>
+    <tr><td><code>network</code></td><td>route, unroute, requests, request_detail, har_start, har_stop, responsebody, headers, offline</td></tr>
+    <tr><td><code>state</code></td><td>state_save, state_load, state_list, state_show, state_clear, state_clean, state_rename, cookies_get, cookies_set, cookies_clear, storage_get, storage_set, storage_clear</td></tr>
   </tbody>
 </table>
+
+An entry matches an action by its exact name, as listed in the table, or by the category that contains it. A `deny` match takes precedence over `confirm` and `allow`. An action outside every category matches only its exact name.
 
 Auth vault operations keep secrets out of normal command output and LLM context. Domain allowlist restrictions still apply to `auth login` navigations. Plugin-backed logins also expose the capability action `plugin:<name>:credential.read` for policy and confirmation gates.
 
 ## Action Confirmation
 
-For actions that require explicit approval, use `--confirm-actions` to specify categories that require confirmation:
+For actions that require explicit approval, use `--confirm-actions` to specify categories that require confirmation. The categories are the ones in the action policy table above, and an exact action name also matches.
 
 ```bash
 # Orchestrator mode: returns confirmation_required response

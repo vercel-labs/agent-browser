@@ -299,6 +299,38 @@ fn a_close_that_policy_denies_keeps_the_settings() {
 }
 
 #[test]
+fn action_policy_categories_reach_the_daemon() {
+    let session = Session::new();
+    let policy = session.tmp.path().join("policy.json");
+    fs::write(
+        &policy,
+        r#"{"default":"allow","deny":["eval","state"],"confirm":["get"]}"#,
+    )
+    .unwrap();
+    session.touch(&["--action-policy", policy.to_str().unwrap()]);
+
+    // `eval` reaches the daemon as the `evaluate` action and state save as
+    // `state_save`; both categories deny them before a browser is needed.
+    for args in [vec!["eval", "1 + 1"], vec!["state", "save", "state.json"]] {
+        let out = session.output(&args);
+        assert!(!out.status.success(), "{args:?}: {}", text(&out));
+        assert!(
+            text(&out).contains("denied by policy"),
+            "{args:?}: {}",
+            text(&out)
+        );
+    }
+
+    // `get title` reaches the daemon as the `title` action the `get` category
+    // covers, so it parks for confirmation instead of running.
+    let parked = session.run(&["get", "title"]);
+    assert_eq!(parked["data"]["confirmation_required"], true, "{parked}");
+    assert_eq!(parked["data"]["action"], "title", "{parked}");
+
+    session.kill_daemon();
+}
+
+#[test]
 fn a_close_parked_for_confirmation_keeps_the_settings() {
     let session = Session::new();
     session.touch(&[

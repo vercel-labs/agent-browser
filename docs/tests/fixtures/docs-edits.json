@@ -198,6 +198,42 @@
       {
         "from": "All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.",
         "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust."
+      },
+      {
+        "from": "open, back, forward, reload, tab new",
+        "to": "navigate, back, forward, reload, tab_new, pushstate"
+      },
+      {
+        "from": "fill, type, keyboard type/inserttext, select, check, uncheck",
+        "to": "fill, type, keyboard, inserttext, select, multiselect, check, uncheck, clear, selectall, setvalue"
+      },
+      {
+        "from": "eval, evalhandle, addscript, addinitscript, addstyle, expose, setcontent",
+        "to": "evaluate, evalhandle, addscript, addinitscript, removeinitscript, addstyle, expose, setcontent"
+      },
+      {
+        "from": "snapshot, screenshot, pdf, diff",
+        "to": "snapshot, screenshot, pdf, diff_snapshot, diff_screenshot, diff_url"
+      },
+      {
+        "from": "get text/html/url/title, count, isvisible, getbyrole, getbytext, getbylabel, etc.",
+        "to": "gettext, innerhtml, innertext, content, url, title, getattribute, count, boundingbox, styles, isvisible, isenabled, ischecked, inputvalue, getbyrole, getbytext, getbylabel, getbyplaceholder, getbyalttext, getbytitle, getbytestid, nth, find"
+      },
+      {
+        "from": "hover, focus, drag, press, keydown, keyup, mousemove, dispatch",
+        "to": "hover, focus, drag, press, keydown, keyup, mousemove, mousedown, mouseup, wheel, mouse, dispatch, swipe, dialog, input_mouse, input_keyboard, input_touch"
+      },
+      {
+        "from": "network route/unroute, requests, har start/stop",
+        "to": "route, unroute, requests, request_detail, har_start, har_stop, responsebody, headers, offline"
+      },
+      {
+        "from": "state save/load, cookies set, storage set",
+        "to": "state_save, state_load, state_list, state_show, state_clear, state_clean, state_rename, cookies_get, cookies_set, cookies_clear, storage_get, storage_set, storage_clear"
+      },
+      {
+        "from": "For actions that require explicit approval, use `--confirm-actions` to specify categories that require confirmation:",
+        "to": "For actions that require explicit approval, use `--confirm-actions` to specify categories that require confirmation. The categories are the ones in the action policy table above, and an exact action name also matches."
       }
     ],
     "/init-scripts": [
