@@ -1806,12 +1806,13 @@ fn scrub_url(url: &str) -> Option<String> {
         None => (before_fragment, None),
     };
     let query = query.map(scrub_pairs);
-    let fragment = fragment.map(|f| {
-        if f.contains('=') && !f.contains('/') {
-            scrub_pairs(f)
-        } else {
-            (f.to_string(), false)
+    // A hash-router fragment (`#/callback?k=v`) carries its pairs after `?`.
+    let fragment = fragment.map(|f| match f.split_once('?') {
+        Some((route, pairs)) => {
+            let (pairs, hit) = scrub_pairs(pairs);
+            (format!("{route}?{pairs}"), hit)
         }
+        None => scrub_pairs(f),
     });
     let changed = query.as_ref().is_some_and(|q| q.1) || fragment.as_ref().is_some_and(|f| f.1);
     changed.then(|| {
@@ -4224,6 +4225,16 @@ mod tests {
         );
         assert_eq!(scrub_url("https://a.test/x?auth&x=1"), None);
         assert_eq!(scrub_url("https://a.test/#/login"), None);
+        // A value with `/`, and a hash-router callback.
+        assert_eq!(
+            scrub_url("https://a.test/cb#access_token=abc/def").as_deref(),
+            Some("https://a.test/cb#access_token=%3Credacted%3E")
+        );
+        assert_eq!(
+            scrub_url("https://a.test/#/callback?access_token=abc/def&state=x").as_deref(),
+            Some("https://a.test/#/callback?access_token=%3Credacted%3E&state=x")
+        );
+        assert_eq!(scrub_url("https://a.test/#/items?page=2"), None);
     }
 
     #[test]
