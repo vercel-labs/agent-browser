@@ -1,0 +1,10 @@
+/*
+ * Navbar: show only the Vercel triangle on every page, with no wordmark.
+ * Geistdocs' standard navbar renders the triangle link (aria-label "Vercel"),
+ * then a slash divider and the site logo as later siblings. Hide those
+ * siblings so the brand link is the only thing left. Imported by both the
+ * marketing and documentation root layouts, which use separate stylesheets.
+ */
+header a[aria-label='Vercel'] ~ * {
+  display: none;
+}
