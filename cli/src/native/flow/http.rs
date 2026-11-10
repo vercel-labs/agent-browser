@@ -247,7 +247,24 @@ pub async fn send(
     req: &PreparedRequest,
     deadline: Instant,
 ) -> TierResult {
-    let cookie = browser.cookie_header(&req.url).await;
-    let routed = browser.routed_response(&req.url).await;
+    let started = Instant::now();
+    let preflight = tokio::time::timeout_at(deadline.into(), async {
+        let cookie = browser.cookie_header(&req.url).await;
+        let routed = browser.routed_response(&req.url).await;
+        (cookie, routed)
+    })
+    .await;
+    let (cookie, routed) = match preflight {
+        Ok(result) => result,
+        Err(_) => {
+            // No HTTP request has been sent, including for a write.
+            return tier_result(
+                req,
+                Tier::Http,
+                started,
+                Err(Failure::unavailable("the run's time is up".to_string())),
+            );
+        }
+    };
     run_http(client, req, cookie.as_deref(), routed, deadline).await
 }
