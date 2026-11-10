@@ -73,7 +73,7 @@ Detection is automatic. A `ws://` or `wss://` URL whose path is `/session` is tr
 
 The session starts on the tab selected in Firefox, or on the first tab when none reports itself visible. The attached browser is externally owned: `close` ends the BiDi session and leaves Firefox running. Only one client can hold a Firefox BiDi session at a time, and a client that exits without ending its session keeps it until Firefox restarts. `--auto-connect` does not support Firefox.
 
-Options that need a launch are rejected when attaching: `--profile`, `--args`, `--extension`, `--allow-file-access`, `--webgpu`, and `--ca-cert`. `--headed`, `--executable-path`, and `--no-xvfb` have no effect on an already-running browser. `--allowed-domains` is rejected when attaching, as it is for any pre-existing CDP session. `--pin-tab` and its `tab_gone` guarantee apply only to Chrome over CDP; Firefox attach rejects `--pin-tab`. See [CDP Mode](/cdp-mode) for the full attach workflow.
+Options that describe a browser agent-browser launches are ignored when attaching, as they are for any attached browser: `--profile`, `--args`, `--extension`, `--allow-file-access`, `--webgpu`, `--headed`, `--executable-path`, and `--no-xvfb`. `--ca-cert` and `--allowed-domains` are rejected when attaching. `--pin-tab` and its `tab_gone` guarantee apply only to Chrome over CDP; Firefox attach rejects `--pin-tab`. See [CDP Mode](/cdp-mode) for the full attach workflow.
 
 <table>
   <thead>

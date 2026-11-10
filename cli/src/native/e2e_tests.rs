@@ -15839,6 +15839,29 @@ async fn e2e_firefox_attach_adopts_the_selected_tab() {
     firefox_close(&mut state).await;
 }
 
+/// Attaching to a fresh profile, whose only tab refuses scripts, opens a tab it can drive.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_attach_opens_a_tab_when_none_runs_scripts() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let firefox = start_running_firefox(&["about:home"]);
+    let target = format!(
+        "http://127.0.0.1:{}?devtools={}",
+        firefox.bidi_port, firefox.devtools_port
+    );
+    let mut state = DaemonState::new();
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+    firefox_close(&mut state).await;
+}
+
 /// Fill replaces controlled values and reaches password inputs by ref, fill/type reach contenteditables and cross-origin frames, and inserttext and raw char succeed without editing when beforeinput is canceled, like Chrome.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
@@ -16517,6 +16540,50 @@ async fn e2e_firefox_pointer_motion_follows_input_mode() {
         firefox_eval(&mut state, "downs").await,
         json!(0),
         "a dialog opened on the way stops the press"
+    );
+
+    firefox_eval(&mut state, "window.ups = 0; document.addEventListener('pointerup', () => ups++, true); document.querySelector('#drag-target').addEventListener('pointerover', () => confirm('drop?'), { once: true }); true").await;
+    let blocked = firefox_command(
+        &mut state,
+        json!({ "id": "dialog-drag", "action": "drag", "source": "#drag-source", "target": "#drag-target" }),
+    )
+    .await;
+    assert_success(&blocked);
+    assert_eq!(get_data(&blocked)["dialogOpened"], true, "{blocked}");
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "accept", "action": "dialog", "response": "accept" }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "ups").await,
+        json!(1),
+        "a drag a dialog interrupted releases the button once the dialog closes"
+    );
+    firefox_close(&mut state).await;
+}
+
+/// Refs inside open shadow roots resolve whether or not the host has an id.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_shadow_refs_without_host_ids() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(&mut state, r#"document.body.innerHTML = '<div id="withid"></div><div class="noid"></div><my-card></my-card>'; window.clicked = []; for (const [host, name] of [['#withid', 'A'], ['.noid', 'B'], ['my-card', 'C']]) { const button = document.createElement('button'); button.textContent = name + ' btn'; button.onclick = () => clicked.push(name); document.querySelector(host).attachShadow({ mode: 'open' }).append(button); } true"#).await;
+    for name in ["A btn", "B btn", "C btn"] {
+        let button = firefox_ref(&mut state, name).await;
+        assert_success(&firefox_act(&mut state, "click", &button, json!({})).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, "clicked").await,
+        json!(["A", "B", "C"])
     );
     firefox_close(&mut state).await;
 }
@@ -18823,6 +18890,7 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
     )
     .await;
     assert_success(&resp);
+    firefox_eval(&mut state, "localStorage.setItem('jar', 'default')").await;
 
     let resp = firefox_command(&mut state, json!({ "id": "w1", "action": "window_new" })).await;
     assert_success(&resp);
@@ -18851,6 +18919,26 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
             .contains("isolated_window=2"),
         "a cookie set in the new window must stay in its own jar"
     );
+
+    firefox_eval(&mut state, "localStorage.setItem('jar', 'window')").await;
+    firefox_open(&mut state, &format!("{}/two", fixture.other)).await;
+    let state_path = tmp.path().join("window-state.json");
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "sv", "action": "state_save", "path": state_path.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&resp);
+    let saved: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    let origin = fixture.url.trim_end_matches('/');
+    assert!(
+        saved["origins"].as_array().unwrap().iter().any(|entry| {
+            entry["origin"] == origin
+                && entry["localStorage"] == json!([{ "name": "jar", "value": "window" }])
+        }),
+        "state save from an isolated window must read that window's storage: {saved}"
+    );
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
 
     firefox_eval(&mut state, "window.open(location.href); 'opened'").await;
     let tabs = firefox_command(&mut state, json!({ "id": "p1", "action": "tab_list" })).await;

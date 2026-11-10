@@ -81,11 +81,12 @@ pub struct FirefoxSession {
     pub browser_version: String,
 }
 
-/// The tab the user is looking at in a running Firefox: the focused visible one, else the first
-/// visible one. `None` when no tab answers, which keeps the first tab in the tree.
+/// The tab the user is looking at in a running Firefox: the focused one, else a visible one, else
+/// any tab that runs scripts. `None` when no tab does, as with the privileged `about:home` of a
+/// fresh profile.
 async fn selected_tab(bidi: &BidiClient, tree: &Value) -> Option<String> {
     const SELECTED_JS: &str =
-        "() => (document.hasFocus() ? 2 : 0) + (document.visibilityState === 'visible' ? 1 : 0)";
+        "() => 1 + (document.hasFocus() ? 4 : 0) + (document.visibilityState === 'visible' ? 2 : 0)";
     let tabs: Vec<&str> = tree["contexts"]
         .as_array()?
         .iter()
@@ -336,19 +337,26 @@ impl FirefoxSession {
             .await?;
 
         let tree = bidi.send("browsingContext.getTree", json!({})).await?;
-        let mut contexts = match Contexts::from_tree(&tree) {
-            Err(_) if attached => {
-                let created = bidi
-                    .send("browsingContext.create", json!({"type": "tab"}))
-                    .await?;
-                Contexts::from_tree(&json!({"contexts": [created]}))?
-            }
-            contexts => contexts?,
+        let mut contexts = if attached {
+            Contexts::from_tree(&tree).unwrap_or_default()
+        } else {
+            Contexts::from_tree(&tree)?
         };
         if attached {
-            if let Some(selected) = selected_tab(&bidi, &tree).await {
-                contexts.activate(&selected);
-            }
+            let selected = match selected_tab(&bidi, &tree).await {
+                Some(selected) => selected,
+                None => {
+                    let created = bidi
+                        .send("browsingContext.create", json!({"type": "tab"}))
+                        .await?;
+                    contexts.record(&created);
+                    created["context"]
+                        .as_str()
+                        .ok_or("Firefox did not return the created browsing context")?
+                        .to_string()
+                }
+            };
+            contexts.activate(&selected);
         }
         let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
             viewport: options
