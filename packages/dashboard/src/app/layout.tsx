@@ -11,6 +11,7 @@ const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 export const metadata: Metadata = {
   title: "agent-browser",
   description: "Observability dashboard for agent-browser",
+  icons: "./favicon.ico",
 };
 
 export default function RootLayout({

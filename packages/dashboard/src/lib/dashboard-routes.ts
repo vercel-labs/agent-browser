@@ -1,14 +1,14 @@
 /**
  * Centralized route building for dashboard API calls.
- * All routes stay on the current dashboard origin so the UI also works
- * behind forwarded or reverse-proxied URLs.
+ * All routes are relative to the page so the UI also works behind forwarded
+ * or reverse-proxied URLs, including under a path prefix.
  */
 
-/** Build a dashboard API path such as "/api/sessions". */
+/** Build a page-relative dashboard API path such as "./api/sessions". */
 export function getDashboardApiPath(path: string): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   assertDashboardApiPath(normalizedPath);
-  return normalizedPath;
+  return `.${normalizedPath}`;
 }
 
 const ACCESS_TOKEN_FRAGMENT_KEY = "dashboard-access-token";
@@ -58,19 +58,20 @@ export function initializeDashboardAccessToken(): void {
 /** Build the same-origin per-session tabs endpoint proxied through the dashboard. */
 export function getSessionTabsPath(port: number): string {
   assertValidPort(port);
-  return `/api/session/${port}/tabs`;
+  return getDashboardApiPath(`/api/session/${port}/tabs`);
 }
 
 /** Build the same-origin WebSocket URL for a session stream. */
 export function getSessionStreamUrl(port: number): string {
   assertValidPort(port);
-  const streamPath = `/api/session/${port}/stream`;
+  const streamPath = getDashboardApiPath(`/api/session/${port}/stream`);
   if (typeof window === "undefined") {
     return streamPath;
   }
 
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}${streamPath}`;
+  const url = new URL(streamPath, window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
 }
 
 function assertDashboardApiPath(path: string): asserts path is string {

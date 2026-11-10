@@ -3799,6 +3799,9 @@ For reverse-proxied origins, start prints private external access URLs
 containing an unguessable fragment token. Open the matching URL to establish
 the browser session and do not share it. Loopback URLs do not require or
 receive this token. Configure a reverse proxy to redact cookies from logs.
+A reverse proxy can mount the dashboard under a path prefix with a trailing
+slash; strip the prefix before forwarding and insert the path before the
+access URL's fragment.
 Stop the dashboard before changing its port or allowed origins.
 
 Options:

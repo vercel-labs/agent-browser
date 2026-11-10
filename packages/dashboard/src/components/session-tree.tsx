@@ -52,15 +52,15 @@ const ENGINE_LOGOS: Record<string, string> = {
   chrome: "https://svgl.app/library/chrome.svg",
   firefox: "https://svgl.app/library/firefox.svg",
   safari: "https://svgl.app/library/safari.svg",
-  lightpanda: "/lightpanda.svg",
+  lightpanda: "./lightpanda.svg",
 };
 
 const PROVIDER_LOGOS: Record<string, string> = {
-  agentcore: "/providers/agentcore.svg",
-  browserbase: "/providers/browserbase.svg",
-  browserless: "/providers/browserless.svg",
-  "browser-use": "/providers/browser-use.svg",
-  kernel: "/providers/kernel.svg",
+  agentcore: "./providers/agentcore.svg",
+  browserbase: "./providers/browserbase.svg",
+  browserless: "./providers/browserless.svg",
+  "browser-use": "./providers/browser-use.svg",
+  kernel: "./providers/kernel.svg",
 };
 
 const SUPPORTED_ENGINES = ["chrome", "lightpanda", "obscura"] as const;
