@@ -174,6 +174,53 @@ test("releases both streams when initialization fails", async () => {
   assert.equal(server.process.stdout.locked, false);
 });
 
+for (const mode of ["abort", "timeout", "close"]) {
+  test(`does not send a queued tool call after ${mode}`, async () => {
+    const server = fakeServer(initializeOr((message) => ({ result: message.params })));
+    const serverWriter = server.process.stdin.getWriter();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let started;
+    const blocked = new Promise((resolve) => { started = resolve; });
+    const stdin = new WritableStream({
+      async write(chunk) {
+        const message = JSON.parse(new TextDecoder().decode(chunk));
+        if (message.params?.name === "first") {
+          started();
+          await gate;
+        }
+        await serverWriter.write(chunk);
+      },
+      close: () => serverWriter.close(),
+    });
+    const client = await connectAgentBrowserMcp({ ...server.process, stdin });
+    const first = client.callTool("first");
+    await blocked;
+    const controller = new AbortController();
+    const queued = client.callTool("must-not-run", {}, {
+      signal: controller.signal,
+      ...(mode === "timeout" ? { timeout: 20 } : {}),
+    });
+    const rejected = assert.rejects(queued, mode === "abort" ? /stop/ : mode === "timeout" ? /timed out/ : /closed/);
+    let closing;
+    if (mode === "abort") controller.abort(new Error("stop"));
+    if (mode === "close") {
+      const firstRejected = assert.rejects(first, /closed/);
+      closing = client.close();
+      await firstRejected;
+    }
+    await rejected;
+    release();
+    if (mode !== "close") {
+      await first;
+      assert.deepEqual(await client.callTool("after"), { arguments: {}, name: "after" });
+      closing = client.close();
+    }
+    await closing;
+    assert.equal(server.received.some((message) => message.params?.name === "must-not-run"), false);
+  });
+}
+
 test("rejects a failed initialization even when the first write stalls", async () => {
   const process = {
     stdin: new WritableStream({ write: () => new Promise(() => {}) }),
