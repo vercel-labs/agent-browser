@@ -83,6 +83,50 @@ fn standalone_binary_ignores_unrelated_skills_and_loads_home_skill_through_cli_a
 }
 
 #[test]
+fn standalone_binary_serves_embedded_skills_through_cli_and_mcp() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let binary = temp.path().join("agent-browser");
+    fs::create_dir(&home).unwrap();
+    copy_binary(&binary);
+    let core = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../skill-data/core/SKILL.md"),
+    )
+    .unwrap();
+    let core_heading = core.lines().find(|line| line.starts_with("# ")).unwrap();
+
+    let run = |args: &[&str]| {
+        let output = run_output(
+            Command::new(&binary)
+                .args(args)
+                .current_dir(temp.path())
+                .env("HOME", &home)
+                .env_remove("AGENT_BROWSER_SKILLS_DIR"),
+        );
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    assert_eq!(run(&["skills", "get", "core"]), core);
+    assert!(run(&["skills", "list"]).contains("core"));
+    assert!(run(&[
+        "mcp",
+        "call",
+        "agent_browser_skills_get",
+        r#"{"names":["core"]}"#,
+    ])
+    .contains(core_heading));
+
+    let path: serde_json::Value =
+        serde_json::from_str(&run(&["skills", "path", "core", "--json"])).unwrap();
+    assert_eq!(path["data"]["location"], "embedded");
+}
+
+#[test]
 fn skills_get_ref_loads_one_reference_through_cli_and_mcp() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
