@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-use crate::connection::get_socket_dir;
+use crate::connection::{get_socket_dir, is_pid_alive};
 use crate::session_files::SessionFile;
 
 pub(super) fn discover_sessions() -> String {
@@ -107,13 +107,53 @@ fn is_process_alive(pid_path: &Path) -> bool {
         Ok(p) => p,
         Err(_) => return false,
     };
-    #[cfg(unix)]
-    {
-        unsafe { libc::kill(pid as i32, 0) == 0 }
+    // PID zero and negative values have process-group semantics on Unix.
+    // A PID file must identify one process, not a group selected by a cast.
+    if pid == 0 {
+        return false;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
+    #[cfg(unix)]
+    if i32::try_from(pid).is_err() {
+        return false;
+    }
+    is_pid_alive(pid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_liveness_rejects_invalid_pid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.pid");
+        assert!(!is_process_alive(&path));
+        for contents in ["", "invalid", "-1", "0"] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(!is_process_alive(&path), "PID file: {contents:?}");
+        }
+        #[cfg(unix)]
+        for pid in [i32::MAX as u32 + 1, u32::MAX] {
+            std::fs::write(&path, pid.to_string()).unwrap();
+            assert!(!is_process_alive(&path), "PID file: {pid}");
+        }
+    }
+
+    #[test]
+    fn process_liveness_detects_running_and_exited_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.pid");
+        std::fs::write(&path, format!("{}\n", std::process::id())).unwrap();
+        assert!(is_process_alive(&path));
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        std::fs::write(&path, pid.to_string()).unwrap();
+        assert!(!is_process_alive(&path));
     }
 }
