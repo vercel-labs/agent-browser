@@ -2507,6 +2507,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SET_VIEWPORT => call_set_viewport(arguments),
         TOOL_SET_DEVICE => call_one_string(arguments, "set device", "device"),
         TOOL_SET_GEO => call_set_geo(arguments),
+        // Pass canonical on/off values to the shared CLI parser.
         TOOL_SET_OFFLINE => call_set_bool(arguments, "offline", "enabled"),
         TOOL_SET_HEADERS => call_set_headers(arguments),
         TOOL_SET_CREDENTIALS => call_set_credentials(arguments),
