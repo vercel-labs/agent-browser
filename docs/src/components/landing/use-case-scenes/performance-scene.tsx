@@ -5,8 +5,8 @@
 // contained width, so the alignment reads as a conversation. The agent
 // measures, profiles a reload, finds the cause, fixes it and measures again.
 // Lines fade in on one left edge; once they fill the panel, the column
-// scrolls up by whole lines and earlier lines slide out under a black scrim
-// at the panel's top, as a terminal scrolls. Two text styles, blue on the
+// scrolls up by whole lines and earlier lines run up under a gradient scrim
+// at the panel's top and out of its edge, as a terminal scrolls. Two text styles, blue on the
 // finding and the result.
 // Output follows agent-browser's real formats (cli/src/output.rs), abridged.
 import { Field, Stage, type Act } from '../../stageshow/vendor/kit';
@@ -46,7 +46,7 @@ const LINES = STEPS.flatMap((step, s) => step.lines.map((line, i) => ({ ...line,
  * padding to a gutter above the stage's foot). */
 const LINE = 20;
 const GAP = 12;
-const VIEW = 164;
+const VIEW = SCENE_SIZE.height - 80 - 16 - 24;
 const TOPS = LINES.reduce<number[]>((tops, line, i) => [...tops, i === 0 ? 0 : tops[i - 1] + LINE + (line.block ? GAP : 0)], []);
 /** The first line in view with `shown` lines out. The column scrolls by whole
  * lines, so the newest line stays in view and the top line is never cut. */
@@ -55,49 +55,55 @@ const firstFor = (shown: number) => {
   return need <= 0 ? 0 : TOPS.findIndex((top) => top >= need);
 };
 
-/** How long each kind holds before the next line: commands run, words are read. */
-const HOLD: Record<Kind, number> = { cmd: 520, text: 520, key: 1000 };
+/** How long each kind holds before the next line: commands run, words are
+ * read. Brisk, so the result lands about 6.5s after the story opens. */
+const HOLD: Record<Kind, number> = { cmd: 300, text: 340, key: 600 };
+/** The scroll: the column's move (performance-scene.css), then a beat */
+const SCROLL = 400;
 
 /** `shown`: lines written. `first`: the first line in view (the scroll). */
 type State = { shown: number; first: number };
 const initial: State = { shown: 0, first: 0 };
 const POSTER_LINES = LINES.findIndex((line) => line.kind === 'key') + 1;
 const poster: State = { shown: POSTER_LINES, first: firstFor(POSTER_LINES) };
+/** A cued tab opens at the story's start: the request, an empty terminal */
+const SETUP = { at: 'reset', state: initial };
 
-async function reveal(a: Act<State>, from: number, to: number, first: number) {
+/** Writes lines `from` to `to`. With `mark`, the last line is marked as it
+ * appears and its hold is left to the caller. */
+async function reveal(a: Act<State>, from: number, to: number, first: number, mark?: string) {
   for (let i = from; i < to; i++) {
-    // Room first: the column moves up and the top lines slide under the
-    // scrim; only then does the new line fade in at its final place.
+    // Room first: the column moves up under the scrim; only then does the
+    // new line fade in at its final place.
     const next = firstFor(i + 1);
     if (next !== first) {
       first = next;
       await a.set({ first });
-      await a.wait(560);
+      await a.wait(SCROLL);
     }
     await a.set({ shown: i + 1 });
-    await a.wait(HOLD[LINES[i].kind]);
+    if (mark && i === to - 1) a.mark(mark);
+    else await a.wait(HOLD[LINES[i].kind]);
   }
 }
 
 async function script(a: Act<State>) {
   a.mark('resume');
-  await a.wait(200);
-  await reveal(a, POSTER_LINES, LINES.length, poster.first);
-  a.mark('result');
-  await a.wait(1200);
+  await reveal(a, POSTER_LINES, LINES.length, poster.first, 'result');
+  await a.wait(2200);
 
   a.mark('reset');
   await a.set({ shown: 0 });
   await a.wait(200);
   await a.snap(initial);
-  await a.wait(200);
+  await a.wait(100);
   await reveal(a, 0, POSTER_LINES, 0);
   await a.set(poster);
   a.mark('done');
 }
 
 export function PerformanceScene() {
-  const { onPointerEnter, run, ...playback } = useScenePlayback({ script, poster });
+  const { onPointerEnter, run, ...playback } = useScenePlayback({ script, poster, setup: SETUP });
   return (
     <SceneFrame
       kind="performance"
@@ -109,7 +115,7 @@ export function PerformanceScene() {
         {s => <>
           <Field className="ab-perf-input" placeholder="Ask anything" value={REQUEST} />
           <div className="ab-perf-term">
-            <div className="ab-perf-view">
+            <div className="ab-perf-view" style={{ height: VIEW }}>
               <div className="ab-perf-lines" style={{ transform: `translateY(${-TOPS[s.first]}px)` }}>
                 {LINES.map((line, i) => (
                   <div key={i} className="ab-perf-line" data-kind={line.kind} data-on={s.shown > i || undefined} style={{ top: TOPS[i] }}>

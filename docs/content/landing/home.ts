@@ -1,5 +1,5 @@
 import type { ProductContent, Product } from "@/components/landing/product-context";
-import type { AgentUseCasesProps } from "@/components/landing/agent-use-cases";
+import type { AgentUseCasesProps } from "@/components/landing/agent-use-case-tabs";
 import type { AgentTweetWallProps } from "@/components/landing/agent-tweet-wall";
 
 const home = {
@@ -9,15 +9,14 @@ const home = {
   },
   "hero": {
     "defaultProduct": "browser",
+    "description": "Give your agent the tools to browse, use apps, and check its own work. Open source and ready for the coding agent you already use.",
     "browser": {
-      "headline": "Browser automation built for agents",
-      "description": "Give your agent a browser. It can test your app, grab a screenshot, and check its work with the tools you already use.",
+      "headline": "Browser automation built for any agent",
       "docsHref": "/docs",
       "prompt": "Read the agent-browser docs: https://agent-browser.dev/"
     },
     "desktop": {
-      "headline": "Desktop automation built for agents",
-      "description": "Give your agent the desktop. It can use native apps, click through menus, and finish the job when it leaves the browser.",
+      "headline": "Desktop automation built for any agent",
       "docsHref": "https://agent-browser.dev/desktop",
       "prompt": "Read the agent-desktop docs: https://agent-browser.dev/desktop"
     }
@@ -26,19 +25,9 @@ const home = {
     "heading": "Let your agent act, verify, and continue its work without you",
     "items": [
       {
-        "title": "Sign in once, stay signed in",
-        "visual": "sign-in",
-        "description": "Keep **logins and cookies** across runs, so your agent can pick up where it left off."
-      },
-      {
-        "title": "Run performance tests",
-        "visual": "performance",
-        "description": "Measure **Core Web Vitals**, profile a reload to find what’s slow, and measure again after the fix."
-      },
-      {
-        "title": "Take screenshots and recordings",
-        "visual": "verify",
-        "description": "Capture screenshots to check your agent’s work. Record **video at up to 60 fps** when the motion matters."
+        "title": "Put your agent in control",
+        "visual": "drive",
+        "description": "Let your agent click, type, and complete tasks in the browser. With **agent-desktop**, carry the work into native apps."
       },
       {
         "title": "Read only what matters",
@@ -46,19 +35,29 @@ const home = {
         "description": "Use **compact snapshots** of page controls, or map a window with agent-desktop and inspect only the region you need."
       },
       {
-        "title": "Mock and inspect the network",
-        "visual": "network",
-        "description": "Inspect requests, block scripts, or **mock API responses** to reach the states your app rarely hits."
+        "title": "Take screenshots and recordings",
+        "visual": "verify",
+        "description": "Capture screenshots to check your agent’s work. Record **video at up to 60 fps** when the motion matters."
+      },
+      {
+        "title": "Run performance tests",
+        "visual": "performance",
+        "description": "Measure **Core Web Vitals**, profile a reload to find what’s slow, and measure again after the fix."
       },
       {
         "title": "Run agents side by side",
         "visual": "sessions",
         "description": "Run agents in **separate browser sessions**, or coordinate them on one desktop with agent-desktop, each with its own cursor."
+      },
+      {
+        "title": "Mock and inspect the network",
+        "visual": "network",
+        "description": "Inspect requests, block scripts, or **mock API responses** to reach the states your app rarely hits."
       }
     ]
   },
   "tweets": {
-    "heading": "The open source tools developers give their agents",
+    "heading": "The open source tools developers give their\u00a0agents",
     "posts": [
       {
         "id": "2040067262124601358",
@@ -145,7 +144,7 @@ const home = {
   }
 } satisfies {
   metadata: { title: string; description: string };
-  hero: { defaultProduct: Product; browser: ProductContent; desktop: ProductContent };
+  hero: { defaultProduct: Product; description: string; browser: ProductContent; desktop: ProductContent };
   useCases: AgentUseCasesProps;
   tweets: AgentTweetWallProps;
   closing: { headline: string };

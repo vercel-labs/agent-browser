@@ -4,7 +4,7 @@ import { AgentClosing } from '@/components/landing/agent-closing';
 import { AgentHero } from '@/components/landing/agent-hero';
 import { Container } from '@/components/landing/compat';
 import { AgentTweetWall } from '@/components/landing/agent-tweet-wall';
-import { AgentUseCases, type AgentUseCasesProps } from '@/components/landing/agent-use-cases';
+import { AgentUseCaseTabs, type AgentUseCasesProps } from '@/components/landing/agent-use-case-tabs';
 import { pageMetadata } from '@/lib/page-metadata';
 
 const baseMetadata = pageMetadata('');
@@ -29,8 +29,8 @@ export default async function Home({ params }: { params: Promise<{ lang: string 
   return (
     <main className="agent-landing" id="main-content">
       <Container>
-        <AgentHero />
-        <AgentUseCases {...(page.useCases as AgentUseCasesProps)} />
+        <AgentHero description={page.hero.description} />
+        <AgentUseCaseTabs {...(page.useCases as AgentUseCasesProps)} />
         <AgentTweetWall {...page.tweets} />
         <AgentClosing {...page.closing} />
       </Container>

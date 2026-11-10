@@ -32,7 +32,7 @@ function ProductSwitcher({ id }: { id: string }) {
   );
 }
 
-export function AgentHero() {
+export function AgentHero({ description }: { description: string }) {
   const { selected, products } = useProduct();
   const id = useId();
 
@@ -51,17 +51,9 @@ export function AgentHero() {
             <div className="grid max-w-[15ch] text-heading-40 @md:text-heading-64 text-balance">
               <h1 id={`${id}-heading`} className="m-0 col-start-1 row-start-1">{products[selected].headline}</h1>
             </div>
-            <div className="mt-6 grid max-w-[46ch] text-copy-18 text-gray-900 text-pretty">
-              {(['browser', 'desktop'] as const).map((key) => (
-                <p
-                  key={key}
-                  aria-hidden={key !== selected}
-                  className={`col-start-1 row-start-1 ${key !== selected ? 'invisible' : ''}`}
-                >
-                  {products[key].description}
-                </p>
-              ))}
-            </div>
+            <p className="mt-6 max-w-[46ch] text-copy-18 text-gray-900 text-pretty">
+              {description}
+            </p>
             <div className="mt-6 @md:mt-8">
               <ProductActions showDocsLink={false} />
             </div>

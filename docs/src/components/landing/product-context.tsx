@@ -5,7 +5,6 @@ import { createContext, useContext, useState, type ReactNode } from 'react';
 export type Product = 'browser' | 'desktop';
 export type ProductContent = {
   headline: string;
-  description: string;
   prompt: string;
   docsHref: string;
 };

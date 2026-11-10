@@ -5,7 +5,8 @@ import { useHairline } from './hairline';
 import '../../stageshow/host-layers.css';
 import './scenes.css';
 
-export const SCENE_SIZE = { width: 400, height: 300, compact: { below: 390, width: 358, height: 300 }, fill: true };
+// Keep the width (and therefore type scale) fixed; shorten the composition instead.
+export const SCENE_SIZE = { width: 400, height: 250, compact: { below: 390, width: 358, height: 250 }, fill: true };
 
 export function SceneFrame({ kind, caption, children, onPointerEnter }: {
   kind: string; caption: string; children: ReactNode; onPointerEnter?: PointerEventHandler<HTMLElement>;

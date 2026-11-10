@@ -1,0 +1,101 @@
+/* Three windows and three agents resizing each other (sessions-scene.tsx).
+   Kept outside the upstream kit. The /side-by-side arena has its own
+   stylesheet, sessions-arena-scene.css. */
+.ab-feature-scene .ab-sessions {
+  /* Gemini's tall window runs off the card's right edge; the card crops it */
+  overflow: hidden;
+
+  /* A window: placed and sized every frame from its edges; it lays out at
+     each size rather than scaling */
+  & .ab-sessions-window {
+    position: absolute;
+    box-shadow: var(--ss-shadow-window);
+  }
+
+  /* Empty on purpose: chrome over a plain white body */
+  & .ab-sessions-body {
+    background: var(--ss-surface);
+  }
+
+  /* The edge being held: a quiet 2px Geist line centred in the gap, running
+     only the length its windows share, short of their rounded corners */
+  & .ab-sessions-edge {
+    position: absolute;
+    z-index: 10;
+    border-radius: 1px;
+    background: var(--ds-gray-alpha-500, rgba(0, 0, 0, .21));
+    pointer-events: none;
+  }
+
+  /* One agent on the stage's own coordinates */
+  & .ab-sessions-actor {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    pointer-events: none;
+  }
+
+  /* The agents' pointers and labels, as the hero draws them: the Vercel
+     arrow in each brand's color and a 22px disc with its mark. True screen
+     pixels whatever the card's fit, scaled from the hotspot by
+     --ss-unscale. */
+  & .ab-peer {
+    --peer-color: var(--ds-gray-1000, #171717);
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 20;
+    pointer-events: none;
+  }
+  & .ab-peer[data-peer='claude'] { --peer-color: #d97757; }
+  & .ab-peer[data-peer='gemini'] { --peer-color: #4285f4; }
+  & .ab-peer .ab-vercel-arrow-fill { fill: var(--peer-color); }
+
+  & .ab-peer-body {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform: scale(var(--ss-unscale, 1));
+    transform-origin: 0 0;
+  }
+  /* The hotspot at the origin, the arrow turned about its tip to the agent's
+     heading (--rot), set every frame from the scene's clock */
+  & .ab-peer-pointer {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform: rotate(var(--rot, 0deg));
+    transform-origin: 0 0;
+  }
+  & .ab-peer-arrow { position: absolute; left: -3px; top: -3px; }
+
+  /* The label is the agent's body, straight behind the arrow */
+  & .ab-peer-tile {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    color: var(--ds-background-100, #fff);
+    transform: translate(var(--lx, 12px), var(--ly, 16px));
+  }
+  /* The avatar and its mark squeeze together, about the disc's centre, set
+     every frame from the effort; the arrow stays rigid */
+  & .ab-peer-squash {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    transform-origin: 50% 50%;
+  }
+  & .ab-peer-disc {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: var(--peer-color);
+    box-shadow: var(--ds-shadow-small, 0 2px 2px rgba(0, 0, 0, .04));
+  }
+  & .ab-peer-squash > :not(.ab-peer-disc) { position: relative; }
+}

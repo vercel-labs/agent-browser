@@ -38,6 +38,6 @@ export function Marquee({ box, radius, fromEnd = false, className, ...data }: {
       `M ${i} ${r} V ${h - r} ${ccw(r, h - i)} H ${w - r}`,
     ];
   return <svg {...data} className={className} width={w} height={h} style={{ position: 'absolute', left: box.x, top: box.y, overflow: 'visible' }} aria-hidden="true">
-    {paths.map((d) => <path key={d.slice(0, 12)} d={d} />)}
+    {paths.map((d, i) => <path key={i} d={d} />)}
   </svg>;
 }

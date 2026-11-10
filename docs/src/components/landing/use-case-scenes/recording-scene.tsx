@@ -4,7 +4,8 @@
 // marquees and carried items: the agent draws a box around part of a page,
 // the region flashes as it is captured, and a copy of it flies to sit under
 // the cursor's label. A second capture stacks its copy on the first, then the
-// stack fades as the next selection begins. The cycle pauses halfway through it.
+// stack fades as the next selection is drawn. The cycle rests on that first
+// selection fully drawn, so each capture is one unbroken corner-to-corner drag.
 import { Bar, Stage, type Act, type Point } from '../../stageshow/vendor/kit';
 import type { ComponentType } from 'react';
 import { SceneFrame, SCENE_SIZE } from './scene-frame';
@@ -25,13 +26,13 @@ type State = { preview: boolean; box: Box | null; fromEnd: boolean; radius: numb
 /** Copies rest beneath the label (left 10, 24 wide), right-aligned to its
  * right edge so the stack hangs back over the page and stays in frame when the
  * cursor works near the page's right side. Offsets are from the hotspot. */
-const SHOT = { right: 34, top: 48 };
+const SHOT = { right: 34, top: 44 };
 const CHART_SCALE = 0.5;
 const PAD = 8;
 /** The tile's corner radius (.ab-shot-tile in the CSS). The marquee sits PAD
  * outside what it captures, so its corners are concentric at radius + PAD. */
 const TILE_RADIUS = 8;
-const TILE = { w: 168, h: 96 };
+const TILE = { w: 168, h: 80 };
 const COPY_W = TILE.w * CHART_SCALE;
 /** Where each copy rests: fanned like a deck of cards. Nearly the same size,
  * both turned clockwise about their top-left corner; the front one sits a
@@ -52,7 +53,9 @@ const resting = (rest: Rest, region: { w: number; h: number }): Copy => {
   return { carry: 'held', from: null, left: rest.right - rest.w, top: rest.top, w: rest.w, h: region.h * scale, scale, rotate: rest.rotate };
 };
 const initial: State = { preview: false, box: null, fromEnd: false, radius: PAD, marquee: false, shot: false, flash: 0, para: none, chart: none };
-/** Halfway through drawing the first capture, in either responsive layout. */
+/** The first capture's selection drawn and still held, its cursor on the far
+ * corner, in either responsive layout. The cycle starts and ends here, so the
+ * drag that draws it is never split across the loop seam. */
 const poster: State = {
   ...initial,
   preview: true,
@@ -70,15 +73,16 @@ const boxFrom = (start: Point, at: Point): Box => {
 
 async function script(a: Act<State>) {
   a.mark('resume');
-  await a.wait(200);
+  // A short beat after the drag's release, as the second capture has.
+  await a.wait(60);
   const tile = a.rect('tile');
   const para = a.rect('para');
   const tileStart = { x: tile.x - PAD, y: tile.y - PAD };
-  const tileMiddle = { x: tile.x + tile.width / 2, y: tile.y + tile.height / 2 };
+  const tileEnd = { x: tile.x + tile.width + PAD, y: tile.y + tile.height + PAD };
 
-  /** Draw the marquee from one corner to the opposite one. */
-  const select = async (start: Point, to: Point, radius: number, duration = 850, resume = false) => {
-    if (!resume) await a.move(start, { duration: 700 });
+  /** Move to one corner, then draw the marquee to the opposite one in one drag. */
+  const select = async (start: Point, to: Point, radius: number, duration = 850) => {
+    await a.move(start, { duration: 700 });
     let end = start;
     const fromEnd = to.x < start.x;
     await a.drag(to, (at) => {
@@ -106,8 +110,10 @@ async function script(a: Act<State>) {
     await a.set({ marquee: false });
   };
 
-  // Finish the half-drawn selection already shown in the poster.
-  const end1 = await select(tileStart, { x: tile.x + tile.width + PAD, y: tile.y + tile.height + PAD }, TILE_RADIUS + PAD, 425, true);
+  // The poster's selection is already drawn (measured at render); hand it to
+  // the state as the same box so the flash can size to it, then capture.
+  a.put({ preview: false, box: boxFrom(tileStart, tileEnd), fromEnd: false });
+  const end1 = tileEnd;
   a.mark('capture');
   await fly('chart', await capture({ x: tile.x, y: tile.y, w: tile.width, h: tile.height }, end1, 1, BACK));
   // The cursor holds still until the copy has landed, so the flight is one arc.
@@ -126,13 +132,14 @@ async function script(a: Act<State>) {
   await a.move({ x: tile.x + tile.width * 0.5, y: end2.y + 6 }, { duration: 1400 });
   await a.wait(250);
 
-  // Clear the captures, then draw only the first half of the next selection.
+  // Clear the captures, then draw the next first selection in one drag,
+  // ending on the poster.
   a.mark('reset');
   await a.set(s => ({ para: { ...s.para, carry: 'gone' }, chart: { ...s.chart, carry: 'gone' } }));
   await a.wait(350);
   await a.snap(initial);
   a.mark('select');
-  await select(tileStart, tileMiddle, TILE_RADIUS + PAD, 425);
+  await select(tileStart, tileEnd, TILE_RADIUS + PAD);
   await a.set(poster);
   await a.cursor('pointer');
   a.mark('done');
@@ -166,15 +173,28 @@ function Carried({ copy, Body }: { copy: Copy; Body: ComponentType<{ w: number; 
   </span>;
 }
 
+/** A cued host opens on the bare page and plays the whole story. Cued at
+ * `select`, past the reset's clear and wait (invisible from this state), so
+ * the hand sets off as the tab opens. */
+const setup = { at: 'select', state: initial };
+/** Where the drift leaves the hand at `reset`, as a fraction of the tile: its
+ * middle, 6 below the paragraph's selection corner (the paragraph is 4 below
+ * the tile's top and 38 tall, its marquee PAD outside, on an 80-tall tile). */
+const RESET_AT = { at: 'tile', x: 0.5, y: (4 + 38 + PAD + 6) / TILE.h };
+/** Where the poster leaves it: on the first selection's far corner. */
+const POSTER_AT = { at: 'tile', x: 1 + PAD / TILE.w, y: 1 + PAD / TILE.h };
+
 export function RecordingScene() {
-  const { onPointerEnter, run, ...playback } = useScenePlayback({ script, poster });
+  const { onPointerEnter, run, ...playback } = useScenePlayback({ script, poster, setup });
+  // Skipped beats never move the hand, so it opens where that state leaves it
+  const cursorAt = playback.initial === initial ? RESET_AT : POSTER_AT;
   return <SceneFrame kind="verify" onPointerEnter={onPointerEnter} caption="An agent draws dashed boxes around a chart and then a paragraph on an abstract page, capturing each with a brief blue flash. The screenshots stack beneath its cursor.">
-    <Stage key={run} {...SCENE_SIZE} {...playback} poster={poster} theme="light" unframed className="look-vercel ab-recording" cursor={{ at: { at: 'tile', x: .5, y: .5 }, style: 'arrow', still: true, idle: false }}>
+    <Stage key={run} {...SCENE_SIZE} {...playback} poster={poster} theme="light" unframed className="look-vercel ab-recording" cursor={{ at: cursorAt, style: 'arrow', still: true, idle: false }}>
       {(s, rect) => {
         const tile = rect('tile');
         let box = s.box;
         if (s.preview) {
-          box = tile.width > 0 ? boxFrom({ x: tile.x - PAD, y: tile.y - PAD }, { x: tile.x + tile.width / 2, y: tile.y + tile.height / 2 }) : null;
+          box = tile.width > 0 ? boxFrom({ x: tile.x - PAD, y: tile.y - PAD }, { x: tile.x + tile.width + PAD, y: tile.y + tile.height + PAD }) : null;
         }
         return <>
         <div className="ab-shot-page" data-target="page">
@@ -183,7 +203,10 @@ export function RecordingScene() {
             <div className="ab-shot-tile" data-target="tile"><ChartTile /></div>
             <div className="ab-shot-lines ab-shot-side" data-target="para"><ParaLines /></div>
           </div>
-          <div className="ab-shot-lines"><Bar w={252} h={6} /><Bar w={164} h={6} /></div>
+          {/* Three lines make the page 200 tall: centered in the 250 stage (25 above
+              and below), and the tile's corner stays high enough that the copy
+              hanging from it at the first capture clears the stage's foot. */}
+          <div className="ab-shot-lines"><Bar w={252} h={6} /><Bar w={216} h={6} /><Bar w={164} h={6} /></div>
         </div>
         {box && <Marquee box={box} radius={s.radius} fromEnd={s.fromEnd} className="ab-shot-marquee" data-show={s.marquee || undefined} data-shot={s.shot || undefined} />}
         {s.box && s.flash > 0 && <div key={s.flash} className="ab-shot-flash" style={{ left: s.box.x, top: s.box.y, width: s.box.w, height: s.box.h, borderRadius: s.radius }} />}

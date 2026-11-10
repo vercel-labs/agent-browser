@@ -802,8 +802,8 @@ test('homepage introduces both tools while keeping the original introduction rea
     text(match[1])
   );
   assert.equal(headings.length, 1);
-  assert.equal(headings[0], 'Browser automation built for agents');
-  for (const section of ['AgentUseCases', 'AgentTweetWall', 'AgentClosing'])
+  assert.equal(headings[0], 'Browser automation built for any agent');
+  for (const section of ['AgentUseCaseTabs', 'AgentTweetWall', 'AgentClosing'])
     assert.ok(html.includes(`data-element="${section}"`), section);
   assert.ok(!html.includes('data-element="GridSection"'));
   assert.ok(!html.includes('data-element="FeatureSection"'));

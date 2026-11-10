@@ -6,15 +6,15 @@
 }
 
 .ab-feature-scene .ab-recording {
-  & .ab-shot-page { position: absolute; left: 40px; top: 40px; width: 320px; padding: 20px; display: flex; flex-direction: column; gap: 16px; border: var(--ss-hairline, 1px) solid var(--ss-line); border-radius: 12px; background: var(--ss-surface); box-shadow: var(--ss-shadow-card); }
+  & .ab-shot-page { position: absolute; left: 40px; top: 25px; width: 320px; padding: 20px; display: flex; flex-direction: column; gap: 16px; border: var(--ss-hairline, 1px) solid var(--ss-line); border-radius: 12px; background: var(--ss-surface); box-shadow: var(--ss-shadow-card); }
   & .ab-shot-row { display: flex; gap: 16px; }
   & .ab-shot-lines { display: flex; flex-direction: column; gap: 10px; }
   /* Measured as the paragraph's own lines: a margin, not padding, sets it down. */
   & .ab-shot-side { align-self: flex-start; margin-top: 4px; }
 
   /* Keep this radius in step with TILE_RADIUS in recording-scene.tsx. */
-  & .ab-shot-tile { flex: none; width: 168px; height: 96px; border: var(--ss-hairline, 1px) solid var(--ss-line); border-radius: 6px; background: var(--ss-surface); }
-  & .ab-shot-chart { width: 166px; height: 94px; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+  & .ab-shot-tile { flex: none; width: 168px; height: 80px; border: var(--ss-hairline, 1px) solid var(--ss-line); border-radius: 6px; background: var(--ss-surface); }
+  & .ab-shot-chart { width: 166px; height: 78px; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
   & .ab-shot-bars { flex: 1; display: flex; align-items: flex-end; gap: 8px; border-bottom: var(--ss-hairline, 1px) solid var(--ss-line); }
   & .ab-shot-bars > span { flex: 1; background: var(--ds-gray-400); border-radius: 2px 2px 0 0; }
   & .ab-shot-bars > span:last-child { background: var(--ds-gray-800); }
