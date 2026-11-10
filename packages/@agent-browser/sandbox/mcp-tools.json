@@ -3637,7 +3637,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get skill content, including home-directory skills when no package root is found. Package discovery looks for the bundled skill-data/core/SKILL.md file. Pass refs with one skill name to load only those references or templates, such as [\"commands\"].",
+      "description": "Get skill content, including home-directory skills when no package root is found. Package discovery looks for the bundled skill-data/core/SKILL.md file. Without either, serves the skills compiled into the binary. Pass refs with one skill name to load only those references or templates, such as [\"commands\"].",
       "inputSchema": {
         "properties": {
           "all": {
@@ -3701,7 +3701,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Print skill directory path.",
+      "description": "Print skill directory path, or report that skills are embedded in the binary.",
       "inputSchema": {
         "properties": {
           "name": {
