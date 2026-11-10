@@ -16136,6 +16136,27 @@ async fn e2e_firefox_pointer_motion_follows_input_mode() {
         json!(0),
         "a dialog opened on the way stops the press"
     );
+
+    firefox_eval(&mut state, "window.ups = 0; document.addEventListener('pointerup', () => ups++, true); document.querySelector('#drag-target').addEventListener('pointerover', () => confirm('drop?'), { once: true }); true").await;
+    let blocked = firefox_command(
+        &mut state,
+        json!({ "id": "dialog-drag", "action": "drag", "source": "#drag-source", "target": "#drag-target" }),
+    )
+    .await;
+    assert_success(&blocked);
+    assert_eq!(get_data(&blocked)["dialogOpened"], true, "{blocked}");
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "accept", "action": "dialog", "response": "accept" }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "ups").await,
+        json!(1),
+        "a drag a dialog interrupted releases the button once the dialog closes"
+    );
     firefox_close(&mut state).await;
 }
 
@@ -17879,6 +17900,7 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
     )
     .await;
     assert_success(&resp);
+    firefox_eval(&mut state, "localStorage.setItem('jar', 'default')").await;
 
     let resp = firefox_command(&mut state, json!({ "id": "w1", "action": "window_new" })).await;
     assert_success(&resp);
@@ -17907,6 +17929,26 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
             .contains("isolated_window=2"),
         "a cookie set in the new window must stay in its own jar"
     );
+
+    firefox_eval(&mut state, "localStorage.setItem('jar', 'window')").await;
+    firefox_open(&mut state, &format!("{}/two", fixture.other)).await;
+    let state_path = tmp.path().join("window-state.json");
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "sv", "action": "state_save", "path": state_path.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&resp);
+    let saved: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    let origin = fixture.url.trim_end_matches('/');
+    assert!(
+        saved["origins"].as_array().unwrap().iter().any(|entry| {
+            entry["origin"] == origin
+                && entry["localStorage"] == json!([{ "name": "jar", "value": "window" }])
+        }),
+        "state save from an isolated window must read that window's storage: {saved}"
+    );
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
 
     firefox_eval(&mut state, "window.open(location.href); 'opened'").await;
     let tabs = firefox_command(&mut state, json!({ "id": "p1", "action": "tab_list" })).await;
