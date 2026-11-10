@@ -10,6 +10,7 @@ use crate::native::element::{
     ELEMENT_STYLES_ALL_JS, ELEMENT_TEXT_JS, ELEMENT_VISIBLE_JS,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 const TEMP_NODE_ID: i64 = -1;
 
@@ -521,8 +522,94 @@ const FRAME_WINDOW_JS: &str = r#"function() {
     return { label: this.name || this.id || this.src || '', window: w };
 }"#;
 
-/// `frame <selector>`: make the iframe's browsing context active for later commands.
+const FRAME_NAMES_JS: &str = r#"() => Array.from(document.querySelectorAll('iframe,frame')).map(f => [f.name, f.contentWindow])"#;
+
+/// Frame names of every descendant context, keyed by context id, read from the frame elements that own them.
+async fn frame_names(
+    ff: &super::session::FirefoxSession,
+    tree: &Value,
+) -> Result<HashMap<String, String>, String> {
+    let mut names = HashMap::new();
+    let mut pending: Vec<&Value> = tree["contexts"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .collect();
+    while let Some(context) = pending.pop() {
+        let Some(id) = context["context"].as_str() else {
+            continue;
+        };
+        let Some(children) = context["children"].as_array() else {
+            continue;
+        };
+        pending.extend(children);
+        let frames = ff
+            .bidi
+            .call_function(id, FRAME_NAMES_JS, None, vec![])
+            .await?;
+        for frame in frames.as_array().into_iter().flatten() {
+            if let (Some(name), Some(child)) = (frame[0].as_str(), frame[1].as_str()) {
+                names.insert(child.to_string(), name.to_string());
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// The first context of `tree` in frame-tree order whose frame name equals `name` or whose URL contains `url`.
+fn find_context(
+    tree: &Value,
+    name: Option<&str>,
+    url: Option<&str>,
+    names: &HashMap<String, String>,
+) -> Option<String> {
+    let context = tree["context"].as_str()?;
+    let by_name = name.is_some_and(|name| names.get(context).is_some_and(|frame| frame == name));
+    let by_url = url.is_some_and(|url| {
+        tree["url"]
+            .as_str()
+            .is_some_and(|frame| frame.contains(url))
+    });
+    if by_name || by_url {
+        return Some(context.to_string());
+    }
+    tree["children"]
+        .as_array()?
+        .iter()
+        .find_map(|child| find_context(child, name, url, names))
+}
+
+/// `frame`: make the iframe matched by selector, name or url the active browsing context for later commands.
 pub async fn frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let name = cmd.get("name").and_then(Value::as_str);
+    let url = cmd.get("url").and_then(Value::as_str);
+    if cmd.get("selector").is_none() && (name.is_some() || url.is_some()) {
+        let ff = session(state)?;
+        let tree = ff
+            .bidi
+            .send(
+                "browsingContext.getTree",
+                json!({"root": ff.contexts.active_tab()}),
+            )
+            .await?;
+        let names = match name {
+            Some(_) => frame_names(ff, &tree).await?,
+            None => HashMap::new(),
+        };
+        let context = tree["contexts"]
+            .as_array()
+            .and_then(|roots| {
+                roots
+                    .iter()
+                    .find_map(|root| find_context(root, name, url, &names))
+            })
+            .ok_or_else(|| "Frame not found".to_string())?;
+        ff.contexts.record(&tree["contexts"][0]);
+        ff.contexts.activate(&context);
+        state.active_frame_id = Some(context);
+        return Ok(json!({ "frame": name.or(url).unwrap_or("frame") }));
+    }
     let sel = selector(cmd)?;
     let from_ref = parse_ref(sel).is_some();
     let target = resolve_target(state, sel).await?;
@@ -541,7 +628,9 @@ pub async fn frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         .filter(|label| !label.is_empty())
         .unwrap_or(sel)
         .to_string();
-    ff.contexts.activate(&window);
+    ff.contexts
+        .record(&json!({"context": window, "parent": target.context}));
+    ff.contexts.activate(window);
     state.active_frame_id = Some(window.to_string());
     Ok(json!({ "frame": label }))
 }

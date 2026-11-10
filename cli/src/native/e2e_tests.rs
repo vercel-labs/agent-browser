@@ -15266,6 +15266,60 @@ async fn firefox_open(state: &mut DaemonState, url: &str) {
 
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_snapshot_refs_cursor_interactive() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        r#"document.body.innerHTML = '<div onclick="window.__clicked = true">Clickable div</div>'
+          + '<span style="cursor:pointer">Pointer span</span>'
+          + '<div tabindex="0">Focusable div</div>'
+          + '<label style="cursor:pointer">Sample card<input type="radio" style="display:none"></label>'; 0"#,
+    )
+    .await;
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "snap", "action": "snapshot", "interactive": true }),
+    )
+    .await;
+    assert_success(&resp);
+    let tree = get_data(&resp)["snapshot"].as_str().unwrap().to_string();
+    let ref_for = |text: &str| {
+        let line = tree
+            .lines()
+            .find(|line| line.contains(&format!("{text:?}")))
+            .unwrap_or_else(|| panic!("no snapshot line for {text}: {tree}"));
+        let id: String = line
+            .split("ref=")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{text} has no ref: {tree}"))
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        assert!(!id.is_empty(), "{text} has no ref: {tree}");
+        format!("@{id}")
+    };
+    let clickable = ref_for("Clickable div");
+    ref_for("Pointer span");
+    ref_for("Focusable div");
+    ref_for("Sample card");
+
+    assert_success(&firefox_act(&mut state, "click", &clickable, json!({})).await);
+    assert_eq!(
+        firefox_eval(&mut state, "window.__clicked === true").await,
+        true
+    );
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_role_selector_semantics() {
     required_firefox_binary();
     let tmp = tempfile::tempdir().unwrap();
@@ -15733,6 +15787,63 @@ async fn e2e_firefox_frame_mouse_uses_local_coordinates() {
             ["wheel", 58, 58, "target"]
         ])
     );
+    firefox_close(&mut state).await;
+}
+
+/// `frame` reaches a child frame by name and by url, and reports Chrome's not-found error.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_frame_by_name_and_url() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    let frame_url = format!("{}/frame.html", fixture.other);
+    firefox_eval(
+        &mut state,
+        &format!(
+            "new Promise(resolve => {{ document.body.innerHTML = '<iframe name=alpha srcdoc=\"<p>alpha text</p>\"></iframe><iframe name=beta src=\"{frame_url}\"></iframe>'; const frames = Array.from(document.querySelectorAll('iframe')); let left = frames.length; for (const frame of frames) frame.addEventListener('load', () => {{ if (--left === 0) resolve(true); }}); }})"
+        ),
+    )
+    .await;
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "by-name", "action": "frame", "name": "alpha" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["frame"], json!("alpha"));
+    assert_eq!(
+        firefox_eval(&mut state, "document.body.textContent").await,
+        json!("alpha text")
+    );
+
+    assert_success(
+        &firefox_command(&mut state, json!({ "id": "main", "action": "mainframe" })).await,
+    );
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "by-url", "action": "frame", "url": frame_url }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["frame"], json!(frame_url));
+    assert_eq!(
+        firefox_eval(&mut state, "document.querySelector('button').textContent").await,
+        json!("Frame button")
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "missing", "action": "frame", "name": "gamma" }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(resp["error"], json!("Frame not found"));
     firefox_close(&mut state).await;
 }
 

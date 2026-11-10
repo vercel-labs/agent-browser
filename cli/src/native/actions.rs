@@ -8557,20 +8557,9 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .get("eventType")
         .and_then(|v| v.as_str())
         .unwrap_or("keyDown");
-    let key = cmd.get("key").and_then(|v| v.as_str());
-    let code = cmd.get("code").and_then(|v| v.as_str());
-    let text = cmd.get("text").and_then(|v| v.as_str());
 
     let mut params = json!({ "type": event_type });
-    if let Some(k) = key {
-        params["key"] = Value::String(k.to_string());
-    }
-    if let Some(c) = code {
-        params["code"] = Value::String(c.to_string());
-    }
-    if let Some(t) = text {
-        params["text"] = Value::String(t.to_string());
-    }
+    raw_key(cmd).apply(&mut params);
 
     mgr.client
         .send_command("Input.dispatchKeyEvent", Some(params), Some(&session_id))
@@ -15125,6 +15114,82 @@ fn primary_button_from_mask(buttons: i32) -> &'static str {
     }
 }
 
+/// The key fields a raw keyboard command may carry: logical key, physical code
+/// and text.
+pub(crate) struct RawKey<'a> {
+    pub key: Option<&'a str>,
+    pub code: Option<&'a str>,
+    pub text: Option<&'a str>,
+}
+
+impl RawKey<'_> {
+    /// Writes the fields the command carried into a CDP key event.
+    pub(crate) fn apply(&self, params: &mut Value) {
+        for (name, value) in [("key", self.key), ("code", self.code), ("text", self.text)] {
+            if let Some(value) = value {
+                params[name] = Value::String(value.to_string());
+            }
+        }
+    }
+}
+
+pub(crate) fn raw_key(cmd: &Value) -> RawKey<'_> {
+    RawKey {
+        key: cmd.get("key").and_then(Value::as_str),
+        code: cmd.get("code").and_then(Value::as_str),
+        text: cmd.get("text").and_then(Value::as_str),
+    }
+}
+
+/// The fields a raw mouse command may carry.
+pub(crate) struct RawMouse<'a> {
+    pub event_type: &'a str,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub button: Option<&'a str>,
+    pub buttons: Option<i32>,
+    pub click_count: Option<i32>,
+    pub delta_x: Option<f64>,
+    pub delta_y: Option<f64>,
+    pub modifiers: Option<i32>,
+}
+
+pub(crate) fn raw_mouse(cmd: &Value) -> RawMouse<'_> {
+    let as_i32 = |value: Option<&Value>| value.and_then(Value::as_i64).map(|value| value as i32);
+    RawMouse {
+        event_type: cmd
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("mouseMoved"),
+        x: cmd.get("x").and_then(Value::as_f64),
+        y: cmd.get("y").and_then(Value::as_f64),
+        button: cmd.get("button").and_then(Value::as_str),
+        buttons: as_i32(cmd.get("buttons")),
+        click_count: as_i32(cmd.get("clickCount")),
+        delta_x: cmd.get("deltaX").and_then(Value::as_f64),
+        delta_y: cmd.get("deltaY").and_then(Value::as_f64),
+        modifiers: as_i32(cmd.get("modifiers")),
+    }
+}
+
+/// Returns the buttons held after a raw mouse event: an explicit mask wins over
+/// the event's own press or release of `button`.
+pub(crate) fn next_mouse_buttons(
+    held: i32,
+    event_type: &str,
+    button: Option<&str>,
+    buttons: Option<i32>,
+) -> i32 {
+    if let Some(buttons) = buttons {
+        return buttons;
+    }
+    match event_type {
+        "mousePressed" => held | mouse_button_mask(button.unwrap_or("left")),
+        "mouseReleased" => held & !mouse_button_mask(button.unwrap_or("left")),
+        _ => held,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_mouse_event_params(
     mouse_state: &mut MouseState,
@@ -15143,18 +15208,7 @@ fn build_mouse_event_params(
     mouse_state.x = x;
     mouse_state.y = y;
 
-    let mut next_buttons = buttons.unwrap_or(mouse_state.buttons);
-    if buttons.is_none() {
-        match event_type {
-            "mousePressed" => {
-                next_buttons |= mouse_button_mask(button.unwrap_or("left"));
-            }
-            "mouseReleased" => {
-                next_buttons &= !mouse_button_mask(button.unwrap_or("left"));
-            }
-            _ => {}
-        }
-    }
+    let next_buttons = next_mouse_buttons(mouse_state.buttons, event_type, button, buttons);
     mouse_state.buttons = next_buttons;
 
     DispatchMouseEventParams {
@@ -15177,28 +15231,20 @@ fn build_mouse_event_params(
 async fn handle_input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    let event_type = cmd
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("mouseMoved");
+    let raw = raw_mouse(cmd);
+    let event_type = raw.event_type;
     let mut mouse_state = state.mouse_state;
     let params = build_mouse_event_params(
         &mut mouse_state,
         event_type,
-        cmd.get("x").and_then(|v| v.as_f64()),
-        cmd.get("y").and_then(|v| v.as_f64()),
-        cmd.get("button").and_then(|v| v.as_str()),
-        cmd.get("buttons")
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32),
-        cmd.get("clickCount")
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32),
-        cmd.get("deltaX").and_then(|v| v.as_f64()),
-        cmd.get("deltaY").and_then(|v| v.as_f64()),
-        cmd.get("modifiers")
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32),
+        raw.x,
+        raw.y,
+        raw.button,
+        raw.buttons,
+        raw.click_count,
+        raw.delta_x,
+        raw.delta_y,
+        raw.modifiers,
     );
 
     mgr.client
@@ -15220,11 +15266,7 @@ async fn handle_input_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value
         .unwrap_or("keyDown");
 
     let mut params = json!({ "type": event_type });
-    for key in &["key", "code", "text"] {
-        if let Some(v) = cmd.get(*key) {
-            params[*key] = v.clone();
-        }
-    }
+    raw_key(cmd).apply(&mut params);
 
     mgr.client
         .send_command("Input.dispatchKeyEvent", Some(params), Some(&session_id))

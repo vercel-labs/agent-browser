@@ -4,12 +4,15 @@ use serde_json::{json, Value};
 
 use super::daemon::session;
 use super::input::{
-    mouse_button_mask, mouse_button_name, pointer_click, pointer_down, pointer_hover,
-    pointer_mousemove, pointer_up, pointer_wheel, touch_event, touch_swipe_path, touch_tap, Origin,
+    modifier_actions, modifier_names, mouse_button_mask, mouse_button_name, pointer_click,
+    pointer_down, pointer_hover, pointer_mousemove, pointer_move_buttons, pointer_up,
+    pointer_wheel, touch_event, touch_swipe_path, touch_tap, Origin,
 };
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
-use crate::native::actions::{DaemonState, MouseState, PendingDialog};
+use crate::native::actions::{
+    next_mouse_buttons, raw_mouse, DaemonState, MouseState, PendingDialog,
+};
 use crate::native::element::{
     intercepted_error, not_actionable_error, ACTIONABILITY_JS, BLOCKER_AT_JS,
 };
@@ -629,7 +632,7 @@ pub async fn swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         10,
     );
     let ff = session(state)?;
-    perform_actions(ff, &ff.contexts.active().to_string(), actions).await?;
+    perform_actions(ff, ff.contexts.active(), actions).await?;
     ff.touches.clear();
 
     Ok(match direction {
@@ -1056,28 +1059,43 @@ pub async fn wheel(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 /// Low-level mouse input, defaulting coordinates to the last known position.
 pub async fn input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     validate_raw_mouse(cmd)?;
-    let event_type = cmd
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("mouseMoved");
+    let raw = raw_mouse(cmd);
     let (x, y) = raw_position(cmd, state).await?;
-    let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
-    let delta_x = cmd.get("deltaX").and_then(Value::as_f64).unwrap_or(0.0);
-    let delta_y = cmd.get("deltaY").and_then(Value::as_f64).unwrap_or(0.0);
-
     let origin = Origin::Viewport { x, y };
-    let actions = match event_type {
-        "mousePressed" => pointer_down(&origin, button),
-        "mouseReleased" => pointer_up(&origin, button),
-        "mouseWheel" => pointer_wheel(&origin, delta_x, delta_y),
-        _ => pointer_hover(&origin),
+    let held = state.mouse_state.buttons;
+    let actions = match raw.event_type {
+        "mouseWheel" => pointer_wheel(
+            &origin,
+            raw.delta_x.unwrap_or(0.0),
+            raw.delta_y.unwrap_or(0.0),
+        ),
+        event_type => pointer_move_buttons(
+            &origin,
+            held,
+            next_mouse_buttons(held, event_type, raw.button, raw.buttons),
+        ),
     };
+    let value = json!({ "dispatched": raw.event_type });
+    let modifiers = modifier_names(raw.modifiers.unwrap_or(0));
+    if modifiers.is_empty() {
+        return Ok(act_raw(state, actions, (x, y), value).await?.value);
+    }
 
-    Ok(
-        act_raw(state, actions, (x, y), json!({ "dispatched": event_type }))
-            .await?
-            .value,
+    let context = session(state)?.contexts.active().to_string();
+    perform_actions(
+        session(state)?,
+        &context,
+        modifier_actions("keyDown", &modifiers),
     )
+    .await?;
+    let outcome = act_raw(state, actions, (x, y), value).await;
+    perform_actions(
+        session(state)?,
+        &context,
+        modifier_actions("keyUp", &modifiers),
+    )
+    .await?;
+    Ok(outcome?.value)
 }
 
 /// Low-level touch input over the supplied points, releasing the previous ones on end.
@@ -1108,7 +1126,7 @@ pub async fn input_touch(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .as_array()
         .is_some_and(|sources| !sources.is_empty())
     {
-        perform_actions(ff, &ff.contexts.active().to_string(), actions).await?;
+        perform_actions(ff, ff.contexts.active(), actions).await?;
     }
     if matches!(event_type, "touchEnd" | "touchCancel") {
         ff.touches.clear();
@@ -1289,6 +1307,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn input_mouse_holds_modifiers_around_the_pointer_action() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.mouse_state.x = 10.0;
+        state.mouse_state.y = 20.0;
+
+        assert_eq!(
+            input_mouse(
+                &json!({"type": "mousePressed", "x": 40, "y": 50, "modifiers": 8}),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({"dispatched": "mousePressed"})
+        );
+
+        let requests = requests.lock().unwrap();
+        let actions: Vec<Value> = requests
+            .iter()
+            .map(|request| request["params"]["actions"][0]["actions"][0].clone())
+            .collect();
+        assert_eq!(
+            actions.first(),
+            Some(&json!({"type": "keyDown", "value": "\u{E008}"}))
+        );
+        assert_eq!(
+            actions.last(),
+            Some(&json!({"type": "keyUp", "value": "\u{E008}"}))
+        );
+        assert!(actions.contains(&json!({"type": "pointerDown", "button": 0})));
+        assert_eq!(state.mouse_state.buttons, 1);
+    }
+
+    #[tokio::test]
+    async fn input_mouse_presses_the_buttons_a_mask_holds_around_a_move() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        assert_eq!(
+            input_mouse(
+                &json!({"type": "mouseMoved", "x": 40, "y": 50, "buttons": 1}),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({"dispatched": "mouseMoved"})
+        );
+
+        let actions: Vec<Value> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request["params"]["actions"][0]["actions"][0].clone())
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                json!({"type": "pointerMove", "x": 40.0, "y": 50.0, "origin": "viewport"}),
+                json!({"type": "pointerDown", "button": 0}),
+            ]
+        );
+        assert_eq!(state.mouse_state.buttons, 1);
+    }
+
+    #[tokio::test]
     async fn wheel_uses_and_commits_each_coordinate_independently() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
@@ -1396,7 +1493,7 @@ mod tests {
             ] {
                 let (mut state, _) = state_with_refs(connected).await;
                 let ff = state.firefox.as_mut().unwrap();
-                ff.contexts.activate(&selected_context);
+                ff.contexts.activate(selected_context);
                 ff.refs.retain(|(_, shared_id), _| shared_id != "sid-1");
                 ff.refs.insert((target_context.into(), "sid-1".into()), 7);
                 state.mouse_state.x = 17.0;

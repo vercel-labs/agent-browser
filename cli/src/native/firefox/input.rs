@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 use crate::native::actions::{
     interpolated_mouse_bend, interpolated_mouse_duration, interpolated_mouse_point,
-    interpolated_mouse_steps,
+    interpolated_mouse_steps, RawKey,
 };
 use crate::native::interaction::{char_to_key_info, key_text, named_key_info};
 
@@ -31,16 +31,40 @@ pub(crate) fn key_chord_actions(chord: &str) -> Value {
     let (key_name, _, _) = named_key_info(&key);
     let value = key_value(&key_name);
 
-    let mut actions = Vec::new();
-    for modifier in &modifiers {
-        actions.push(json!({ "type": "keyDown", "value": modifier_value(modifier) }));
-    }
+    let mut actions = modifier_steps("keyDown", &modifiers);
     actions.push(json!({ "type": "keyDown", "value": value }));
     actions.push(json!({ "type": "keyUp", "value": value }));
-    for modifier in modifiers.iter().rev() {
-        actions.push(json!({ "type": "keyUp", "value": modifier_value(modifier) }));
-    }
+    actions.extend(modifier_steps("keyUp", &modifiers));
     key_source(actions)
+}
+
+/// Resolves the key a raw key event dispatches: the logical key, else the
+/// physical code, else the text.
+pub(crate) fn key_from_raw(raw: &RawKey<'_>) -> Result<String, String> {
+    match raw
+        .key
+        .filter(|key| !key.is_empty() && *key != "Unidentified")
+    {
+        Some(key) => Ok(key.to_string()),
+        None => match raw.code {
+            Some(code) => code_key_name(code)
+                .ok_or_else(|| format!("Raw key code {code} is not supported on Firefox")),
+            None => Ok(raw.text.unwrap_or_default().to_string()),
+        },
+    }
+}
+
+/// Names the modifiers a CDP bitmask holds.
+pub(crate) fn modifier_names(mask: i32) -> Vec<&'static str> {
+    [(1, "Alt"), (2, "Control"), (4, "Meta"), (8, "Shift")]
+        .into_iter()
+        .filter_map(|(bit, name)| (mask & bit != 0).then_some(name))
+        .collect()
+}
+
+/// Build the BiDi actions that press or release `modifiers` in place.
+pub(crate) fn modifier_actions(event_type: &str, modifiers: &[&str]) -> Value {
+    key_source(modifier_steps(event_type, modifiers))
 }
 
 /// Build the BiDi actions for one key event (`keyDown` or `keyUp`) of `key`.
@@ -126,6 +150,20 @@ pub(crate) fn pointer_up(origin: &Origin, button: &str) -> Value {
             json!({ "type": "pointerUp", "button": mouse_button(button) }),
         ],
     )
+}
+
+/// Build the BiDi actions that move to `origin` and leave exactly the buttons in
+/// `wanted` pressed, given `held` before the event.
+pub(crate) fn pointer_move_buttons(origin: &Origin, held: i32, wanted: i32) -> Value {
+    let changed = |mask: i32| (0..5u8).filter(move |button| mask & mouse_button_mask(*button) != 0);
+    let mut actions = vec![pointer_move(origin)];
+    actions.extend(
+        changed(held & !wanted).map(|button| json!({ "type": "pointerUp", "button": button })),
+    );
+    actions.extend(
+        changed(wanted & !held).map(|button| json!({ "type": "pointerDown", "button": button })),
+    );
+    pointer_source("mouse", actions)
 }
 
 /// Build the BiDi actions for a wheel scroll at `origin`.
@@ -307,6 +345,77 @@ fn modifier_value(modifier: &str) -> String {
         "Meta" => "\u{E03D}".to_string(),
         _ => modifier.to_string(),
     }
+}
+
+fn modifier_steps(event_type: &str, modifiers: &[&str]) -> Vec<Value> {
+    let release = event_type == "keyUp";
+    let event_type = if release { "keyUp" } else { "keyDown" };
+    let ordered: Vec<&str> = if release {
+        modifiers.iter().rev().copied().collect()
+    } else {
+        modifiers.to_vec()
+    };
+    ordered
+        .into_iter()
+        .map(|modifier| json!({ "type": event_type, "value": modifier_value(modifier) }))
+        .collect()
+}
+
+/// Maps a DOM `KeyboardEvent.code` to the key BiDi can dispatch, if any.
+fn code_key_name(code: &str) -> Option<String> {
+    if let Some(letter) = code.strip_prefix("Key") {
+        if letter.len() == 1 && letter.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+            return Some(letter.to_ascii_lowercase());
+        }
+    }
+    for prefix in ["Digit", "Numpad"] {
+        if let Some(digit) = code.strip_prefix(prefix) {
+            if digit.len() == 1 && digit.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Some(digit.to_string());
+            }
+        }
+    }
+    if code
+        .strip_prefix('F')
+        .and_then(|number| number.parse::<u8>().ok())
+        .is_some_and(|number| (1..=12).contains(&number))
+    {
+        return Some(code.to_string());
+    }
+    let name = match code {
+        "Space" => " ",
+        "Enter" | "NumpadEnter" => "Enter",
+        "Tab" => "Tab",
+        "Backspace" => "Backspace",
+        "Escape" => "Escape",
+        "Delete" => "Delete",
+        "Insert" => "Insert",
+        "Home" => "Home",
+        "End" => "End",
+        "PageUp" => "PageUp",
+        "PageDown" => "PageDown",
+        "ArrowUp" => "ArrowUp",
+        "ArrowDown" => "ArrowDown",
+        "ArrowLeft" => "ArrowLeft",
+        "ArrowRight" => "ArrowRight",
+        "ShiftLeft" | "ShiftRight" => "Shift",
+        "ControlLeft" | "ControlRight" => "Control",
+        "AltLeft" | "AltRight" => "Alt",
+        "MetaLeft" | "MetaRight" => "Meta",
+        "Semicolon" => ";",
+        "Equal" | "NumpadAdd" => "=",
+        "Comma" => ",",
+        "Minus" | "NumpadSubtract" => "-",
+        "Period" | "NumpadDecimal" => ".",
+        "Slash" | "NumpadDivide" => "/",
+        "Backquote" => "`",
+        "BracketLeft" => "[",
+        "Backslash" => "\\",
+        "BracketRight" => "]",
+        "Quote" => "'",
+        _ => return None,
+    };
+    Some(name.to_string())
 }
 
 fn split_chord(chord: &str) -> (String, Vec<&'static str>) {
