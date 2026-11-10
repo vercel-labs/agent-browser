@@ -304,6 +304,24 @@ fn apply_mouse_action(mouse_state: &mut MouseState, action: &Value) {
     }
 }
 
+/// Notes a button a dialog left held, so it is released once the dialog closes.
+fn defer_release(
+    mouse: &MouseState,
+    pending_release: &mut Option<PendingRelease>,
+    context: &str,
+    position: (f64, f64),
+) {
+    let held = (0..=4).find(|button| mouse.buttons & mouse_button_mask(*button) != 0);
+    if let (None, Some(button)) = (pending_release.as_ref(), held) {
+        *pending_release = Some(PendingRelease {
+            session_id: context.to_string(),
+            x: position.0,
+            y: position.1,
+            button: mouse_button_name(button).to_string(),
+        });
+    }
+}
+
 /// Moves the mouse along the planned path and records where it landed.
 async fn move_mouse(
     ff: &FirefoxSession,
@@ -393,18 +411,8 @@ async fn perform_pointer(
             commit_mouse_position(ff, state.mouse, &context, position).await;
         }
     }
-    if dialog_opened && state.pending_release.is_none() {
-        for button in 0..=4 {
-            if state.mouse.buttons & mouse_button_mask(button) != 0 {
-                *state.pending_release = Some(PendingRelease {
-                    session_id: context.clone(),
-                    x: position.0,
-                    y: position.1,
-                    button: mouse_button_name(button).to_string(),
-                });
-                break;
-            }
-        }
+    if dialog_opened {
+        defer_release(state.mouse, state.pending_release, &context, position);
     }
     if dialog_opened && action.reports_dialog() {
         value["dialogOpened"] = json!(true);
@@ -840,6 +848,7 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
         return Err(error);
     }
     if dialog_opened {
+        defer_release(mouse_state, pending_release, &context, release_at);
         return Ok(json!({
             "dragged": false,
             "source": source,

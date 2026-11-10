@@ -381,7 +381,12 @@ async fn collect_origins(
         .ok_or("Failed to read active browsing contexts")?;
     let mut context_ids = Vec::new();
     let mut active = HashSet::new();
-    collect_context_ids(contexts, &mut context_ids, &mut active);
+    for info in contexts
+        .iter()
+        .filter(|info| ff.contexts.in_active_jar(info))
+    {
+        collect_context_ids(std::slice::from_ref(info), &mut context_ids, &mut active);
+    }
     let mut seen = HashSet::new();
     let mut temporary = HashSet::new();
     let mut origins = Vec::new();
@@ -428,13 +433,11 @@ async fn collect_via_temp_context(
     ff: &FirefoxSession,
     origins: &[String],
 ) -> Result<Vec<OriginStorage>, String> {
-    let created = ff
-        .bidi
-        .send(
-            "browsingContext.create",
-            json!({"type": "tab", "background": true}),
-        )
-        .await?;
+    let mut params = json!({"type": "tab", "background": true});
+    if let Some(user_context) = ff.contexts.user_context(ff.contexts.active()) {
+        params["userContext"] = json!(user_context);
+    }
+    let created = ff.bidi.send("browsingContext.create", params).await?;
     let context = created["context"]
         .as_str()
         .ok_or("Firefox did not return a context id for the storage tab")?;

@@ -257,6 +257,14 @@ impl Contexts {
             .filter(|user_context| *user_context != DEFAULT_USER_CONTEXT)
     }
 
+    /// Whether a `getTree` entry uses the same cookie jar as the active tab.
+    pub fn in_active_jar(&self, info: &Value) -> bool {
+        let jar = self
+            .tab(&self.active)
+            .map_or(DEFAULT_USER_CONTEXT, |tab| tab.user_context.as_str());
+        info["userContext"].as_str().unwrap_or(DEFAULT_USER_CONTEXT) == jar
+    }
+
     /// The BiDi storage partition of the tab `context` belongs to, when it is not the default one.
     pub fn partition(&self, context: &str) -> Option<Value> {
         self.user_context(context)
