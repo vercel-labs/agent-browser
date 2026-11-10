@@ -22,22 +22,12 @@ const FIXED_PATHS: &[&str] = &[
     "/opt/firefox/firefox",
 ];
 
-/// Where Firefox's DevTools (RDP) server listens: a unix socket inside the
-/// private profile dir, or a loopback port on Windows.
-#[derive(Debug, Clone, PartialEq)]
-pub enum DevtoolsEndpoint {
-    Unix(PathBuf),
-    Port(u16),
-}
-
 /// An owned Firefox child, its temp profile and its stderr tail. Dropping it
 /// kills the process tree and deletes the profile.
 pub struct FirefoxProcess {
     child: Child,
     pub bidi_url: String,
-    pub devtools: DevtoolsEndpoint,
     pub profile_dir: PathBuf,
-    socket_dir: Option<PathBuf>,
     tail: Arc<Mutex<VecDeque<String>>>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
@@ -182,9 +172,7 @@ pub fn check_firefox_version(version: &str) -> Result<(), String> {
 
 fn user_js(download_path: Option<&str>) -> String {
     let mut js = String::from(
-        "user_pref(\"devtools.debugger.remote-enabled\", true);\n\
-         user_pref(\"devtools.debugger.prompt-connection\", false);\n\
-         user_pref(\"dom.w3c_touch_events.enabled\", 1);\n\
+        "user_pref(\"dom.w3c_touch_events.enabled\", 1);\n\
          user_pref(\"browser.download.useDownloadDir\", true);\n\
          user_pref(\"browser.download.always_ask_before_handling_new_types\", false);\n\
          user_pref(\"browser.download.manager.showWhenStarting\", false);\n",
@@ -205,42 +193,14 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     b.create(dir)
 }
 
-#[cfg(windows)]
-fn devtools_endpoint(
-    _profile_dir: &Path,
-) -> Result<(DevtoolsEndpoint, String, Option<PathBuf>), String> {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map_err(|e| format!("Failed to reserve a DevTools port: {e}"))?
-        .port();
-    Ok((DevtoolsEndpoint::Port(port), port.to_string(), None))
-}
-
-#[cfg(not(windows))]
-fn devtools_endpoint(
-    profile_dir: &Path,
-) -> Result<(DevtoolsEndpoint, String, Option<PathBuf>), String> {
-    let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
-    let dir = Path::new("/tmp").join(format!("abff-{id}"));
-    if create_private_dir(&dir).is_ok() {
-        let sock = dir.join("s");
-        let arg = sock.to_string_lossy().into_owned();
-        return Ok((DevtoolsEndpoint::Unix(sock), arg, Some(dir)));
-    }
-    let sock = profile_dir.join("rdp.sock");
-    let arg = sock.to_string_lossy().into_owned();
-    Ok((DevtoolsEndpoint::Unix(sock), arg, None))
-}
-
 fn prepare(
     path: &Path,
     headless: bool,
     profile_dir: &Path,
     download_path: Option<&str>,
-) -> Result<(DevtoolsEndpoint, Option<PathBuf>, Child), String> {
+) -> Result<Child, String> {
     std::fs::write(profile_dir.join("user.js"), user_js(download_path))
         .map_err(|e| format!("Failed to write Firefox profile: {e}"))?;
-    let (devtools, _rdp, socket_dir) = devtools_endpoint(profile_dir)?;
     let mut args: Vec<String> = Vec::new();
     if headless {
         args.push("--headless".into());
@@ -257,12 +217,7 @@ fn prepare(
         profile_dir.to_string_lossy().into_owned(),
     ]);
     args.extend(["-no-remote".into(), "about:blank".into()]);
-    let child = spawn(path, &args, headless).inspect_err(|_| {
-        if let Some(dir) = &socket_dir {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-    })?;
-    Ok((devtools, socket_dir, child))
+    spawn(path, &args, headless)
 }
 
 impl FirefoxProcess {
@@ -277,10 +232,9 @@ impl FirefoxProcess {
         let profile_dir = std::env::temp_dir().join(format!("agent-browser-firefox-{id}"));
         create_private_dir(&profile_dir)
             .map_err(|e| format!("Failed to create Firefox profile dir: {e}"))?;
-        let (devtools, socket_dir, mut child) =
-            prepare(path, headless, &profile_dir, download_path).inspect_err(|_| {
-                let _ = std::fs::remove_dir_all(&profile_dir);
-            })?;
+        let mut child = prepare(path, headless, &profile_dir, download_path).inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&profile_dir);
+        })?;
         let stderr: Option<Box<dyn Read + Send>> = child.stderr.take().map(|s| Box::new(s) as _);
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let (tx, rx) = mpsc::channel();
@@ -303,9 +257,7 @@ impl FirefoxProcess {
         let mut p = FirefoxProcess {
             child,
             bidi_url: String::new(),
-            devtools,
             profile_dir,
-            socket_dir,
             tail,
             reader,
         };
@@ -361,9 +313,6 @@ impl Drop for FirefoxProcess {
     fn drop(&mut self) {
         self.kill();
         remove_private_dir(&self.profile_dir);
-        if let Some(dir) = &self.socket_dir {
-            remove_private_dir(dir);
-        }
     }
 }
 
@@ -563,19 +512,13 @@ mod tests {
     #[test]
     fn launch_parses_url_and_drop_removes_profile() {
         let dir = tempfile::tempdir().unwrap();
-        let args_path = dir.path().join("args");
-        let body = format!(
-            "printf '%s\\n' \"$@\" > '{}'\necho noise >&2\necho 'WebDriver BiDi listening on ws://127.0.0.1:4242' >&2\nexec sleep 30",
-            args_path.display()
+        let bin = fake(
+            dir.path(),
+            "echo noise >&2\necho 'WebDriver BiDi listening on ws://127.0.0.1:4242' >&2\nexec sleep 30",
         );
-        let bin = fake(dir.path(), &body);
         let p = FirefoxProcess::launch(&bin, true, None, Duration::from_secs(10)).unwrap();
         assert_eq!(p.bidi_url, "ws://127.0.0.1:4242");
         let profile = p.profile_dir.clone();
-        let args = std::fs::read_to_string(args_path).unwrap();
-        assert!(!args.lines().any(|arg| arg == "--start-debugger-server"));
-        let prefs = std::fs::read_to_string(profile.join("user.js")).unwrap();
-        assert!(!prefs.contains("devtools.chrome.enabled"));
         assert!(profile
             .file_name()
             .unwrap()
@@ -583,31 +526,6 @@ mod tests {
             .starts_with("agent-browser-firefox-"));
         drop(p);
         assert!(!profile.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn long_tmpdir_profile_yields_short_socket_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let long_profile = dir.path().join("t".repeat(150)).join("profile");
-        std::fs::create_dir_all(&long_profile).unwrap();
-        let (endpoint, _arg, socket_dir) = devtools_endpoint(&long_profile).unwrap();
-        let DevtoolsEndpoint::Unix(sock) = endpoint else {
-            panic!("expected a unix socket endpoint");
-        };
-        assert!(
-            sock.as_os_str().len() < 100,
-            "socket path too long: {}",
-            sock.display()
-        );
-        let socket_dir = socket_dir.unwrap();
-        assert!(socket_dir.starts_with("/tmp"));
-        assert!(socket_dir
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("abff-"));
-        std::fs::remove_dir_all(socket_dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -639,17 +557,5 @@ mod tests {
             .unwrap();
         assert!(start.elapsed() < Duration::from_secs(10));
         assert!(e.contains("bad profile"), "{e}");
-    }
-
-    #[test]
-    #[ignore = "requires FIREFOX_BIN"]
-    fn real_firefox_smoke() {
-        let bin = std::env::var("FIREFOX_BIN").expect("FIREFOX_BIN");
-        let p =
-            FirefoxProcess::launch(Path::new(&bin), true, None, Duration::from_secs(30)).unwrap();
-        assert!(p.bidi_url.starts_with("ws://127.0.0.1:"), "{}", p.bidi_url);
-        let profile = p.profile_dir.clone();
-        drop(p);
-        assert!(!profile.exists());
     }
 }

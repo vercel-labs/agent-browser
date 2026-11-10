@@ -66,7 +66,7 @@ pub async fn storage_clear(
     Ok(())
 }
 
-fn storage_js_name(storage_type: &str) -> &str {
+pub(crate) fn storage_js_name(storage_type: &str) -> &str {
     match storage_type {
         "session" => "sessionStorage",
         _ => "localStorage",

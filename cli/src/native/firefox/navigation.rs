@@ -91,7 +91,7 @@ pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, St
     };
     daemon::reset_page(state);
     let ff = daemon::session(state)?;
-    let context = ff.context.clone();
+    let context = ff.contexts.active().to_string();
     let mut params = params;
     params["context"] = json!(context);
     let landed = ff

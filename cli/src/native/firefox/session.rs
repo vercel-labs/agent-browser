@@ -11,6 +11,7 @@ use tokio::sync::broadcast::{self, error::TryRecvError};
 use tokio::sync::Notify;
 
 use super::bidi::{remote_to_json, BidiClient};
+use super::contexts::Contexts;
 use super::process::{check_firefox_version, find_firefox, FirefoxProcess};
 use crate::native::actions::PendingDialog;
 use crate::native::cdp::chrome::LaunchOptions;
@@ -32,18 +33,9 @@ pub struct FirefoxSession {
     pub bidi: Arc<BidiClient>,
     pub auto_dialog: Arc<AtomicBool>,
     pub auto_dialog_changed: Arc<Notify>,
-    /// Active top-level browsing context (tab) id.
-    pub context: String,
-    /// Stable `t<N>` ids keyed by BiDi context; assigned on first sight and never reused.
-    pub tab_ids: HashMap<String, u32>,
-    next_tab_id: u32,
+    pub contexts: Contexts,
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
-    pub tab_labels: HashMap<String, String>,
-    /// BiDi user context of the window a top-level context belongs to, keyed by that context.
-    /// `window new` and every `tab new` inside such a window insert here, so several tabs can
-    /// share one user context.
-    pub window_contexts: HashMap<String, String>,
     pub visited_origins: HashSet<String>,
     events: broadcast::Receiver<Value>,
 }
@@ -112,43 +104,31 @@ impl FirefoxSession {
             .await?;
 
         let tree = bidi.send("browsingContext.getTree", json!({})).await?;
-        let context = tree["contexts"][0]["context"]
-            .as_str()
-            .ok_or("Firefox reported no browsing context")?
-            .to_string();
         let mut session = Self {
             process: Some(process),
             headless: options.headless,
             bidi,
             auto_dialog: Arc::new(AtomicBool::new(auto_dialog)),
             auto_dialog_changed: Arc::new(Notify::new()),
-            tab_ids: HashMap::from([(context.clone(), 1)]),
-            next_tab_id: 2,
-            context,
+            contexts: Contexts::from_tree(&tree)?,
             refs: HashMap::new(),
-            tab_labels: HashMap::new(),
-            window_contexts: HashMap::new(),
             visited_origins: HashSet::new(),
             events,
         };
         if let Some(contexts) = tree["contexts"].as_array() {
-            for context in contexts {
-                if let Some(id) = context["context"].as_str() {
-                    session.tab_id(id);
-                }
-            }
             session.record_context_origins(contexts);
         }
         if let Some(viewport) = options.viewport_size {
-            session.set_initial_viewport(viewport).await?;
+            session.set_viewport(viewport).await?;
         }
         Ok(session)
     }
 
-    async fn set_initial_viewport(&self, (width, height): (u32, u32)) -> Result<(), String> {
+    /// Sizes the viewport of the active context.
+    pub async fn set_viewport(&self, (width, height): (u32, u32)) -> Result<(), String> {
         self.bidi.send(
             "browsingContext.setViewport",
-            json!({"context": self.context, "viewport": {"width": width, "height": height}, "devicePixelRatio": 1}),
+            json!({"context": self.contexts.active(), "viewport": {"width": width, "height": height}, "devicePixelRatio": 1}),
         ).await?;
         Ok(())
     }
@@ -173,23 +153,22 @@ impl FirefoxSession {
         }
     }
 
-    /// The BiDi storage partition for the active tab, set by `window new` and `tab new` inside
-    /// that window.
+    /// The BiDi storage partition of the active context's tab, when it is not the default one.
     pub fn active_partition(&self) -> Option<Value> {
-        self.window_contexts
-            .get(&self.context)
-            .map(|user_context| json!({"type": "storageKey", "userContext": user_context}))
+        self.contexts.partition(self.contexts.active())
     }
 
-    /// Returns the stable `t<N>` id for `context`, assigning the next id the first time it is seen.
-    pub fn tab_id(&mut self, context: &str) -> u32 {
-        if let Some(id) = self.tab_ids.get(context) {
-            return *id;
+    /// Removes the user contexts this session created once their last tab is gone.
+    pub async fn release_unused_user_contexts(&mut self) {
+        for user_context in self.contexts.take_unused_user_contexts() {
+            let _ = self
+                .bidi
+                .send(
+                    "browser.removeUserContext",
+                    json!({"userContext": user_context}),
+                )
+                .await;
         }
-        let id = self.next_tab_id;
-        self.next_tab_id += 1;
-        self.tab_ids.insert(context.to_string(), id);
-        id
     }
 
     /// True once the Firefox process has exited or its BiDi connection has closed.
@@ -217,11 +196,7 @@ impl FirefoxSession {
                     let params = &e["params"];
                     match e["method"].as_str() {
                         Some("browsingContext.contextCreated") => {
-                            if params["parent"].is_null() {
-                                if let Some(context) = params["context"].as_str() {
-                                    self.tab_id(context);
-                                }
-                            }
+                            self.contexts.record(params);
                             if let Some(url) = params["url"].as_str() {
                                 self.note_visit(url);
                             }
@@ -231,7 +206,7 @@ impl FirefoxSession {
                                 self.note_visit(url);
                             }
                         }
-                        Some("browsingContext.contextDestroyed") if params["parent"].is_null() => {
+                        Some("browsingContext.contextDestroyed") => {
                             if let Some(context) = params["context"].as_str() {
                                 active_destroyed |= self.forget_context(context, dialog);
                             }
@@ -247,26 +222,24 @@ impl FirefoxSession {
         active_destroyed
     }
 
-    /// Forgets a browsing context that is gone: its stable id, label, element refs and any prompt it
-    /// owned. Returns true when it was the active context, which is then replaced by the lowest id.
+    /// Forgets a browsing context that is gone and everything nested in it: element refs and
+    /// any prompt they owned. Returns true when the active context was among them, which the
+    /// registry then replaces.
     pub fn forget_context(&mut self, context: &str, dialog: &mut Option<PendingDialog>) -> bool {
-        self.refs.retain(|(id, _), _| id != context);
-        if dialog.as_ref().and_then(|d| d.session_id.as_deref()) == Some(context) {
+        let removed = self.contexts.remove(context);
+        self.refs
+            .retain(|(id, _), _| !removed.contexts.contains(id));
+        if dialog
+            .as_ref()
+            .and_then(|d| d.session_id.as_ref())
+            .is_some_and(|owner| removed.contexts.contains(owner))
+        {
             *dialog = None;
         }
-        self.tab_ids.remove(context);
-        self.tab_labels.remove(context);
-        if self.context != context {
-            return false;
+        if removed.active_changed {
+            self.refs.clear();
         }
-        self.context = self
-            .tab_ids
-            .iter()
-            .min_by_key(|(_, id)| *id)
-            .map(|(context, _)| context.clone())
-            .unwrap_or_default();
-        self.refs.clear();
-        true
+        removed.active_changed
     }
 
     /// Accepts the prompts the daemon answers itself, following `auto_dialog` as it changes.
@@ -342,7 +315,7 @@ impl FirefoxSession {
                 e = events.recv() => match e {
                     Ok(e) if e["method"] == "browsingContext.userPromptOpened"
                         && !auto_handles_prompt(&e["params"], self.auto_dialog.load(Ordering::Acquire))
-                        && e["params"]["context"] == self.context.as_str() => return Ok(None),
+                        && e["params"]["context"] == self.contexts.active() => return Ok(None),
                     Err(broadcast::error::RecvError::Closed) => return fut.await.map(Some),
                     _ => {}
                 },
@@ -367,7 +340,7 @@ impl FirefoxSession {
                 "script.evaluate",
                 json!({
                     "expression": expression,
-                    "target": {"context": self.context},
+                    "target": {"context": self.contexts.active()},
                     "awaitPromise": true,
                     "resultOwnership": "none",
                 }),
@@ -391,7 +364,10 @@ impl FirefoxSession {
     pub async fn url(&self) -> Result<String, String> {
         let tree = self
             .bidi
-            .send("browsingContext.getTree", json!({"root": self.context}))
+            .send(
+                "browsingContext.getTree",
+                json!({"root": self.contexts.active()}),
+            )
             .await?;
         Ok(tree["contexts"][0]["url"]
             .as_str()
@@ -520,12 +496,9 @@ pub(crate) mod tests {
             bidi: Arc::new(bidi),
             auto_dialog: Arc::new(AtomicBool::new(false)),
             auto_dialog_changed: Arc::new(Notify::new()),
-            context: "ctx-active".into(),
-            tab_ids: HashMap::from([("ctx-active".into(), 1)]),
-            next_tab_id: 2,
+            contexts: Contexts::from_tree(&json!({"contexts": [{"context": "ctx-active"}]}))
+                .unwrap(),
             refs: HashMap::new(),
-            tab_labels: HashMap::new(),
-            window_contexts: HashMap::new(),
             visited_origins: HashSet::new(),
             events,
         };
@@ -545,54 +518,31 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn tab_ids_are_stable_and_never_reused() {
-        let (mut s, _tx, _) = fake_session().await;
-        assert_eq!(s.tab_id("ctx-active"), 1);
-        assert_eq!(s.tab_id("ctx-new"), 2);
-        assert_eq!(s.tab_id("ctx-active"), 1);
-        assert_eq!(s.tab_id("ctx-later"), 3);
-    }
-
-    #[tokio::test]
-    async fn destroyed_contexts_reconcile_tabs_and_active_state() {
+    async fn context_events_update_the_registry_and_reset_page_state() {
         let (mut session, tx, _) = fake_session().await;
-        session.tab_id("survivor");
-        session
-            .tab_labels
-            .insert("ctx-active".into(), "docs".into());
-        session.refs.insert(("child".into(), "node".into()), 1);
+        session.contexts.record(&json!({"context": "survivor"}));
+        session.refs.insert(("ctx-active".into(), "node".into()), 1);
         let mut state = crate::native::actions::DaemonState::new();
         state.firefox = Some(session);
-        state.active_frame_id = Some("child".into());
-
-        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"child", "parent":"ctx-active"}})).unwrap();
-        tx.send(json!({"type":"event", "method":"browsingContext.domContentLoaded", "params":{"url":"https://child-event.example/"}})).unwrap();
+        state.active_frame_id = Some("frame".into());
+        for (method, params) in [
+            (
+                "contextCreated",
+                json!({"context": "popup", "parent": null, "userContext": "jar"}),
+            ),
+            (
+                "contextDestroyed",
+                json!({"context": "ctx-active", "parent": null}),
+            ),
+        ] {
+            let method = format!("browsingContext.{method}");
+            tx.send(json!({"type": "event", "method": method, "params": params}))
+                .unwrap();
+        }
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 state.drain_firefox_events();
-                if state
-                    .firefox
-                    .as_ref()
-                    .unwrap()
-                    .visited_origins
-                    .contains("https://child-event.example")
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-active");
-        assert_eq!(state.active_frame_id.as_deref(), Some("child"));
-        assert_eq!(state.firefox.as_ref().unwrap().refs.len(), 1);
-
-        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                state.drain_firefox_events();
-                if state.firefox.as_ref().unwrap().context == "survivor" {
+                if state.firefox.as_ref().unwrap().contexts.active() == "survivor" {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -601,41 +551,16 @@ pub(crate) mod tests {
         .await
         .unwrap();
         let ff = state.firefox.as_ref().unwrap();
-        assert!(!ff.tab_ids.contains_key("ctx-active"));
-        assert!(!ff.tab_labels.contains_key("ctx-active"));
+        assert_eq!(ff.contexts.tab("popup").unwrap().user_context, "jar");
+        assert!(ff.contexts.tab("ctx-active").is_none());
+        assert!(ff.refs.is_empty());
         assert!(state.active_frame_id.is_none());
-        ff.eval("1 + 1").await.unwrap();
-        let err = super::super::tabs::tab_new(&json!({"label":"docs"}), &mut state)
-            .await
-            .unwrap_err();
-        assert_eq!(err, "Firefox did not return a context id for the new tab");
-
-        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
-        tx.send(json!({"type":"event", "method":"browsingContext.contextCreated", "params":{"context":"third", "parent":null}})).unwrap();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                state.drain_firefox_events();
-                if state
-                    .firefox
-                    .as_ref()
-                    .unwrap()
-                    .tab_ids
-                    .contains_key("third")
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(state.firefox.as_ref().unwrap().context, "survivor");
     }
 
     #[tokio::test]
     async fn initial_viewport_is_sent_to_firefox() {
         let (session, _tx, calls) = fake_session().await;
-        session.set_initial_viewport((800, 600)).await.unwrap();
+        session.set_viewport((800, 600)).await.unwrap();
         assert_eq!(*calls.lock().unwrap(), ["browsingContext.setViewport"]);
     }
 

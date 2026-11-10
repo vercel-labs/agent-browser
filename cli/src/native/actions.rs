@@ -1342,6 +1342,9 @@ impl DaemonState {
 
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
         self.drain_firefox_events();
+        if let Some(ff) = self.firefox.as_mut() {
+            ff.release_unused_user_contexts().await;
+        }
         let drained = self.drain_cdp_events();
         self.apply_drained_events(drained).await
     }
@@ -3029,7 +3032,7 @@ pub(crate) fn dialog_block_error(action: &str, cmd: &Value, state: &DaemonState)
     let active = state
         .firefox
         .as_ref()
-        .map(|ff| ff.context.as_str())
+        .map(|ff| ff.contexts.active())
         .or_else(|| {
             state
                 .browser

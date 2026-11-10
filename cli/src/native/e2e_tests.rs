@@ -15482,7 +15482,13 @@ async fn e2e_firefox_review_live_dialog_setting() {
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
     firefox_open(&mut state, &fixture.url).await;
-    let context = state.firefox.as_ref().unwrap().context.clone();
+    let context = state
+        .firefox
+        .as_ref()
+        .unwrap()
+        .contexts
+        .active()
+        .to_string();
     let before = firefox_command(&mut state, json!({"id":"before", "action":"session_info"})).await;
     assert_success(&before);
     for disabled in [true, false] {
@@ -15538,7 +15544,7 @@ async fn e2e_firefox_review_live_dialog_setting() {
             get_data(&before)["launchHash"],
             get_data(&after)["launchHash"]
         );
-        assert_eq!(state.firefox.as_ref().unwrap().context, context);
+        assert_eq!(state.firefox.as_ref().unwrap().contexts.active(), context);
     }
     firefox_eval(
         &mut state,
@@ -15628,6 +15634,39 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
             .contains("isolated_window=2"),
         "a cookie set in the new window must stay in its own jar"
     );
+
+    firefox_eval(&mut state, "window.open(location.href); 'opened'").await;
+    let tabs = firefox_command(&mut state, json!({ "id": "p1", "action": "tab_list" })).await;
+    let popup = get_data(&tabs)["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tab| tab["tabId"].clone())
+        .find(|tab| *tab != "t1" && *tab != window_tab)
+        .expect("the popup must be listed as a tab");
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "p2", "action": "tab_switch", "tabId": popup }),
+    )
+    .await;
+    assert_success(&resp);
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "isolated_window") && !has_cookie(&cookies, "main_window"),
+        "a popup must read the jar of the window that opened it: {cookies}"
+    );
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "p3", "action": "tab_close", "tabId": popup }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "p4", "action": "tab_switch", "tabId": window_tab }),
+    )
+    .await;
+    assert_success(&resp);
 
     let resp = firefox_command(&mut state, json!({ "id": "t1", "action": "tab_new" })).await;
     assert_success(&resp);

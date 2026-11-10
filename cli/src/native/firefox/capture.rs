@@ -129,7 +129,7 @@ fn pdf_save_path(cmd: &Value) -> String {
 pub async fn screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let options = screenshot_options(cmd);
     let ff = session(state)?;
-    let params = screenshot_params(cmd, &ff.context)?;
+    let params = screenshot_params(cmd, ff.contexts.active())?;
     let result = ff
         .bidi
         .send("browsingContext.captureScreenshot", params)
@@ -144,7 +144,7 @@ pub async fn screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 /// PDF of the active tab (`browsingContext.print`). Must return what Chrome's `handle_pdf` returns.
 pub async fn pdf(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    let params = pdf_params(cmd, &ff.context);
+    let params = pdf_params(cmd, ff.contexts.active());
     let result = ff.bidi.send("browsingContext.print", params).await?;
     let data = result
         .get("data")

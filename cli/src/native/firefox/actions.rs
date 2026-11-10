@@ -148,7 +148,7 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .as_ref()
         .and_then(|dialog| dialog.session_id.clone());
     let ff = session(state)?;
-    let context = recorded.unwrap_or_else(|| ff.context.clone());
+    let context = recorded.unwrap_or_else(|| ff.contexts.active().to_string());
     let mut params = serde_json::json!({ "context": context, "accept": accept });
     if let Some(text) = cmd.get("promptText").and_then(Value::as_str) {
         params["userText"] = serde_json::json!(text);
@@ -273,7 +273,6 @@ mod tests {
         });
         let mut state = DaemonState::new();
         let (mut ff, _tx, _) = fake_session().await;
-        ff.context = "ctx-active".into();
         ff.bidi = super::super::bidi::BidiClient::connect(&url)
             .await
             .unwrap()
