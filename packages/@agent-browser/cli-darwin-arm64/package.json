@@ -1,6 +1,6 @@
 {
   "name": "@agent-browser/cli-darwin-arm64",
-  "version": "0.39.1",
+  "version": "0.42.0",
   "description": "The darwin-arm64 native binary for agent-browser",
   "files": [
     "bin/agent-browser"

@@ -1,6 +1,6 @@
 [package]
 name = "agent-browser"
-version = "0.39.1"
+version = "0.42.0"
 edition = "2021"
 description = "Fast browser automation CLI for AI agents"
 license = "Apache-2.0"
@@ -13,7 +13,6 @@ categories = ["command-line-utilities", "web-programming"]
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-dirs = "5.0"
 base64 = "0.22"
 getrandom = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process"] }
@@ -39,6 +38,7 @@ hex = "0.4"
 chrono = "0.4"
 urlencoding = "2"
 rust-embed = "8"
+psl = "=2.1.246"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

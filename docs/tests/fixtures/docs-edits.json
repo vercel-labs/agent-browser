@@ -2,18 +2,234 @@
   "pages": {
     "/commands": [
       {
+        "from": "--auto-connect           # Auto-discover and connect to running Chrome",
+        "to": "--auto-connect           # Auto-discover and connect to running Chrome\n--no-auto-connect        # Return an --auto-connect session to a local launch (overrides AGENT_BROWSER_AUTO_CONNECT)"
+      },
+      {
         "from": "# Trust a CA for locally launched Chromium on Linux",
         "to": "# Trust a CA for CLI requests, and for local Chromium on Linux"
       },
       {
         "from": "# Clear CA trust retained by the running session",
         "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
+      },
+      {
+        "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"cookies\",\"set\",\"--curl\",\"cookies.curl\",\"--domain\",\"localhost\"]' \\\n  '[\"navigate\",\"http://localhost:3000/target\"]'",
+        "to": "agent-browser batch \\\n  \"open\" \\\n  \"network route * --abort --resource-type script\" \\\n  \"cookies set --curl cookies.curl --domain localhost\" \\\n  \"navigate http://localhost:3000/target\""
+      },
+      {
+        "from": "Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity.",
+        "to": "Each tool also accepts `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured `allowedDomains` is rejected when the server already sets allowed domains."
+      },
+      {
+        "from": "Each tool also accepts extraArgs for advanced CLI flags and exact CLI parity.",
+        "to": "Each tool also accepts extraArgs for per-command options and display or emulation flags such as --engine; extraArgs cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured allowedDomains is rejected when the server already sets allowed domains."
+      },
+      {
+        "from": "Tool invocations use the same config files and environment variables as the CLI.",
+        "to": "By default, tool invocations use the same config discovery and environment variables as the CLI."
+      },
+      {
+        "from": "--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional\n--auto-connect",
+        "to": "--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional\n--cdp-headers <json>     # Headers for --cdp discovery and WebSocket handshake (or AGENT_BROWSER_CDP_HEADERS env)\n--auto-connect"
+      },
+      {
+        "from": "agent-browser network route <url> --body <json>  # Mock response",
+        "to": "agent-browser network route <url> --body <json>  # Mock response\nagent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin"
+      },
+      {
+        "from": "agent-browser open --init-script <path>           # Register before first navigation (repeatable)\nagent-browser addinitscript <js>                  # Register at runtime (returns identifier)\nagent-browser removeinitscript <identifier>       # Remove from every tab in the session",
+        "to": "agent-browser --init-script <path> open <url>  # Register before first navigation (repeatable)\nagent-browser removeinitscript <identifier>"
+      },
+      {
+        "from": "See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.",
+        "to": "See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script removal, built-in React DevTools, and extensions."
+      },
+      {
+        "from": "See Init Scripts & Extensions for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.",
+        "to": "See Init Scripts & Extensions for launch-time scripts, script removal, built-in React DevTools, and extensions."
+      },
+      {
+        "from": "`key`, `session`, `allowedDomains`, and `idleTimeout`, so MCP clients",
+        "to": "`key`, `session`, and `allowedDomains`, so MCP clients"
+      },
+      {
+        "from": "key, session, allowedDomains, and idleTimeout, so MCP clients",
+        "to": "key, session, and allowedDomains, so MCP clients"
+      },
+      {
+        "from": "Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, and `allowedDomains`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. The common `idleTimeout` string maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. Each tool also accepts `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured `allowedDomains` is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.",
+        "to": "Each tool has typed fields such as `url`, `selector`, `text`, and `key`, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments `session`, `restore`, `allowedDomains`, `extraArgs`, `timeoutMs`, `namespace`, `restoreSave`, `restoreCheckUrl`, `restoreCheckText`, `restoreCheckFn`, `caCert`, `useSystemCa`, `clearCaCert`, `idleTimeout`, and `relaunch`. A tool's schema lists only the ones that usually matter for it: `session` on every tool, `restore` and `relaunch` on `open` and `tab_new`, `allowedDomains` and `extraArgs` on `open`, `tab_new`, and `read`, and `timeoutMs` on tools that navigate, wait, or run scripts. The server's `initialize` instructions describe all of them. `allowedDomains` maps to `--allowed-domains`, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. `idleTimeout` maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. `relaunch: true` maps to `--relaunch`. `extraArgs` carries per-command options and display or emulation flags such as `--engine`; it cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
+      },
+      {
+        "from": "Each tool has typed fields such as url, selector, text, key, session, and allowedDomains, so MCP clients show meaningful approval prompts instead of raw command arrays. The common allowedDomains array maps to --allowed-domains and activates the same WebRTC containment and launch-mode restrictions. The common idleTimeout string maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. Each tool also accepts extraArgs for per-command options and display or emulation flags such as --engine; extraArgs cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured allowedDomains is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.",
+        "to": "Each tool has typed fields such as url, selector, text, and key, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments session, restore, allowedDomains, extraArgs, timeoutMs, namespace, restoreSave, restoreCheckUrl, restoreCheckText, restoreCheckFn, caCert, useSystemCa, clearCaCert, idleTimeout, and relaunch. A tool's schema lists only the ones that usually matter for it: session on every tool, restore and relaunch on open and tab_new, allowedDomains and extraArgs on open, tab_new, and read, and timeoutMs on tools that navigate, wait, or run scripts. The server's initialize instructions describe all of them. allowedDomains maps to --allowed-domains, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. idleTimeout maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. relaunch: true maps to --relaunch. extraArgs carries per-command options and display or emulation flags such as --engine; it cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
       }
     ],
     "/configuration": [
       {
         "from": "This initial implementation does not support",
         "to": "Browser trust does not support"
+      },
+      {
+        "from": "Project-level plugin entries are appended after user-level entries. If two entries use the same name, agent-browser resolves the later entry, so a project can override a user default. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape.",
+        "to": "The auto-discovered `./agent-browser.json` ignores `plugins` with a warning. To use a project file's plugin entries, load it with `--config`; that file replaces default discovery. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape."
+      },
+      {
+        "from": "Project-level plugin entries are appended after user-level entries. If two entries use the same name, agent-browser resolves the later entry, so a project can override a user default. AGENT_BROWSER_PLUGINS can replace config discovery with a JSON array using the same shape.",
+        "to": "The auto-discovered ./agent-browser.json ignores plugins with a warning. To use a project file's plugin entries, load it with --config; that file replaces default discovery. AGENT_BROWSER_PLUGINS can replace config discovery with a JSON array using the same shape."
+      },
+      {
+        "from": "See [Plugins](/plugins) for the plugin author protocol and implementation examples. Use `agent-browser plugin add <ref>` to create this config automatically.",
+        "to": "See [Plugins](/plugins) for the plugin author protocol and implementation examples. Use `agent-browser plugin add <ref>` to create this config automatically; it writes `~/.agent-browser/config.json` by default, and `--project` writes `./agent-browser.json` (only used with `--config`)."
+      },
+      {
+        "from": "See Plugins for the plugin author protocol and implementation examples. Use agent-browser plugin add <ref> to create this config automatically.",
+        "to": "See Plugins for the plugin author protocol and implementation examples. Use agent-browser plugin add <ref> to create this config automatically; it writes ~/.agent-browser/config.json by default, and --project writes ./agent-browser.json (only used with --config)."
+      },
+      {
+        "from": "Create an `agent-browser.json` file to set persistent defaults instead of repeating flags on every command.",
+        "to": "Create `./agent-browser.json` to set persistent project defaults instead of repeating flags on every command."
+      },
+      {
+        "from": "Create an agent-browser.json file to set persistent defaults instead of repeating flags on every command.",
+        "to": "Create ./agent-browser.json to set persistent project defaults instead of repeating flags on every command."
+      },
+      {
+        "from": "Project-level overrides",
+        "to": "Allowlisted project defaults"
+      },
+      {
+        "from": "Project-level values override user-level values. Environment variables override both. CLI flags always win.",
+        "to": "Allowed project-level values override user-level values. Environment variables override both. CLI flags always win."
+      },
+      {
+        "from": "Use `--config <path>` or the `AGENT_BROWSER_CONFIG` environment variable to load a specific config file instead of the default locations:",
+        "to": "Use `--config <path>` or the `AGENT_BROWSER_CONFIG` environment variable to load only a specific trusted config file, replacing default discovery. Environment variables and CLI flags still override its values:"
+      },
+      {
+        "from": "Use --config <path> or the AGENT_BROWSER_CONFIG environment variable to load a specific config file instead of the default locations:",
+        "to": "Use --config <path> or the AGENT_BROWSER_CONFIG environment variable to load only a specific trusted config file, replacing default discovery. Environment variables and CLI flags still override its values:"
+      },
+      {
+        "from": "{\n  \"headed\": true,\n  \"proxy\": \"http://localhost:8080\",\n  \"profile\": \"./browser-data\",\n  \"userAgent\": \"my-agent/1.0\",\n  \"hideScrollbars\": false,\n  \"ignoreHttpsErrors\": true\n}",
+        "to": "{\n  \"headed\": true,\n  \"userAgent\": \"my-agent/1.0\",\n  \"hideScrollbars\": false,\n  \"colorScheme\": \"dark\",\n  \"maxOutput\": 50000,\n  \"screenshotQuality\": 80,\n  \"screenshotFormat\": \"png\",\n  \"idleTimeout\": \"30m\"\n}"
+      },
+      {
+        "from": "Global launch, output, provider, and chat options can be set in the config file using their camelCase equivalent. Command-scoped flags such as `screenshot --full` remain command arguments.",
+        "to": "Global options can be set in a trusted config file using their camelCase equivalent. Command-scoped flags such as `screenshot --full` remain command arguments. The auto-discovered project config accepts only the keys listed above."
+      },
+      {
+        "from": "Global launch, output, provider, and chat options can be set in the config file using their camelCase equivalent. Command-scoped flags such as screenshot --full remain command arguments.",
+        "to": "Global options can be set in a trusted config file using their camelCase equivalent. Command-scoped flags such as screenshot --full remain command arguments. The auto-discovered project config accepts only the keys listed above."
+      },
+      {
+        "from": "Extensions Merging",
+        "to": "Extensions"
+      },
+      {
+        "from": "Extensions from user-level and project-level configs are **concatenated**, not replaced. For example, if `~/.agent-browser/config.json` specifies `[\"/ext1\"]` and `./agent-browser.json` specifies `[\"/ext2\"]`, the result is `[\"/ext1\", \"/ext2\"]`.",
+        "to": "The auto-discovered project config ignores `extensions` with a warning."
+      },
+      {
+        "from": "Extensions from user-level and project-level configs are concatenated, not replaced. For example, if ~/.agent-browser/config.json specifies [\"/ext1\"] and ./agent-browser.json specifies [\"/ext2\"], the result is [\"/ext1\", \"/ext2\"].",
+        "to": "The auto-discovered project config ignores extensions with a warning."
+      },
+      {
+        "from": "The `AGENT_BROWSER_EXTENSIONS` environment variable and CLI `--extension` flags follow the standard priority rules (env replaces config, CLI appends).",
+        "to": "Put extension paths in user config or an explicitly loaded config, or set `AGENT_BROWSER_EXTENSIONS` or pass `--extension`."
+      },
+      {
+        "from": "The AGENT_BROWSER_EXTENSIONS environment variable and CLI --extension flags follow the standard priority rules (env replaces config, CLI appends).",
+        "to": "Put extension paths in user config or an explicitly loaded config, or set AGENT_BROWSER_EXTENSIONS or pass --extension."
+      },
+      {
+        "from": "Configure external plugins with the `plugins` array:",
+        "to": "Configure external plugins with the `plugins` array in user config or a file loaded with `--config`:"
+      },
+      {
+        "from": "Configure external plugins with the plugins array:",
+        "to": "Configure external plugins with the plugins array in user config or a file loaded with --config:"
+      },
+      {
+        "from": "- **Unknown keys** are silently ignored for forward compatibility.",
+        "to": "- **Unknown keys** in user or explicitly loaded config are silently ignored for forward compatibility."
+      },
+      {
+        "from": "Unknown keys are silently ignored for forward compatibility.",
+        "to": "Unknown keys in user or explicitly loaded config are silently ignored for forward compatibility."
+      },
+      {
+        "from": "> **Tip:** If your project-level `agent-browser.json` contains environment-specific values (paths, proxies), consider adding it to `.gitignore`.",
+        "to": "Existing project configs that use advanced keys must move those settings to user config or be loaded explicitly with `--config`."
+      },
+      {
+        "from": "Tip: If your project-level agent-browser.json contains environment-specific values (paths, proxies), consider adding it to .gitignore.",
+        "to": "Existing project configs that use advanced keys must move those settings to user config or be loaded explicitly with --config."
+      },
+      {
+        "from": "<tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance.</td><td>(disabled)</td></tr>",
+        "to": "<tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance. <code>0</code>, <code>false</code>, <code>no</code> or an empty value leave it off.</td><td>(disabled)</td></tr>"
+      },
+      {
+        "from": "anthropic/claude-sonnet-4.6",
+        "to": "openai/gpt-6-luna-fast"
+      }
+    ],
+    "/plugins": [
+      {
+        "from": "`plugin add` writes `./agent-browser.json` by default. Use `--global` to write `~/.agent-browser/config.json` instead.",
+        "to": "`plugin add` writes `~/.agent-browser/config.json` by default. Use `--project` to write `./agent-browser.json` instead (only used with `--config`)."
+      },
+      {
+        "from": "plugin add writes ./agent-browser.json by default. Use --global to write ~/.agent-browser/config.json instead.",
+        "to": "plugin add writes ~/.agent-browser/config.json by default. Use --project to write ./agent-browser.json instead (only used with --config)."
+      }
+    ],
+    "/security": [
+      {
+        "from": "Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol. Configure them in `agent-browser.json`:",
+        "to": "Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol. Configure them in `~/.agent-browser/config.json`, set `AGENT_BROWSER_PLUGINS`, or load a trusted file with `--config`. The auto-discovered `./agent-browser.json` ignores `plugins` with a warning, and an explicitly loaded file replaces default config discovery."
+      },
+      {
+        "from": "Plugins run out-of-process over the agent-browser.plugin.v1 stdio JSON protocol. Configure them in agent-browser.json:",
+        "to": "Plugins run out-of-process over the agent-browser.plugin.v1 stdio JSON protocol. Configure them in ~/.agent-browser/config.json, set AGENT_BROWSER_PLUGINS, or load a trusted file with --config. The auto-discovered ./agent-browser.json ignores plugins with a warning, and an explicitly loaded file replaces default config discovery."
+      },
+      {
+        "from": "All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.",
+        "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust."
+      }
+    ],
+    "/init-scripts": [
+      {
+        "from": "Runtime scripts",
+        "to": "Removing init scripts"
+      },
+      {
+        "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"cookies\",\"set\",\"--curl\",\"cookies.curl\",\"--domain\",\"localhost\"]' \\\n  '[\"navigate\",\"http://localhost:3000/target\"]'",
+        "to": "agent-browser batch \\\n  \"open\" \\\n  \"network route * --abort --resource-type script\" \\\n  \"cookies set --curl cookies.curl --domain localhost\" \\\n  \"navigate http://localhost:3000/target\""
+      },
+      {
+        "from": "agent-browser addinitscript \"window.__testMode = true\"\n# Returns an identifier\n\nagent-browser removeinitscript <identifier>",
+        "to": "agent-browser removeinitscript <identifier>"
+      },
+      {
+        "from": "Runtime init scripts are useful after a session has started. They are still init scripts, so they affect future documents and navigations rather than rewriting already-executed page code.",
+        "to": ""
+      },
+      {
+        "from": "Runtime init-script identifiers are session-wide. `removeinitscript` removes the script from every open tab where it was registered and prevents it from being replayed into tabs opened later.",
+        "to": "Init-script identifiers are session-wide. `removeinitscript` removes a script from every open tab where it was registered and prevents it from being replayed into future tabs."
+      },
+      {
+        "from": "Runtime init-script identifiers are session-wide. removeinitscript removes the script from every open tab where it was registered and prevents it from being replayed into tabs opened later.",
+        "to": "Init-script identifiers are session-wide. removeinitscript removes a script from every open tab where it was registered and prevents it from being replayed into future tabs."
+      }
+    ],
+    "/network": [
+      {
+        "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"navigate\",\"http://localhost:3000\"]' \\\n  '[\"snapshot\",\"-i\"]'",
+        "to": "agent-browser batch \\\n  \"open\" \\\n  \"network route * --abort --resource-type script\" \\\n  \"navigate http://localhost:3000\" \\\n  \"snapshot -i\""
       }
     ],
     "/proxy": [
@@ -37,9 +253,120 @@
         "from": "It is not supported on macOS or Windows.",
         "to": "Browser trust is not supported on macOS or Windows, where Chromium already uses the operating system trust store."
       }
+    ],
+    "/cdp-mode": [
+      {
+        "from": "pass it once and later commands and daemon restarts keep the strict semantics.",
+        "to": "pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit close releases it so other sessions can take the tab, and the next pinned command pins again."
+      }
+    ],
+    "/engines/chrome": [
+      {
+        "from": "When no `--executable-path` is provided, agent-browser searches for Chrome in this order:",
+        "to": "When no `--executable-path` is provided, agent-browser checks the Chrome it downloaded with `agent-browser install` first, then searches the platform locations in this order:"
+      },
+      {
+        "from": "When no --executable-path is provided, agent-browser searches for Chrome in this order:",
+        "to": "When no --executable-path is provided, agent-browser checks the Chrome it downloaded with agent-browser install first, then searches the platform locations in this order:"
+      },
+      {
+        "from": "        <code>/Applications/Google Chrome.app</code>,\n        <code>/Applications/Google Chrome Canary.app</code>,\n        <code>/Applications/Chromium.app</code>,\n        <code>/Applications/Brave Browser.app</code>,\n        Puppeteer cache (<code>~/.cache/puppeteer/chrome/</code> or <code>PUPPETEER_CACHE_DIR</code>),\n        Chrome for Testing cache",
+        "to": "        <code>/Applications/Google Chrome.app</code>,\n        <code>/Applications/Google Chrome Canary.app</code>,\n        <code>/Applications/Chromium.app</code>,\n        <code>/Applications/Brave Browser.app</code>,\n        the same apps in <code>~/Applications</code>,\n        Puppeteer cache (<code>~/.cache/puppeteer/chrome/</code> or <code>PUPPETEER_CACHE_DIR</code>),\n        Playwright cache (<code>~/.cache/ms-playwright</code> or <code>PLAYWRIGHT_BROWSERS_PATH</code>)"
+      },
+      {
+        "from": "/Applications/Google Chrome.app, /Applications/Google Chrome Canary.app, /Applications/Chromium.app, /Applications/Brave Browser.app, Puppeteer cache (~/.cache/puppeteer/chrome/ or PUPPETEER_CACHE_DIR), Chrome for Testing cache",
+        "to": "/Applications/Google Chrome.app, /Applications/Google Chrome Canary.app, /Applications/Chromium.app, /Applications/Brave Browser.app, the same apps in ~/Applications, Puppeteer cache (~/.cache/puppeteer/chrome/ or PUPPETEER_CACHE_DIR), Playwright cache (~/.cache/ms-playwright or PLAYWRIGHT_BROWSERS_PATH)"
+      }
+    ],
+    "/engines/obscura": [
+      {
+        "from": "MCP tools use the same provider through `extraArgs`: `[\"--engine\", \"obscura\", \"--executable-path\", \"/path/to/obscura\"]`.",
+        "to": "MCP tools use the same provider: set `AGENT_BROWSER_EXECUTABLE_PATH` in the MCP server's environment and pass `extraArgs: [\"--engine\", \"obscura\"]`, because `--executable-path` is rejected in `extraArgs`."
+      },
+      {
+        "from": "MCP tools use the same provider through extraArgs: [\"--engine\", \"obscura\", \"--executable-path\", \"/path/to/obscura\"].",
+        "to": "MCP tools use the same provider: set AGENT_BROWSER_EXECUTABLE_PATH in the MCP server's environment and pass extraArgs: [\"--engine\", \"obscura\"], because --executable-path is rejected in extraArgs."
+      },
+      {
+        "from": "Or in your `agent-browser.json` config:",
+        "to": "Or in `~/.agent-browser/config.json` or a file loaded with `--config`:"
+      },
+      {
+        "from": "Or in your agent-browser.json config:",
+        "to": "Or in ~/.agent-browser/config.json or a file loaded with --config:"
+      }
+    ],
+    "/eve": [
+      {
+        "from": "The agent gets namespaced tools such as `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, `browser__console`, and `browser__network_requests`.",
+        "to": "The agent gets namespaced tools such as `browser__open`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, `browser__console`, and `browser__network_requests`."
+      },
+      {
+        "from": "The agent gets namespaced tools such as browser__navigate, browser__snapshot, browser__click, browser__fill, browser__find, browser__screenshot, browser__console, and browser__network_requests.",
+        "to": "The agent gets namespaced tools such as browser__open, browser__snapshot, browser__click, browser__fill, browser__find, browser__screenshot, browser__console, and browser__network_requests."
+      }
+    ],
+    "/sessions": [
+      {
+        "from": "Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use `agent-browser session id` to generate a valid key:",
+        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, `café-東京_7` is valid, while `my session` is rejected because it contains a space.\n\nUse `agent-browser session id` to generate a valid key:"
+      },
+      {
+        "from": "Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use agent-browser session id to generate a valid key:",
+        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, café-東京_7 is valid, while my session is rejected because it contains a space.\n\nUse agent-browser session id to generate a valid key:"
+      }
+    ],
+    "/skills": [
+      {
+        "from": " — ",
+        "to": ": "
+      },
+      {
+        "from": "`agent-browser skills get core --full` is the recommended starting point for most browser tasks.",
+        "to": "Start with `agent-browser skills get core`. It routes to its references when a task needs more detail, and `--full` prints all of them at once."
+      },
+      {
+        "from": "agent-browser skills get core --full is the recommended starting point for most browser tasks.",
+        "to": "Start with agent-browser skills get core. It routes to its references when a task needs more detail, and --full prints all of them at once."
+      }
+    ],
+    "/webgpu": [
+      {
+        "from": "Also available as the `AGENT_BROWSER_WEBGPU` environment variable or `\"webgpu\": true` in `agent-browser.json`.",
+        "to": "Also available as the `AGENT_BROWSER_WEBGPU` environment variable, or as `\"webgpu\": true` in `~/.agent-browser/config.json` or a file loaded with `--config`."
+      },
+      {
+        "from": "Also available as the AGENT_BROWSER_WEBGPU environment variable or \"webgpu\": true in agent-browser.json.",
+        "to": "Also available as the AGENT_BROWSER_WEBGPU environment variable, or as \"webgpu\": true in ~/.agent-browser/config.json or a file loaded with --config."
+      }
+    ],
+    "/engines/lightpanda": [
+      {
+        "from": "Or in your `agent-browser.json` config:",
+        "to": "Or in `~/.agent-browser/config.json` or a file loaded with `--config`:"
+      },
+      {
+        "from": "Or in your agent-browser.json config:",
+        "to": "Or in ~/.agent-browser/config.json or a file loaded with --config:"
+      }
+    ],
+    "/installation": [
+      {
+        "from": "pnpm install\npnpm build\npnpm build:native\n./bin/agent-browser install\npnpm link --global",
+        "to": "pnpm install\npnpm build:source\npnpm link --global\nagent-browser install"
+      }
+    ],
+    "/dashboard": [
+      {
+        "from": "anthropic/claude-sonnet-4.6",
+        "to": "openai/gpt-6-luna-fast"
+      }
     ]
   },
   "resources": {
-    "/schema.json": { "size": 9427, "sha256": "eecb6f5aa3f6c7f0a4f0fb1176923c5b7d005065fea101ff90394c2845b97468" }
+    "/schema.json": {
+      "size": 9813,
+      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
+    }
   }
 }

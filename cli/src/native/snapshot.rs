@@ -6,7 +6,7 @@ use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
 };
-use super::element::{resolve_ax_session, RefMap};
+use super::element::{normalize_ax_role, resolve_ax_session, RefMap};
 
 #[cfg(test)]
 mod document_identity_regressions {
@@ -125,12 +125,10 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "Iframe",
 ];
 
+const TABLE_CELL_ROLES: &[&str] = &["cell", "gridcell", "columnheader", "rowheader"];
+
 const CONTENT_ROLES: &[&str] = &[
     "heading",
-    "cell",
-    "gridcell",
-    "columnheader",
-    "rowheader",
     "listitem",
     "article",
     "region",
@@ -427,8 +425,10 @@ pub async fn take_snapshot(
             .send_command_no_params("Accessibility.enable", Some(effective_session_id))
             .await;
     }
+    // The full tree of a large page runs to megabytes, so the response is
+    // parsed once, straight from its text, instead of through a Value.
     let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed(
+        .send_command_typed_raw(
             "Accessibility.getFullAXTree",
             &ax_params,
             Some(effective_session_id),
@@ -490,13 +490,14 @@ pub async fn take_snapshot(
 
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
-        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
-            true
-        } else if CONTENT_ROLES.contains(&role) {
-            !node.name.is_empty()
-        } else {
-            false
-        };
+        let mut should_ref =
+            if INTERACTIVE_ROLES.contains(&role) || TABLE_CELL_ROLES.contains(&role) {
+                true
+            } else if CONTENT_ROLES.contains(&role) {
+                !node.name.is_empty()
+            } else {
+                false
+            };
 
         if node
             .backend_node_id
@@ -1091,7 +1092,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
     let mut id_to_idx: HashMap<String, usize> = HashMap::new();
 
     for (i, node) in nodes.iter().enumerate() {
-        let role = extract_ax_string(&node.role);
+        let role = normalize_ax_role(extract_ax_string(&node.role));
         let name = extract_ax_string(&node.name);
         let value_text = extract_ax_string_opt(&node.value);
 
@@ -1352,6 +1353,7 @@ fn render_tree(
     }
 }
 
+/// Retain matching content and its direct ancestor chain, including visible text in noninteractive snapshots.
 fn compact_tree(tree: &str, interactive: bool) -> String {
     let lines: Vec<&str> = tree.lines().collect();
     if lines.is_empty() {
@@ -1359,22 +1361,28 @@ fn compact_tree(tree: &str, interactive: bool) -> String {
     }
 
     let mut keep = vec![false; lines.len()];
+    // Index and indent of the open ancestors, outermost first. Keeping them in
+    // a stack lets a kept line mark its ancestors once instead of walking back
+    // over every earlier line, which made compact mode quadratic on big tables.
+    let mut ancestors: Vec<(usize, usize)> = Vec::new();
 
     for (i, line) in lines.iter().enumerate() {
-        if line.contains("ref=") || line.contains(": ") {
+        let indent = count_indent(line);
+        while let Some(&(_, ancestor_indent)) = ancestors.last() {
+            if ancestor_indent < indent {
+                break;
+            }
+            ancestors.pop();
+        }
+
+        if line.contains("ref=") || line.contains(": ") || (!interactive && line.contains(" \"")) {
             keep[i] = true;
-            // Mark ancestors
-            let my_indent = count_indent(line);
-            for j in (0..i).rev() {
-                let ancestor_indent = count_indent(lines[j]);
-                if ancestor_indent < my_indent {
-                    keep[j] = true;
-                    if ancestor_indent == 0 {
-                        break;
-                    }
-                }
+            for &(ancestor, _) in &ancestors {
+                keep[ancestor] = true;
             }
         }
+
+        ancestors.push((i, indent));
     }
 
     let result: Vec<&str> = lines
@@ -1533,11 +1541,34 @@ mod tests {
 
     #[test]
     fn test_compact_tree_basic() {
-        let tree = "- navigation\n  - link \"Home\" [ref=e1]\n  - link \"About\" [ref=e2]\n- main\n  - heading \"Title\"\n  - paragraph\n    - text: Hello\n";
+        let tree = "- navigation\n  - link \"Home\" [ref=e1]\n  - link \"About\" [ref=e2]\n- main\n  - heading \"Title\"\n  - paragraph\n    - text: Hello\n- status\n  - StaticText \"Saved successfully\"\n- empty\n  - paragraph\n";
         let result = compact_tree(tree, false);
         assert!(result.contains("[ref=e1]"));
         assert!(result.contains("[ref=e2]"));
         assert!(result.contains("Hello"));
+        assert!(result.contains("- status\n  - StaticText \"Saved successfully\""));
+        assert!(!result.contains("- empty"));
+
+        let interactive = compact_tree(tree, true);
+        assert!(!interactive.contains("Saved successfully"));
+        assert!(interactive.contains("[ref=e1]"));
+        assert!(interactive.contains("Hello"));
+    }
+
+    #[test]
+    fn test_compact_tree_keeps_only_direct_ancestors() {
+        for (interactive, content) in [
+            (false, "StaticText \"Saved successfully\""),
+            (true, "button \"Save\" [ref=e1]"),
+        ] {
+            let tree = format!(
+                "- main\n  - empty-section\n    - empty-paragraph\n  - section\n    - empty-paragraph\n    - paragraph\n      - {content}\n  - trailing-section\n- empty-root\n"
+            );
+            assert_eq!(
+                compact_tree(&tree, interactive),
+                format!("- main\n  - section\n    - paragraph\n      - {content}")
+            );
+        }
     }
 
     #[test]
@@ -1564,6 +1595,81 @@ mod tests {
     fn test_compact_tree_empty_interactive() {
         let result = compact_tree("- generic\n", true);
         assert_eq!(result, "(no interactive elements)");
+    }
+
+    /// The original ancestor walk, kept as the reference the stack in
+    /// `compact_tree` has to reproduce exactly.
+    fn compact_tree_reference(tree: &str, interactive: bool) -> String {
+        let lines: Vec<&str> = tree.lines().collect();
+        let mut keep = vec![false; lines.len()];
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains("ref=")
+                || line.contains(": ")
+                || (!interactive && line.contains(" \""))
+            {
+                keep[i] = true;
+                let mut my_indent = count_indent(line);
+                for j in (0..i).rev() {
+                    let ancestor_indent = count_indent(lines[j]);
+                    if ancestor_indent < my_indent {
+                        keep[j] = true;
+                        my_indent = ancestor_indent;
+                        if ancestor_indent == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let output = lines
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| keep[*i])
+            .map(|(_, line)| *line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if output.trim().is_empty() && interactive {
+            return "(no interactive elements)".to_string();
+        }
+        output
+    }
+
+    #[test]
+    fn test_compact_tree_matches_reference_on_generated_trees() {
+        // Successive rounds shuffle indents, empty branches and kept lines so
+        // the stack path is compared against the ancestor walk on many shapes.
+        let lines = [
+            "- root",
+            "  - empty-section",
+            "    - empty-paragraph",
+            "  - section",
+            "    - paragraph",
+            "      - StaticText \"Saved\"",
+            "      - text: Hello",
+            "        - deeper",
+            "  - button \"Save\" [ref=e1]",
+            "    - StaticText \"Save\"",
+            "- other-root",
+            "",
+            "      - jump",
+            "        - jump-deeper",
+            "          - checkbox [checked=false, ref=e2]",
+            "- trailing",
+        ];
+        for len in 0..=lines.len() {
+            for rotation in 0..4 {
+                let mut rotated: Vec<&str> = lines[..len].to_vec();
+                rotated.rotate_left(rotation % len.max(1));
+                let tree = format!("{}\n", rotated.join("\n"));
+                for interactive in [false, true] {
+                    assert_eq!(
+                        compact_tree(&tree, interactive),
+                        compact_tree_reference(&tree, interactive),
+                        "tree: {tree:?}, interactive: {interactive}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

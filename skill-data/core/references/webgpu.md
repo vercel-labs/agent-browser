@@ -10,7 +10,7 @@ agent-browser --webgpu open https://my-webgpu-app.example.com
 agent-browser screenshot app.png
 ```
 
-`--webgpu` (or `AGENT_BROWSER_WEBGPU=1`, or `"webgpu": true` in agent-browser.json) applies a launch preset:
+`--webgpu` (or `AGENT_BROWSER_WEBGPU=1`, or `"webgpu": true` in `~/.agent-browser/config.json` or a file loaded with `--config`) applies a launch preset:
 
 - everywhere: `--enable-unsafe-webgpu` (WebGPU is hidden in headless/blocklisted environments by default)
 - Linux only: `--enable-features=Vulkan --use-angle=vulkan --use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --disable-vulkan-surface` — routes WebGPU through SwiftShader's software Vulkan, so it works with no GPU (containers, CI)
@@ -27,7 +27,7 @@ macOS uses the hardware Metal backend; Windows uses D3D. Nothing extra to instal
 
 The Windows/Linux screenshot gap is an upstream headless-Chrome limitation: WebGPU canvas *presentation* never reaches the headless compositor, even though rendering itself works (verified by pixel readback). It is not an agent-browser or flag problem — no known flag combination fixes it. Rendering, `eval`-based pixel readbacks, and compute all work headless everywhere.
 
-On Linux, `--headed` is all you need even on displayless servers and containers: when no `DISPLAY` is set and Xvfb is installed (`apt-get install -y xvfb`), agent-browser starts a private virtual display for the browser and tears it down with it. Set `AGENT_BROWSER_NO_XVFB=1` to opt out.
+On Linux, `--headed` is all you need even on displayless servers and containers: when no `DISPLAY` is set and Xvfb is installed (`apt-get install -y xvfb`), agent-browser starts a private virtual display for the browser and tears it down with it. Set `AGENT_BROWSER_NO_XVFB=1` to opt out. Do not wrap the CLI in `xvfb-run`: it removes the display when the CLI exits while the browser keeps running.
 
 ```bash
 agent-browser --webgpu --headed open https://my-webgpu-app.example.com

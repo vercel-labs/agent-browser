@@ -50,6 +50,26 @@ export async function snapshotUrl(url: string) {
 }
 ```
 
+## MCP server over stdin
+
+When an agent makes many MCP tool calls in the same Vercel Sandbox, use `startAgentBrowserMcp` from `@agent-browser/sandbox/vercel`. It starts one `agent-browser mcp` process and sends every request over that command's stdin, so tool calls reuse the process instead of starting a CLI command each time as `runAgentBrowserCommand` does:
+
+```typescript
+import { startAgentBrowserMcp, withAgentBrowserSandbox } from "@agent-browser/sandbox/vercel";
+
+const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
+  const mcp = await startAgentBrowserMcp(sandbox, { timeout: 60_000 });
+  try {
+    await mcp.callTool("agent_browser_open", { url: "https://example.com" });
+    return await mcp.callTool("agent_browser_snapshot", { interactive: true });
+  } finally {
+    await mcp.close();
+  }
+});
+```
+
+`startAgentBrowserMcp` requires `@vercel/sandbox` 3.7 or later. `timeout` is in milliseconds and applies to each request and to `close()`; without it, requests wait indefinitely. In another runtime, pass a process with `stdin` and `stdout` streams to `connectAgentBrowserMcp` from `@agent-browser/sandbox`.
+
 ## Sandbox snapshots
 
 Without optimization, each Sandbox run installs system dependencies + agent-browser + Chromium from scratch (~30 seconds). A **sandbox snapshot** is a saved VM image with everything pre-installed, similar to a Docker image for Vercel Sandbox. When `AGENT_BROWSER_SNAPSHOT_ID` is set, the sandbox boots from that image instead of installing, bringing startup down to sub-second.

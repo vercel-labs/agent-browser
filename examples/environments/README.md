@@ -1,14 +1,14 @@
-# agent-browser Environments
+# agent-browser environments
 
 A demo of agent-browser running in a Vercel Sandbox. Pick a URL, take a screenshot or accessibility snapshot, and watch each command execute in real time.
 
-## How It Works
+## How it works
 
-The app runs agent-browser + Chrome inside an ephemeral Vercel Sandbox microVM. A Linux VM spins up on demand, executes agent-browser commands, and shuts down. No binary size limits, no Chromium bundling complexity.
+The app runs agent-browser and Chrome inside an ephemeral Vercel Sandbox microVM. A Linux VM starts on demand, runs the agent-browser commands, and shuts down, so the app's own serverless functions never bundle Chromium.
 
 The UI streams progress via Server-Sent Events so you can see each step as it runs (sandbox creation, browser startup, navigation, screenshot/snapshot, cleanup).
 
-## Getting Started
+## Getting started
 
 ```bash
 cd examples/environments
@@ -18,9 +18,9 @@ pnpm dev
 
 For local development, set `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID` in `.env.local` so the Sandbox SDK can authenticate.
 
-## Sandbox Snapshots
+## Sandbox snapshots
 
-Without optimization, each Sandbox run installs system dependencies + agent-browser + Chromium from scratch (~30s). A **sandbox snapshot** is a saved VM image with everything pre-installed -- the sandbox boots from the image instead of installing, bringing startup down to sub-second. (This is unrelated to agent-browser's *accessibility snapshot* feature, which dumps a page's accessibility tree.)
+Without a snapshot, each sandbox run installs system dependencies, agent-browser, and Chromium from scratch. A sandbox snapshot is a saved VM image with everything preinstalled, so the sandbox boots from the image instead of installing. Sandbox snapshots are unrelated to agent-browser's `snapshot` command, which returns a page's accessibility tree.
 
 Create a sandbox snapshot by running the helper script once:
 
@@ -31,11 +31,11 @@ npx tsx scripts/create-snapshot.ts
 
 Add the ID to your Vercel project environment variables or `.env.local`. Recommended for production.
 
-## Environment Variables
+## Environment variables
 
 | Variable | Description |
 |---|---|
-| `AGENT_BROWSER_SNAPSHOT_ID` | Sandbox snapshot ID for sub-second startup (see above) |
+| `AGENT_BROWSER_SNAPSHOT_ID` | Sandbox snapshot ID to boot from instead of installing (see above) |
 | `VERCEL_TOKEN` | Vercel personal access token (for local dev; OIDC is automatic on Vercel) |
 | `VERCEL_TEAM_ID` | Vercel team ID (for local dev) |
 | `VERCEL_PROJECT_ID` | Vercel project ID (for local dev) |
@@ -44,7 +44,7 @@ Add the ID to your Vercel project environment variables or `.env.local`. Recomme
 | `RATE_LIMIT_PER_MINUTE` | Max requests per minute per IP (default: 10) |
 | `RATE_LIMIT_PER_DAY` | Max requests per day per IP (default: 100) |
 
-## Project Structure
+## Project structure
 
 ```
 examples/environments/
