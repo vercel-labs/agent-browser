@@ -448,7 +448,13 @@ pub fn daemon_ready(session: &str) -> bool {
     #[cfg(unix)]
     {
         let socket_path = get_socket_path(session);
-        UnixStream::connect(&socket_path).is_ok()
+        match connect_unix(&socket_path) {
+            Ok(_) => true,
+            // A full Linux listen queue means the listener exists, even if it
+            // cannot accept another connection yet. Do not start a replacement.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
+            Err(_) => false,
+        }
     }
     #[cfg(windows)]
     {
@@ -460,6 +466,20 @@ pub fn daemon_ready(session: &str) -> bool {
             .is_ok()
         })
     }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn connect_unix(path: &std::path::Path) -> std::io::Result<UnixStream> {
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+    socket.set_nonblocking(true)?;
+    socket.connect(&socket2::SockAddr::unix(path)?)?;
+    socket.set_nonblocking(false)?;
+    Ok(socket.into())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn connect_unix(path: &std::path::Path) -> std::io::Result<UnixStream> {
+    UnixStream::connect(path)
 }
 
 /// Result of ensure_daemon indicating whether a new daemon was started
@@ -1173,9 +1193,15 @@ fn connect(session: &str) -> Result<Connection, String> {
     #[cfg(unix)]
     {
         let socket_path = get_socket_path(session);
-        UnixStream::connect(&socket_path)
+        connect_unix(&socket_path)
             .map(Connection::Unix)
-            .map_err(|e| format!("Failed to connect: {}", e))
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    format!("Daemon socket is busy: {}", e)
+                } else {
+                    format!("Failed to connect: {}", e)
+                }
+            })
     }
     #[cfg(windows)]
     {
@@ -1388,6 +1414,53 @@ fn exchange<S: Read + Write>(mut stream: S, request: &[u8]) -> Result<Response, 
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn full_unix_backlog_is_busy_without_blocking_or_restarting() {
+        use std::os::unix::net::UnixListener;
+
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("AGENT_BROWSER_NAMESPACE");
+        let session = "full-queue";
+        let socket =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        socket
+            .bind(&socket2::SockAddr::unix(&get_socket_path(session)).unwrap())
+            .unwrap();
+        socket.listen(1).unwrap();
+        let listener: UnixListener = socket.into();
+        let mut queued = Vec::new();
+        loop {
+            match connect_unix(&get_socket_path(session)) {
+                Ok(stream) => queued.push(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("unexpected connect error: {error}"),
+            }
+            assert!(queued.len() < 10, "listener backlog did not fill");
+        }
+
+        let start = Instant::now();
+        assert!(
+            daemon_ready(session),
+            "a full listener must not appear dead"
+        );
+        let error = match connect(session) {
+            Ok(_) => panic!("full queue accepted a connection"),
+            Err(error) => error,
+        };
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(is_transient_error(&error), "{error}");
+        assert!(!daemon_unreachable(&error), "{error}");
+
+        let (_accepted, _) = listener.accept().unwrap();
+        assert!(
+            connect(session).is_ok(),
+            "connecting recovers when a slot opens"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
