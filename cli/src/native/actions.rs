@@ -9490,10 +9490,21 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .unwrap_or(true);
     let prompt_text = cmd.get("promptText").and_then(|v| v.as_str());
 
+    // Answer the dialog on the session it opened on: a dialog on a
+    // background tab must not be resolved against the active tab (#2528).
+    // A missing session means a top-level page dialog; fall back to the
+    // active session. Read the session before clearing the tracked entry
+    // below.
+    let dialog_session = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|d| d.session_id.clone());
+    let result = mgr
+        .handle_dialog(accept, prompt_text, dialog_session.as_deref())
+        .await;
     // Clear tracked state even if Chrome reports no dialog (e.g. it was
     // already resolved and the closed event was missed); otherwise a stale
     // pending_dialog would make every page command fail fast forever.
-    let result = mgr.handle_dialog(accept, prompt_text).await;
     state.pending_dialog = None;
     result?;
 
