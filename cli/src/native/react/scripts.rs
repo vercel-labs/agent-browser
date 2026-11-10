@@ -203,7 +203,8 @@ pub const RENDERS_INIT: &str = r#"
   if (!hook || window.__AB_RENDERS_ACTIVE__) return;
 
   const MAX_COMPONENTS = 200;
-  const data = {};
+  // Component display names can also be Object.prototype property names.
+  const data = Object.create(null);
   const fps = { frames: [], last: 0, rafId: 0 };
 
   window.__AB_RENDERS__ = data;

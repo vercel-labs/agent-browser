@@ -41,6 +41,9 @@ jobs:
       - name: Run launcher tests
         run: pnpm run test:launcher
 
+      - name: Run React render profiler script tests
+        run: pnpm run test:react-renders
+
   docs:
     name: Docs (${{ matrix.environment }})
     runs-on: ubuntu-latest
