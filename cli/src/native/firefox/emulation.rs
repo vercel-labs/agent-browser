@@ -252,7 +252,7 @@ pub async fn set_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     if cmd.get("mobile").and_then(Value::as_bool).unwrap_or(false) {
         return Err("Firefox does not support mobile viewport emulation".to_string());
     }
-    let context = session(state)?.top_context.clone();
+    let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, viewport(width, height, scale)).await?;
     session(state)?.emulation.write().unwrap().viewport = Some((width, height, scale));
     state.viewport = Some((width as i32, height as i32, scale, false));
@@ -277,7 +277,7 @@ pub async fn set_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         .get("userAgent")
         .and_then(Value::as_str)
         .ok_or("Missing 'userAgent' parameter")?;
-    let context = session(state)?.top_context.clone();
+    let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::user_agent(user_agent)).await?;
     session(state)?.emulation.write().unwrap().user_agent = Some(user_agent.to_string());
     Ok(json!({ "userAgent": user_agent }))
@@ -289,7 +289,7 @@ pub async fn set_locale(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .get("locale")
         .and_then(Value::as_str)
         .ok_or("Missing 'locale' parameter")?;
-    let context = session(state)?.top_context.clone();
+    let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::locale(locale)).await?;
     session(state)?.emulation.write().unwrap().locale = Some(locale.to_string());
     Ok(json!({ "locale": locale }))
@@ -302,7 +302,7 @@ pub async fn set_timezone(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .or_else(|| cmd.get("timezone"))
         .and_then(Value::as_str)
         .ok_or("Missing 'timezoneId' parameter")?;
-    let context = session(state)?.top_context.clone();
+    let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::timezone(timezone)).await?;
     session(state)?.emulation.write().unwrap().timezone = Some(timezone.to_string());
     Ok(json!({ "timezoneId": timezone }))
@@ -319,7 +319,7 @@ pub async fn set_geolocation(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .and_then(Value::as_f64)
         .ok_or("Missing 'longitude' parameter")?;
     let accuracy = cmd.get("accuracy").and_then(Value::as_f64);
-    let context = session(state)?.top_context.clone();
+    let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(
         session(state)?,
         &context,
@@ -374,7 +374,7 @@ fn page_origin(url: &str) -> Result<String, String> {
 /// Toggles offline mode for the active tab and any tab opened later.
 pub async fn set_offline(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let offline = cmd.get("offline").and_then(Value::as_bool).unwrap_or(true);
-    let context = session(state)?.top_context.clone();
+    let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::offline(offline)).await?;
     session(state)?.emulation.write().unwrap().offline = Some(offline);
     Ok(json!({ "offline": offline }))
@@ -386,7 +386,7 @@ pub async fn set_media(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     let config = media_config(&media)?;
     {
         let ff = session(state)?;
-        let context = ff.top_context.clone();
+        let context = ff.contexts.active_tab().to_string();
         update_tab_configuration(&ff.bidi, &ff.rdp, &context, &config).await?;
     }
     session(state)?.emulation.write().unwrap().media = Some(media);

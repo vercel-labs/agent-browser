@@ -52,7 +52,7 @@ pub async fn resolve_target(
 ) -> Result<Target, String> {
     let Some(ref_id) = parse_ref(selector_or_ref) else {
         let ff = session(state)?;
-        let context = ff.context.clone();
+        let context = ff.contexts.active().to_string();
         let shared_id = find_element(ff, &context, selector_or_ref)
             .await
             .map_err(|error| format!("Could not resolve selector '{selector_or_ref}': {error}"))?
@@ -99,7 +99,7 @@ async fn recover(
     }
     let context = context
         .or_else(|| entry.frame_id.clone())
-        .unwrap_or_else(|| ff.context.clone());
+        .unwrap_or_else(|| ff.contexts.active().to_string());
     let found = ff
         .bidi
         .send(

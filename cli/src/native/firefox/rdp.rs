@@ -22,8 +22,7 @@ pub struct RdpClient {
     next_request: Arc<AtomicU64>,
     failed: Arc<AtomicBool>,
     events: broadcast::Sender<Value>,
-    greeting: Value,
-    reader: Arc<AbortOnDrop>,
+    _reader: Arc<AbortOnDrop>,
 }
 
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
@@ -69,7 +68,7 @@ impl RdpClient {
     {
         let (rd, wr) = split(stream);
         let mut rd = BufReader::new(rd);
-        let greeting = read_frame(&mut rd)
+        read_frame(&mut rd)
             .await
             .ok_or("DevTools greeting not received")?;
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
@@ -105,14 +104,8 @@ impl RdpClient {
             next_request: Arc::new(AtomicU64::new(0)),
             failed: Arc::new(AtomicBool::new(false)),
             events,
-            greeting,
-            reader: Arc::new(AbortOnDrop(reader)),
+            _reader: Arc::new(AbortOnDrop(reader)),
         })
-    }
-
-    /// Returns the server greeting message.
-    pub fn greeting(&self) -> &Value {
-        &self.greeting
     }
 
     /// Subscribes to unsolicited actor events.

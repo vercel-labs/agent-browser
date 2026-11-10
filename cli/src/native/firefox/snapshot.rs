@@ -10,7 +10,10 @@ use super::target::find_element;
 use crate::native::actions::{self as chrome, DaemonState};
 use crate::native::cdp::types::{AXNode, AXProperty, AXValue};
 use crate::native::element::RefMap;
-use crate::native::snapshot::{snapshot_from_ax_nodes, SnapshotOptions, SnapshotRefContext};
+use crate::native::snapshot::{
+    cursor_info_from_value, snapshot_from_ax_nodes, SnapshotOptions, SnapshotRefContext,
+    CURSOR_DETECTION_JS,
+};
 
 const PAINT_WAIT: Duration = Duration::from_millis(500);
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(30);
@@ -19,8 +22,8 @@ const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(30);
 const SETTLE_JS: &str =
     "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(0))))";
 
-/// Batch-resolves a pruned `[selector, role, children]` tree to `[node, contentWindow, inShadowRoot]` triples in document order.
-/// Children of an open shadow host resolve inside its shadow root first.
+/// Batch-resolves a pruned `[selector, role, children]` tree to `[node, contentWindow, inShadowRoot, textLeaf]` entries in document order.
+/// Children of an open shadow host resolve inside its shadow root first; a text leaf resolves to the element that holds the text when that element has no node of its own.
 const RESOLVE_JS: &str = r#"(tree) => {
   const out = [];
   const find = (roots, sel) => {
@@ -30,12 +33,21 @@ const RESOLVE_JS: &str = r#"(tree) => {
     return null;
   };
   const walk = ([sel, role, kids], roots) => {
-    const el = role === 'document' ? roots[0] : sel && !sel.endsWith('#text') ? find(roots, sel) : null;
-    out.push([el, role === 'internal frame' && el ? el.contentWindow : null, !!el && el.getRootNode() instanceof ShadowRoot]);
+    const text = !!sel && sel.endsWith('#text');
+    const el = role === 'document' ? roots[0] : sel && !text ? find(roots, sel) : null;
+    out.push([el, role === 'internal frame' && el ? el.contentWindow : null, !!el && el.getRootNode() instanceof ShadowRoot, text ? [roots, sel.slice(0, -5)] : null]);
     const next = role !== 'document' && el && el.shadowRoot ? [el.shadowRoot, ...roots] : roots;
     for (const k of kids) walk(k, next);
   };
   walk(JSON.parse(tree), [document]);
+  const resolved = new Set(out.map(entry => entry[0]).filter(Boolean));
+  for (const entry of out) {
+    if (!entry[3]) continue;
+    const el = find(entry[3][0], entry[3][1]);
+    if (!el || resolved.has(el)) continue;
+    resolved.add(el);
+    entry[0] = el;
+  }
   return out;
 }"#;
 
@@ -77,6 +89,7 @@ fn push_node(
     let role = match node["role"].as_str().unwrap_or("") {
         "document" => "RootWebArea",
         "text leaf" => "StaticText",
+        "label" => "LabelText",
         "internal frame" => "Iframe",
         "entry" | "password text" => "textbox",
         "search" if states.contains(&"editable") => "searchbox",
@@ -276,6 +289,39 @@ fn find_context_root<'a>(node: &'a Value, context: &str) -> Option<&'a Value> {
         .find_map(|c| find_context_root(c, context))
 }
 
+/// Runs the shared cursor detection over the document and its open shadow roots, keyed by BiDi `sharedId`.
+async fn cursor_detections(ff: &FirefoxSession, context: &str) -> HashMap<String, Value> {
+    let js = format!(
+        r#"() => {{
+      const scopes = document.body ? [document.body] : [];
+      for (let i = 0; i < scopes.length; i++)
+        for (const el of scopes[i].querySelectorAll('*')) if (el.shadowRoot) scopes.push(el.shadowRoot);
+      return scopes.flatMap(scope => ({CURSOR_DETECTION_JS})(scope));
+    }}"#
+    );
+    ff.bidi
+        .call_function(context, &js, None, vec![])
+        .await
+        .ok()
+        .and_then(|found| found.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| Some((item["element"]["sharedId"].as_str()?.to_string(), item)))
+        .collect()
+}
+
+/// Copies each detected element's cursor info onto the node that resolved to it.
+fn attach_cursor(node: &mut Value, detected: &HashMap<String, Value>) {
+    if let Some(info) = node["abSid"].as_str().and_then(|sid| detected.get(sid)) {
+        node["abCursor"] = info.clone();
+    }
+    if let Some(children) = node["children"].as_array_mut() {
+        for child in children {
+            attach_cursor(child, detected);
+        }
+    }
+}
+
 /// Tags every node of `doc` with its BiDi `abSid`/`abCtx`, then does the same inside each frame's own context.
 async fn annotate(
     ff: &mut FirefoxSession,
@@ -298,6 +344,7 @@ async fn annotate(
         &mut Vec::new(),
         &mut frames,
     );
+    attach_cursor(doc, &cursor_detections(ff, context).await);
     if let Some(sid) = doc["abSid"].as_str() {
         if ff
             .documents
@@ -398,7 +445,7 @@ async fn active_tab_target(
 
 pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Result<Value, String> {
     let deadline = tokio::time::Instant::now() + SNAPSHOT_DEADLINE;
-    let top = ff.top_context.clone();
+    let top = ff.contexts.active_tab().to_string();
     ff.bidi
         .send("browsingContext.activate", json!({"context": top}))
         .await?;
@@ -428,7 +475,7 @@ pub async fn take_snapshot(
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
 ) -> Result<String, String> {
-    let context = ff.context.clone();
+    let context = ff.contexts.active().to_string();
     let frame_root = capture_tree(ff, &context).await?;
     let root = match &options.selector {
         None => &frame_root,
@@ -442,6 +489,7 @@ pub async fn take_snapshot(
         }
     };
     let mut urls = HashMap::new();
+    let mut cursor_elements = HashMap::new();
     let mut node_contexts = HashMap::new();
     let FirefoxSession {
         refs,
@@ -457,6 +505,9 @@ pub async fn take_snapshot(
             *next_node_id
         });
         node_contexts.insert(id, context);
+        if n["abCursor"].is_object() {
+            cursor_elements.insert(id, cursor_info_from_value(&n["abCursor"]));
+        }
         if n["abShadow"] == true {
             shadow_ids.insert(id);
         }
@@ -475,6 +526,7 @@ pub async fn take_snapshot(
     Ok(snapshot_from_ax_nodes(
         &nodes,
         &urls,
+        &cursor_elements,
         options,
         ref_map,
         SnapshotRefContext {
@@ -494,7 +546,7 @@ pub async fn snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     state.ref_map.begin_snapshot();
     let tree = Box::pin(take_snapshot(ff, &options, &mut state.ref_map)).await?;
     let url = ff.url().await.unwrap_or_default();
-    let session_id = ff.top_context.clone();
+    let session_id = ff.contexts.active_tab().to_string();
     chrome::snapshot_response(cmd, state, session_id, &options, previous_refs, tree, url)
 }
 
@@ -651,6 +703,7 @@ mod tests {
         snapshot_from_ax_nodes(
             &nodes,
             &HashMap::new(),
+            &HashMap::new(),
             &options,
             ref_map,
             SnapshotRefContext {
@@ -731,6 +784,7 @@ mod tests {
 
         snapshot_from_ax_nodes(
             &nodes,
+            &HashMap::new(),
             &HashMap::new(),
             &SnapshotOptions::default(),
             &mut refs,
@@ -857,6 +911,7 @@ mod tests {
             snapshot_from_ax_nodes(
                 &nodes,
                 &hrefs,
+                &HashMap::new(),
                 &options,
                 &mut map,
                 SnapshotRefContext {

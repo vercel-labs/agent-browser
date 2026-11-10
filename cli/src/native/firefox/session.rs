@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
 
 use super::bidi::{remote_to_json, BidiClient};
+use super::contexts::{Contexts, Removed};
 use super::emulation::{self, Settings as EmulationSettings};
 use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
 use super::process::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
@@ -38,22 +39,13 @@ pub struct FirefoxSession {
     pub auto_dialog: Arc<AtomicBool>,
     pub auto_dialog_changed: Arc<Notify>,
     pub rdp: RdpClient,
-    pub accessibility_actor: String,
-    /// Active top-level browsing context (tab) id.
-    pub context: String,
-    /// Active top-level browsing context id (tab), restored by `frame main`.
-    pub top_context: String,
-    /// Stable `t<N>` ids keyed by BiDi context; assigned on first sight and never reused.
-    pub tab_ids: HashMap<String, u32>,
-    pub(crate) context_parents: HashMap<String, String>,
-    next_tab_id: u32,
+    pub contexts: Contexts,
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
     pub next_node_id: i64,
     pub frames: Option<super::snapshot::FrameWatch>,
     /// Document node `sharedId` last snapshotted per context, used to reset `refs` on a new document.
     pub documents: HashMap<String, String>,
-    pub tab_labels: HashMap<String, String>,
     /// Touch points of the active touch sequence, released by a later `input_touch` end.
     pub touches: Vec<(f64, f64)>,
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
@@ -68,9 +60,7 @@ pub struct FirefoxSession {
     pub intercepting: bool,
     /// Unfinished requests mapped to their reported browsing contexts.
     pub inflight: HashMap<String, Option<String>>,
-    pub(crate) dispatcher: Option<AbortOnDrop>,
-    /// BiDi user context created for a window opened by `window new`, keyed by its top-level context.
-    pub window_contexts: HashMap<String, String>,
+    _dispatcher: Option<AbortOnDrop>,
     pub visited_origins: HashSet<String>,
     /// Version Firefox reported when the session opened, used for HAR browser metadata.
     pub browser_version: String,
@@ -200,10 +190,6 @@ impl FirefoxSession {
             .await?;
 
         let tree = bidi.send("browsingContext.getTree", json!({})).await?;
-        let context = tree["contexts"][0]["context"]
-            .as_str()
-            .ok_or("Firefox reported no browsing context")?
-            .to_string();
         let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
             viewport: options
                 .viewport_size
@@ -228,39 +214,27 @@ impl FirefoxSession {
             auto_dialog: Arc::new(AtomicBool::new(auto_dialog)),
             auto_dialog_changed: Arc::new(Notify::new()),
             rdp,
-            accessibility_actor,
-            tab_ids: HashMap::from([(context.clone(), 1)]),
-            context_parents: HashMap::new(),
-            next_tab_id: 2,
-            top_context: context.clone(),
-            context,
+            contexts: Contexts::from_tree(&tree)?,
             refs: HashMap::new(),
             next_node_id: 0,
             frames: None,
             documents: HashMap::new(),
-            tab_labels: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
             emulation,
             download_dir: options.download_path.clone(),
-            window_contexts: HashMap::new(),
             visited_origins: HashSet::new(),
             events,
             net,
             intercepting: false,
             inflight: HashMap::new(),
-            dispatcher,
+            _dispatcher: dispatcher,
             browser_version,
         };
         if let Some(contexts) = tree["contexts"].as_array() {
-            for context in contexts {
-                if let Some(id) = context["context"].as_str() {
-                    session.tab_id(id);
-                }
-            }
             session.record_context_origins(contexts);
         }
-        emulation::apply_to_context(&session, &session.context).await?;
+        emulation::apply_to_context(&session, session.contexts.active()).await?;
         Ok(session)
     }
 
@@ -270,14 +244,6 @@ impl FirefoxSession {
                 self.note_visit(url);
             }
             if let Some(children) = context["children"].as_array() {
-                if let Some(parent) = context["context"].as_str() {
-                    for child in children {
-                        if let Some(child) = child["context"].as_str() {
-                            self.context_parents
-                                .insert(child.to_string(), parent.to_string());
-                        }
-                    }
-                }
                 self.record_context_origins(children);
             }
         }
@@ -292,22 +258,22 @@ impl FirefoxSession {
         }
     }
 
-    /// The BiDi storage partition for the active tab's window, set only by `window new`.
+    /// The BiDi storage partition of the active context's tab, when it is not the default one.
     pub fn active_partition(&self) -> Option<Value> {
-        self.window_contexts
-            .get(&self.context)
-            .map(|user_context| json!({"type": "storageKey", "userContext": user_context}))
+        self.contexts.partition(self.contexts.active())
     }
 
-    /// Returns the stable `t<N>` id for `context`, assigning the next id the first time it is seen.
-    pub fn tab_id(&mut self, context: &str) -> u32 {
-        if let Some(id) = self.tab_ids.get(context) {
-            return *id;
+    /// Removes the user contexts this session created once their last tab is gone.
+    pub async fn release_unused_user_contexts(&mut self) {
+        for user_context in self.contexts.take_unused_user_contexts() {
+            let _ = self
+                .bidi
+                .send(
+                    "browser.removeUserContext",
+                    json!({"userContext": user_context}),
+                )
+                .await;
         }
-        let id = self.next_tab_id;
-        self.next_tab_id += 1;
-        self.tab_ids.insert(context.to_string(), id);
-        id
     }
 
     /// True once the Firefox process has exited or its BiDi connection has closed.
@@ -332,7 +298,8 @@ impl FirefoxSession {
         let mut drained = Vec::new();
         while let Ok(e) = self.events.try_recv() {
             self.track_request(&e);
-            self.track_tabs(&e, dialog);
+            let removed = self.contexts.apply(&e);
+            self.forget(removed, dialog);
             if matches!(
                 e["method"].as_str(),
                 Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
@@ -344,7 +311,7 @@ impl FirefoxSession {
             apply_event(
                 &e,
                 dialog,
-                &mut self.context_parents,
+                &self.contexts,
                 self.auto_dialog.load(Ordering::Acquire),
             );
             drained.push(e);
@@ -352,34 +319,14 @@ impl FirefoxSession {
         drained
     }
 
-    /// Registers new top-level tabs and drops every destroyed context, frames included, through
-    /// the one cleanup path.
-    fn track_tabs(&mut self, event: &Value, dialog: &mut Option<PendingDialog>) {
-        let params = &event["params"];
-        let Some(context) = params["context"].as_str() else {
-            return;
-        };
-        match event["method"].as_str() {
-            Some("browsingContext.contextCreated") => {
-                if params["parent"].is_null() {
-                    self.tab_id(context);
-                }
-            }
-            Some("browsingContext.contextDestroyed") => {
-                self.forget_context(context, dialog);
-            }
-            _ => {}
-        }
-    }
-
-    /// Tracks request lifetimes and removes requests belonging to destroyed contexts.
+    /// Tracks request lifetimes.
     pub(super) fn track_request(&mut self, event: &Value) {
         let params = &event["params"];
         let id = params["request"]["request"].as_str();
         match event["method"].as_str() {
             Some("network.beforeRequestSent") => {
                 let url = params["request"]["url"].as_str().unwrap_or("");
-                if !url.starts_with("ws:") && !url.starts_with("wss:") {
+                if !super::network::is_websocket(url) {
                     if let Some(id) = id {
                         self.inflight.insert(
                             id.to_string(),
@@ -391,15 +338,6 @@ impl FirefoxSession {
             Some("network.responseCompleted" | "network.fetchError") => {
                 if let Some(id) = id {
                     self.inflight.remove(id);
-                }
-            }
-            Some("browsingContext.contextDestroyed") => {
-                if let Some(context) = params["context"].as_str() {
-                    self.inflight.retain(|_, owner| {
-                        !owner.as_deref().is_some_and(|owner| {
-                            is_descendant_of(context, owner, &self.context_parents)
-                        })
-                    });
                 }
             }
             _ => {}
@@ -416,16 +354,22 @@ impl FirefoxSession {
 
     /// True when `context` is the active tab or one of its frames.
     pub(crate) fn context_is_in_active_tab(&self, context: &str) -> bool {
-        is_descendant_of(&self.top_context, context, &self.context_parents)
+        self.contexts.tab_of(context) == Some(self.contexts.active_tab())
     }
 
     /// Records the frame tree under the active tab so frames created since the last drain can be placed.
     pub(crate) async fn refresh_frame_tree(&mut self) -> Result<(), String> {
         let tree = self
             .bidi
-            .send("browsingContext.getTree", json!({"root": self.top_context}))
+            .send(
+                "browsingContext.getTree",
+                json!({"root": self.contexts.active_tab()}),
+            )
             .await?;
         let contexts = tree["contexts"].as_array().cloned().unwrap_or_default();
+        for info in &contexts {
+            self.contexts.record(info);
+        }
         self.record_context_origins(&contexts);
         Ok(())
     }
@@ -439,18 +383,16 @@ impl FirefoxSession {
         self.refresh_frame_tree().await.is_ok() && self.context_is_in_active_tab(context)
     }
 
-    /// Forgets a browsing context that is gone along with every context nested inside it: stable
-    /// ids, labels, element refs, documents, shadow ids and any prompt they owned. Returns true
-    /// when the active context was among them, which then falls back to its top-level tab, or to
-    /// the lowest surviving tab id when that tab itself is gone.
+    /// Forgets a browsing context that is gone and everything nested in it: element refs,
+    /// documents, shadow ids, unfinished requests and any prompt they owned. Returns true when the
+    /// active context was among them, which the registry then replaces.
     pub fn forget_context(&mut self, context: &str, dialog: &mut Option<PendingDialog>) -> bool {
-        let gone: HashSet<String> = self
-            .context_parents
-            .keys()
-            .filter(|id| is_context_or_descendant(id, context, &self.context_parents))
-            .cloned()
-            .chain(std::iter::once(context.to_string()))
-            .collect();
+        let removed = self.contexts.remove(context);
+        self.forget(removed, dialog)
+    }
+
+    fn forget(&mut self, removed: Removed, dialog: &mut Option<PendingDialog>) -> bool {
+        let gone = &removed.contexts;
         let stale_ids: HashSet<i64> = self
             .refs
             .iter()
@@ -460,6 +402,8 @@ impl FirefoxSession {
         self.refs.retain(|(id, _), _| !gone.contains(id));
         self.documents.retain(|id, _| !gone.contains(id));
         self.shadow_ids.retain(|id| !stale_ids.contains(id));
+        self.inflight
+            .retain(|_, owner| !owner.as_ref().is_some_and(|owner| gone.contains(owner)));
         if dialog.as_ref().is_some_and(|d| {
             [&d.owner_context, &d.session_id]
                 .into_iter()
@@ -468,26 +412,17 @@ impl FirefoxSession {
         }) {
             *dialog = None;
         }
-        self.context_parents.retain(|id, _| !gone.contains(id));
-        if self.tab_ids.remove(context).is_some() {
-            self.tab_labels.remove(context);
-            if self.top_context == context {
-                self.top_context = self
-                    .tab_ids
-                    .iter()
-                    .min_by_key(|(_, id)| *id)
-                    .map(|(context, _)| context.clone())
-                    .unwrap_or_default();
-                self.context = self.top_context.clone();
-                self.refs.clear();
-                return true;
-            }
+        if removed.active_changed {
+            self.forget_refs();
         }
-        if !gone.contains(&self.context) {
-            return false;
-        }
-        self.context = self.top_context.clone();
-        true
+        removed.active_changed
+    }
+
+    /// Drops every element ref along with the documents and shadow ids they were recorded for.
+    pub fn forget_refs(&mut self) {
+        self.refs.clear();
+        self.documents.clear();
+        self.shadow_ids.clear();
     }
 
     /// Accepts the prompts the daemon answers itself, following `auto_dialog` as it changes.
@@ -556,7 +491,7 @@ impl FirefoxSession {
         fut: impl Future<Output = Result<T, String>>,
     ) -> Result<Option<T>, String> {
         let mut events = self.bidi.subscribe_buffered();
-        let mut parents = self.context_parents.clone();
+        let mut contexts = self.contexts.clone();
         tokio::pin!(fut);
         loop {
             tokio::select! {
@@ -564,11 +499,13 @@ impl FirefoxSession {
                 e = events.recv() => match e {
                     Some(e) if e["method"] == "browsingContext.userPromptOpened"
                         && !auto_handles_prompt(&e["params"], self.auto_dialog.load(Ordering::Acquire))
-                        && [context, &self.context, &self.top_context].iter().any(|active|
-                            owner_context(active, &parents)
-                                == owner_context(e["params"]["context"].as_str().unwrap_or_default(), &parents)
+                        && [context, contexts.active()].iter().any(|active|
+                            contexts.tab_of(active)
+                                == contexts.tab_of(e["params"]["context"].as_str().unwrap_or_default())
                         ) => return Ok(None),
-                    Some(e) => apply_event(&e, &mut None, &mut parents, self.auto_dialog.load(Ordering::Acquire)),
+                    Some(e) => {
+                        contexts.apply(&e);
+                    }
                     None => return fut.await.map(Some),
                 },
             }
@@ -577,18 +514,20 @@ impl FirefoxSession {
 
     /// Evaluates `expression` in the active context and returns the decoded value.
     pub async fn eval(&self, expression: &str) -> Result<Value, String> {
-        self.eval_in_context(expression, &self.context, false).await
+        self.eval_in_context(expression, self.contexts.active(), false)
+            .await
     }
 
     /// Evaluates `expression` in the active top-level tab and returns the decoded value.
     pub async fn eval_top(&self, expression: &str) -> Result<Value, String> {
-        self.eval_in_context(expression, &self.top_context, false)
+        self.eval_in_context(expression, self.contexts.active_tab(), false)
             .await
     }
 
     /// Like `eval`, but a script exception yields `null` so callers can keep polling.
     pub async fn eval_lenient(&self, expression: &str) -> Result<Value, String> {
-        self.eval_in_context(expression, &self.context, true).await
+        self.eval_in_context(expression, self.contexts.active(), true)
+            .await
     }
 
     async fn eval_in_context(
@@ -627,7 +566,10 @@ impl FirefoxSession {
     pub async fn url(&self) -> Result<String, String> {
         let tree = self
             .bidi
-            .send("browsingContext.getTree", json!({"root": self.top_context}))
+            .send(
+                "browsingContext.getTree",
+                json!({"root": self.contexts.active_tab()}),
+            )
             .await?;
         Ok(tree["contexts"][0]["url"]
             .as_str()
@@ -649,21 +591,11 @@ pub(crate) fn auto_handles_prompt(params: &Value, auto_dialog: bool) -> bool {
 fn apply_event(
     e: &Value,
     dialog: &mut Option<PendingDialog>,
-    context_parents: &mut HashMap<String, String>,
+    contexts: &Contexts,
     auto_dialog: bool,
 ) {
     let p = &e["params"];
     match e["method"].as_str() {
-        Some("browsingContext.contextCreated") => {
-            if let (Some(context), Some(parent)) = (p["context"].as_str(), p["parent"].as_str()) {
-                context_parents.insert(context.to_string(), parent.to_string());
-            }
-        }
-        Some("browsingContext.contextDestroyed") => {
-            if let Some(context) = p["context"].as_str() {
-                context_parents.remove(context);
-            }
-        }
         Some("browsingContext.userPromptOpened") if !auto_handles_prompt(p, auto_dialog) => {
             let context = p["context"].as_str();
             *dialog = Some(PendingDialog {
@@ -673,7 +605,7 @@ fn apply_event(
                 default_prompt: p["defaultValue"].as_str().map(String::from),
                 session_id: context.map(String::from),
                 owner_context: context
-                    .map(|context| owner_context(context, context_parents).to_string()),
+                    .map(|context| contexts.tab_of(context).unwrap_or(context).to_string()),
             });
         }
         Some("browsingContext.userPromptClosed")
@@ -685,52 +617,16 @@ fn apply_event(
     }
 }
 
-fn is_context_or_descendant<'a>(
-    mut context: &'a str,
-    root: &str,
-    parents: &'a HashMap<String, String>,
-) -> bool {
-    loop {
-        if context == root {
-            return true;
-        }
-        let Some(parent) = parents.get(context).filter(|parent| !parent.is_empty()) else {
-            return false;
-        };
-        context = parent;
-    }
-}
-
-fn owner_context<'a>(mut context: &'a str, parents: &'a HashMap<String, String>) -> &'a str {
-    while let Some(parent) = parents.get(context).filter(|parent| !parent.is_empty()) {
-        context = parent;
-    }
-    context
-}
-
-/// True when `context` is `root` or a frame nested inside it.
-fn is_descendant_of<'a>(
-    root: &str,
-    mut context: &'a str,
-    parents: &'a HashMap<String, String>,
-) -> bool {
-    loop {
-        if root == context {
-            return true;
-        }
-        match parents.get(context) {
-            Some(parent) => context = parent,
-            None => return false,
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::AsyncWriteExt;
     use tokio_tungstenite::tungstenite::Message;
+
+    pub(crate) fn active_only() -> Contexts {
+        Contexts::from_tree(&json!({"contexts": [{"context": "ctx-active"}]})).unwrap()
+    }
 
     pub(crate) type Calls = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
@@ -879,28 +775,21 @@ pub(crate) mod tests {
             auto_dialog: Arc::new(AtomicBool::new(false)),
             auto_dialog_changed: Arc::new(Notify::new()),
             rdp,
-            accessibility_actor: "acc".into(),
-            context: "ctx-active".into(),
-            tab_ids: HashMap::from([("ctx-active".into(), 1)]),
-            context_parents: HashMap::new(),
-            next_tab_id: 2,
-            top_context: "ctx-active".into(),
+            contexts: active_only(),
             refs: HashMap::new(),
             next_node_id: 0,
             frames: None,
             documents: HashMap::new(),
-            tab_labels: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
             emulation: Arc::default(),
             download_dir: None,
-            window_contexts: HashMap::new(),
             visited_origins: HashSet::new(),
             events,
             net: NetContext::default(),
             intercepting: false,
             inflight: HashMap::new(),
-            dispatcher: None,
+            _dispatcher: None,
             browser_version: String::new(),
         };
         (session, tx, calls)
@@ -1013,18 +902,12 @@ pub(crate) mod tests {
             auto_dialog: Arc::new(AtomicBool::new(false)),
             auto_dialog_changed: Arc::new(Notify::new()),
             rdp,
-            accessibility_actor: "acc".into(),
-            context: "ctx-active".into(),
-            tab_ids: HashMap::from([("ctx-active".into(), 1)]),
-            context_parents: HashMap::new(),
-            next_tab_id: 2,
-            top_context: "ctx-active".into(),
+            contexts: active_only(),
             refs: HashMap::new(),
             next_node_id: 0,
             shadow_ids: Default::default(),
             frames: None,
             documents: HashMap::new(),
-            tab_labels: HashMap::new(),
             touches: Vec::new(),
             emulation: Arc::default(),
             download_dir: None,
@@ -1033,9 +916,8 @@ pub(crate) mod tests {
             net: NetContext::default(),
             intercepting: false,
             inflight: HashMap::new(),
-            dispatcher: None,
+            _dispatcher: None,
             browser_version: String::new(),
-            window_contexts: HashMap::new(),
         };
         (session, tx, calls, bidi_messages, rdp_messages)
     }
@@ -1053,25 +935,14 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn tab_ids_are_stable_and_never_reused() {
-        let (mut s, _tx, _) = fake_session().await;
-        assert_eq!(s.tab_id("ctx-active"), 1);
-        assert_eq!(s.tab_id("ctx-new"), 2);
-        assert_eq!(s.tab_id("ctx-active"), 1);
-        assert_eq!(s.tab_id("ctx-later"), 3);
-    }
-
-    #[tokio::test]
     async fn destroyed_contexts_reconcile_tabs_and_active_state() {
         let (mut session, tx, _) = fake_session().await;
-        session.tab_id("survivor");
+        session.contexts.record(&json!({"context": "survivor"}));
+        session.contexts.set_label("ctx-active", "docs");
         session
-            .tab_labels
-            .insert("ctx-active".into(), "docs".into());
-        session.context = "child".into();
-        session
-            .context_parents
-            .insert("child".into(), "ctx-active".into());
+            .contexts
+            .record(&json!({"context": "child", "parent": "ctx-active"}));
+        session.contexts.activate("child");
         session.refs.insert(("child".into(), "node".into()), 1);
         session.documents.insert("child".into(), "document".into());
         session.shadow_ids.insert(1);
@@ -1102,7 +973,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
         let ff = state.firefox.as_ref().unwrap();
-        assert_eq!(ff.context, "ctx-active");
+        assert_eq!(ff.contexts.active(), "ctx-active");
         assert!(state.active_frame_id.is_none());
         assert!(ff.refs.is_empty());
         assert!(ff.documents.is_empty());
@@ -1113,7 +984,7 @@ pub(crate) mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 crate::native::firefox::network::drain(&mut state).await;
-                if state.firefox.as_ref().unwrap().context == "survivor" {
+                if state.firefox.as_ref().unwrap().contexts.active() == "survivor" {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -1122,8 +993,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
         let ff = state.firefox.as_ref().unwrap();
-        assert!(!ff.tab_ids.contains_key("ctx-active"));
-        assert!(!ff.tab_labels.contains_key("ctx-active"));
+        assert!(ff.contexts.tab("ctx-active").is_none());
         assert!(state.active_frame_id.is_none());
         ff.eval("1 + 1").await.unwrap();
         let err = super::super::tabs::tab_new(&json!({"label":"docs"}), &mut state)
@@ -1140,8 +1010,9 @@ pub(crate) mod tests {
                     .firefox
                     .as_ref()
                     .unwrap()
-                    .tab_ids
-                    .contains_key("third")
+                    .contexts
+                    .tab("third")
+                    .is_some()
                 {
                     break;
                 }
@@ -1150,7 +1021,10 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(state.firefox.as_ref().unwrap().context, "survivor");
+        assert_eq!(
+            state.firefox.as_ref().unwrap().contexts.active(),
+            "survivor"
+        );
     }
 
     #[tokio::test]
@@ -1192,7 +1066,10 @@ pub(crate) mod tests {
             json!({"contexts": [{"context": "ctx-page", "url": "https://page.example/"}]})
         })
         .await;
-        session.context = "ctx-frame".into();
+        session
+            .contexts
+            .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
+        session.contexts.activate("ctx-frame");
 
         assert_eq!(session.url().await.unwrap(), "https://page.example/");
         assert_eq!(requests.lock().unwrap()[0]["params"]["root"], "ctx-active");
@@ -1218,21 +1095,22 @@ pub(crate) mod tests {
     #[test]
     fn prompt_events_set_and_clear_the_dialog() {
         let mut d = None;
-        let mut context_parents = HashMap::new();
-        let frame = json!({"method":"browsingContext.contextCreated","params":{"context":"frame","parent":"top"}});
-        apply_event(&frame, &mut d, &mut context_parents, false);
+        let contexts = Contexts::from_tree(
+            &json!({"contexts": [{"context": "top", "children": [{"context": "frame"}]}]}),
+        )
+        .unwrap();
         let open = json!({"method":"browsingContext.userPromptOpened","params":{"context":"frame","type":"confirm","message":"sure?"}});
-        apply_event(&open, &mut d, &mut context_parents, false);
+        apply_event(&open, &mut d, &contexts, false);
         assert_eq!(d.as_ref().unwrap().dialog_type, "confirm");
         assert_eq!(d.as_ref().unwrap().session_id.as_deref(), Some("frame"));
         assert_eq!(d.as_ref().unwrap().owner_context.as_deref(), Some("top"));
         let other =
             json!({"method":"browsingContext.userPromptClosed","params":{"context":"other"}});
-        apply_event(&other, &mut d, &mut context_parents, false);
+        apply_event(&other, &mut d, &contexts, false);
         assert!(d.is_some());
         let close =
             json!({"method":"browsingContext.userPromptClosed","params":{"context":"frame"}});
-        apply_event(&close, &mut d, &mut context_parents, false);
+        apply_event(&close, &mut d, &contexts, false);
         assert!(d.is_none());
     }
 
@@ -1248,7 +1126,7 @@ pub(crate) mod tests {
                             "context": "ctx-active", "type": kind, "handler": handler
                         }}),
                         &mut dialog,
-                        &mut HashMap::new(),
+                        &active_only(),
                         enabled,
                     );
                     assert_eq!(
@@ -1300,10 +1178,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn inflight_requests_follow_tab_ancestry_and_end_on_completion_error_or_destroy() {
         let (mut session, _, _) = fake_session().await;
-        session.record_context_origins(&[json!({
-            "context": "ctx-active",
-            "children": [{"context": "frame", "children": [{"context": "nested"}]}],
-        })]);
+        for tab in [
+            json!({"context": "ctx-active", "children": [{"context": "frame", "children": [{"context": "nested"}]}]}),
+            json!({"context": "other"}),
+        ] {
+            session.contexts.record(&tab);
+        }
         for (id, context) in [("background", Some("other")), ("unknown", None)] {
             session.track_request(&json!({
                 "method": "network.beforeRequestSent",
@@ -1311,15 +1191,14 @@ pub(crate) mod tests {
             }));
         }
         assert!(!session.has_inflight_in_active_tab());
-        session.top_context = "other".into();
+        session.contexts.activate("other");
         assert!(session.has_inflight_in_active_tab());
         session.track_request(&json!({
             "method": "network.fetchError",
             "params": {"request": {"request": "background"}},
         }));
         assert!(!session.has_inflight_in_active_tab());
-        session.top_context = "ctx-active".into();
-        session.context = "frame".into();
+        session.contexts.activate("frame");
         for id in ["completed", "destroyed"] {
             session.track_request(&json!({
                 "method": "network.beforeRequestSent",
@@ -1333,10 +1212,7 @@ pub(crate) mod tests {
         }));
         assert!(!session.inflight.contains_key("completed"));
         assert!(session.has_inflight_in_active_tab());
-        session.track_request(&json!({
-            "method": "browsingContext.contextDestroyed",
-            "params": {"context": "frame"},
-        }));
+        session.forget_context("frame", &mut None);
         assert!(!session.inflight.contains_key("destroyed"));
         assert!(!session.has_inflight_in_active_tab());
     }
@@ -1344,8 +1220,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn race_prompt_returns_none_when_a_prompt_opens_on_the_active_context() {
         let (mut s, tx, _) = fake_session().await;
-        s.context_parents
-            .insert("frame-parent".into(), "ctx-active".into());
+        s.contexts
+            .record(&json!({"context": "frame-parent", "parent": "ctx-active"}));
         let hang = std::future::pending::<Result<(), String>>();
         let racer = s.race_prompt("ctx-active", hang);
         tokio::pin!(racer);
