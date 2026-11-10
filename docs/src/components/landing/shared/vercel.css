@@ -4,7 +4,7 @@
  * Every value points at a Geist token (`--ds-*`, `--font-geist-*`) with the
  * Geist light value as a fallback. Inside an app that loads Geist, the stage
  * follows the host's light or dark theme; anywhere else it renders as Geist
- * light. Same values as tokens.ts. Appearance only: stageshow's framing,
+ * light. Appearance only: stageshow's framing,
  * craft and motion rules are unchanged.
  *
  * Uses the public @vercel/geistdocs theme tokens.

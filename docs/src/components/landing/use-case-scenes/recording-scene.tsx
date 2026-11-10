@@ -12,7 +12,7 @@ import { SceneFrame, SCENE_SIZE } from './scene-frame';
 import { useScenePlayback } from './scene-playback';
 import { StageAgentLabel } from './stage-agent-label';
 import { Marquee } from './marquee';
-import './vercel.css';
+import '../shared/vercel.css';
 import './recording-scene.css';
 
 type Box = { x: number; y: number; w: number; h: number };

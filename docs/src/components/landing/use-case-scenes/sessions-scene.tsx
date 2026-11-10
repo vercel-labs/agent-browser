@@ -33,8 +33,8 @@ import { bezier } from '../../stageshow/vendor/kit/ease';
 import { BrandMark } from '../compat';
 import { SceneFrame, SCENE_SIZE } from './scene-frame';
 import { useScenePlayback } from './scene-playback';
-import { VercelArrow } from './vercel-cursor';
-import './vercel.css';
+import { VercelArrow } from '../shared/vercel-cursor';
+import '../shared/vercel.css';
 import './sessions-scene.css';
 
 /** How an agent's avatar (disc and mark) deforms while it strains at an

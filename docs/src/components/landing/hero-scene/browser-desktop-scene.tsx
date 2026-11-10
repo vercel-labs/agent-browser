@@ -15,7 +15,7 @@ import { DesktopApps } from './desktop-apps';
 import { desktopFrame, desktopPeerPosition, desktopPeerAlpha } from './desktop-timeline';
 import { Marquee } from '../use-case-scenes/marquee';
 import { useHairline } from '../use-case-scenes/hairline';
-import '../use-case-scenes/vercel.css';
+import '../shared/vercel.css';
 import './browser-desktop-scene.css';
 
 /** Browser scope's crop, matched to each stage's aspect: a gutter at the

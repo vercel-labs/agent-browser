@@ -2,7 +2,6 @@
 export { Stage } from './stage'
 export { Window, Bar } from './window'
 export { Field } from './controls/Field'
-export { Check } from './parts/Check'
 export { clock } from './clock'
 export { useReducedMotion } from './reduced-motion'
 export type { Act, Script } from './act'

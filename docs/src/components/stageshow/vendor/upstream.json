@@ -23,8 +23,6 @@
     "kit/stage.tsx": "75f75e600ace3a75aa04ebb72f6d6300af01e84529a418e08ad0d3d6a867ced3",
     "kit/motion/Camera.css": "6bdc4d2b6a11b0275a5b4735c4b23b6839ccf0cf59193b804f3a5aac15688641",
     "kit/controls/Field.css": "d48c35db3f1a7e966d2bc816bb492b6f1a2d69acf4e2f0e01b6fde475de0e54b",
-    "kit/controls/Field.tsx": "16dd3a339be85893929c361892a906c389ac24db87a9083291e63a66f15f5d59",
-    "kit/parts/Check.tsx": "e2dd0a7c25d1abeb14f6f091158f95f98fb99e8198bb6613398a39458e6eb762",
-    "kit/parts/Check.css": "5c4c2080ab705ce4e6febfa560337d7248b00de5381bd0be2be97e6e689734a9"
+    "kit/controls/Field.tsx": "16dd3a339be85893929c361892a906c389ac24db87a9083291e63a66f15f5d59"
   }
 }

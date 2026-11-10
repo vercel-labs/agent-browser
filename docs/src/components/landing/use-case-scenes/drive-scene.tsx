@@ -21,7 +21,7 @@ import { Field, Stage, type Act, type Point } from '../../stageshow/vendor/kit';
 import { SceneFrame, SCENE_SIZE } from './scene-frame';
 import { useScenePlayback } from './scene-playback';
 import { StageAgentLabel } from './stage-agent-label';
-import './vercel.css';
+import '../shared/vercel.css';
 import './drive-scene.css';
 
 type Team = 'Design' | 'Engineering' | 'Marketing';

@@ -3,7 +3,7 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { BrandMark } from '../compat';
-import { VercelArrow } from './vercel-cursor';
+import { VercelArrow } from '../shared/vercel-cursor';
 
 /** Extend the kit cursor without forking it. The label shares its transform,
  * so it cannot lag behind, flip sides, or change the pointer's hotspot.

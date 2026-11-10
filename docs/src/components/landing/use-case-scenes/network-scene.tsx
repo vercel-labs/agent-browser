@@ -23,7 +23,7 @@ import { IconCheck, IconRefreshCounterClockwise } from '@vercel/geistdocs/assets
 import { Stage, type Act } from '../../stageshow/vendor/kit';
 import { SceneFrame, SCENE_SIZE } from './scene-frame';
 import { useScenePlayback } from './scene-playback';
-import './vercel.css';
+import '../shared/vercel.css';
 import './network-scene.css';
 
 /** The button's four states, each one of Geist's own Button looks: the

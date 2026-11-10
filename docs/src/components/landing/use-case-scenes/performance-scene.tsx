@@ -12,7 +12,7 @@
 import { Field, Stage, type Act } from '../../stageshow/vendor/kit';
 import { SceneFrame, SCENE_SIZE } from './scene-frame';
 import { useScenePlayback } from './scene-playback';
-import './vercel.css';
+import '../shared/vercel.css';
 import './performance-scene.css';
 
 const REQUEST = 'Measure and improve perf plz';

@@ -21,7 +21,7 @@ import { bezier } from '../../stageshow/vendor/kit/ease';
 import { clock } from '../../stageshow/vendor/kit/clock';
 import { SceneFrame, SCENE_SIZE } from './scene-frame';
 import { useScenePlayback } from './scene-playback';
-import './vercel.css';
+import '../shared/vercel.css';
 import './snapshots-scene.css';
 
 /** `pos`: where the outline is, 0 around most of the page, 1 around half of

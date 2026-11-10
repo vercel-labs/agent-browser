@@ -1,5 +1,6 @@
 import type { Point } from '../../stageshow/vendor/kit';
-import type { Targets } from './hero-timeline';
+import { bezier } from '../../stageshow/vendor/kit/ease';
+import { smooth, type Targets } from './hero-timeline';
 
 // A lived-in desktop: the browser leading, Maps beside it, a few loose files.
 // Three agents work in parallel on one pulse (B = 850ms). The desktop runs a
@@ -110,27 +111,14 @@ const PRESENCE: Record<Exclude<DesktopPeer, 'claude'>, { in: number; out: number
 };
 
 const progress = (time: number, start: number, end: number) => Math.max(0, Math.min(1, (time - start) / (end - start)));
-const smooth = (value: number) => value * value * (3 - 2 * value);
 /** Settle: starts at once and eases in (a zoom responding to its tap). */
 const settle = (value: number) => 1 - (1 - value) ** 3;
-function bezier(x1: number, y1: number, x2: number, y2: number) {
-  return (t: number) => {
-    const bx = (s: number) => 3 * x1 * s * (1 - s) ** 2 + 3 * x2 * s * s * (1 - s) + s ** 3;
-    const by = (s: number) => 3 * y1 * s * (1 - s) ** 2 + 3 * y2 * s * s * (1 - s) + s ** 3;
-    let s = t;
-    for (let i = 0; i < 6; i++) {
-      const d = (bx(s + 1e-4) - bx(s)) / 1e-4 || 1;
-      s = Math.max(0, Math.min(1, s - (bx(s) - t) / d));
-    }
-    return by(s);
-  };
-}
 /** Travel: the browser agent's curve. Arrival from nowhere: decelerates in (the stageshow arrival curve). */
-const travel = bezier(.45, 0, .1, 1);
-const arrive = bezier(.25, .8, .25, 1);
+const travel = bezier([.45, 0, .1, 1]);
+const arrive = bezier([.25, .8, .25, 1]);
 /** Leaving: accelerates away, but never so steeply that the last frames jump
  * (end slope 3, ~20px a frame; the cursor is mostly faded by then). */
-const depart = bezier(.45, 0, .85, .55);
+const depart = bezier([.45, 0, .85, .55]);
 
 function point(stop: Stop, targets: Targets, offset: Point = { x: 0, y: 0 }): Point {
   const rect = targets[stop[1]];

@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react';
 import { BrandMark } from '../compat';
-import { VercelArrow } from '../use-case-scenes/vercel-cursor';
+import { VercelArrow } from '../shared/vercel-cursor';
 import type { Peer } from './hero-timeline';
 import './cursor-command-label.css';
 

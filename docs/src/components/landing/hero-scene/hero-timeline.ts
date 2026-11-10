@@ -1,4 +1,5 @@
 import type { Point, Rect } from '../../stageshow/vendor/kit';
+import { bezier } from '../../stageshow/vendor/kit/ease';
 
 // The browser story, one 17s loop: notice, fix, prove. The production site (a
 // low-fi agent-browser homepage) is already open, its headline misspelled; the
@@ -96,18 +97,7 @@ const STEADY = new Set<number>([SHOTS[0].select[0], SHOTS[1].select[0]]);
 export const progress = (time: number, start: number, end: number) => Math.max(0, Math.min(1, (time - start) / (end - start)));
 export const smooth = (value: number) => value * value * (3 - 2 * value);
 /** Travel: cubic-bezier(0.45, 0, 0.1, 1), stageshow's travel curve, sampled. */
-export function travel(t: number) {
-  // Solve the bezier's x for t, then read its y (a few Newton steps are plenty)
-  const x1 = .45, x2 = .1, y1 = 0, y2 = 1;
-  const bx = (s: number) => 3 * x1 * s * (1 - s) ** 2 + 3 * x2 * s * s * (1 - s) + s ** 3;
-  const by = (s: number) => 3 * y1 * s * (1 - s) ** 2 + 3 * y2 * s * s * (1 - s) + s ** 3;
-  let s = t;
-  for (let i = 0; i < 6; i++) {
-    const d = (bx(s + 1e-4) - bx(s)) / 1e-4 || 1;
-    s = Math.max(0, Math.min(1, s - (bx(s) - t) / d));
-  }
-  return by(s);
-}
+export const travel = bezier([.45, 0, .1, 1]);
 /** Arrival from nowhere: a quick start and a long, soft settle. */
 export const settle = (t: number) => 1 - (1 - t) ** 3;
 /** A placed flight: eases in and out with no step in speed at either end
