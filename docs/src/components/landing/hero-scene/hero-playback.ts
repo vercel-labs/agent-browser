@@ -4,12 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { clock, type Act, type Script } from "../../stageshow/vendor/kit";
 
 export const HERO_DURATION = 17_000;
-export const HERO_POSTER = 13_000;
+export const HERO_POSTER = 11_500;
 
-export type HeroClock = { time: number };
+/** `loop`: how many times the playhead has wrapped, so scenes can carry state
+ * across loops (the desktop's wallpaper moves through a series). */
+export type HeroClock = { time: number; loop: number };
 
-export const HERO_INITIAL: HeroClock = { time: 0 };
-export const HERO_STILL: HeroClock = { time: HERO_POSTER };
+export const HERO_INITIAL: HeroClock = { time: 0, loop: 0 };
+export const HERO_STILL: HeroClock = { time: HERO_POSTER, loop: 0 };
 
 type ActivePlayback = {
   act: Act<HeroClock>;
@@ -21,6 +23,7 @@ export function useHeroPlayback(reduced: boolean) {
   const [playing, setPlaying] = useState(!reduced);
   const transport = useRef({
     time: reduced ? HERO_POSTER : 0,
+    loop: 0,
     playing: !reduced,
     reduced,
     active: null as ActivePlayback | null,
@@ -43,9 +46,11 @@ export function useHeroPlayback(reduced: boolean) {
         frame = null;
         if (act.signal.aborted || !state.playing) return;
 
-        state.time = (state.time + Math.max(0, now - previous)) % HERO_DURATION;
+        const next = state.time + Math.max(0, now - previous);
+        state.loop += Math.floor(next / HERO_DURATION);
+        state.time = next % HERO_DURATION;
         previous = now;
-        act.put({ time: state.time });
+        act.put({ time: state.time, loop: state.loop });
         frame = clock.raf(tick);
       };
 
@@ -73,7 +78,7 @@ export function useHeroPlayback(reduced: boolean) {
 
       state.active = active;
       act.signal.addEventListener("abort", stop, { once: true });
-      act.put({ time: state.time });
+      act.put({ time: state.time, loop: state.loop });
       active.wake();
     });
   }, []);
@@ -83,10 +88,19 @@ export function useHeroPlayback(reduced: boolean) {
     state.time = Math.min(HERO_DURATION, Math.max(0, Number.isFinite(ms) ? ms : 0));
     state.playing = false;
     state.active?.wake();
-    state.active?.act.put({ time: state.time });
+    state.active?.act.put({ time: state.time, loop: state.loop });
     setTime(state.time);
     setPlaying(false);
   }, []);
+
+  // Development only: `?hero-t=<ms>` or `window.__heroSeek(ms)` pauses the
+  // story on a beat, for reviewing frames. Stripped from production builds.
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    const at = new URLSearchParams(window.location.search).get("hero-t");
+    if (at !== null) seek(Number(at));
+    (window as unknown as { __heroSeek?: (ms: number) => void }).__heroSeek = seek;
+  }, [seek]);
 
   useEffect(() => {
     const state = transport.current;

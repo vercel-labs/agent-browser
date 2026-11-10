@@ -1,12 +1,14 @@
 /* A lived-in desktop with room to breathe, on the 1080 × 750 canvas (shown at
    about 0.6x): the 560 × 360 browser top left, Maps top right, Photos (opened
    from the dock) on top of both, a few loose image files bottom left, a glass
-   dock. No words; Geist tokens only (grays, blue for selection), Geist
+   dock. No words; Geist grays only (color is left to the model cursors), Geist
    materials (12px windows with the modal shadow, 6px small parts).
    Nothing but the browser enters browser scope's crop (x < 500, y < 399 wide;
    x < 312, y < 393 compact). Kept outside the upstream kit. */
 .ab-hero-demo {
+  /* Windows are the page's color with Geist's window hairline and fall */
   & .ab-maps, & .ab-photos { position: absolute; background: var(--ss-surface); box-shadow: var(--ss-shadow-window); }
+  & :is(.ab-maps, .ab-photos) > .ss-window__bar { border-bottom-width: var(--ss-hairline, 1px); }
   /* Maps: Claude moves it (a transform) and widens it from the left (--maps-grow) */
   & .ab-maps { left: 676px; top: 96px; width: calc(380px + var(--maps-grow, 0px)); height: 340px; z-index: 3; will-change: transform; }
   /* Grab points near the corner, so the hand's trip between them is short */
@@ -15,7 +17,7 @@
   /* Photos: 3.5 columns × 2 rows of large squares; overlaps the browser and Maps, clear of the dock */
   /* Left edge 16px clear of Maps' widened edge (516), its lights 30px clear of
      the browser's edge (584), outside browser scope's crop (x < 500) */
-  & .ab-photos-frame { position: absolute; left: 500px; top: 360px; width: 424px; height: 284px; z-index: 5; transform-origin: 61.5px 334px; visibility: hidden; will-change: transform, opacity; }
+  & .ab-photos-frame { position: absolute; left: 500px; top: 360px; width: 424px; height: 284px; z-index: 5; transform-origin: 60px 338px; visibility: hidden; will-change: transform, opacity; }
   & .ab-photos-frame[data-open] { visibility: visible; }
   & .ab-photos { inset: 0; width: 100%; height: 100%; }
 
@@ -24,15 +26,36 @@
   & .ab-map { position: absolute; inset: 0; overflow: hidden; }
   & .ab-map-layer { position: absolute; left: -50%; top: -50%; width: 200%; height: 200%; transform-origin: 50% 50%; will-change: transform; }
   & .ab-map-art { display: block; width: 100%; height: 100%; }
-  /* Grays only: land, water a step darker, parks between */
-  & .ab-map-land { fill: var(--ds-gray-100, #f2f2f2); }
-  & .ab-map-water { fill: var(--ds-gray-300, #e6e6e6); }
-  & .ab-map-park { fill: var(--ds-gray-200, #ebebeb); }
-  & .ab-map-road { fill: none; stroke: var(--ds-background-100, #fff); stroke-width: 5; stroke-linecap: round; }
-  & .ab-map-road-minor { fill: none; stroke: var(--ds-background-100, #fff); stroke-width: 2; stroke-linecap: round; }
-  /* Zoom controls: a Geist small material (6px, border-small shadow) */
+  /* A flat city (map-art.tsx), drawn in outlines on the page's color: land
+     and every block in background-200, building footprints, parks, trees and
+     the water's edge as hairlines, streets as channels (a hairline casing with
+     the land's color inside), the river and bay in white, labels haloed in the
+     land's color. No fills of gray and no shading. Map strokes are in the
+     art's own units (the 300-wide art is drawn at about 2.5x), so 0.4 is
+     about one pixel. */
+  & .ab-map-land { fill: var(--ds-background-200, #fafafa); }
+  & .ab-map-building { fill: var(--ds-background-200, #fafafa); stroke: var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); stroke-width: .4; }
+  & .ab-map-building-shadow { display: none; }
+  & .ab-map-tree { fill: none; stroke: var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); stroke-width: .4; }
+  & .ab-map-highway-edge { fill: none; stroke: var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); stroke-width: 9; stroke-linecap: round; }
+  & .ab-map-highway { fill: none; stroke: var(--ds-background-200, #fafafa); stroke-width: 8.2; stroke-linecap: round; }
+  & .ab-map-transit { fill: none; stroke: var(--ds-gray-700, #8f8f8f); stroke-width: .8; stroke-dasharray: 3 2; }
+  & .ab-map-poi { fill: var(--ds-gray-700, #8f8f8f); stroke: var(--ds-background-200, #fafafa); stroke-width: .7; }
+  & .ab-map-poi-label { fill: var(--ds-gray-700, #8f8f8f); font: 500 3.6px var(--ss-font); paint-order: stroke; stroke: var(--ds-background-200, #fafafa); stroke-width: 1; stroke-linejoin: round; }
+  & .ab-map-park { fill: var(--ds-background-200, #fafafa); stroke: var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); stroke-width: .4; }
+  & .ab-map-water { fill: var(--ds-background-100, #fff); }
+  & .ab-map-water-edge { fill: none; stroke: var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); stroke-width: .4; }
+  & .ab-map-casing { fill: none; stroke: var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); stroke-width: 5.8; }
+  & .ab-map-casing-minor { stroke-width: 2.8; }
+  & .ab-map-casing-wide { stroke-width: 7.2; stroke-linecap: round; }
+  & .ab-map-road { fill: none; stroke: var(--ds-background-200, #fafafa); stroke-width: 5; }
+  & .ab-map-road-wide { stroke-width: 6.4; stroke-linecap: round; }
+  & .ab-map-road-minor { fill: none; stroke: var(--ds-background-200, #fafafa); stroke-width: 2; }
+  & .ab-map-label { fill: var(--ds-gray-1000, #171717); font: 500 3.8px var(--ss-font); paint-order: stroke; stroke: var(--ds-background-200, #fafafa); stroke-width: 1.2; stroke-linejoin: round; }
+  & .ab-map-district { fill: var(--ds-gray-700, #8f8f8f); font: 600 4.6px var(--ss-font); letter-spacing: 1.4px; paint-order: stroke; stroke: var(--ds-background-200, #fafafa); stroke-width: 1.2; stroke-linejoin: round; }
+  /* Zoom controls: a white Geist small material (6px, hairline and small fall) */
   & .ab-map-zoom { position: absolute; left: 12px; top: 12px; display: grid; border-radius: 6px; background: var(--ds-background-100, #fff); box-shadow: var(--ss-shadow-control); overflow: hidden; }
-  & .ab-map-zoom-button { display: grid; place-items: center; width: 32px; height: 32px; color: var(--ds-gray-900, #4d4d4d); }
+  & .ab-map-zoom-button { display: grid; place-items: center; width: 32px; height: 32px; color: var(--ds-gray-1000, #171717); }
   & .ab-map-zoom-button + .ab-map-zoom-button { box-shadow: inset 0 var(--ss-hairline, 1px) 0 var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); }
   & .ab-map-pan { position: absolute; width: 1px; height: 1px; }
   /* West 120px, then back east 120px: one axis, so the map is centered again
@@ -41,89 +64,116 @@
   & .ab-map-pan-2a { left: 90px; top: 130px; } & .ab-map-pan-2b { left: 210px; top: 130px; }
   & .ab-maps-rest { position: absolute; left: 290px; top: 70px; width: 1px; height: 1px; }
 
-  /* Photos: a relaxed grid of squares (4px corners, 8px gaps); a pick wears an
-     inset blue ring and a check, as Photos draws a selection */
+  /* Photos: a relaxed grid of squares (6px corners, 10px gaps). A pick wears
+     Geist's focus-ring shape in neutral (a 2px gap in the surface, then a 2px
+     gray-700 ring outside the tile) and a check */
   & .ab-photos-body { position: relative; padding: 0; overflow: hidden; }
   /* The close light (measured: 9px at 14.5, -24 from the body's corner) */
   & .ab-photos-close { position: absolute; left: 14.5px; top: -24px; width: 9px; height: 9px; pointer-events: none; }
   & .ab-photos-grid { position: absolute; inset: 0; }
   & .ab-photo { position: absolute; width: 108px; height: 108px; border-radius: 6px; transform-origin: 54px 54px; }
-  & .ab-photo::after { content: ''; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 2px var(--ds-blue-700, #006bff); opacity: 0; transition: opacity .15s ease-out; }
+  /* The picture: a wallpaper from the series (desktop-apps.tsx sets which) */
+  & .ab-photo-image {
+    position: absolute; inset: 0; overflow: hidden; border-radius: inherit;
+    background-color: var(--ab-wall-base);
+    /* A hairline so the light photos hold their edge on the window */
+    box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, .08));
+    background-size: cover; background-position: center; background-repeat: no-repeat;
+    filter: var(--ab-wall-filter);
+  }
+  /* The toolbar's view switcher: a small outlined segmented control, the
+     current view on a faint gray fill (flat, nothing raised) */
+  & .ab-photos-views { display: flex; gap: 2px; padding: 2px; border-radius: 6px; box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); font: 500 11px/1 var(--ss-font); color: var(--ds-gray-700, #8f8f8f); }
+  & .ab-photos-view { padding: 5px 9px; border-radius: 4px; white-space: nowrap; }
+  & .ab-photos-view[data-on] { background: var(--ds-gray-alpha-200, rgba(0, 0, 0, .08)); color: var(--ds-gray-1000, #171717); }
+  & .ab-photo::after { content: ''; position: absolute; inset: 0; border-radius: inherit; box-shadow: 0 0 0 2px var(--ss-surface), 0 0 0 4px var(--ds-gray-700, #8f8f8f); opacity: 0; transition: opacity .15s ease-out; }
   & .ab-photo[data-picked]::after { opacity: 1; }
-  & .ab-photo-check { position: absolute; right: 7px; bottom: 7px; display: grid; color: var(--ds-blue-700, #006bff); opacity: 0; scale: .7; transition: opacity .15s ease-out, scale .2s cubic-bezier(.22, 1, .36, 1); }
+  & .ab-photo-check { position: absolute; right: 7px; bottom: 7px; display: grid; color: var(--ds-gray-1000, #171717); opacity: 0; scale: .7; transition: opacity .15s ease-out, scale .2s cubic-bezier(.22, 1, .36, 1); }
   /* The check's tick is a cutout: a white disc behind it keeps it white */
   & .ab-photo-check::before { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--ds-background-100, #fff); }
   & .ab-photo-check svg { position: relative; display: block; }
   & .ab-photo[data-picked] .ab-photo-check { opacity: 1; scale: 1; }
 
-  /* Image tones shared by photos and file thumbnails: flat Geist grays */
-  & :is(.ab-photo, .ab-desk-thumb > span)[data-tone='1'] { background: var(--ds-gray-200, #ebebeb); }
-  & :is(.ab-photo, .ab-desk-thumb > span)[data-tone='2'] { background: var(--ds-gray-300, #e6e6e6); }
-  & :is(.ab-photo, .ab-desk-thumb > span)[data-tone='3'] { background: var(--ds-gray-400, #d9d9d9); }
-  & :is(.ab-photo, .ab-desk-thumb > span)[data-tone='4'] { background: var(--ds-gray-500, #c9c9c9); }
-  & :is(.ab-photo, .ab-desk-thumb > span)[data-tone='5'] { background: var(--ds-gray-600, #a8a8a8); }
-
-  /* Loose image files: one thumbnail size and shape (56 × 48, squarish) in a
-     white border, a skeleton name below. Selected, the thumbnail sits on a
-     gray pad and the name on blue, as Finder does. */
+  /* Loose image files: one thumbnail size and shape (56 × 48, squarish) on a
+     white card, no name: just the image icon. Selected, the thumbnail sits on
+     a light tint, as Geist highlights an item (no solid fill). */
   & .ab-desk-marquee-region { position: absolute; left: 20px; top: 470px; width: 360px; height: 152px; }
   & .ab-desk-file { position: absolute; z-index: 1; display: grid; justify-items: center; align-content: start; gap: 6px; width: 72px; height: 74px; }
   & .ab-desk-file-0 { left: 40px; top: 486px; }
   & .ab-desk-file-1 { left: 150px; top: 536px; }
   & .ab-desk-file-2 { left: 280px; top: 482px; }
   & .ab-desk-thumb-wrap { display: grid; place-items: center; padding: 4px; border-radius: 6px; transition: background-color .15s ease; }
-  & .ab-desk-file[data-selected] .ab-desk-thumb-wrap { background: var(--ds-gray-alpha-300, rgba(0, 0, 0, .1)); }
-  & .ab-desk-thumb { display: block; width: 56px; height: 48px; padding: 3px; border-radius: 4px; background: var(--ds-background-100, #fff); box-shadow: var(--ss-shadow-control); }
-  & .ab-desk-thumb > span { display: block; width: 100%; height: 100%; border-radius: 2px; }
-  & .ab-desk-label { display: flex; padding: 3px 5px; border-radius: 4px; transition: background-color .15s ease; }
-  & .ab-desk-name { display: block; height: 6px; border-radius: var(--ss-radius-pill); background: var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); }
-  & .ab-desk-file[data-selected] .ab-desk-label { background: var(--ds-blue-700, #006bff); }
-  & .ab-desk-file[data-selected] .ab-desk-name { background: color-mix(in srgb, var(--ds-background-100, #fff) 80%, transparent); }
-  /* The box-select: Geist blue, a faint fill and a hairline edge */
-  & .ab-desk-select { position: absolute; z-index: 2; border-radius: 4px; background: color-mix(in srgb, var(--ds-blue-700, #006bff) 10%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ds-blue-700, #006bff) 55%, transparent); pointer-events: none; }
+  /* Selected, the icon sits on a faint gray tint */
+  & .ab-desk-file[data-selected] .ab-desk-thumb-wrap { background: var(--ds-gray-alpha-200, rgba(0, 0, 0, .08)); }
+  /* An outlined card in the page's color with Geist's image icon, as a
+     placeholder for the picture (flat: no fall while it rests) */
+  & .ab-desk-thumb { display: grid; place-items: center; width: 56px; height: 48px; border-radius: 6px; background: var(--ds-background-200, #fafafa); color: var(--ds-gray-700, #8f8f8f); box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); }
+  /* The box-select over the light wallpaper: a faint gray fill, a dark hairline */
+  & .ab-desk-select { position: absolute; z-index: 2; border-radius: 4px; background: var(--ds-gray-alpha-200, rgba(0, 0, 0, .08)); box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-700, #8f8f8f); pointer-events: none; }
   /* Three files riding together: a small fanned stack */
   & .ab-desk-stack { position: absolute; left: 0; top: 0; z-index: 20; width: 56px; height: 48px; transform-origin: 53px 48px; pointer-events: none; will-change: transform; }
   & .ab-desk-stack-item { position: absolute; left: 0; top: 0; }
+  /* Carried, they lift: Geist's lift material, the one fall a file gets */
   & .ab-desk-stack .ab-desk-thumb { box-shadow: var(--ss-shadow-lift); }
 
-  /* The dock: only the shelf is glass (Geist background through the kit's blur
-     recipe); the tiles on it are solid */
+  /* The dock, as macOS 26 (Tahoe) draws it: a Liquid Glass shelf (a light
+     tint over a strong blur, a thin light rim brighter along the top, a soft
+     shadow). Proportions measured from this Mac's Dock against the icon's
+     body (b, about 42px here: the WebPs carry Apple's ~10% margin): pitch
+     1.35b, shelf 1.73b tall with near-pill ends (radius ~0.37 of its height),
+     dark running dots inside the shelf ~0.2b below the body, a divider ~1.25b
+     tall before the Trash. Icons are Tahoe's own renders at 256px
+     (NSWorkspace for the apps, Dock.app's s-trashempty and s-trashfull for the
+     Trash, at full size: as in the real Dock, the bin stands as tall as an app
+     icon's body). The divider is 1.14× an icon's body, as measured on the real
+     Dock (about 70% of the shelf's height). */
   & .ab-dock {
     /* Centered with auto margins, not a transform: targets are measured from
        layout, and a translate would put the Trash far from where it draws */
-    position: absolute; left: 0; right: 0; bottom: 24px; z-index: 6;
+    position: absolute; left: 0; right: 0; bottom: 16px; z-index: 6;
     width: fit-content; margin-inline: auto;
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px; border-radius: 16px;
-    background: color-mix(in srgb, var(--ds-background-100, #fff) 60%, transparent);
-    backdrop-filter: blur(24px) saturate(1.6);
-    -webkit-backdrop-filter: blur(24px) saturate(1.6);
-    box-shadow: var(--ss-shadow-float);
+    display: flex; align-items: center; gap: 5px;
+    padding: 10px 11px; border-radius: 27px;
+    color: var(--ds-background-100, #fff);
+    background: color-mix(in srgb, var(--ds-background-100) 16%, transparent);
+    backdrop-filter: blur(30px) saturate(1.8);
+    -webkit-backdrop-filter: blur(30px) saturate(1.8);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--ds-background-100) 24%, transparent),
+      inset 0 1px 0 color-mix(in srgb, var(--ds-background-100) 45%, transparent),
+      var(--ds-shadow-2xl);
   }
   & .ab-dock-app {
     position: relative; display: grid; place-items: center;
-    width: 48px; height: 48px; border-radius: 12px;
-    transition: scale .25s cubic-bezier(.22, 1, .36, 1);
+    width: 52px; height: 52px;
+    transition: scale .25s cubic-bezier(.22, 1, .36, 1), filter .15s ease;
   }
-  /* Flat, one fill: tiles and the Trash share a height (44) and a gray */
-  & .ab-dock-skeleton { width: 44px; height: 44px; border-radius: 12px; background: var(--ds-gray-300, #e6e6e6); }
-  & .ab-dock-app[data-pressed] { scale: .92; }
-  & .ab-dock-app::after { content: ''; position: absolute; bottom: -6px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--ds-gray-700, #8f8f8f); opacity: 0; transition: opacity .2s ease-out; }
+  & .ab-dock-icon { display: block; width: 52px; height: 52px; background: center / contain no-repeat; filter: drop-shadow(0 2px 4px color-mix(in srgb, var(--ds-gray-1000) 35%, transparent)); }
+  /* Icons load with the desktop's other assets ([data-assets], see HeroWorld) */
+  & [data-assets] .ab-dock-icon[data-app='chrome'] { background-image: url('/landing/dock-chrome.webp'); }
+  & [data-assets] .ab-dock-icon[data-app='maps'] { background-image: url('/landing/dock-maps.webp'); }
+  & [data-assets] .ab-dock-icon[data-app='photos'] { background-image: url('/landing/dock-photos.webp'); }
+  & [data-assets] .ab-dock-icon[data-app='trash'] { background-image: url('/landing/dock-trash.webp'); }
+  & [data-assets] .ab-dock-icon[data-app='trash-full'] { background-image: url('/landing/dock-trash-full.webp'); }
+  & .ab-dock-icon-over { position: absolute; left: 0; top: 0; }
+  & .ab-dock-app[data-pressed] { scale: .92; filter: brightness(.85); }
+  /* Running: a small dark dot under the icon, as macOS draws it over a light wallpaper */
+  & .ab-dock-app::after { content: ''; position: absolute; bottom: -6px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: color-mix(in srgb, var(--ds-gray-1000) 75%, transparent); opacity: 0; transition: opacity .2s ease-out; }
   & .ab-dock-app[data-running]::after { opacity: 1; }
   & .ab-dock-trash::after { display: none; }
-  & .ab-dock-divider { width: var(--ss-hairline, 1px); height: 34px; margin: 0 2px; background: var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); }
-  & .ab-dock-trash[data-hover] .ab-dock-skeleton { background: var(--ds-gray-400, #d9d9d9); }
+  & .ab-dock-divider { width: 1px; height: 52px; margin: 0 6px; background: color-mix(in srgb, var(--ds-gray-1000) 18%, transparent); }
+  & .ab-dock-trash[data-hover] { filter: brightness(1.25); }
   & .ab-dock-trash[data-bump] { scale: 1.08; }
   /* Gemini waits below the files it tidies; OpenAI right of the dock */
   & .ab-gemini-rest { position: absolute; left: 60px; top: 680px; width: 1px; height: 1px; }
   & .ab-openai-rest { position: absolute; left: 760px; top: 640px; width: 1px; height: 1px; }
 
-  & [data-playing='false'] :is(.ab-desk-thumb-wrap, .ab-desk-label, .ab-dock-app, .ab-photo-check) { transition: none; }
+  & [data-playing='false'] :is(.ab-desk-thumb-wrap, .ab-dock-app, .ab-photo-check) { transition: none; }
   & [data-playing='false'] :is(.ab-photo, .ab-dock-app)::after { transition: none; }
 
   & .ss-stage[data-layout='compact'] {
     & .ab-maps { left: 480px; top: 100px; width: calc(440px + var(--maps-grow, 0px)); height: 360px; }
-    & .ab-photos-frame { left: 400px; top: 470px; transform-origin: 101.5px 524px; }
+    & .ab-photos-frame { left: 400px; top: 470px; transform-origin: 100px 528px; }
     & .ab-desk-marquee-region { left: 20px; top: 520px; width: 320px; height: 170px; }
     & .ab-desk-file-0 { left: 34px; top: 536px; }
     & .ab-desk-file-1 { left: 140px; top: 600px; }

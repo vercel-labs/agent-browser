@@ -1,7 +1,6 @@
 /* Pointers and their labels. No words anywhere: every participant has the
-   Vercel arrow (Geist ink, a crisp light edge) and one small ink circle with
-   its mark (Lil Pix for the browser agent, the brand marks for the others),
-   as on the use-case cards. Grayscale on purpose; the marks tell them apart.
+   Vercel arrow and one small circle with its mark (Lil Pix for the browser
+   agent, the brand marks for the others), each in its own color.
 
    Constant on screen: everything inside .ab-peer-body is sized by
    --ss-unscale / --ab-zoom (true screen pixels), and --ab-zoom eases with the camera, so the
@@ -20,12 +19,19 @@
   & .ab-peer[data-kind='ibeam'] .ab-peer-ibeam { opacity: 1; }
   & .ab-peer[data-kind='ibeam'] .ab-peer-arrow { opacity: 0; }
 
-  /* Brand colors on each agent's arrow and label circle (marks stay white).
-     The browser agent keeps Geist ink. */
-  & .ab-peer { --peer-color: var(--ds-gray-1000, #171717); }
+  /* Brand colors on each agent's arrow and label circle, fixed in both themes
+     (literals, as brand colors are); the marks are white on their discs. The
+     browser agent (Lil Pix) is ink with a white edge on its arrow; in dark mode
+     its disc gets a soft glow (below) so it reads on a dark desktop. */
+  & .ab-peer { --peer-color: #171717; --peer-mark: #fff; }
+  & .ab-peer[data-peer='agent'] .ab-vercel-arrow-edge { fill: #fff; stroke: #fff; }
   & .ab-peer[data-peer='claude'] { --peer-color: #d97757; }
-  & .ab-peer[data-peer='openai'] { --peer-color: #000; }
   & .ab-peer[data-peer='gemini'] { --peer-color: #4285f4; }
+  /* OpenAI in white: a white arrow and disc, an ink mark, and a gray edge on
+     both (gray-600: a light gray on the light desktop, a dark edge on the dark) */
+  & .ab-peer[data-peer='openai'] { --peer-color: #fff; --peer-mark: #171717; }
+  & .ab-peer[data-peer='openai'] .ab-vercel-arrow-edge { fill: var(--ds-gray-600, #a8a8a8); stroke: var(--ds-gray-600, #a8a8a8); }
+  & .ab-peer[data-peer='openai'] .ab-peer-tile { box-shadow: 0 0 0 1px var(--ds-gray-600, #a8a8a8), var(--ds-shadow-small, 0 2px 2px rgba(0, 0, 0, .04)); }
   & .ab-peer .ab-vercel-arrow-fill { fill: var(--peer-color); }
 
   /* The label: a 22px circle in the agent's color around its mark, no ring */
@@ -33,10 +39,14 @@
     position: absolute; top: 0; left: 0;
     display: grid; place-items: center;
     width: 22px; height: 22px; border-radius: 50%;
-    background: var(--peer-color); color: var(--ds-background-100, #fff);
+    background: var(--peer-color); color: var(--peer-mark);
     box-shadow: var(--ds-shadow-small, 0 2px 2px rgba(0, 0, 0, .04));
     transform: translate(var(--lx, 12px), var(--ly, 16px));
     transition: transform .25s cubic-bezier(.45, 0, .1, 1);
   }
   & [data-playing='false'] .ab-peer-tile, &.ab-hero-still .ab-peer-tile { transition: none; }
 }
+
+/* Dark: Lil Pix's ink disc parts from the dark desktop with a faint hairline
+   and a soft light glow, no white ring */
+:is(.dark, .dark-theme) .ab-hero-demo .ab-peer[data-peer='agent'] .ab-peer-tile { box-shadow: 0 0 0 .5px var(--ds-gray-alpha-500, rgba(255, 255, 255, .2)), 0 0 10px rgba(255, 255, 255, .14); }

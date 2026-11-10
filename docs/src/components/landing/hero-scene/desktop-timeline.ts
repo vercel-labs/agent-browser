@@ -2,22 +2,22 @@ import type { Point } from '../../stageshow/vendor/kit';
 import type { Targets } from './hero-timeline';
 
 // A lived-in desktop: the browser leading, Maps beside it, a few loose files.
-// Three agents work in parallel on one pulse (B = 850ms, 20 beats a loop).
-// Inactivity decides presence: an agent enters (up from below) just before
-// its first action and leaves (down) once it has nothing to do for a while.
-// The browser agent is always there, and Gemini, OpenAI and Claude overlap,
-// so all four cursors share the screen every loop (about 2.4–4.8s).
-// Presses that share a beat land together, one rhythm rather than solos:
-//   Claude   drags Maps away by its title bar and widens it from its left edge
-//            (quick, decisive drags), taps zoom out on OpenAI's second and third
-//            picks, pans west and back east, taps zoom in, narrows Maps and drags
-//            it home, then leaves (idle across the seam)
-//   Gemini   box-selects the loose files and drags them to the Trash (b5), leaves
-//   OpenAI   opens Photos from the dock (b3.5, well before Gemini's drop), picks
-//            three photos one a beat, deletes them, closes Photos (b9), leaves
-// Every zoom is about the map's center. The loop ends where it began: the
-// files settle back in near the seam, Photos is closed, Maps is home, in close
-// and centered, and no desktop agent is on screen.
+// Three agents work in parallel on one pulse (B = 850ms). The desktop runs a
+// short cycle (CYCLE, 10 beats) twice per 17s loop, so the agents are busy at
+// the same time instead of taking turns: all three are on screen together for
+// most of each cycle's first half (about 1.3–4.4s), twice a loop.
+// Inactivity decides presence: an agent enters (up from below) just before its
+// first action and leaves (down) once it has nothing to do for a while. Claude
+// always has work, so it stays; Gemini and OpenAI come and go every cycle.
+//   Gemini   box-selects the loose files and drags them to the Trash, leaves
+//   OpenAI   opens Photos from the dock (well before Gemini's drop), clicks a
+//            photo (it becomes the wallpaper), clicks another (the wallpaper
+//            changes again), deletes the first, closes Photos, leaves. The
+//            wallpaper carries over, so it steps through a series across loops.
+//   Claude   drags Maps away by its title bar, zooms out once, pans west and
+//            back east, zooms in once, drags Maps home
+// Every zoom is about the map's center. Each cycle ends where it began: new
+// files settle in, Photos is closed, Maps is home, in close and centered.
 
 type DesktopPeer = 'claude' | 'openai' | 'gemini';
 /** A route stop: a target, a point inside it (fractions), and an offset in pixels. */
@@ -26,7 +26,11 @@ type Stop = readonly [time: number, target: string, x?: number, y?: number, dx?:
 /** The pulse: every press lands on a beat or a half beat. */
 export const BEAT = 850;
 const b = (beats: number) => Math.round(beats * BEAT);
-const END = 17_000;
+/** The desktop's cycle: half the 17s loop, so it plays twice and the seam holds. */
+const CYCLE = 8_500;
+const END = CYCLE;
+/** Loop time folded into the cycle. */
+const cyc = (time: number) => ((time % CYCLE) + CYCLE) % CYCLE;
 
 /** Enter and leave by direction, snappily: a 350ms run over ~150px (decelerating
  * in, accelerating out), with a quick fade at the start of an entrance and at
@@ -42,16 +46,13 @@ const EXIT = { delay: 150 };
 
 /** Presses, on the pulse. */
 const T = {
-  geminiIn: b(1.1) - 900, boxStart: b(1.1), boxEnd: b(2.5), pickup: b(3.5), drop: b(5), geminiOut: b(5.3),
-  openaiIn: b(3) - 900, dock: b(3), picks: [b(4.5), b(5.5), b(6.5)], deleteHold: b(7.35), deleted: b(7.5), close: b(9), openaiOut: b(9.2),
-  // Maps moves are quick, decisive drags (450ms)
-  claudeIn: b(1.8) - 900, mapsMove: [b(1.8), b(1.8) + 450], mapsGrow: [b(3.2), b(3.2) + 450],
-  // Moves are given room: no hand travels faster than ~15px a frame. The first
-  // pan starts on OpenAI's delete (b7.5)
-  zoomOut: [b(5.5), b(6.5)], pans: [[b(7.5), b(9)], [b(10), b(11.5)]],
-  // The tail runs later so the seam has little dead air: Claude leaves ~14.7s,
-  // new files arrive from 15.4s, Gemini enters at the top of the next loop
-  zoomIn: [b(13), b(14)], mapsShrink: [b(15), b(15) + 450], mapsBack: [b(16.5), b(16.5) + 450], claudeOut: b(16.5) + 700,
+  geminiIn: b(1.1) - 900, boxStart: b(1.1), boxEnd: b(2.3), pickup: b(3.1), drop: b(4.5), geminiOut: b(4.8),
+  // OpenAI clicks the dock 1.6s before Gemini's drop beside it, so they never read as linked
+  openaiIn: b(2.6) - 900, dock: b(2.6), picks: [b(3.9), b(4.75)], deleteHold: b(5.65), deleted: b(5.85), close: b(7.05), openaiOut: b(7.25),
+  // Claude: Maps drags are quick and decisive (450ms); one zoom step each way.
+  // Moves are given room: no hand travels faster than ~15px a frame.
+  mapsMove: [b(0.6), b(0.6) + 450], zoomOut: b(1.9), pans: [[b(3), b(4.2)], [b(4.7), b(5.9)]],
+  zoomIn: b(6.6), mapsBack: [b(7.6), b(7.6) + 450],
 } as const;
 
 export const DESKTOP_ROUTES: Record<DesktopPeer, readonly Stop[]> = {
@@ -74,12 +75,11 @@ export const DESKTOP_ROUTES: Record<DesktopPeer, readonly Stop[]> = {
     [0, 'dock-photos', .5, .72, ENTER_FROM.dx, ENTER_FROM.dy], [T.openaiIn, 'dock-photos', .5, .72, ENTER_FROM.dx, ENTER_FROM.dy],
     [T.openaiIn + RUN, 'dock-photos', .5, .72],
     [T.dock - 80, 'dock-photos', .5, .72], [T.dock + 120, 'dock-photos', .5, .72],
-    // One photo a beat
+    // Click a photo (the wallpaper follows), then another
     [T.picks[0] - 80, 'photo-0', .6, .6], [T.picks[0] + 100, 'photo-0', .6, .6],
     [T.picks[1] - 80, 'photo-1', .6, .6], [T.picks[1] + 100, 'photo-1', .6, .6],
-    [T.picks[2] - 80, 'photo-2', .6, .6],
-    // A held press on the last pick deletes all three
-    [T.deleted + 150, 'photo-2', .6, .6],
+    // Back to the first, a held press deletes it
+    [T.deleteHold - 80, 'photo-0', .6, .6], [T.deleted + 150, 'photo-0', .6, .6],
     // Close Photos with its close light
     [T.close - 80, 'photos-close'], [T.openaiOut, 'photos-close'],
     // Leaves down
@@ -89,31 +89,24 @@ export const DESKTOP_ROUTES: Record<DesktopPeer, readonly Stop[]> = {
   // its route adds Maps' current offset, so holding the title bar or the edge
   // through a drag carries the hand exactly with the window.
   claude: [
-    // Enters up from below, onto Maps' title bar (it was idle across the seam)
-    [0, 'maps-bar', .5, .5, ENTER_FROM.dx, ENTER_FROM.dy], [T.claudeIn, 'maps-bar', .5, .5, ENTER_FROM.dx, ENTER_FROM.dy],
-    [T.claudeIn + RUN, 'maps-bar'],
-    // Drag Maps a little by its title bar
+    // Waits on Maps' title bar across the seam (it never runs out of work)
+    [0, 'maps-bar'],
+    // Drag Maps away by its title bar
     [T.mapsMove[0] - 80, 'maps-bar'], [T.mapsMove[1] + 100, 'maps-bar'],
-    // Widen it from its left edge
-    [T.mapsGrow[0] - 80, 'maps-edge'], [T.mapsGrow[1] + 100, 'maps-edge'],
-    [T.zoomOut[0] - 80, 'map-zoom-out'], [T.zoomOut[1] + 120, 'map-zoom-out'],
+    [T.zoomOut - 80, 'map-zoom-out'], [T.zoomOut + 120, 'map-zoom-out'],
     // Two pans along one axis: west, then back east
     [T.pans[0][0] - 50, 'map-pan-1a'], [T.pans[0][0], 'map-pan-1a'], [T.pans[0][1], 'map-pan-1b'],
     [T.pans[1][0] - 50, 'map-pan-2a'], [T.pans[1][0], 'map-pan-2a'], [T.pans[1][1], 'map-pan-2b'],
-    [T.zoomIn[0] - 80, 'map-zoom-in'], [T.zoomIn[1] + 120, 'map-zoom-in'],
-    // Narrow Maps again, then drag it home
-    [T.mapsShrink[0] - 80, 'maps-edge'], [T.mapsShrink[1] + 100, 'maps-edge'],
-    [T.mapsBack[0] - 80, 'maps-bar'], [T.claudeOut, 'maps-bar'],
-    // Done until the next loop, so it leaves down
-    [T.claudeOut + RUN, 'maps-bar', .5, .5, EXIT_TO.dx, EXIT_TO.dy], [END, 'maps-bar', .5, .5, EXIT_TO.dx, EXIT_TO.dy],
+    [T.zoomIn - 80, 'map-zoom-in'], [T.zoomIn + 120, 'map-zoom-in'],
+    // Drag Maps home, and hold the title bar for the next cycle
+    [T.mapsBack[0] - 80, 'maps-bar'], [END, 'maps-bar'],
   ],
 };
 
 /** When each agent is on screen: its fade in and its fade out. */
-const PRESENCE: Record<DesktopPeer, { in: number; out: number }> = {
+const PRESENCE: Record<Exclude<DesktopPeer, 'claude'>, { in: number; out: number }> = {
   gemini: { in: T.geminiIn, out: T.geminiOut },
   openai: { in: T.openaiIn, out: T.openaiOut },
-  claude: { in: T.claudeIn, out: T.claudeOut },
 };
 
 const progress = (time: number, start: number, end: number) => Math.max(0, Math.min(1, (time - start) / (end - start)));
@@ -146,13 +139,13 @@ function point(stop: Stop, targets: Targets, offset: Point = { x: 0, y: 0 }): Po
 }
 
 /** Maps' displacement from home: a quick drag by the title bar (80px left,
- * 44 down) and a widening from the left edge (80px), each undone near the loop's end.
- * Drawn as a transform plus width, so targets inside always measure at home. */
-export function mapsGeometry(time: number) {
+ * 44 down), undone before the cycle ends. Drawn as a transform, so targets
+ * inside always measure at home. (`grow` stays 0; Maps keeps its width.) */
+export function mapsGeometry(loopTime: number) {
+  const time = cyc(loopTime);
   // A hand drag: departure, clear travel, soft arrival (the travel curve)
   const move = travel(progress(time, T.mapsMove[0], T.mapsMove[1])) - travel(progress(time, T.mapsBack[0], T.mapsBack[1]));
-  const grow = 80 * (travel(progress(time, T.mapsGrow[0], T.mapsGrow[1])) - travel(progress(time, T.mapsShrink[0], T.mapsShrink[1])));
-  return { dx: -80 * move, dy: 44 * move, grow };
+  return { dx: -80 * move, dy: 44 * move, grow: 0 };
 }
 /** Where a point inside Maps (left-anchored) has moved to. */
 const mapsOffset = (time: number): Point => {
@@ -168,24 +161,22 @@ export const MAP_PANS = T.pans.map(([at, to]) => ({ at, to }));
  * Photos. Entrances take the arrival curve, exits the departure; every other
  * move travels. */
 const STEADY = new Set<number>([T.boxStart, T.pickup, T.picks[0] + 100, T.picks[1] + 100, T.deleted + 150, T.pans[1][1], ...T.pans.map((pan) => pan[0])]);
-const ENTRANCES = new Set<number>([T.geminiIn, T.openaiIn, T.claudeIn]);
-const EXITS = new Set<number>([T.geminiOut, T.openaiOut, T.claudeOut]);
+const ENTRANCES = new Set<number>([T.geminiIn, T.openaiIn]);
+const EXITS = new Set<number>([T.geminiOut, T.openaiOut]);
 
-/** Gemini's routine runs ahead of the loop by GEMINI_LEAD, wrapping across the
- * seam: it enters right after the next loop's files land (about 16.3s), so the
- * end of the loop has little dead air and its entrance has a cause. */
-export const GEMINI_LEAD = 735;
-const geminiTime = (time: number) => (time + GEMINI_LEAD) % END;
-/** Loop time for one agent's routine. */
-const routineTime = (who: DesktopPeer, time: number) => (who === 'gemini' ? geminiTime(time) : time);
-/** A moment on Gemini's clock, on the loop's. */
-const fromGemini = (local: number) => (local - GEMINI_LEAD + END) % END;
+/** Gemini's routine can run ahead of the cycle by GEMINI_LEAD, wrapping across
+ * the seam. In the short cycle it starts at the top, right after the new files
+ * land (a cause for its entrance). */
+export const GEMINI_LEAD = 0;
+const geminiTime = (time: number) => (cyc(time) + GEMINI_LEAD) % END;
+/** Cycle time for one agent's routine. */
+const routineTime = (who: DesktopPeer, time: number) => (who === 'gemini' ? geminiTime(time) : cyc(time));
 
 /** Carried files and their cursor use the same measured, camera-independent route. */
 export function desktopPeerPosition(who: DesktopPeer, loopTime: number, targets: Targets): Point {
   const route = DESKTOP_ROUTES[who];
-  // Maps moves on the loop's clock; each routine on its own
-  const mapsTime = loopTime;
+  // Maps moves on the cycle's clock; each routine on its own
+  const mapsTime = cyc(loopTime);
   const time = routineTime(who, loopTime);
   for (let i = 1; i < route.length; i++) {
     if (time > route[i][0]) continue;
@@ -206,6 +197,8 @@ export function desktopPeerPosition(who: DesktopPeer, loopTime: number, targets:
 
 /** 0 → 1 as an agent enters, 1 → 0 as it leaves; 0 while it has nothing to do. */
 export function desktopPeerAlpha(who: DesktopPeer, loopTime: number) {
+  // Claude always has work, so it never leaves
+  if (who === 'claude') return 1;
   const time = routineTime(who, loopTime);
   const p = PRESENCE[who];
   return smooth(progress(time, p.in, p.in + ENTER.fade)) * (1 - smooth(progress(time, p.out + EXIT.delay, p.out + RUN)));
@@ -214,20 +207,27 @@ export function desktopPeerAlpha(who: DesktopPeer, loopTime: number) {
 const near = (time: number, at: number) => Math.abs(time - at) < 80;
 
 export const DESK_FILE_COUNT = 3;
-/** When the next loop's files start arriving (loop clock): just after Claude
- * leaves, a beat before Gemini comes for them. On Gemini's clock below. */
-const FILES_BACK = 15_400;
+/** When the next cycle's files start arriving: after Photos has closed, a beat
+ * before Gemini comes for them (they settle by ~8.5s). On Gemini's clock below. */
+const FILES_BACK = b(9.2);
 const FILES_BACK_G = FILES_BACK + GEMINI_LEAD;
 /** The box reaches each file as it grows (at about .2, .45 and .73 of the drag). */
 const SELECTED_AT = [.2, .45, .73].map((f) => Math.round(T.boxStart + (T.boxEnd - T.boxStart) * f));
 export const PHOTO_COUNT = 18;
-/** The three photos OpenAI picks: not neighbors (row 1 col 1, row 1 col 3, row 2 col 2). */
-export const PHOTO_PICKS = [0, 2, 7] as const;
+/** The two photos OpenAI clicks (row 1 col 3, then row 2 col 2); the first is
+ * deleted once the second is the wallpaper. */
+export const PHOTO_PICKS = [2, 7] as const;
+/** How long the wallpaper takes to crossfade to a clicked photo. */
+const WALL_FADE = 600;
 
-/** The map's zoom: in close, out in two steps, in again in two at the loop's end. */
-export const MAP_ZOOM = { near: 2.2, mid: 1.6, far: 1 };
+/** The map's zoom: in close, out one step, in again one step. */
+export const MAP_ZOOM = { near: 2.2, far: 1.4 };
 
-export function desktopFrame(time: number) {
+export function desktopFrame(loopTime: number, loop = 0) {
+  const time = cyc(loopTime);
+  // Which cycle this is, counting across loops (two cycles a loop): each one
+  // starts on wallpaper 2c, clicks to 2c + 1, then to 2c + 2 (the next one's start)
+  const cycle = loop * 2 + (loopTime >= CYCLE ? 1 : 0);
   // Gemini's files, on Gemini's clock
   const g = geminiTime(time);
   const marquee = g >= T.boxStart && g < T.boxEnd + 300;
@@ -254,22 +254,31 @@ export function desktopFrame(time: number) {
   const openT = settle(progress(time, T.dock + 50, T.dock + 450));
   const closeWinT = progress(time, T.close + 50, T.close + 330) ** 2;
   const photosOpen = time >= T.dock + 50 && time < T.close + 400;
-  const picked = T.picks.map((at) => time >= at && time < T.deleted);
+  // The selection follows the clicks: the first photo, then the second, then
+  // the first again for the held press that deletes it
+  const picked = [
+    (time >= T.picks[0] && time < T.picks[1]) || (time >= T.deleteHold - 100 && time < T.deleted),
+    time >= T.picks[1] && time < T.deleteHold - 100,
+  ];
+  // The wallpaper: a base and the clicked photo fading in over it
+  const second = time >= T.picks[1];
+  const wall = {
+    base: 2 * cycle + (second ? 1 : 0),
+    next: 2 * cycle + (second ? 2 : 1),
+    mix: settle(progress(time, second ? T.picks[1] : T.picks[0], (second ? T.picks[1] : T.picks[0]) + WALL_FADE)),
+  };
   const deleteT = smooth(progress(time, T.deleted, T.deleted + 250));
   const closeT = smooth(progress(time, T.deleted + 100, T.deleted + 600));
   const deleted = time >= T.deleted && time < T.close + 400;
 
-  // Claude's map: two steps out, two pans, two steps in, always about the center
+  // Claude's map: one step out, two pans, one step in, always about the center
   const step = (from: number, to: number, start: number) => from + (to - from) * settle(progress(time, start, start + 420));
-  const zoom = time < T.zoomOut[1] ? step(MAP_ZOOM.near, MAP_ZOOM.mid, T.zoomOut[0])
-    : time < T.zoomIn[0] ? step(MAP_ZOOM.mid, MAP_ZOOM.far, T.zoomOut[1])
-      : time < T.zoomIn[1] ? step(MAP_ZOOM.far, MAP_ZOOM.mid, T.zoomIn[0])
-        : step(MAP_ZOOM.mid, MAP_ZOOM.near, T.zoomIn[1]);
+  const zoom = time < T.zoomIn ? step(MAP_ZOOM.near, MAP_ZOOM.far, T.zoomOut) : step(MAP_ZOOM.far, MAP_ZOOM.near, T.zoomIn);
   /** Each pan's progress, 0 → 1 while dragged (the map moves exactly with the hand). */
   const pans = MAP_PANS.map((pan) => smooth(progress(time, pan.at, pan.to)));
 
   return {
-    phase: time < T.dock ? 'start' : time < T.deleted ? 'pick' : time < T.close ? 'deleted' : time < T.zoomIn[0] ? 'panned' : 'tidy',
+    phase: time < T.dock ? 'start' : time < T.deleted ? 'pick' : time < T.close ? 'deleted' : time < T.zoomIn ? 'panned' : 'tidy',
     files,
     marquee,
     marqueeAlpha,
@@ -278,12 +287,20 @@ export function desktopFrame(time: number) {
     dropT,
     trashHover: g >= T.drop - 300 && g < T.drop + 200,
     trashBump: g >= T.drop && g < T.drop + 200,
+    /** The Trash's icon, 0 empty to 1 full, as macOS swaps it: full once the files
+     * drop in; back to empty in the cycle's last moments, as the next files land
+     * on the desk, so the cycle (and the loop) starts on an empty Trash. */
+    trashFull: smooth(progress(g, T.drop + 60, T.drop + 220)) * (1 - smooth(progress(g, END - 450, END - 150))),
     photosOpen,
     /** 0 → 1 as Photos grows out of its dock icon; 1 → 0 as it closes. */
     photosT: time < T.close + 50 ? openT : 1 - closeWinT,
     photosRunning: time >= T.dock && time < T.close + 400,
     dockPhotosPress: near(time, T.dock),
     picked,
+    wall,
+    /** The wallpapers photos A and B show this cycle. */
+    photoWalls: [2 * cycle + 1, 2 * cycle + 2] as const,
+    cycle,
     deleteT,
     closeT,
     deleted,
@@ -291,19 +308,8 @@ export function desktopFrame(time: number) {
     pans,
     geminiPress: (marquee && g < T.boxEnd) || carrying,
     geminiCarrying: carrying,
-    openaiPress: near(time, T.dock) || T.picks.some((at) => near(time, at)) || (time >= T.deleteHold - 100 && time < T.deleted) || near(time, T.close),
-    claudePress: [...T.zoomOut, ...T.zoomIn].some((at) => near(time, at)) || MAP_PANS.some((pan) => time >= pan.at && time < pan.to)
-      || [T.mapsMove, T.mapsGrow, T.mapsShrink, T.mapsBack].some(([at, to]) => time >= at && time < to),
+    openaiPress: near(time, T.dock) || T.picks.some((at) => near(time, at)) || (time >= T.deleteHold && time < T.deleted) || near(time, T.close),
+    claudePress: [T.zoomOut, T.zoomIn].some((at) => near(time, at)) || MAP_PANS.some((pan) => time >= pan.at && time < pan.to)
+      || [T.mapsMove, T.mapsBack].some(([at, to]) => time >= at && time < to),
   };
 }
-
-/** Key moments, for the storyboard's stills. */
-export const DESKTOP_BEATS = {
-  boxSelect: fromGemini(T.boxStart + 900),
-  carry: fromGemini(T.pickup + 700),
-  picked: T.picks[2] + 200,
-  deleted: T.deleted + 700,
-  zoomedOut: T.zoomOut[1] + 400,
-  panned: T.pans[0][1],
-  zoomIn: T.zoomIn[1] + 200,
-};

@@ -1,116 +1,130 @@
+import type { CSSProperties } from 'react';
 import { Plus, X } from 'lucide-react';
-import { Bar, Window } from '../../stageshow/vendor/kit';
-import type { HeroFrame } from './hero-timeline';
+import { Window, type Layout } from '../../stageshow/vendor/kit';
+import { FIXED, PR_NUMBER, PR_TITLE, TYPO, type HeroFrame } from './hero-timeline';
 import './deployment-browser.css';
 
-/** Masonry tiles, abstract images in quiet tones. Heights in px; tone picks the fill. */
-type Tile = readonly [height: number, tone: 1 | 2 | 3 | 4];
-// Wide, Pinterest-like columns (128px): a side column, the board's two, a side
-// column; four across fill the browser, the last runs past browser scope's crop.
-const SIDE_LEFT: readonly Tile[] = [[120, 2], [150, 3], [96, 1]];
-/** The board: a 2×2 block (264 × 144) whose columns end level, so the capture
- * is a clean rectangle, short enough that the drag ends with room for the
- * cursor's label below it inside browser scope's crop. */
-const BOARD: readonly (readonly Tile[])[] = [[[84, 3], [52, 1]], [[60, 2], [76, 4]]];
-const SIDE_RIGHT: readonly Tile[] = [[88, 1], [136, 4], [110, 2]];
+/* Three pages, all in the page's own pixels from its top-left corner. Everything
+   that matters sits inside browser scope's crop (--ab-visible of the page's
+   width, about 250px of its height).
 
-function Column({ tiles }: { tiles: readonly Tile[] }) {
-  return <div className="ab-pin-col">{tiles.map(([h, tone], i) => <span key={i} className="ab-pin-tile" data-tone={tone} style={{ height: h }} />)}</div>;
+   Production and the Preview: one page, a nav bar's bottom line, then its hero
+   (a two-line headline and two solid buttons). The headline is misspelled on
+   production and corrected on the Preview. Each capture takes
+   most of the hero.
+   GitHub: the pull request, nothing but its title and the description the two
+   screenshots are pasted into, Before and After side by side. */
+
+const VISIBLE: Record<Layout, number> = { wide: 460, compact: 280 };
+/** The captured region: most of the hero, from under the nav line to near the
+ * crop's foot, across the page's width; a fixed box, so the capture never
+ * depends on measured text. The hero's content sits inside it (.ab-mock-hero
+ * in the CSS places it). */
+export const SHOT_REGION: Record<Layout, { x: number; y: number; width: number; height: number }> = {
+  wide: { x: 12, y: 40, width: 436, height: 184 },
+  compact: { x: 10, y: 40, width: 260, height: 172 },
+};
+/** The copy is the region in a frame of the page's color, SHOT_PAD all round:
+ * exactly the marquee's box (its gap is the same 8px). */
+export const SHOT_PAD = 8;
+export const shotSize = (layout: Layout) => ({ width: SHOT_REGION[layout].width + SHOT_PAD * 2, height: SHOT_REGION[layout].height + SHOT_PAD * 2 });
+/** The pasted images' scale in the description: side by side across its width. */
+export const ATTACH_SCALE: Record<Layout, number> = { wide: .468, compact: .47 };
+
+/** The hero, simplified to what a marketing page always has: a two-line
+ * headline (the blandest one there is, so only its typo catches the eye;
+ * `fixed` spells it right: the Preview) and two buttons as plain solid fills.
+ * Placed by CSS (.ab-mock-hero). */
+function Hero({ fixed }: { fixed: boolean }) {
+  return (
+    <div className="ab-mock-hero">
+      <div className="ab-headline">Build better<br />{fixed ? FIXED : TYPO}, faster</div>
+      <span className="ab-mock-actions"><span className="ab-mock-primary" /><span className="ab-mock-secondary" /></span>
+    </div>
+  );
 }
 
-/** The board as captured: its tiles in a white frame with even padding, for
- * the copy that rides with the cursor and lands in the message. */
-export function BoardShot() {
-  return <div className="ab-board-shot"><div className="ab-board-shot-tiles">{BOARD.map((tiles, i) => <Column key={i} tiles={tiles} />)}</div></div>;
+/** A screenshot of the hero, as it rides with the cursor and lands in the
+ * description: the page itself, cropped to the region and framed in the page's
+ * color. `fixed` is the Preview's; otherwise production's, with the typo. */
+export function HeadlineShot({ layout, fixed }: { layout: Layout; fixed: boolean }) {
+  const region = SHOT_REGION[layout];
+  const size = shotSize(layout);
+  return (
+    <div className="ab-shot" style={{ width: size.width, height: size.height, '--ab-visible': `${VISIBLE[layout]}px` } as CSSProperties}>
+      <div className="ab-shot-page" style={{ left: SHOT_PAD - region.x, top: SHOT_PAD - region.y }}>
+        <Hero fixed={fixed} />
+      </div>
+    </div>
+  );
 }
 
-const MAIL_ROWS = [92, 74, 104, 66, 86];
+/** The page around the headline: the nav bar's bottom line. */
+const PageFrame = () => <span className="ab-page-nav" />;
 
-function MailRow({ w }: { w: number }) {
-  return <div className="ab-mail-row">
-    <span className="ab-mail-avatar" />
-    <span className="ab-mail-lines"><Bar w={w} h={6} tone={3} /><Bar w={w + 40} h={5} tone={2} /></span>
-  </div>;
-}
-
-/** A filled value without words: the gray bar fades in whole (a placeholder,
- * not text). The cursor's own I-beam runs along it as it appears. */
-function BarValue({ filled, w }: { filled: boolean; w: number }) {
-  return <span className="ab-fill" data-on={filled || undefined}><Bar w={w} h={6} tone={3} /></span>;
-}
-
-/** A filled field: Geist's input box around a BarValue. Same 28px box as every control. */
-function BarField({ filled, w, focused, target }: { filled: boolean; w: number; focused: boolean; target: string }) {
-  return <span className="ab-bar-field" data-focused={focused || undefined} data-target={target}>
-    <BarValue filled={filled} w={w} />
-  </span>;
-}
-
+const tabLabel = (key: string, title: string) => (
+  <span className="ab-tab-label" key={key}><span className="ab-tab-title">{title}</span><span className="ab-tab-close" data-target={`close-${key}`}><X size={10} /></span></span>
+);
 
 /** Every screen and target stays mounted so timeline seeks are deterministic. */
-export function BrowserWindow({ frame }: { frame: HeroFrame }) {
+export function BrowserWindow({ frame, layout }: { frame: HeroFrame; layout: Layout }) {
+  const region = SHOT_REGION[layout];
+  const size = shotSize(layout);
+  const scale = ATTACH_SCALE[layout];
+  const slot = { width: size.width * scale, height: size.height * scale };
   return (
     <Window
-      url={<span className="ab-address-content" />}
+      url={<span className="ab-address-content">{frame.url}</span>}
       urlShape="pill"
       tabs={[
-        <span className="ab-tab-label" key="pin"><Bar w={56} h={5} tone={3} /><span className="ab-tab-close" data-target="close-pin"><X size={10} /></span></span>,
-        <span className="ab-tab-label" key="mail"><Bar w={34} h={5} tone={3} /><span className="ab-tab-close" data-target="close-mail"><X size={10} /></span></span>,
+        tabLabel('production', 'Acme'),
+        tabLabel('preview', 'Acme'),
+        tabLabel('github', `${PR_TITLE} ${PR_NUMBER}`),
         <span className="ab-tab-plus" key="plus" data-target="tab-plus"><Plus size={13} /></span>,
       ]}
-      lights="grey"
-      className="ab-browser" data-target="browser-window" data-active-tab={frame.active} data-pin-tab={frame.pinTab || undefined} data-mail-tab={frame.mailTab || undefined}
+      lights="color"
+      className="ab-browser" data-target="browser-window" data-active-tab={frame.active} data-preview-tab={frame.previewTab || undefined} data-github-tab={frame.githubTab || undefined} data-many-tabs={frame.manyTabs || undefined}
       body={{ className: 'ab-browser-body' }}
     >
-      {/* The pin board: logged out, then signed in */}
-      {/* Where + sits with no tabs open (measured: 79.5, 14 in the window, 18px): the hand's home at the loop's ends */}
-      <span className="ab-plus-home" data-target="plus-home" />
-      <div className="ab-page ab-pin-page" data-on={(frame.pinTab && frame.active === 'pin') || undefined} data-signed-in={frame.signedIn || undefined}>
-        <div className="ab-pin-header">
-          <span className="ab-pin-logo" />
-          <span className="ab-pin-search" />
-          <span className="ab-pin-rest" data-target="pin-rest" />
-          <span className="ab-pin-account">
-            <span className="ab-pin-login" data-target="login" />
-            <span className="ab-pin-avatar" />
-          </span>
-        </div>
-        <div className="ab-pin-grid">
-          <Column tiles={SIDE_LEFT} />
-          <div className="ab-pin-board" data-target="board">{BOARD.map((tiles, i) => <Column key={i} tiles={tiles} />)}</div>
-          <Column tiles={SIDE_RIGHT} />
-        </div>
-        <div className="ab-pin-modal" data-on={frame.modal || undefined}>
-          <div className="ab-pin-card">
-            <Bar w={84} h={8} tone={3} />
-            <BarField filled={frame.emailFilled} w={104} focused={frame.emailFocused} target="email" />
-            <BarField filled={frame.passwordFilled} w={64} focused={frame.passwordFocused} target="password" />
-            <span className="ab-pin-submit" data-target="submit" />
-          </div>
-        </div>
+      {/* Where + sits beside one tab and beside two: fixed anchors, so the
+          hand's trips to it never jump while a tab opens and pushes + along */}
+      <span className="ab-plus-home ab-plus-one" data-target="plus-one" />
+      <span className="ab-plus-home ab-plus-two" data-target="plus-two" />
+      {/* The hand's resting place on production, where the loop opens and ends */}
+      <span className="ab-anchor ab-home" data-target="home" />
+      {/* The captured region: the same box on production and the preview */}
+      <span className="ab-anchor" data-target="shot-region" style={{ left: region.x, top: region.y, width: region.width, height: region.height }} />
+
+      {/* Production: the headline, with a typo in it */}
+      <div className="ab-page" data-on={frame.active === 'production' || undefined}>
+        <PageFrame />
+        <Hero fixed={false} />
       </div>
 
-      {/* The inbox in the new tab */}
-      <div className="ab-page ab-mail-page" data-on={(frame.mailTab && frame.active === 'mail') || undefined}>
-        <aside className="ab-mail-side">
-          <span className="ab-mail-compose" data-target="compose" />
-          {[54, 42, 48].map((w, i) => <span className="ab-mail-nav" key={i} data-selected={i === 0 || undefined}><Bar w={w} h={5} tone={i === 0 ? 3 : 2} /></span>)}
-        </aside>
-        <div className="ab-mail-main">
-          <div className="ab-mail-slot" style={{ height: 44 * frame.sentRow, opacity: frame.sentRow > .8 ? (frame.sentRow - .8) / .2 : 0 }}><MailRow w={80} /></div>
-          {MAIL_ROWS.map((w, i) => <MailRow key={i} w={w} />)}
+      {/* The Preview deployment of the fix: the same page, spelled right */}
+      <div className="ab-page" data-on={(frame.previewTab && frame.active === 'preview') || undefined}>
+        <PageFrame />
+        <Hero fixed />
+      </div>
+
+      {/* The pull request: its title, and the description the screenshots are pasted into */}
+      <div className="ab-page ab-pr" data-on={(frame.githubTab && frame.active === 'github') || undefined}>
+        <div className="ab-pr-title">{PR_TITLE} <span className="ab-pr-number">{PR_NUMBER}</span></div>
+        <div className="ab-pr-field">
+          <span className="ab-pr-placeholder" data-target="pr-field" data-hidden={!frame.fieldEmpty || undefined}>{frame.fieldFocused && <span className="ab-caret ab-caret-lead" />}Add a description</span>
+          {/* Each image's place, reserved at its final size so the flying copy lands on it exactly */}
+          {(['Before', 'After'] as const).map((label, i) => (
+            <div className="ab-pr-shot" key={label}>
+              <span className="ab-pr-caption" data-on={frame.copies[i].caption || undefined}>{label}</span>
+              <span className="ab-pr-attach" data-target={`slot-${i}`} data-on={frame.copies[i].attached || undefined} style={{ width: slot.width, height: slot.height }}>
+                <span className="ab-pr-attach-shot" style={{ scale: `${scale}` } as CSSProperties}>
+                  <HeadlineShot layout={layout} fixed={i === 1} />
+                </span>
+              </span>
+            </div>
+          ))}
         </div>
-        <span className="ab-mail-rest" data-target="mail-rest" />
-        <div className="ab-compose" data-on={frame.composing || undefined}>
-          <div className="ab-compose-head"><Bar w={64} h={6} tone={3} /><X size={11} /></div>
-          <div className="ab-compose-line" data-target="to"><span className="ab-compose-value"><BarValue filled={frame.toFilled} w={104} /></span></div>
-          <div className="ab-compose-line"><Bar w={96} h={6} tone={2} /></div>
-          <div className="ab-compose-body">
-            <Bar w={128} h={5} tone={2} />
-            <span className="ab-compose-attach" data-target="attach" data-on={frame.attached || undefined}><BoardShot /></span>
-          </div>
-          <div className="ab-compose-foot"><span className="ab-compose-send" data-target="send" /></div>
-        </div>
+        <span className="ab-anchor ab-pr-rest" data-target="pr-rest" />
       </div>
     </Window>
   );
