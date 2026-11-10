@@ -1999,9 +1999,9 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DASHBOARD_START,
             "Dashboard start",
-            "Start dashboard server. Loopback access requires no token. When the dashboard is exposed through a reverse proxy, configure its exact browser origin with allowedOrigins and open the returned private URL. Stop a running dashboard before changing its port or allowed origins.",
+            "Start dashboard server and return the port it listens on. Loopback access requires no token. When the dashboard is exposed through a reverse proxy, configure its exact browser origin with allowedOrigins and open the returned private URL. Stop a running dashboard before changing its port or allowed origins.",
             json!({
-                "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                "port": { "type": "integer", "minimum": 0, "maximum": 65535, "description": "Port to listen on (default 4848). Use 0 to pick a free port." },
                 "allowedOrigins": {
                     "type": "string",
                     "minLength": 1,
@@ -6229,7 +6229,7 @@ mod tests {
             tool["inputSchema"]["properties"]["allowedOrigins"]["minLength"],
             1
         );
-        assert_eq!(tool["inputSchema"]["properties"]["port"]["minimum"], 1);
+        assert_eq!(tool["inputSchema"]["properties"]["port"]["minimum"], 0);
         assert_eq!(tool["inputSchema"]["properties"]["port"]["maximum"], 65535);
 
         let args = dashboard_start_args(&json!({
