@@ -4,12 +4,15 @@ use futures_util::future::join_all;
 use serde_json::{json, Value};
 
 use super::client::{remote_to_json, BidiClient};
+use super::contexts::Contexts;
 use super::daemon::{reset_page, session};
 use super::emulation;
 use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
+
+const TREE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Opens a tab and makes it active. Must return what Chrome's `handle_tab_new` returns,
 /// honouring `url` and `label`.
@@ -20,31 +23,15 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         validate_tab_label(session(state)?, label)?;
     }
 
-    let mut create = json!({"type": "tab"});
-    let user_context = session(state)?
-        .active_partition()
-        .and_then(|partition| partition["userContext"].as_str().map(str::to_string));
-    if let Some(user_context) = &user_context {
-        create["userContext"] = json!(user_context);
-    }
-    let created = session(state)?
-        .bidi
-        .send("browsingContext.create", create)
-        .await?;
-    let context = created["context"]
-        .as_str()
-        .ok_or("Firefox did not return a context id for the new tab")?
-        .to_string();
     let ff = session(state)?;
-    if let Some(user_context) = user_context {
-        ff.window_contexts.insert(context.clone(), user_context);
-    }
-    let tab_id = ff.tab_id(&context);
+    let user_context = ff
+        .contexts
+        .user_context(ff.contexts.active())
+        .map(str::to_string);
+    let (context, tab_id) = create_tab(ff, "tab", user_context.as_deref()).await?;
     activate(state, &context).await?;
     if let Some(label) = label {
-        session(state)?
-            .tab_labels
-            .insert(context.clone(), label.to_string());
+        session(state)?.contexts.set_label(&context, label);
     }
 
     let landing = match url {
@@ -79,6 +66,27 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     Ok(result)
 }
 
+/// Creates a tab or window in `user_context` and records it, returning its context and tab id.
+async fn create_tab(
+    ff: &mut FirefoxSession,
+    kind: &str,
+    user_context: Option<&str>,
+) -> Result<(String, u32), String> {
+    let mut info = json!({"type": kind});
+    if let Some(user_context) = user_context {
+        info["userContext"] = json!(user_context);
+    }
+    let created = ff.bidi.send("browsingContext.create", info.clone()).await?;
+    info["context"] = created["context"].clone();
+    ff.contexts.record(&info);
+    let context = info["context"].as_str().unwrap_or_default();
+    let tab = ff
+        .contexts
+        .tab(context)
+        .ok_or("Firefox did not return a context id for the new tab")?;
+    Ok((context.to_string(), tab.id))
+}
+
 /// Fails when `label` is malformed, uses tab-id syntax, or another tab already holds it.
 fn validate_tab_label(ff: &FirefoxSession, label: &str) -> Result<(), String> {
     if !is_valid_label(label) {
@@ -92,7 +100,11 @@ fn validate_tab_label(ff: &FirefoxSession, label: &str) -> Result<(), String> {
             "Tab label `{label}` uses syntax reserved for tab IDs"
         ));
     }
-    if ff.tab_labels.values().any(|existing| existing == label) {
+    if ff
+        .contexts
+        .tabs()
+        .any(|(_, tab)| tab.label.as_deref() == Some(label))
+    {
         return Err(format!(
             "Label `{label}` is already used by another tab; labels must be unique within a \
              session"
@@ -108,7 +120,7 @@ async fn activate(state: &mut DaemonState, context: &str) -> Result<(), String> 
     ff.bidi
         .send("browsingContext.activate", json!({"context": context}))
         .await?;
-    ff.top_context = context.to_string();
+    ff.contexts.activate(context);
     reset_page(state);
     emulation::apply_to_context(session(state)?, context).await
 }
@@ -139,60 +151,73 @@ pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
         .send_timeout(
             "browsingContext.getTree",
             json!({"maxDepth": 0}),
-            Duration::from_secs(1),
+            TREE_TIMEOUT,
         )
         .await?;
     let contexts = tree["contexts"].as_array().cloned().unwrap_or_default();
+    for info in &contexts {
+        ff.contexts.record(info);
+    }
     let titles = join_all(
         contexts
             .iter()
             .map(|context| tab_title(&ff.bidi, context["context"].as_str().unwrap_or_default())),
     )
     .await;
-    Ok(json!({ "tabs": build_tab_list(ff, &contexts, &titles) }))
+    let active = ff.contexts.active_tab();
+    Ok(json!({ "tabs": build_tab_list(&contexts, &titles, &ff.contexts, active) }))
 }
 
-/// Builds the same tab list for the dashboard without letting a blocked page hold the daemon.
-pub(crate) async fn stream_tabs(ff: &mut FirefoxSession) -> Result<Vec<Value>, String> {
-    const TREE_TIMEOUT: Duration = Duration::from_secs(1);
-    let tree = ff
-        .bidi
+/// Builds the dashboard tab list from Firefox, or `None` when it does not answer in time.
+pub(crate) async fn stream_tabs(
+    bidi: &BidiClient,
+    index: &Contexts,
+    active: &str,
+) -> Option<Vec<Value>> {
+    let tree = bidi
         .send_timeout(
             "browsingContext.getTree",
             json!({"maxDepth": 0}),
             TREE_TIMEOUT,
         )
-        .await?;
-    let contexts: Vec<Value> = tree["contexts"]
-        .as_array()
-        .cloned()
-        .ok_or("Firefox did not return a context tree")?;
-    let bidi = &ff.bidi;
-    let titles = join_all(contexts.iter().map(|context| async move {
-        let title = tab_title(bidi, context["context"].as_str().unwrap_or_default()).await;
-        Value::String(title.as_str().unwrap_or_default().to_string())
-    }))
+        .await
+        .ok()?;
+    let contexts = tree["contexts"].as_array()?.clone();
+    let titles = join_all(
+        contexts
+            .iter()
+            .map(|context| tab_title(bidi, context["context"].as_str().unwrap_or_default())),
+    )
     .await;
-    Ok(build_tab_list(ff, &contexts, &titles))
+    let titles: Vec<Value> = titles
+        .iter()
+        .map(|title| Value::String(title.as_str().unwrap_or_default().to_string()))
+        .collect();
+    Some(build_tab_list(&contexts, &titles, index, active))
 }
 
 /// Maps a BiDi tree and titles to the shared CLI and stream tab shape.
-fn build_tab_list(ff: &mut FirefoxSession, contexts: &[Value], titles: &[Value]) -> Vec<Value> {
+fn build_tab_list(
+    contexts: &[Value],
+    titles: &[Value],
+    index: &Contexts,
+    active: &str,
+) -> Vec<Value> {
     contexts
         .iter()
         .zip(titles)
-        .map(|(c, title)| {
+        .filter_map(|(c, title)| {
             let context = c["context"].as_str().unwrap_or_default();
-            let tab_id = ff.tab_id(context);
-            json!({
-                "tabId": format_tab_id(tab_id),
+            let tab = index.tab(context)?;
+            Some(json!({
+                "tabId": format_tab_id(tab.id),
                 "targetId": context,
-                "label": ff.tab_labels.get(context),
+                "label": tab.label,
                 "title": title,
                 "url": c["url"],
                 "type": "page",
-                "active": context == ff.top_context,
-            })
+                "active": context == active,
+            }))
         })
         .collect()
 }
@@ -235,7 +260,7 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }
     let context = match requested {
         Some(input) => resolve_tab_ref(&list, input)?,
-        None => session(state)?.top_context.clone(),
+        None => session(state)?.contexts.active_tab().to_string(),
     };
     let index = list
         .iter()
@@ -250,23 +275,8 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .bidi
         .send("browsingContext.close", json!({"context": context}))
         .await?;
-    let user_context = session(state)?.window_contexts.remove(&context);
     let was_active = super::daemon::forget_context(state, &context)?;
-    if let Some(user_context) = user_context {
-        let still_open = session(state)?
-            .window_contexts
-            .values()
-            .any(|other| *other == user_context);
-        if !still_open {
-            let _ = session(state)?
-                .bidi
-                .send(
-                    "browser.removeUserContext",
-                    json!({"userContext": user_context}),
-                )
-                .await;
-        }
-    }
+    session(state)?.release_unused_user_contexts().await;
     if was_active {
         match successor {
             Some(successor) => {
@@ -285,7 +295,7 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 }
 
 /// Opens a new window. Must return what Chrome's `handle_window_new` returns.
-pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub async fn window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let user_context = session(state)?
         .bidi
         .send("browser.createUserContext", json!({}))
@@ -294,34 +304,17 @@ pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(Value::as_str)
         .ok_or("Firefox did not return a user context for the new window")?
         .to_string();
-    let created = session(state)?
-        .bidi
-        .send(
-            "browsingContext.create",
-            json!({"type": "window", "userContext": user_context}),
-        )
-        .await;
-    let created = match created {
-        Ok(created) => created,
-        Err(error) => {
-            let _ = session(state)?
-                .bidi
-                .send(
-                    "browser.removeUserContext",
-                    json!({"userContext": user_context}),
-                )
-                .await;
-            return Err(error);
-        }
-    };
-    let context = created["context"]
-        .as_str()
-        .ok_or("Firefox did not return a context id for the new window")?
-        .to_string();
     let ff = session(state)?;
-    ff.window_contexts.insert(context.clone(), user_context);
-    let tab_id = ff.tab_id(&context);
+    ff.contexts.own_user_context(&user_context);
+    let created = create_tab(ff, "window", Some(&user_context)).await;
+    if created.is_err() {
+        ff.release_unused_user_contexts().await;
+    }
+    let (context, tab_id) = created?;
     activate(state, &context).await?;
+    if let Some(viewport) = cmd.get("viewport") {
+        super::emulation::set_viewport(viewport, state).await?;
+    }
     let total = tab_count(session(state)?).await?;
 
     Ok(json!({
@@ -437,13 +430,16 @@ mod tests {
             _ => json!({}),
         })
         .await;
-        ff.tab_labels.insert("ctx-other".into(), "docs".into());
+        ff.contexts.record(&json!({"context": "ctx-other"}));
+        ff.contexts.set_label("ctx-other", "docs");
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
 
         let cli = tab_list(&mut state).await.unwrap();
         let ff = state.firefox.as_mut().unwrap();
-        let stream = stream_tabs(ff).await.unwrap();
+        let stream = stream_tabs(&ff.bidi, &ff.contexts, ff.contexts.active_tab())
+            .await
+            .unwrap();
         assert_eq!(cli["tabs"], json!(stream));
         assert_eq!(
             stream,
@@ -453,15 +449,16 @@ mod tests {
             ]
         );
 
-        ff.top_context = "ctx-other".into();
+        ff.contexts.activate("ctx-other");
         let remaining = build_tab_list(
-            ff,
             &[json!({"context":"ctx-other", "url":"about:blank"})],
             &[json!("Other")],
+            &ff.contexts,
+            ff.contexts.active_tab(),
         );
         assert_eq!(remaining[0]["tabId"], "t2");
         assert_eq!(remaining[0]["active"], true);
-        assert!(build_tab_list(ff, &[], &[]).is_empty());
+        assert!(build_tab_list(&[], &[], &ff.contexts, ff.contexts.active_tab()).is_empty());
     }
 
     #[tokio::test]
@@ -477,23 +474,26 @@ mod tests {
         state.firefox = Some(ff);
         let cli = tab_list(&mut state).await.unwrap();
         assert!(cli["tabs"][0]["title"].is_null());
-        let tabs = stream_tabs(state.firefox.as_mut().unwrap()).await.unwrap();
+        let ff = state.firefox.as_mut().unwrap();
+        let tabs = stream_tabs(&ff.bidi, &ff.contexts, ff.contexts.active_tab())
+            .await
+            .unwrap();
         assert_eq!(tabs[0]["title"], "");
     }
 
     #[tokio::test]
     async fn stream_tracks_commands_and_external_context_changes() {
         use crate::native::stream::{IdleActivity, StreamServer};
+        use futures_util::StreamExt;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let fail_first_tree = AtomicBool::new(true);
         let tree = Arc::new(Mutex::new(vec![
             json!({"context":"ctx-active", "url":"about:blank"}),
         ]));
         let browser_tree = tree.clone();
-        let (ff, events, calls) =
+        let (ff, events, _calls) =
             fake_session_with(move |request| match request["method"].as_str() {
                 Some("browsingContext.getTree") => {
                     if fail_first_tree.swap(false, Ordering::Relaxed) {
@@ -539,40 +539,35 @@ mod tests {
         state.engine = "firefox".into();
         state.firefox = Some(ff);
 
-        async fn cached_tabs(port: u16) -> Value {
-            let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .unwrap();
-            socket.write_all(format!("GET /api/tabs HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
-            let mut response = String::new();
-            socket.read_to_string(&mut response).await.unwrap();
-            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
-            assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
-            serde_json::from_str(body).unwrap()
+        async fn next_tabs(
+            ws: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            until: impl Fn(&Value) -> bool,
+        ) -> Value {
+            loop {
+                let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("timed out waiting for the dashboard tab list")
+                    .expect("stream ended")
+                    .expect("ws error");
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let payload: Value = serde_json::from_str(text).unwrap();
+                if payload["type"] == "tabs" && until(&payload["tabs"]) {
+                    return payload["tabs"].clone();
+                }
+            }
         }
 
         state.update_stream_client().await;
-        assert_eq!(cached_tabs(server.port()).await, json!([]));
-        state.drain_cdp_events_background().await.unwrap();
-        let initial = cached_tabs(server.port()).await;
-        assert_eq!(initial[0]["tabId"], "t1");
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}", server.port()))
+                .await
+                .unwrap();
+        let initial = next_tabs(&mut ws, |tabs| tabs[0]["tabId"] == "t1").await;
         assert_eq!(initial[0]["active"], true);
-        let tree_calls = calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|m| *m == "browsingContext.getTree")
-            .count();
-        tokio::time::sleep(Duration::from_millis(550)).await;
-        assert_eq!(
-            calls
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|m| *m == "browsingContext.getTree")
-                .count(),
-            tree_calls
-        );
 
         let run = |action: &str, id: &str| json!({"id":id, "action":action});
         let created = crate::native::actions::execute_command(
@@ -582,8 +577,7 @@ mod tests {
         .await;
         assert_eq!(created["success"], true, "{created}");
         assert_eq!(created["data"]["tabId"], "t2");
-        let tabs = cached_tabs(server.port()).await;
-        assert_eq!(tabs[1]["label"], "docs");
+        let tabs = next_tabs(&mut ws, |tabs| tabs[1]["label"] == "docs").await;
         assert_eq!(tabs[1]["active"], true);
         let listed =
             crate::native::actions::execute_command(&run("tab_list", "2"), &mut state).await;
@@ -594,7 +588,8 @@ mod tests {
         )
         .await;
         assert_eq!(switched["success"], true, "{switched}");
-        assert_eq!(cached_tabs(server.port()).await[0]["active"], true);
+        let tabs = next_tabs(&mut ws, |tabs| tabs[0]["active"] == true).await;
+        assert_eq!(tabs[0]["active"], true);
         assert_eq!(
             server.firefox_live_context().await.as_deref(),
             Some("ctx-active")
@@ -605,10 +600,8 @@ mod tests {
         )
         .await;
         assert_eq!(closed["success"], true, "{closed}");
-        assert_eq!(
-            cached_tabs(server.port()).await.as_array().unwrap().len(),
-            1
-        );
+        let tabs = next_tabs(&mut ws, |tabs| tabs.as_array().unwrap().len() == 1).await;
+        assert_eq!(tabs.as_array().unwrap().len(), 1);
 
         tree.lock()
             .unwrap()
@@ -616,9 +609,8 @@ mod tests {
         events.send(json!({"type":"event", "method":"browsingContext.contextCreated", "params":{"context":"ctx-external", "parent":null}})).unwrap();
         seen_events.recv().await.unwrap();
         state.drain_cdp_events_background().await.unwrap();
-        let tabs = cached_tabs(server.port()).await;
+        let tabs = next_tabs(&mut ws, |tabs| tabs[1]["url"] == "https://external.test/").await;
         assert_eq!(tabs[1]["tabId"], "t3");
-        assert_eq!(tabs[1]["url"], "https://external.test/");
 
         tree.lock()
             .unwrap()
@@ -626,9 +618,8 @@ mod tests {
         events.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
         seen_events.recv().await.unwrap();
         state.drain_cdp_events_background().await.unwrap();
-        let tabs = cached_tabs(server.port()).await;
+        let tabs = next_tabs(&mut ws, |tabs| tabs[0]["tabId"] == "t3").await;
         assert_eq!(tabs.as_array().unwrap().len(), 1);
-        assert_eq!(tabs[0]["tabId"], "t3");
         assert_eq!(tabs[0]["active"], true);
         assert_eq!(
             server.firefox_live_context().await.as_deref(),
@@ -639,7 +630,7 @@ mod tests {
         events.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-external", "parent":null}})).unwrap();
         seen_events.recv().await.unwrap();
         state.drain_cdp_events_background().await.unwrap();
-        assert_eq!(cached_tabs(server.port()).await, json!([]));
+        assert_eq!(next_tabs(&mut ws, Value::is_array).await, json!([]));
         server.shutdown().await;
     }
 
@@ -682,8 +673,12 @@ mod tests {
         assert_eq!(result["targetId"], "ctx-new");
         assert_eq!(result["dialogOpened"], true);
         assert_eq!(result["total"], 2);
-        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-new");
-        assert_eq!(state.firefox.as_ref().unwrap().tab_labels["ctx-new"], "new");
+        let contexts = &state.firefox.as_ref().unwrap().contexts;
+        assert_eq!(contexts.active(), "ctx-new");
+        assert_eq!(
+            contexts.tab("ctx-new").unwrap().label.as_deref(),
+            Some("new")
+        );
         assert!(state.active_frame_id.is_none());
     }
 
@@ -726,7 +721,7 @@ mod tests {
             );
         }
         let mut ff = ff;
-        ff.tab_labels.insert("ctx-a".into(), "docs".into());
+        ff.contexts.set_label("ctx-active", "docs");
         assert!(validate_tab_label(&ff, "docs")
             .unwrap_err()
             .contains("already used by another tab"));

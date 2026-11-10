@@ -284,7 +284,7 @@ impl HiddenInputKind {
 
 /// Information about a cursor-interactive element (elements with cursor:pointer, onclick, tabindex, etc.)
 #[derive(Clone)]
-struct CursorElementInfo {
+pub(crate) struct CursorElementInfo {
     kind: String, // "clickable", "focusable", "editable"
     hints: Vec<String>,
     text: String, // textContent from the DOM element (fallback when ARIA name is empty)
@@ -782,17 +782,20 @@ fn finish_output(mut output: String, options: &SnapshotOptions) -> String {
 
 /// Runs the shared tree, ref and render pipeline on prebuilt accessibility nodes.
 /// `urls` maps a node's `backend_d_o_m_node_id` to its link target and is used when `options.urls` is set.
+/// `cursor_elements` maps that same id to the element's cursor-interactive info.
 pub fn snapshot_from_ax_nodes(
     nodes: &[AXNode],
     urls: &HashMap<i64, String>,
+    cursor_elements: &HashMap<i64, CursorElementInfo>,
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
     refs: SnapshotRefContext<'_>,
 ) -> String {
     let (mut tree_nodes, roots) = build_tree(nodes);
+    promote_hidden_inputs(&mut tree_nodes, cursor_elements);
     assign_refs(
         &mut tree_nodes,
-        &HashMap::new(),
+        cursor_elements,
         refs.node_contexts,
         ref_map,
         refs.session_id,
@@ -859,23 +862,13 @@ async fn resolve_iframe_frame_id(
         .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
 }
 
-async fn find_cursor_interactive_elements(
-    client: &CdpClient,
-    session_id: &str,
-) -> Result<HashMap<i64, CursorElementInfo>, String> {
-    // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
-    // - Uses querySelectorAll('*') to walk all elements
-    // - Checks getComputedStyle(el).cursor === 'pointer'
-    // - Checks onclick attribute/handler and tabindex
-    // - Skips interactiveTags (a, button, input, select, textarea, details, summary)
-    // - Skips elements with interactive ARIA roles
-    // - Deduplicates inherited cursor:pointer from parent
-    // - Skips empty text and zero-size elements
-    // - Tags each matched element with data-__ab-ci for batch backendNodeId resolution
-    let js = r#"
-(function() {
+/// Runs inside a scope root and reports the elements that behave as controls without an interactive role.
+/// `tag` names an attribute that receives each match's index for a caller that only gets values back; each
+/// result also carries the matched `element`, so a caller that receives node handles can use those instead.
+pub(crate) const CURSOR_DETECTION_JS: &str = r#"
+(root, tag) => {
     var results = [];
-    if (!document.body) return results;
+    if (!root) return results;
 
     var interactiveRoles = {
         'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
@@ -886,7 +879,7 @@ async fn find_cursor_interactive_elements(
         'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
     };
 
-    var allElements = document.body.querySelectorAll('*');
+    var allElements = root.querySelectorAll('*');
     for (var i = 0; i < allElements.length; i++) {
         var el = allElements[i];
 
@@ -936,8 +929,9 @@ async fn find_cursor_interactive_elements(
             }
         }
 
-        el.setAttribute('data-__ab-ci', String(results.length));
+        if (tag) el.setAttribute(tag, String(results.length));
         results.push({
+            element: el,
             text: text,
             tagName: tagName,
             hasOnClick: hasOnClick,
@@ -949,14 +943,19 @@ async fn find_cursor_interactive_elements(
         });
     }
     return results;
-})()
+}
 "#;
 
+async fn find_cursor_interactive_elements(
+    client: &CdpClient,
+    session_id: &str,
+) -> Result<HashMap<i64, CursorElementInfo>, String> {
+    let js = format!("({CURSOR_DETECTION_JS})(document.body, 'data-__ab-ci')");
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.evaluate",
             &EvaluateParams {
-                expression: js.to_string(),
+                expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
@@ -1065,90 +1064,83 @@ async fn find_cursor_interactive_elements(
         eprintln!("[agent-browser] Warning: failed to clean up data-__ab-ci attributes: {e}");
     }
 
-    // Build the map
-    let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();
-    for (i, elem) in elements.iter().enumerate() {
-        let backend_node_id = idx_to_backend.get(&i).copied();
-
-        // Role differentiation: v0.19.0 uses 'clickable' for cursor:pointer or onclick,
-        // 'focusable' for tabindex-only elements.
-        let has_cursor_pointer = elem
-            .get("hasCursorPointer")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let has_on_click = elem
-            .get("hasOnClick")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let has_tab_index = elem
-            .get("hasTabIndex")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let is_editable = elem
-            .get("isEditable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let kind = if has_cursor_pointer || has_on_click {
-            "clickable"
-        } else if is_editable {
-            "editable"
-        } else {
-            "focusable"
-        };
-
-        let mut hints: Vec<String> = Vec::new();
-        if has_cursor_pointer {
-            hints.push("cursor:pointer".to_string());
+    let mut map = HashMap::new();
+    for (index, element) in elements.iter().enumerate() {
+        if let Some(&backend_node_id) = idx_to_backend.get(&index) {
+            map.insert(backend_node_id, cursor_info_from_value(element));
         }
-        if has_on_click {
-            hints.push("onclick".to_string());
-        }
-        if has_tab_index {
-            hints.push("tabindex".to_string());
-        }
-        if is_editable {
-            hints.push("contenteditable".to_string());
-        }
+    }
+    Ok(map)
+}
 
-        let text = elem
+/// Parses one result item from `CURSOR_DETECTION_JS` into the info the snapshot pipeline renders.
+pub(crate) fn cursor_info_from_value(element: &Value) -> CursorElementInfo {
+    // Role differentiation: v0.19.0 uses 'clickable' for cursor:pointer or onclick,
+    // 'focusable' for tabindex-only elements.
+    let has_cursor_pointer = element
+        .get("hasCursorPointer")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let has_on_click = element
+        .get("hasOnClick")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let has_tab_index = element
+        .get("hasTabIndex")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let is_editable = element
+        .get("isEditable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let kind = if has_cursor_pointer || has_on_click {
+        "clickable"
+    } else if is_editable {
+        "editable"
+    } else {
+        "focusable"
+    };
+
+    let mut hints: Vec<String> = Vec::new();
+    if has_cursor_pointer {
+        hints.push("cursor:pointer".to_string());
+    }
+    if has_on_click {
+        hints.push("onclick".to_string());
+    }
+    if has_tab_index {
+        hints.push("tabindex".to_string());
+    }
+    if is_editable {
+        hints.push("contenteditable".to_string());
+    }
+
+    CursorElementInfo {
+        kind: kind.to_string(),
+        hints,
+        text: element
             .get("text")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
-            .to_string();
-
-        let hidden_input_kind = elem
+            .to_string(),
+        hidden_input_kind: element
             .get("hiddenInputType")
             .and_then(|v| v.as_str())
-            .and_then(HiddenInputKind::parse);
-        let hidden_input_checked = elem
+            .and_then(HiddenInputKind::parse),
+        hidden_input_checked: element
             .get("hiddenInputChecked")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        if let Some(bid) = backend_node_id {
-            map.insert(
-                bid,
-                CursorElementInfo {
-                    kind: kind.to_string(),
-                    hints,
-                    text,
-                    hidden_input_kind,
-                    hidden_input_checked,
-                },
-            );
-        }
+            .map(|s| s.to_string()),
     }
-
-    Ok(map)
 }
 
 /// Promote LabelText/generic nodes that wrap a hidden radio/checkbox input.
-/// When a `<label>` contains a `display:none` `<input type="radio">`, Chrome excludes
-/// the input from the AX tree entirely, leaving only the label with role="LabelText"
-/// and an empty name. We detect these via cursor-interactive scanning and promote
-/// the label to the correct input role so consumers see role="radio" in data.refs.
+/// When a `<label>` contains a `display:none` `<input type="radio">`, the browser leaves the input
+/// out of its accessibility tree and exposes only the label with role="LabelText" and an empty name.
+/// We detect these via cursor-interactive scanning and promote the label to the correct input role
+/// so consumers see role="radio" in data.refs.
 fn promote_hidden_inputs(
     tree_nodes: &mut [TreeNode],
     cursor_elements: &HashMap<i64, CursorElementInfo>,

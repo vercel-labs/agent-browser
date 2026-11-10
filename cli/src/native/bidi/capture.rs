@@ -167,7 +167,10 @@ async fn collect_annotations(
     };
     let tree = ff
         .bidi
-        .send("browsingContext.getTree", json!({"root": ff.top_context}))
+        .send(
+            "browsingContext.getTree",
+            json!({"root": ff.contexts.active_tab()}),
+        )
         .await?;
     let mut targets_by_id = HashMap::with_capacity(ff.refs.len());
     for (target, id) in &ff.refs {
@@ -251,7 +254,7 @@ pub async fn screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     };
     let capture_context = match (&target, full_page) {
         (Some(target), false) => target.context.clone(),
-        _ => session(state)?.top_context.clone(),
+        _ => session(state)?.contexts.active_tab().to_string(),
     };
     let (annotations, overlay_annotations) = if annotate {
         let (annotations, overlay_annotations) =
@@ -320,7 +323,7 @@ pub async fn screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 /// PDF of the active tab (`browsingContext.print`). Must return what Chrome's `handle_pdf` returns.
 pub async fn pdf(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    let params = pdf_params(cmd, &ff.top_context);
+    let params = pdf_params(cmd, ff.contexts.active_tab());
     let result = ff.bidi.send("browsingContext.print", params).await?;
     let data = result
         .get("data")

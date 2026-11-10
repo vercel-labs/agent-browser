@@ -142,7 +142,7 @@ pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, St
     };
     daemon::reset_page(state);
     let ff = daemon::session(state)?;
-    let context = ff.top_context.clone();
+    let context = ff.contexts.active_tab().to_string();
     let mut params = params;
     params["context"] = json!(context);
     let landed = ff

@@ -96,12 +96,6 @@ fn target_from_url(mut url: Url) -> Result<AttachTarget, String> {
     })
 }
 
-pub fn normalize_attach_target(target: &str) -> String {
-    endpoint_url(target)
-        .map(|url| url.to_string())
-        .unwrap_or_else(|_| target.into())
-}
-
 pub fn target_label(target: &str) -> String {
     match endpoint_url(target).map(|url| url.origin()) {
         Ok(url::Origin::Tuple(scheme, host, port)) => format!("{scheme}://{host}:{port}"),

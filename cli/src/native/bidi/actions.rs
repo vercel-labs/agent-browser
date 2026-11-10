@@ -1,7 +1,6 @@
 use serde_json::Value;
 
 use super::session::dialog_blocks_tab;
-use super::session::FirefoxSession;
 use super::{capture, emulation, forms, interact, network, page, query, snapshot, storage, tabs};
 use crate::native::actions::{self as chrome, DaemonState};
 
@@ -43,17 +42,12 @@ const SAFE_DURING_DIALOG: &[&str] = &[
     "deny",
 ];
 
-/// The launched Firefox session, or the standard not-launched error.
-pub fn session(state: &mut DaemonState) -> Result<&mut FirefoxSession, String> {
-    state.firefox.as_mut().ok_or("Browser not launched".into())
-}
-
 /// Fails when a dialog on the active tab would block `action`; a dialog on a background tab does not.
 fn dialog_guard(action: &str, state: &DaemonState) -> Result<(), String> {
     let (Some(dialog), Some(ff)) = (&state.pending_dialog, &state.firefox) else {
         return Ok(());
     };
-    if dialog_blocks_tab(dialog.owner_context.as_deref(), &ff.top_context)
+    if dialog_blocks_tab(dialog.owner_context.as_deref(), ff.contexts.active_tab())
         && !SAFE_DURING_DIALOG.contains(&action)
     {
         return Err(format!(
@@ -301,7 +295,7 @@ mod tests {
     async fn dialog_blocks_only_the_active_tab() {
         let mut state = DaemonState::new();
         let (mut ff, _tx, calls) = fake_session().await;
-        ff.tab_ids.insert("ctx-background".to_string(), 2);
+        ff.contexts.record(&json!({"context": "ctx-background"}));
         state.firefox = Some(ff);
         state.pending_dialog = Some(dialog("ctx-active", Some("ctx-active")));
         let e = execute("navigate", &json!({}), &mut state)

@@ -22,7 +22,7 @@ pub struct RdpClient {
     next_request: Arc<AtomicU64>,
     failed: Arc<AtomicBool>,
     events: broadcast::Sender<Value>,
-    reader: Arc<AbortOnDrop>,
+    _reader: Arc<AbortOnDrop>,
 }
 
 async fn read_frame<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> Option<Value> {
@@ -99,7 +99,7 @@ impl RdpClient {
             next_request: Arc::new(AtomicU64::new(0)),
             failed: Arc::new(AtomicBool::new(false)),
             events,
-            reader: Arc::new(AbortOnDrop(reader)),
+            _reader: Arc::new(AbortOnDrop(reader)),
         })
     }
 

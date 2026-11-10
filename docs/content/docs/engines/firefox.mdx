@@ -71,7 +71,7 @@ agent-browser close
 
 Detection is automatic. A `ws://` or `wss://` URL whose path is `/session` is treated as Firefox BiDi. Other targets try CDP first and probe for Firefox only when CDP discovery fails. Pass `--engine firefox` to skip the CDP attempt. Firefox uses the DevTools server on port 6000 unless the URL sets `?devtools=<port>`, for example `agent-browser connect "ws://127.0.0.1:9222/session?devtools=6080"` when Firefox was started with `--start-debugger-server 6080`.
 
-The attached browser is externally owned: `close` ends the BiDi session and leaves Firefox running. Only one client can hold a Firefox BiDi session at a time, and a client that exits without ending its session keeps it until Firefox restarts. `--auto-connect` does not support Firefox.
+The session starts on the tab selected in Firefox, or on the first tab when none reports itself visible. The attached browser is externally owned: `close` ends the BiDi session and leaves Firefox running. Only one client can hold a Firefox BiDi session at a time, and a client that exits without ending its session keeps it until Firefox restarts. `--auto-connect` does not support Firefox.
 
 Options that need a launch are rejected when attaching: `--profile`, `--args`, `--extension`, `--allow-file-access`, `--webgpu`, and `--ca-cert`. `--headed`, `--executable-path`, and `--no-xvfb` have no effect on an already-running browser. `--allowed-domains` is rejected when attaching, as it is for any pre-existing CDP session. `--pin-tab` and its `tab_gone` guarantee apply only to Chrome over CDP; Firefox attach rejects `--pin-tab`. See [CDP Mode](/cdp-mode) for the full attach workflow.
 

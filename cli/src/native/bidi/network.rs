@@ -219,7 +219,7 @@ fn resource_type(request: &Value) -> &'static str {
     }
 }
 
-fn is_websocket(url: &str) -> bool {
+pub(super) fn is_websocket(url: &str) -> bool {
     url.starts_with("ws:") || url.starts_with("wss:")
 }
 
@@ -495,10 +495,10 @@ fn auth_response(
 /// active context, or its tab, the daemon's element refs and frame scope go with it.
 pub async fn drain(state: &mut DaemonState) -> bool {
     if let Some(ff) = state.firefox.as_mut() {
-        let active = ff.context.clone();
+        let active = ff.contexts.active().to_string();
         let events = ff.drain_events(&mut state.pending_dialog);
         let tabs_changed = events.iter().any(top_level_context_changed);
-        if ff.context != active {
+        if ff.contexts.active() != active {
             state.ref_map.invalidate_all_documents();
             state.active_iframe_sessions.clear();
             state.active_frame_id = None;
@@ -1071,7 +1071,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     if clicked.is_none() {
         return Ok(json!({ "clicked": selector, "dialogOpened": true }));
     }
-    let contexts = [target.context.as_str(), ff.top_context.as_str()];
+    let contexts = [target.context.as_str(), ff.contexts.active_tab()];
     let record = wait_download(
         &downloads,
         cursor,
@@ -1665,7 +1665,7 @@ mod tests {
     #[tokio::test]
     async fn dispatcher_resolves_each_blocked_request_once() {
         let (mut ff, tx, calls) = fake_session().await;
-        ff.tab_id("popup");
+        ff.contexts.record(&json!({"context": "popup"}));
         ff.emulation.write().unwrap().user_agent = Some("Popup Agent".to_string());
         let net = NetContext::default();
         *net.domain_filter.write().await = Some(DomainFilter::new("allowed.example"));
@@ -1952,9 +1952,10 @@ mod tests {
             |_| json!({"bytes": {"type": "string", "value": "body"}}),
         )
         .await;
-        ff.top_context = "active".into();
-        ff.context = "active".into();
-        ff.context_parents.insert("frame".into(), "active".into());
+        ff.contexts = crate::native::bidi::contexts::Contexts::from_tree(
+            &json!({"contexts": [{"context": "active", "children": [{"context": "frame"}]}]}),
+        )
+        .unwrap();
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.request_tracking = true;
@@ -1987,9 +1988,10 @@ mod tests {
     async fn log_entries_exclude_background_tabs() {
         let (mut ff, _, _) =
             crate::native::bidi::session::tests::fake_session_with(|_| json!({})).await;
-        ff.top_context = "active".into();
-        ff.context = "active".into();
-        ff.context_parents.insert("frame".into(), "active".into());
+        ff.contexts = crate::native::bidi::contexts::Contexts::from_tree(
+            &json!({"contexts": [{"context": "active", "children": [{"context": "frame"}]}]}),
+        )
+        .unwrap();
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
 
