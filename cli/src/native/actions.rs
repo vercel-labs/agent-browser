@@ -1938,7 +1938,19 @@ impl DaemonState {
                                     || self.iframe_sessions.values().any(|known| known == sid)))
                     });
 
-                    if !session_matches && !iframe_network_event && !webmcp_event {
+                    // Dialog open/close is daemon-global state, not
+                    // page-session state: the fail-fast gate does its own
+                    // active-tab scoping from the tracked session id, and
+                    // `dialog status` must see a dialog on any tab. Let
+                    // dialog events through even with no browser attached
+                    // (unit tests) or when the dialog is on a background
+                    // tab, or the drain would silently discard them.
+                    let dialog_event = matches!(
+                        event.method.as_str(),
+                        "Page.javascriptDialogOpening" | "Page.javascriptDialogClosed"
+                    );
+
+                    if !session_matches && !iframe_network_event && !webmcp_event && !dialog_event {
                         continue;
                     }
 
@@ -2280,7 +2292,21 @@ impl DaemonState {
                             }
                         }
                         "Page.javascriptDialogClosed" => {
-                            self.pending_dialog = None;
+                            // Only clear the dialog this event closed: a
+                            // close on another tab must not hide a
+                            // still-open dialog on the tracked tab. A
+                            // missing session id means a top-level page
+                            // dialog.
+                            let closed_session = event.session_id.as_deref();
+                            let same_dialog = match (&self.pending_dialog, closed_session) {
+                                (Some(tracked), Some(closed)) => {
+                                    tracked.session_id.as_deref() == Some(closed)
+                                }
+                                _ => true,
+                            };
+                            if same_dialog {
+                                self.pending_dialog = None;
+                            }
                         }
                         // Fetch.requestPaused is handled by the background
                         // fetch_handler_task — no need to collect here.
@@ -2290,6 +2316,20 @@ impl DaemonState {
                 Err(broadcast::error::TryRecvError::Empty) => break,
                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
                     eprintln!("[agent-browser] Warning: CDP event buffer overflowed, {} events dropped. Network requests may be missing from HAR output.", n);
+                    // A dropped close event would leave an auto-dismissed
+                    // dialog tracked forever: the background task saw the
+                    // same opening on its lossless tap and already
+                    // dismissed it, so the tracked entry is stale and page
+                    // commands would fail fast on a dialog that no longer
+                    // exists (#2528). Confirm/prompt dialogs are never
+                    // auto-dismissed, so their entries stay tracked.
+                    if self.auto_dialog {
+                        if let Some(dialog) = &self.pending_dialog {
+                            if matches!(dialog.dialog_type.as_str(), "beforeunload" | "alert") {
+                                self.pending_dialog = None;
+                            }
+                        }
+                    }
                     continue;
                 }
                 Err(broadcast::error::TryRecvError::Closed) => {
@@ -22109,6 +22149,69 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(
             state.pending_dialog.is_none(),
             "a closed dialog must clear tracking"
+        );
+    }
+
+    #[test]
+    fn test_lagged_broadcast_clears_auto_handled_dialog() {
+        // Broadcast lag can drop the close event of an auto-dismissed
+        // alert; the tracked entry must not block page commands forever
+        // (#2528). A confirm dialog is never auto-dismissed, so lag must
+        // not clear it.
+        let mut state = DaemonState::new();
+        state.auto_dialog = true;
+        let (events, receiver) = broadcast::channel(16);
+        state.event_rx = Some(receiver);
+
+        // Flood the channel past its capacity so the next drain reports lag.
+        let flood = |events: &broadcast::Sender<CdpEvent>| {
+            for _ in 0..20 {
+                events
+                    .send(CdpEvent {
+                        method: "Page.frameNavigated".to_string(),
+                        params: json!({}),
+                        session_id: None,
+                    })
+                    .unwrap();
+            }
+        };
+
+        events
+            .send(CdpEvent {
+                method: "Page.javascriptDialogOpening".to_string(),
+                params: json!({"type": "alert", "message": "hi", "url": "https://example.com/"}),
+                session_id: None,
+            })
+            .unwrap();
+        let _ = state.drain_cdp_events();
+        assert!(
+            state.pending_dialog.is_some(),
+            "an alert must be tracked before the lag"
+        );
+        flood(&events);
+        let _ = state.drain_cdp_events();
+        assert!(
+            state.pending_dialog.is_none(),
+            "lag must clear an auto-dismissed alert whose close event was dropped"
+        );
+
+        events
+            .send(CdpEvent {
+                method: "Page.javascriptDialogOpening".to_string(),
+                params: json!({"type": "confirm", "message": "sure?", "url": "https://example.com/"}),
+                session_id: None,
+            })
+            .unwrap();
+        let _ = state.drain_cdp_events();
+        assert!(
+            state.pending_dialog.is_some(),
+            "a confirm must be tracked before the lag"
+        );
+        flood(&events);
+        let _ = state.drain_cdp_events();
+        assert!(
+            state.pending_dialog.is_some(),
+            "lag must not clear a confirm dialog: only the agent resolves it"
         );
     }
 
