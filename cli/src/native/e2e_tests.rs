@@ -15606,6 +15606,7 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
     )
     .await;
     assert_success(&resp);
+    firefox_eval(&mut state, "localStorage.setItem('jar', 'default')").await;
 
     let resp = firefox_command(&mut state, json!({ "id": "w1", "action": "window_new" })).await;
     assert_success(&resp);
@@ -15634,6 +15635,26 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
             .contains("isolated_window=2"),
         "a cookie set in the new window must stay in its own jar"
     );
+
+    firefox_eval(&mut state, "localStorage.setItem('jar', 'window')").await;
+    firefox_open(&mut state, &format!("{}/two", fixture.other)).await;
+    let state_path = tmp.path().join("window-state.json");
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "sv", "action": "state_save", "path": state_path.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&resp);
+    let saved: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    let origin = fixture.url.trim_end_matches('/');
+    assert!(
+        saved["origins"].as_array().unwrap().iter().any(|entry| {
+            entry["origin"] == origin
+                && entry["localStorage"] == json!([{ "name": "jar", "value": "window" }])
+        }),
+        "state save from an isolated window must read that window's storage: {saved}"
+    );
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
 
     firefox_eval(&mut state, "window.open(location.href); 'opened'").await;
     let tabs = firefox_command(&mut state, json!({ "id": "p1", "action": "tab_list" })).await;
