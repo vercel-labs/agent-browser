@@ -913,18 +913,15 @@ mod tests {
     /// counts, so it must stay structured rather than preformatted text.
     #[test]
     fn test_state_show_reports_summary_as_counts() {
-        let dir = std::env::temp_dir().join(format!(
-            "agent-browser-state-summary-{}.json",
-            std::process::id()
-        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("summary.json");
         std::fs::write(
-            &dir,
+            &path,
             r#"{"cookies":[{"name":"a","value":"1","domain":".example.com","path":"/","expires":0,"size":1,"httpOnly":false,"secure":false,"sameSite":"Lax"}],"origins":[]}"#,
         )
         .unwrap();
 
-        let result = state_show(dir.to_str().unwrap()).unwrap();
-        let _ = std::fs::remove_file(&dir);
+        let result = state_show(path.to_str().unwrap()).unwrap();
 
         assert_eq!(result["summary"]["cookies"], 1);
         assert_eq!(result["summary"]["origins"], 0);
