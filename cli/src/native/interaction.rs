@@ -421,19 +421,67 @@ pub async fn press_key_with_modifiers(
 /// so a failed settle probe must not fail the command. The fallback timer
 /// bounds the wait at 5s for pages whose frames never fire (e.g. a hidden
 /// tab).
+///
+/// A JavaScript dialog opened by the key handler ends the settle at once.
+/// `confirm`/`prompt` dialogs pause the page's timers, so neither the frame
+/// callback nor the fallback timer can fire while one is open, and the
+/// evaluation would hang until the 30s CDP timeout. The dialog stays open
+/// for the agent to handle with the `dialog` command; there is nothing to
+/// wait for while the page is blocked. A dialog that is already open when
+/// the settle starts fires no event, so the whole probe is also capped just
+/// above the 5s in-page fallback.
 pub async fn wait_for_settle(client: &CdpClient, session_id: &str) {
-    let _ = client
-        .send_command_typed::<_, EvaluateResult>(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: "new Promise((resolve) => { setTimeout(() => resolve(false), 5000); requestAnimationFrame(() => setTimeout(() => resolve(true), 0)); })"
-                    .to_string(),
-                return_by_value: Some(true),
-                await_promise: Some(true),
-            },
-            Some(session_id),
-        )
-        .await;
+    use tokio::sync::broadcast::error::RecvError;
+
+    // Subscribe before evaluating so a dialog that opens mid-settle cannot
+    // slip past us, the same race `dispatch_mouse_or_dialog` uses.
+    let mut events = client.subscribe();
+    // The params must outlive the future: `send_command_typed` borrows them,
+    // and the future is polled across awaits below.
+    let params = EvaluateParams {
+        expression: "new Promise((resolve) => { setTimeout(() => resolve(false), 5000); requestAnimationFrame(() => setTimeout(() => resolve(true), 0)); })"
+            .to_string(),
+        return_by_value: Some(true),
+        await_promise: Some(true),
+    };
+    let settle = client.send_command_typed::<_, EvaluateResult>(
+        "Runtime.evaluate",
+        &params,
+        Some(session_id),
+    );
+    tokio::pin!(settle);
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(6));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut settle => return,
+            _ = &mut deadline => return,
+            event = events.recv() => {
+                match event {
+                    Ok(e) if e.method == "Page.javascriptDialogOpening" => {
+                        // Only a dialog on this settle's session ends it; a
+                        // background-tab dialog must not. A session-less
+                        // event has no flat session and is treated as the
+                        // top-level page (i.e. ours).
+                        let ours = match e.session_id.as_deref() {
+                            Some(sid) => sid == session_id,
+                            None => true,
+                        };
+                        if ours {
+                            return;
+                        }
+                        continue;
+                    }
+                    Ok(_) => continue,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => {
+                        let _ = (&mut settle).await;
+                        return;
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub async fn scroll(
