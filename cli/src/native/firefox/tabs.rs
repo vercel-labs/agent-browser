@@ -19,31 +19,15 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         validate_tab_label(session(state)?, label)?;
     }
 
-    let mut create = json!({"type": "tab"});
-    let user_context = session(state)?
-        .active_partition()
-        .and_then(|partition| partition["userContext"].as_str().map(str::to_string));
-    if let Some(user_context) = &user_context {
-        create["userContext"] = json!(user_context);
-    }
-    let created = session(state)?
-        .bidi
-        .send("browsingContext.create", create)
-        .await?;
-    let context = created["context"]
-        .as_str()
-        .ok_or("Firefox did not return a context id for the new tab")?
-        .to_string();
     let ff = session(state)?;
-    if let Some(user_context) = user_context {
-        ff.window_contexts.insert(context.clone(), user_context);
-    }
-    let tab_id = ff.tab_id(&context);
+    let user_context = ff
+        .contexts
+        .user_context(ff.contexts.active())
+        .map(str::to_string);
+    let (context, tab_id) = create_tab(ff, "tab", user_context.as_deref()).await?;
     activate(state, &context).await?;
     if let Some(label) = label {
-        session(state)?
-            .tab_labels
-            .insert(context.clone(), label.to_string());
+        session(state)?.contexts.set_label(&context, label);
     }
 
     let landing = match url {
@@ -78,6 +62,27 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     Ok(result)
 }
 
+/// Creates a tab or window in `user_context` and records it, returning its context and tab id.
+async fn create_tab(
+    ff: &mut FirefoxSession,
+    kind: &str,
+    user_context: Option<&str>,
+) -> Result<(String, u32), String> {
+    let mut info = json!({"type": kind});
+    if let Some(user_context) = user_context {
+        info["userContext"] = json!(user_context);
+    }
+    let created = ff.bidi.send("browsingContext.create", info.clone()).await?;
+    info["context"] = created["context"].clone();
+    ff.contexts.record(&info);
+    let context = info["context"].as_str().unwrap_or_default();
+    let tab = ff
+        .contexts
+        .tab(context)
+        .ok_or("Firefox did not return a context id for the new tab")?;
+    Ok((context.to_string(), tab.id))
+}
+
 /// Fails when `label` is malformed, uses tab-id syntax, or another tab already holds it.
 fn validate_tab_label(ff: &FirefoxSession, label: &str) -> Result<(), String> {
     if !is_valid_label(label) {
@@ -91,7 +96,11 @@ fn validate_tab_label(ff: &FirefoxSession, label: &str) -> Result<(), String> {
             "Tab label `{label}` uses syntax reserved for tab IDs"
         ));
     }
-    if ff.tab_labels.values().any(|existing| existing == label) {
+    if ff
+        .contexts
+        .tabs()
+        .any(|(_, tab)| tab.label.as_deref() == Some(label))
+    {
         return Err(format!(
             "Label `{label}` is already used by another tab; labels must be unique within a \
              session"
@@ -106,7 +115,7 @@ async fn activate(state: &mut DaemonState, context: &str) -> Result<(), String> 
     ff.bidi
         .send("browsingContext.activate", json!({"context": context}))
         .await?;
-    ff.top_context = context.to_string();
+    ff.contexts.activate(context);
     reset_page(state);
     Ok(())
 }
@@ -136,6 +145,9 @@ pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
         .send("browsingContext.getTree", json!({"maxDepth": 0}))
         .await?;
     let contexts: Vec<Value> = tree["contexts"].as_array().cloned().unwrap_or_default();
+    for info in &contexts {
+        session(state)?.contexts.record(info);
+    }
     let titles = {
         let bidi = &session(state)?.bidi;
         futures_util::future::join_all(
@@ -148,14 +160,15 @@ pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
     let mut tabs = Vec::with_capacity(contexts.len());
     for (c, title) in contexts.iter().zip(titles) {
         let context = c["context"].as_str().unwrap_or_default().to_string();
-        let tab_id = session(state)?.tab_id(&context);
         let ff = session(state)?;
-        let label = ff.tab_labels.get(&context).cloned();
-        let active = context == ff.top_context;
+        let Some(tab) = ff.contexts.tab(&context) else {
+            continue;
+        };
+        let active = context == ff.contexts.active_tab();
         tabs.push(json!({
-            "tabId": format_tab_id(tab_id),
+            "tabId": format_tab_id(tab.id),
             "targetId": context,
-            "label": label,
+            "label": tab.label,
             "title": title,
             "url": c["url"],
             "type": "page",
@@ -203,7 +216,7 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }
     let context = match requested {
         Some(input) => resolve_tab_ref(&list, input)?,
-        None => session(state)?.top_context.clone(),
+        None => session(state)?.contexts.active_tab().to_string(),
     };
     let index = list
         .iter()
@@ -218,23 +231,8 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .bidi
         .send("browsingContext.close", json!({"context": context}))
         .await?;
-    let user_context = session(state)?.window_contexts.remove(&context);
     let was_active = super::daemon::forget_context(state, &context)?;
-    if let Some(user_context) = user_context {
-        let still_open = session(state)?
-            .window_contexts
-            .values()
-            .any(|other| *other == user_context);
-        if !still_open {
-            let _ = session(state)?
-                .bidi
-                .send(
-                    "browser.removeUserContext",
-                    json!({"userContext": user_context}),
-                )
-                .await;
-        }
-    }
+    session(state)?.release_unused_user_contexts().await;
     if was_active {
         match successor {
             Some(successor) => {
@@ -253,7 +251,7 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 }
 
 /// Opens a new window. Must return what Chrome's `handle_window_new` returns.
-pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub async fn window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let user_context = session(state)?
         .bidi
         .send("browser.createUserContext", json!({}))
@@ -262,34 +260,22 @@ pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(Value::as_str)
         .ok_or("Firefox did not return a user context for the new window")?
         .to_string();
-    let created = session(state)?
-        .bidi
-        .send(
-            "browsingContext.create",
-            json!({"type": "window", "userContext": user_context}),
-        )
-        .await;
-    let created = match created {
-        Ok(created) => created,
-        Err(error) => {
-            let _ = session(state)?
-                .bidi
-                .send(
-                    "browser.removeUserContext",
-                    json!({"userContext": user_context}),
-                )
-                .await;
-            return Err(error);
-        }
-    };
-    let context = created["context"]
-        .as_str()
-        .ok_or("Firefox did not return a context id for the new window")?
-        .to_string();
     let ff = session(state)?;
-    ff.window_contexts.insert(context.clone(), user_context);
-    let tab_id = ff.tab_id(&context);
+    ff.contexts.own_user_context(&user_context);
+    let created = create_tab(ff, "window", Some(&user_context)).await;
+    if created.is_err() {
+        ff.release_unused_user_contexts().await;
+    }
+    let (context, tab_id) = created?;
     activate(state, &context).await?;
+    if let Some(viewport) = cmd.get("viewport") {
+        let side = |key: &str, default: u64| {
+            viewport.get(key).and_then(Value::as_u64).unwrap_or(default) as u32
+        };
+        session(state)?
+            .set_viewport((side("width", 1280), side("height", 720)))
+            .await?;
+    }
     let total = tab_count(session(state)?).await?;
 
     Ok(json!({
@@ -429,8 +415,12 @@ mod tests {
         assert_eq!(result["targetId"], "ctx-new");
         assert_eq!(result["dialogOpened"], true);
         assert_eq!(result["total"], 2);
-        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-new");
-        assert_eq!(state.firefox.as_ref().unwrap().tab_labels["ctx-new"], "new");
+        let contexts = &state.firefox.as_ref().unwrap().contexts;
+        assert_eq!(contexts.active(), "ctx-new");
+        assert_eq!(
+            contexts.tab("ctx-new").unwrap().label.as_deref(),
+            Some("new")
+        );
         assert!(state.active_frame_id.is_none());
     }
 
@@ -473,7 +463,7 @@ mod tests {
             );
         }
         let mut ff = ff;
-        ff.tab_labels.insert("ctx-a".into(), "docs".into());
+        ff.contexts.set_label("ctx-active", "docs");
         assert!(validate_tab_label(&ff, "docs")
             .unwrap_err()
             .contains("already used by another tab"));

@@ -319,7 +319,9 @@ mod tests {
             json!({"type": "success", "result": {"type": "string", "value": "Page title"}})
         })
         .await;
-        ff.context = "ctx-frame".into();
+        ff.contexts
+            .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
+        ff.contexts.activate("ctx-frame");
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
 

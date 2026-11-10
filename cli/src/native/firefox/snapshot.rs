@@ -398,7 +398,7 @@ async fn active_tab_target(
 
 pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Result<Value, String> {
     let deadline = tokio::time::Instant::now() + SNAPSHOT_DEADLINE;
-    let top = ff.top_context.clone();
+    let top = ff.contexts.active_tab().to_string();
     ff.bidi
         .send("browsingContext.activate", json!({"context": top}))
         .await?;
@@ -428,7 +428,7 @@ pub async fn take_snapshot(
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
 ) -> Result<String, String> {
-    let context = ff.context.clone();
+    let context = ff.contexts.active().to_string();
     let frame_root = capture_tree(ff, &context).await?;
     let root = match &options.selector {
         None => &frame_root,
@@ -494,7 +494,7 @@ pub async fn snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     state.ref_map.begin_snapshot();
     let tree = Box::pin(take_snapshot(ff, &options, &mut state.ref_map)).await?;
     let url = ff.url().await.unwrap_or_default();
-    let session_id = ff.top_context.clone();
+    let session_id = ff.contexts.active_tab().to_string();
     chrome::snapshot_response(cmd, state, session_id, &options, previous_refs, tree, url)
 }
 

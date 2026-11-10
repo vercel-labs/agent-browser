@@ -16200,7 +16200,7 @@ async fn e2e_firefox_iframe_and_shadow_root_refs() {
     assert_success(&navigated);
     assert_eq!(get_data(&navigated)["url"], target_url);
     let session = state.firefox.as_ref().unwrap();
-    assert_eq!(session.context, session.top_context);
+    assert_eq!(session.contexts.active(), session.contexts.active_tab());
     assert_eq!(firefox_title(&mut state).await, "Frame");
     firefox_close(&mut state).await;
 }
@@ -16264,7 +16264,13 @@ async fn e2e_firefox_frame_dialog_does_not_block_new_tab() {
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
     firefox_open(&mut state, &fixture.url).await;
-    let owner_context = state.firefox.as_ref().unwrap().top_context.clone();
+    let owner_context = state
+        .firefox
+        .as_ref()
+        .unwrap()
+        .contexts
+        .active_tab()
+        .to_string();
 
     let ask = firefox_ref(&mut state, "Frame ask").await;
     let resp = firefox_act(&mut state, "click", &ask, json!({})).await;
@@ -16290,7 +16296,10 @@ async fn e2e_firefox_frame_dialog_does_not_block_new_tab() {
     assert_eq!(get_data(&resp)["accepted"], false, "{resp}");
     assert_eq!(firefox_eval(&mut state, "window.close(); 1").await, 1);
     assert_eq!(firefox_eval(&mut state, "1 + 1").await, 2);
-    assert_eq!(state.firefox.as_ref().unwrap().top_context, owner_context);
+    assert_eq!(
+        state.firefox.as_ref().unwrap().contexts.active_tab(),
+        owner_context
+    );
     firefox_close(&mut state).await;
 }
 
@@ -16429,7 +16438,7 @@ async fn e2e_firefox_screenshot_annotate_excludes_iframe_overlays() {
             .and_then(|ref_id| state.ref_map.get(ref_id))
             .and_then(|entry| entry.backend_node_id)
             .and_then(|id| ff.refs.iter().find(|(_, value)| **value == id))
-            .is_some_and(|((context, _), _)| *context != ff.context)
+            .is_some_and(|((context, _), _)| *context != ff.contexts.active())
     };
     let top_document_numbers = annotations
         .iter()
@@ -16480,7 +16489,13 @@ async fn e2e_firefox_resolve_target() {
     let go = firefox_ref(&mut state, "Go").await;
     let shadow = firefox_ref(&mut state, "Shadow button").await;
     let frame = firefox_ref(&mut state, "Frame button").await;
-    let top = state.firefox.as_ref().unwrap().context.clone();
+    let top = state
+        .firefox
+        .as_ref()
+        .unwrap()
+        .contexts
+        .active()
+        .to_string();
 
     for (selector, text) in [(&first, "First"), (&shadow, "Shadow button")] {
         let target = resolve_target(&mut state, selector).await.unwrap();
@@ -16633,7 +16648,13 @@ async fn e2e_firefox_review_live_dialog_setting() {
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
     firefox_open(&mut state, &fixture.url).await;
-    let context = state.firefox.as_ref().unwrap().context.clone();
+    let context = state
+        .firefox
+        .as_ref()
+        .unwrap()
+        .contexts
+        .active()
+        .to_string();
     let before = firefox_command(&mut state, json!({"id":"before", "action":"session_info"})).await;
     assert_success(&before);
     for disabled in [true, false] {
@@ -16689,7 +16710,7 @@ async fn e2e_firefox_review_live_dialog_setting() {
             get_data(&before)["launchHash"],
             get_data(&after)["launchHash"]
         );
-        assert_eq!(state.firefox.as_ref().unwrap().context, context);
+        assert_eq!(state.firefox.as_ref().unwrap().contexts.active(), context);
     }
     firefox_eval(
         &mut state,
@@ -16779,6 +16800,39 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
             .contains("isolated_window=2"),
         "a cookie set in the new window must stay in its own jar"
     );
+
+    firefox_eval(&mut state, "window.open(location.href); 'opened'").await;
+    let tabs = firefox_command(&mut state, json!({ "id": "p1", "action": "tab_list" })).await;
+    let popup = get_data(&tabs)["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tab| tab["tabId"].clone())
+        .find(|tab| *tab != "t1" && *tab != window_tab)
+        .expect("the popup must be listed as a tab");
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "p2", "action": "tab_switch", "tabId": popup }),
+    )
+    .await;
+    assert_success(&resp);
+    let cookies = firefox_cookies_get(&mut state, None).await;
+    assert!(
+        has_cookie(&cookies, "isolated_window") && !has_cookie(&cookies, "main_window"),
+        "a popup must read the jar of the window that opened it: {cookies}"
+    );
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "p3", "action": "tab_close", "tabId": popup }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "p4", "action": "tab_switch", "tabId": window_tab }),
+    )
+    .await;
+    assert_success(&resp);
 
     let resp = firefox_command(&mut state, json!({ "id": "t1", "action": "tab_new" })).await;
     assert_success(&resp);

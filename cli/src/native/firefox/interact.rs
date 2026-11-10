@@ -204,7 +204,7 @@ async fn map_mouse_position(
     position: (f64, f64),
     direction: i32,
 ) -> Result<(f64, f64), String> {
-    if context == ff.top_context {
+    if context == ff.contexts.active_tab() {
         return Ok(position);
     }
     let point = ff
@@ -219,7 +219,10 @@ async fn map_mouse_position(
     if point[2] == false {
         let tree = ff
             .bidi
-            .send("browsingContext.getTree", json!({"root": ff.top_context}))
+            .send(
+                "browsingContext.getTree",
+                json!({"root": ff.contexts.active_tab()}),
+            )
             .await?;
         let mut path = Vec::new();
         if !tree["contexts"].as_array().is_some_and(|roots| {
@@ -268,7 +271,7 @@ async fn local_mouse_position(state: &DaemonState) -> Result<(f64, f64), String>
     let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
     map_mouse_position(
         ff,
-        &ff.context,
+        ff.contexts.active(),
         (state.mouse_state.x, state.mouse_state.y),
         -1,
     )
@@ -441,7 +444,7 @@ async fn act_raw(
         &mut state.pending_pointer_release,
     );
     let ff = ff.as_ref().ok_or("Browser not launched")?;
-    let context = ff.context.clone();
+    let context = ff.contexts.active().to_string();
     perform_pointer(
         ff,
         PointerState {
@@ -626,7 +629,7 @@ pub async fn swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         10,
     );
     let ff = session(state)?;
-    perform_actions(ff, &ff.context.clone(), actions).await?;
+    perform_actions(ff, &ff.contexts.active().to_string(), actions).await?;
     ff.touches.clear();
 
     Ok(match direction {
@@ -661,7 +664,7 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
         &mut state.pending_pointer_release,
     );
     let ff = firefox.as_ref().ok_or("Browser not launched")?;
-    let top_level = source_target.context == ff.top_context;
+    let top_level = source_target.context == ff.contexts.active_tab();
     let (sx, sy) = prepare(ff, &source_target, source, PointerAction::Drag).await?;
     let html5 = ff
         .bidi
@@ -1105,7 +1108,7 @@ pub async fn input_touch(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .as_array()
         .is_some_and(|sources| !sources.is_empty())
     {
-        perform_actions(ff, &ff.context.clone(), actions).await?;
+        perform_actions(ff, &ff.contexts.active().to_string(), actions).await?;
     }
     if matches!(event_type, "touchEnd" | "touchCancel") {
         ff.touches.clear();
@@ -1132,7 +1135,12 @@ pub async fn dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
         .pending_dialog
         .as_ref()
         .and_then(|d| d.session_id.clone())
-        .or_else(|| state.firefox.as_ref().map(|ff| ff.context.clone()))
+        .or_else(|| {
+            state
+                .firefox
+                .as_ref()
+                .map(|ff| ff.contexts.active().to_string())
+        })
         .ok_or("Browser not launched")?;
 
     let mut params = json!({ "context": context, "accept": accept });
@@ -1388,7 +1396,7 @@ mod tests {
             ] {
                 let (mut state, _) = state_with_refs(connected).await;
                 let ff = state.firefox.as_mut().unwrap();
-                ff.context = selected_context.into();
+                ff.contexts.activate(&selected_context);
                 ff.refs.retain(|(_, shared_id), _| shared_id != "sid-1");
                 ff.refs.insert((target_context.into(), "sid-1".into()), 7);
                 state.mouse_state.x = 17.0;

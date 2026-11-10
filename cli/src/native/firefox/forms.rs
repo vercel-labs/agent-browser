@@ -100,7 +100,7 @@ pub(super) async fn run(
 }
 
 async fn focused_context(ff: &FirefoxSession, context: &str) -> Result<String, String> {
-    let mut focused = ff.top_context.clone();
+    let mut focused = ff.contexts.active_tab().to_string();
     let mut visited = HashSet::new();
     while visited.insert(focused.clone()) {
         let child = ff
@@ -112,7 +112,7 @@ async fn focused_context(ff: &FirefoxSession, context: &str) -> Result<String, S
         };
         focused = child.to_string();
     }
-    Ok(if focused == ff.top_context {
+    Ok(if focused == ff.contexts.active_tab() {
         context.to_string()
     } else {
         focused
@@ -280,7 +280,7 @@ pub async fn type_text(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 pub async fn press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let key = require(cmd, "key")?;
     let ff = session(state)?;
-    perform_actions(ff, &ff.context, key_chord_actions(key)).await?;
+    perform_actions(ff, ff.contexts.active(), key_chord_actions(key)).await?;
     Ok(json!({ "pressed": key }))
 }
 
@@ -288,7 +288,7 @@ pub async fn press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 pub async fn keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let key = require(cmd, "key")?;
     let ff = session(state)?;
-    perform_actions(ff, &ff.context, key_event_actions("keyDown", key)).await?;
+    perform_actions(ff, ff.contexts.active(), key_event_actions("keyDown", key)).await?;
     Ok(json!({ "keydown": key }))
 }
 
@@ -296,7 +296,7 @@ pub async fn keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 pub async fn keyup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let key = require(cmd, "key")?;
     let ff = session(state)?;
-    perform_actions(ff, &ff.context, key_event_actions("keyUp", key)).await?;
+    perform_actions(ff, ff.contexts.active(), key_event_actions("keyUp", key)).await?;
     Ok(json!({ "keyup": key }))
 }
 
@@ -306,7 +306,7 @@ pub async fn keyboard(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         Some("type") => {
             let text = require(cmd, "text")?;
             let ff = session(state)?;
-            send_text(ff, &ff.context, text, None).await?;
+            send_text(ff, ff.contexts.active(), text, None).await?;
             Ok(json!({ "typed": text }))
         }
         Some("insertText") => inserttext(cmd, state).await,
@@ -324,7 +324,7 @@ pub async fn input_keyboard(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     if event_type == "char" {
         let text = require(cmd, "text")?;
         let ff = session(state)?;
-        literal_edit(ff, &ff.context, None, text, false).await?;
+        literal_edit(ff, ff.contexts.active(), None, text, false).await?;
         return Ok(json!({ "dispatched": event_type }));
     }
     let key = cmd
@@ -333,7 +333,7 @@ pub async fn input_keyboard(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         .or_else(|| cmd.get("text").and_then(Value::as_str))
         .unwrap_or("");
     let ff = session(state)?;
-    perform_actions(ff, &ff.context, key_event_actions(event_type, key)).await?;
+    perform_actions(ff, ff.contexts.active(), key_event_actions(event_type, key)).await?;
     Ok(json!({ "dispatched": event_type }))
 }
 
@@ -342,7 +342,7 @@ pub async fn inserttext(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let text = require(cmd, "text")?;
     let ff = session(state)?;
     if !text.is_empty() {
-        literal_edit(ff, &ff.context, None, text, false).await?;
+        literal_edit(ff, ff.contexts.active(), None, text, false).await?;
     }
     Ok(json!({ "inserted": true }))
 }

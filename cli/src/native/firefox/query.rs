@@ -311,7 +311,7 @@ async fn semantic_target(
         .ok_or_else(|| format!("Missing '{param}' parameter"))?;
     let exact = cmd.get("exact").and_then(Value::as_bool).unwrap_or(false);
     let ff = session(state)?;
-    let context = ff.context.clone();
+    let context = ff.contexts.active().to_string();
     let node = if matches!(strategy, "text" | "label") {
         let js = if strategy == "text" {
             FIND_TEXT_JS
@@ -389,7 +389,7 @@ pub async fn getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     let name = cmd.get("name").and_then(Value::as_str);
     let exact = cmd.get("exact").and_then(Value::as_bool).unwrap_or(false);
     let ff = session(state)?;
-    let context = ff.context.clone();
+    let context = ff.contexts.active().to_string();
     let target = if chrome::is_presentational_role(role) || role.eq_ignore_ascii_case("directory") {
         let locator = chrome::build_presentational_role_locator_js(role, name, exact);
         let js = format!("function() {{ return ({locator})(document); }}");
@@ -490,7 +490,7 @@ pub async fn nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> 
             "script.evaluate",
             json!({
                 "expression": nth_js(sel, index),
-                "target": {"context": ff.context},
+                "target": {"context": ff.contexts.active()},
                 "awaitPromise": true,
                 "resultOwnership": "none",
             }),
@@ -510,7 +510,7 @@ pub async fn nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> 
             index, sel
         ));
     }
-    let target = target_from_node(&ff.context, &value["result"])?;
+    let target = target_from_node(ff.contexts.active(), &value["result"])?;
     run_subaction(cmd, state, &target).await
 }
 
@@ -541,7 +541,7 @@ pub async fn frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         .filter(|label| !label.is_empty())
         .unwrap_or(sel)
         .to_string();
-    ff.context = window.to_string();
+    ff.contexts.activate(&window);
     state.active_frame_id = Some(window.to_string());
     Ok(json!({ "frame": label }))
 }
@@ -549,7 +549,7 @@ pub async fn frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 /// `frame main`: return to the active top-level tab.
 pub async fn mainframe(state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    ff.context = ff.top_context.clone();
+    ff.contexts.leave_frame();
     state.active_frame_id = None;
     Ok(json!({ "frame": "main" }))
 }
@@ -567,7 +567,7 @@ pub async fn evalhandle(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             "script.evaluate",
             json!({
                 "expression": script,
-                "target": {"context": ff.context},
+                "target": {"context": ff.contexts.active()},
                 "awaitPromise": true,
                 "resultOwnership": "root",
             }),
@@ -706,7 +706,9 @@ mod tests {
     async fn mainframe_returns_to_the_active_tab() {
         let mut state = DaemonState::new();
         let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
-        ff.context = "ctx-frame".into();
+        ff.contexts
+            .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
+        ff.contexts.activate("ctx-frame");
         state.firefox = Some(ff);
         state.active_frame_id = Some("ctx-frame".into());
 
@@ -714,7 +716,10 @@ mod tests {
             mainframe(&mut state).await.unwrap(),
             json!({"frame": "main"})
         );
-        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-active");
+        assert_eq!(
+            state.firefox.as_ref().unwrap().contexts.active(),
+            "ctx-active"
+        );
         assert!(state.active_frame_id.is_none());
     }
 

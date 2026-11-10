@@ -27,6 +27,7 @@ const FIXED_PATHS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq)]
 pub enum DevtoolsEndpoint {
     Unix(PathBuf),
+    #[cfg_attr(not(windows), allow(dead_code))]
     Port(u16),
 }
 

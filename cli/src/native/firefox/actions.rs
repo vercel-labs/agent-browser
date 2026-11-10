@@ -403,7 +403,7 @@ mod tests {
             json!({})
         })
         .await;
-        ff.context = "ctx-active".into();
+        ff.contexts.activate("ctx-active");
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.pending_dialog = Some(dialog("ctx-other", Some("ctx-other")));

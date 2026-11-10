@@ -1344,18 +1344,7 @@ impl DaemonState {
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
         self.drain_firefox_events();
         if let Some(ff) = self.firefox.as_mut() {
-            if ff.top_context.is_empty() {
-                let tree = ff
-                    .bidi
-                    .send("browsingContext.getTree", json!({"maxDepth": 0}))
-                    .await?;
-                ff.top_context = tree["contexts"][0]["context"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                ff.context = ff.top_context.clone();
-                firefox::daemon::reset_page(self);
-            }
+            ff.release_unused_user_contexts().await;
         }
         let drained = self.drain_cdp_events();
         self.apply_drained_events(drained).await
@@ -3045,7 +3034,7 @@ pub(crate) fn dialog_block_error(action: &str, cmd: &Value, state: &DaemonState)
     let active = state
         .firefox
         .as_ref()
-        .map(|ff| ff.top_context.as_str())
+        .map(|ff| ff.contexts.active_tab())
         .or_else(|| {
             state
                 .browser
@@ -24262,7 +24251,7 @@ mod firefox_routing_tests {
         let _guard = clean_env();
         let (mut state, calls) = firefox_state().await;
         let ff = state.firefox.as_mut().unwrap();
-        ff.tab_ids.insert("ctx-background".into(), 2);
+        ff.contexts.record(&json!({"context": "ctx-background"}));
         state.pending_dialog = Some(PendingDialog {
             dialog_type: "confirm".into(),
             message: "sure?".into(),
