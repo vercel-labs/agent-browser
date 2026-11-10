@@ -103,13 +103,16 @@ Flags, environment variables, and `agent-browser.json` are documented in [Config
 
 Native binaries ship for macOS (ARM64, x64), Linux (ARM64, x64, glibc and musl), and Windows (x64). The npm package picks the right binary for the host.
 
+The npm installer verifies the binary before reporting success. A failed or interrupted download exits with an error and can be retried by rerunning the installation. Empty or unusable cached binaries are downloaded again.
+
 ## Development
 
 Building from source requires Node.js 24 or later, pnpm 11 or later, and Rust:
 
 ```bash
-pnpm install
-pnpm build:source               # builds the dashboard and the native CLI
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm build:dashboard
+pnpm build:native
 pnpm link --global
 agent-browser install
 ```

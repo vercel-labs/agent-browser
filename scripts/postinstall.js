@@ -9,12 +9,12 @@
  * - Mac/Linux: Replaces symlink to point to native binary
  */
 
-import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync } from 'fs';
+import { existsSync, mkdirSync, chmodSync, unlinkSync, writeFileSync, symlinkSync, lstatSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
-import { get } from 'https';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
+import { downloadFile } from './download.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
@@ -51,36 +51,14 @@ const version = packageJson.version;
 const GITHUB_REPO = 'vercel-labs/agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
-async function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    const file = createWriteStream(dest);
-    
-    const request = (url) => {
-      get(url, (response) => {
-        // Handle redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          request(response.headers.location);
-          return;
-        }
-        
-        if (response.statusCode !== 200) {
-          reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
-          return;
-        }
-        
-        response.pipe(file);
-        file.on('finish', () => {
-          file.close();
-          resolve();
-        });
-      }).on('error', (err) => {
-        unlinkSync(dest);
-        reject(err);
-      });
-    };
-    
-    request(url);
+function isUsableBinary(path) {
+  const result = spawnSync(path, ['--version'], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    killSignal: 'SIGKILL',
   });
+  return !result.error && result.status === 0 &&
+    result.stdout.trim() === `agent-browser ${version}`;
 }
 
 /**
@@ -110,11 +88,11 @@ function writeInstallMethod() {
 
 async function main() {
   // Check if binary already exists
-  if (existsSync(binaryPath)) {
+  if (existsSync(binaryPath) && platform() !== 'win32') {
     // Ensure binary is executable (npm doesn't preserve execute bit)
-    if (platform() !== 'win32') {
-      chmodSync(binaryPath, 0o755);
-    }
+    chmodSync(binaryPath, 0o755);
+  }
+  if (existsSync(binaryPath) && isUsableBinary(binaryPath)) {
     console.log(`✓ Native binary ready: ${binaryName}`);
 
     writeInstallMethod();
@@ -138,20 +116,20 @@ async function main() {
   console.log(`URL: ${DOWNLOAD_URL}`);
 
   try {
-    await downloadFile(DOWNLOAD_URL, binaryPath);
-
-    // Make executable on Unix
-    if (platform() !== 'win32') {
-      chmodSync(binaryPath, 0o755);
-    }
-
-    console.log(`✓ Downloaded native binary: ${binaryName}`);
+    await downloadFile(DOWNLOAD_URL, binaryPath, {
+      validate(path) {
+        if (!isUsableBinary(path)) {
+          throw new Error('Downloaded binary could not run or reported an unexpected version');
+        }
+      },
+    });
+    console.log(`Downloaded native binary: ${binaryName}`);
   } catch (err) {
-    console.log(`Could not download native binary: ${err.message}`);
-    console.log('');
-    console.log('To build the native binary locally:');
-    console.log('  1. Install Rust: https://rustup.rs');
-    console.log('  2. Run: npm run build:native');
+    console.error(`Could not install native binary: ${err.message}`);
+    console.error('Retry the package installation. In a source checkout, install dependencies');
+    console.error('with --ignore-scripts, then build the dashboard and native binary.');
+    process.exitCode = 1;
+    return;
   }
 
   writeInstallMethod();
@@ -318,4 +296,7 @@ async function fixWindowsShims() {
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(`Native binary installation failed: ${error.message}`);
+  process.exitCode = 1;
+});

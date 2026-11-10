@@ -41,6 +41,9 @@ jobs:
       - name: Run launcher tests
         run: pnpm run test:launcher
 
+      - name: Run installer recovery tests
+        run: pnpm run test:installer
+
   docs:
     name: Docs (${{ matrix.environment }})
     runs-on: ubuntu-latest
@@ -63,7 +66,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Test original documentation contract
         run: pnpm --filter docs test
@@ -123,7 +126,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Install dependencies
-        run: pnpm install --filter dashboard
+        run: pnpm install --filter dashboard --ignore-scripts
         working-directory: packages/dashboard
 
       - name: Build dashboard
@@ -147,7 +150,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Test sandbox package
         run: pnpm --filter @agent-browser/sandbox test
@@ -169,7 +172,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Typecheck Eve package
         run: pnpm --filter @agent-browser/eve typecheck

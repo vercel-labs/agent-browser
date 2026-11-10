@@ -153,7 +153,8 @@ jobs:
           cache: pnpm
 
       - name: Install npm dependencies
-        run: pnpm install --frozen-lockfile
+        # This version's release binary does not exist until these jobs build it.
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Sync version
         run: pnpm run version:sync
@@ -266,7 +267,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Sync version
         run: pnpm run version:sync
