@@ -87,7 +87,7 @@ Not every launch option applies to Firefox. These are rejected when combined wit
     <tr><th>Option</th><th>Reason</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>connect</code>, <code>--cdp</code>, <code>--auto-connect</code></td><td>Firefox is launched over WebDriver BiDi</td></tr>
+    <tr><td><code>--cdp</code>, <code>--auto-connect</code></td><td>Firefox is launched over WebDriver BiDi</td></tr>
     <tr><td><code>--provider</code></td><td>Cloud and direct-page providers are not supported</td></tr>
     <tr><td><code>--extension</code>, <code>--args</code></td><td>Chrome extension and startup argument handling is not supported</td></tr>
     <tr><td><code>--enable</code>, <code>--init-script</code>, launch-mutator plugins</td><td>Launch-time scripts and feature toggles are not supported</td></tr>
@@ -96,6 +96,8 @@ Not every launch option applies to Firefox. These are rejected when combined wit
     <tr><td><code>--state</code> or <code>--restore</code> with <code>--allowed-domains</code></td><td>Not supported in combination</td></tr>
   </tbody>
 </table>
+
+`connect` always attaches over CDP. With `--engine firefox` it still connects to the Chrome DevTools endpoint you name, and the session then drives that Chrome.
 
 ## Security
 

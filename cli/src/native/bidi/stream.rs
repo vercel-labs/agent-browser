@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +8,6 @@ use tokio::sync::{watch, Mutex};
 use super::client::BidiClient;
 use super::contexts::Contexts;
 use super::input::{self, Origin};
-use super::session::dialog_blocks_tab;
 use super::tabs;
 use crate::native::stream::{FrameMetadata, StreamServer};
 
@@ -67,7 +66,7 @@ async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<Fire
         return;
     };
     let mut events = live.bidi.subscribe_buffered();
-    let mut paused = false;
+    let mut prompts = HashSet::<String>::new();
     let mut frame: Option<tokio::task::JoinHandle<Option<Shot>>> = None;
     let mut listing: Option<tokio::task::JoinHandle<Option<Vec<Value>>>> = None;
     let mut frame_tick = tokio::time::interval(POLL_INTERVAL);
@@ -77,17 +76,23 @@ async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<Fire
     loop {
         tokio::select! {
             Some(e) = events.recv() => {
-                live.contexts.apply(&e);
                 let context = e["params"]["context"].as_str().unwrap_or_default();
-                let blocks = dialog_blocks_tab(live.contexts.tab_of(context).or(Some(context)), &live.context);
-                match (e["method"].as_str(), blocks) {
-                    (Some("browsingContext.userPromptOpened"), true) => {
-                        paused = true;
-                        if let Some(task) = frame.take() {
-                            task.abort();
+                let tab = live.contexts.tab_of(context).unwrap_or(context).to_string();
+                for gone in live.contexts.apply(&e).contexts {
+                    prompts.remove(&gone);
+                }
+                match e["method"].as_str() {
+                    Some("browsingContext.userPromptOpened") => {
+                        if tab == live.context {
+                            if let Some(task) = frame.take() {
+                                task.abort();
+                            }
                         }
+                        prompts.insert(tab);
                     }
-                    (Some("browsingContext.userPromptClosed"), true) => paused = false,
+                    Some("browsingContext.userPromptClosed") => {
+                        prompts.remove(&tab);
+                    }
                     _ => {}
                 }
             }
@@ -112,7 +117,7 @@ async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<Fire
                 frame = None;
                 if let Ok(Some(shot)) = result {
                     let shown = server.firefox_live_context().await;
-                    if !paused && shown.as_deref() == Some(shot.context.as_str()) {
+                    if !prompts.contains(&live.context) && shown.as_deref() == Some(shot.context.as_str()) {
                         publish_frame(&shot, &server).await;
                     }
                 }
@@ -129,7 +134,7 @@ async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<Fire
                     server.broadcast_status(false, false, width, height, "firefox").await;
                     break;
                 }
-                if frame.is_none() && !paused && server.has_clients().await {
+                if frame.is_none() && !prompts.contains(&live.context) && server.has_clients().await {
                     frame = Some(capture_frame(&live, server.screencast_quality()));
                 }
             }
@@ -387,7 +392,7 @@ mod tests {
             contexts: ff.contexts.clone(),
             modifiers: Default::default(),
         };
-        let _poller = spawn_poller(live, Arc::clone(&server));
+        let poller = spawn_poller(live.clone(), Arc::clone(&server));
         let _ws = dashboard(&server).await;
 
         assert_eq!(
@@ -425,6 +430,29 @@ mod tests {
             .await,
             2,
             "the prompt should pause and resume the poller while the capture hangs"
+        );
+
+        events
+            .send(
+                json!({"type": "event", "method": "browsingContext.userPromptOpened",
+                "params": {"context": "ctx-active", "type": "alert"}}),
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        poller.show(FirefoxLive {
+            context: "ctx-other".into(),
+            ..live
+        });
+        assert_eq!(
+            wait_for(
+                &calls,
+                "browsingContext.captureScreenshot",
+                3,
+                Duration::from_millis(1200)
+            )
+            .await,
+            3,
+            "a prompt on the tab left behind must not pause the tab now shown"
         );
         server.shutdown().await;
     }
