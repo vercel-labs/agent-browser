@@ -32,13 +32,13 @@ export const shotSize = (layout: Layout) => ({ width: SHOT_REGION[layout].width 
 export const ATTACH_SCALE: Record<Layout, number> = { wide: .468, compact: .47 };
 
 /** The hero, simplified to what a marketing page always has: a two-line
- * headline (the blandest one there is, so only its typo catches the eye;
+ * headline (the blandest one there is, so only its typos catch the eye;
  * `fixed` spells it right: the Preview) and two buttons as plain solid fills.
  * Placed by CSS (.ab-mock-hero). */
 function Hero({ fixed }: { fixed: boolean }) {
   return (
     <div className="ab-mock-hero">
-      <div className="ab-headline">Build better<br />{fixed ? FIXED : TYPO}, faster</div>
+      <div className="ab-headline">Build {(fixed ? FIXED : TYPO)[0]}<br />{(fixed ? FIXED : TYPO)[1]}, faster</div>
       <span className="ab-mock-actions"><span className="ab-mock-primary" /><span className="ab-mock-secondary" /></span>
     </div>
   );

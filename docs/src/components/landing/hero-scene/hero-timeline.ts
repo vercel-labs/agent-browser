@@ -34,11 +34,13 @@ export const SHOT_GAP = 8;
 export const PRODUCTION_URL = 'acme.com';
 export const PREVIEW_URL = 'acme-git-fix-typo.vercel.app';
 export const PR_URL = 'github.com/acme/web/pull/128';
-export const PR_TITLE = 'Fix typo in hero heading';
+export const PR_TITLE = 'Fix typos in hero heading';
 export const PR_NUMBER = '#128';
-/** The headline's misspelled word on production, and the fix on the preview. */
-export const TYPO = 'prpducts';
-export const FIXED = 'products';
+/** The headline's misspelled words on production, and the fixes on the preview:
+ * each a neighboring key that adds an ascender or descender, so the word's
+ * outline changes (transposed letters are read straight past). */
+export const TYPO = ['bdtter', 'prpducts'] as const;
+export const FIXED = ['better', 'products'] as const;
 
 /** The two captures: the typo on production, then the fix on the preview.
  * Each is dragged as people drag a selection: top left down to lower right. */

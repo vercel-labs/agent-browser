@@ -51,15 +51,16 @@
   & .ab-anchor { position: absolute; left: 0; top: 0; width: 1px; height: 1px; pointer-events: none; }
 
   /* The page: where the nav bar ends, a hairline; the hero, left-aligned in
-     the captured region (SHOT_REGION): the headline and two buttons as flat
-     fills, an ink one and a light gray one (no borders, no words) */
+     the captured region (SHOT_REGION): the headline, set as the homepage's own
+     H1 is (Geist 450, -0.06em, line-height 1) so it never out-weighs it, and
+     two quiet buttons, a gray fill and an outline (no words) */
   & .ab-page-nav { position: absolute; left: 0; right: 0; top: 32px; height: var(--ss-hairline, 1px); background: var(--ss-line); }
   & .ab-mock-hero { position: absolute; left: 40px; top: 74px; display: flex; flex-direction: column; align-items: flex-start; }
-  & .ab-headline { font: 600 30px/34px var(--ss-font); letter-spacing: -.04em; color: var(--ds-gray-1000, #171717); white-space: nowrap; }
+  & .ab-headline { font: 450 30px/1 var(--ss-font); letter-spacing: -.06em; color: var(--ds-gray-1000, #171717); white-space: nowrap; }
   & .ab-mock-actions { display: flex; gap: 8px; margin-top: 20px; }
   & .ab-mock-actions > * { display: block; height: 28px; border-radius: 999px; }
-  & .ab-mock-primary { width: 92px; background: var(--ds-gray-1000); }
-  & .ab-mock-secondary { width: 72px; background: var(--ds-gray-300); }
+  & .ab-mock-primary { width: 92px; background: var(--ds-gray-500); }
+  & .ab-mock-secondary { width: 72px; box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-500); }
   & .ab-home { left: 250px; top: 200px; }
 
   /* A screenshot: the headline region in a frame of the page's color, so
@@ -109,7 +110,7 @@
     & .ab-plus-one { left: 219.5px; }
     & .ab-plus-two { left: 191.5px; }
     & .ab-mock-hero { left: 22px; top: 79px; }
-    & .ab-headline { font-size: 23px; line-height: 27px; letter-spacing: -.035em; }
+    & .ab-headline { font-size: 23px; }
     & .ab-mock-actions { margin-top: 16px; }
     & .ab-mock-actions > * { height: 24px; }
     & .ab-mock-primary { width: 76px; }
