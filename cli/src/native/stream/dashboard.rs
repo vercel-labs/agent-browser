@@ -893,6 +893,17 @@ async fn read_post_body(stream: &mut tokio::net::TcpStream, initial: &[u8], n: u
     String::from_utf8(body).unwrap_or_default()
 }
 
+/// Runs the CLI as a client of a session daemon. The dashboard server runs
+/// with `AGENT_BROWSER_DASHBOARD` set, and a child that inherits it starts a
+/// second dashboard server instead of running its command.
+pub(super) fn cli_command(exe: &std::path::Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.env_remove("AGENT_BROWSER_DASHBOARD")
+        .env_remove("AGENT_BROWSER_DASHBOARD_PORT")
+        .env_remove("AGENT_BROWSER_STREAM_PORT");
+    cmd
+}
+
 async fn exec_cli(body: &str) -> Result<String, String> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| format!("Invalid JSON: {}", e))?;
     let args: Vec<String> = parsed
@@ -912,12 +923,8 @@ async fn exec_cli(body: &str) -> Result<String, String> {
 
     let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
 
-    let mut cmd = tokio::process::Command::new(&exe);
-    cmd.args(&args)
-        .arg("--json")
-        .env_remove("AGENT_BROWSER_DASHBOARD")
-        .env_remove("AGENT_BROWSER_DASHBOARD_PORT")
-        .env_remove("AGENT_BROWSER_STREAM_PORT");
+    let mut cmd = cli_command(&exe);
+    cmd.args(&args).arg("--json");
 
     let output = cmd
         .output()
@@ -992,7 +999,7 @@ pub(super) async fn spawn_session(body: &str) -> Result<String, String> {
 
     let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
 
-    let mut cmd = tokio::process::Command::new(&exe);
+    let mut cmd = cli_command(&exe);
     cmd.arg("open")
         .arg("about:blank")
         .arg("--session")
@@ -1046,6 +1053,20 @@ mod tests {
             validate_dashboard_session_name(&"a".repeat(65)),
             Err("Session name must be 1-64 UTF-8 bytes".to_string())
         );
+    }
+
+    #[test]
+    fn cli_command_clears_dashboard_mode_for_the_child() {
+        let cmd = cli_command(std::path::Path::new("agent-browser"));
+        let removed: Vec<_> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(key, value)| value.is_none().then_some(key))
+            .collect();
+
+        for name in ["AGENT_BROWSER_DASHBOARD", "AGENT_BROWSER_DASHBOARD_PORT"] {
+            assert!(removed.contains(&std::ffi::OsStr::new(name)), "{name}");
+        }
     }
 
     async fn send_request_to_dashboard_handler(request: &str) -> String {
