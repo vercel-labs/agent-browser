@@ -582,8 +582,6 @@ pub struct DaemonState {
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
     pub firefox: Option<bidi::session::FirefoxSession>,
     pub firefox_poller: Option<bidi::stream::Poller>,
-    /// Retry a failed stream tab refresh on the next idle maintenance tick.
-    firefox_tabs_dirty: bool,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
@@ -793,7 +791,6 @@ impl DaemonState {
             webdriver_backend: None,
             firefox: None,
             firefox_poller: None,
-            firefox_tabs_dirty: false,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
@@ -1235,23 +1232,23 @@ impl DaemonState {
         }));
     }
 
-    /// Publish Firefox tabs without changing CDP session or frame bookkeeping.
-    async fn broadcast_firefox_tabs(&mut self) {
-        let Some(server) = self.stream_server.clone() else {
-            self.firefox_tabs_dirty = false;
+    /// Point the dashboard poller at the Firefox tabs the session has now.
+    fn notify_firefox_tabs(&self) {
+        let (Some(poller), Some(live)) = (self.firefox_poller.as_ref(), self.firefox_live()) else {
             return;
         };
-        if let Some(ff) = self.firefox.as_mut() {
-            match bidi::tabs::stream_tabs(ff).await {
-                Ok(tabs) => {
-                    self.firefox_tabs_dirty = false;
-                    server.broadcast_tabs(&tabs).await;
-                }
-                Err(_) => self.firefox_tabs_dirty = true,
-            }
-        } else {
-            self.firefox_tabs_dirty = false;
-        }
+        poller.show(live);
+    }
+
+    /// The Firefox tab the dashboard shows and the tabs the session has now.
+    fn firefox_live(&self) -> Option<bidi::stream::FirefoxLive> {
+        self.firefox.as_ref().map(|ff| bidi::stream::FirefoxLive {
+            bidi: Arc::clone(&ff.bidi),
+            context: ff.top_context.clone(),
+            contexts: ff.context_parents.clone(),
+            tabs: ff.tab_index(),
+            modifiers: Default::default(),
+        })
     }
 
     /// Update the stream server's client when a browser is set, cleared, or switched.
@@ -1260,45 +1257,37 @@ impl DaemonState {
             let mut guard = slot.write().await;
             *guard = self.browser.as_ref().map(|m| Arc::clone(&m.client));
         }
-        if let Some(server) = self.stream_server.clone() {
-            // Update the CDP page session ID so screencast commands target the right page
-            let session_id = self
-                .browser
-                .as_ref()
-                .and_then(|m| m.active_session_id().ok().map(|s| s.to_string()));
-            let connected = self.browser.is_some() || self.firefox.is_some();
-            let live = self.firefox.as_ref().map(|ff| bidi::stream::FirefoxLive {
-                bidi: Arc::clone(&ff.bidi),
-                context: ff.top_context.clone(),
-                contexts: ff.context_parents.clone(),
-                modifiers: Default::default(),
-            });
-            let paused = live.as_ref().is_some_and(|live| {
-                self.pending_dialog.as_ref().is_some_and(|dialog| {
-                    bidi::session::dialog_blocks_tab(dialog.owner_context.as_deref(), &live.context)
-                })
-            });
-            self.firefox_poller = None;
-            server.set_firefox_live(live.clone()).await;
-            let sc = server.is_screencasting().await;
-            if let Some(ref mgr) = self.browser {
-                server
-                    .bind_cdp_session_and_broadcast_tabs(session_id, &mgr.tab_list())
-                    .await;
-            } else if self.firefox.is_some() {
-                self.broadcast_firefox_tabs().await;
-            } else {
-                self.firefox_tabs_dirty = false;
-                server
-                    .bind_cdp_session_and_broadcast_tabs(session_id, &[])
-                    .await;
+        let Some(server) = self.stream_server.clone() else {
+            return;
+        };
+        // Update the CDP page session ID so screencast commands target the right page
+        let session_id = self
+            .browser
+            .as_ref()
+            .and_then(|m| m.active_session_id().ok().map(|s| s.to_string()));
+        let connected = self.browser.is_some() || self.firefox.is_some();
+        let live = self.firefox_live();
+        let (vw, vh) = server.viewport().await;
+        let sc = server.is_screencasting().await;
+        server
+            .broadcast_status(connected, sc, vw, vh, &self.engine)
+            .await;
+        server.set_firefox_live(live.clone()).await;
+        match (live, self.firefox_poller.as_ref()) {
+            (Some(live), Some(poller)) => poller.show(live),
+            (Some(live), None) => {
+                self.firefox_poller = Some(bidi::stream::spawn_poller(live, Arc::clone(&server)));
             }
-            let (vw, vh) = server.viewport().await;
+            (None, _) => self.firefox_poller = None,
+        }
+        if let Some(ref mgr) = self.browser {
             server
-                .broadcast_status(connected, sc, vw, vh, &self.engine)
+                .bind_cdp_session_and_broadcast_tabs(session_id, &mgr.tab_list())
                 .await;
-            self.firefox_poller =
-                live.map(|live| bidi::stream::spawn_poller(live, Arc::clone(&server), paused));
+        } else if self.firefox.is_none() {
+            server
+                .bind_cdp_session_and_broadcast_tabs(session_id, &[])
+                .await;
         }
     }
 
@@ -1410,8 +1399,8 @@ impl DaemonState {
         if previous_firefox_context != self.firefox.as_ref().map(|ff| ff.top_context.clone()) {
             bidi::daemon::reset_page(self);
             self.update_stream_client().await;
-        } else if firefox_tabs_changed || self.firefox_tabs_dirty {
-            self.broadcast_firefox_tabs().await;
+        } else if firefox_tabs_changed {
+            self.notify_firefox_tabs();
         }
         let drained = self.drain_cdp_events();
         self.apply_drained_events(drained).await
@@ -3993,9 +3982,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 .await;
         }
     }
-    if state.browser.is_none() && state.firefox.is_some() {
-        state.broadcast_firefox_tabs().await;
-    }
+    state.notify_firefox_tabs();
 
     resp
 }

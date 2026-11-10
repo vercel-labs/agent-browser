@@ -314,6 +314,17 @@ impl FirefoxSession {
         id
     }
 
+    /// The session's tabs as (context, `t<N>` id, label), in id order.
+    pub fn tab_index(&self) -> Vec<(String, u32, Option<String>)> {
+        let mut tabs: Vec<_> = self
+            .tab_ids
+            .iter()
+            .map(|(context, id)| (context.clone(), *id, self.tab_labels.get(context).cloned()))
+            .collect();
+        tabs.sort_by_key(|(_, id, _)| *id);
+        tabs
+    }
+
     /// True once the Firefox process has exited or its BiDi connection has closed.
     pub fn has_exited(&mut self) -> bool {
         self.process

@@ -11,6 +11,8 @@ use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 
+const TREE_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Opens a tab and makes it active. Must return what Chrome's `handle_tab_new` returns,
 /// honouring `url` and `label`.
 pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -139,60 +141,79 @@ pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
         .send_timeout(
             "browsingContext.getTree",
             json!({"maxDepth": 0}),
-            Duration::from_secs(1),
+            TREE_TIMEOUT,
         )
         .await?;
     let contexts = tree["contexts"].as_array().cloned().unwrap_or_default();
+    let index: Vec<_> = contexts
+        .iter()
+        .map(|context| {
+            let context = context["context"].as_str().unwrap_or_default().to_string();
+            let id = ff.tab_id(&context);
+            let label = ff.tab_labels.get(&context).cloned();
+            (context, id, label)
+        })
+        .collect();
     let titles = join_all(
         contexts
             .iter()
             .map(|context| tab_title(&ff.bidi, context["context"].as_str().unwrap_or_default())),
     )
     .await;
-    Ok(json!({ "tabs": build_tab_list(ff, &contexts, &titles) }))
+    let active = ff.top_context.clone();
+    Ok(json!({ "tabs": build_tab_list(&contexts, &titles, &index, &active) }))
 }
 
-/// Builds the same tab list for the dashboard without letting a blocked page hold the daemon.
-pub(crate) async fn stream_tabs(ff: &mut FirefoxSession) -> Result<Vec<Value>, String> {
-    const TREE_TIMEOUT: Duration = Duration::from_secs(1);
-    let tree = ff
-        .bidi
+/// Builds the dashboard tab list from Firefox, or `None` when it does not answer in time.
+pub(crate) async fn stream_tabs(
+    bidi: &BidiClient,
+    index: &[(String, u32, Option<String>)],
+    active: &str,
+) -> Option<Vec<Value>> {
+    let tree = bidi
         .send_timeout(
             "browsingContext.getTree",
             json!({"maxDepth": 0}),
             TREE_TIMEOUT,
         )
-        .await?;
-    let contexts: Vec<Value> = tree["contexts"]
-        .as_array()
-        .cloned()
-        .ok_or("Firefox did not return a context tree")?;
-    let bidi = &ff.bidi;
-    let titles = join_all(contexts.iter().map(|context| async move {
-        let title = tab_title(bidi, context["context"].as_str().unwrap_or_default()).await;
-        Value::String(title.as_str().unwrap_or_default().to_string())
-    }))
+        .await
+        .ok()?;
+    let contexts = tree["contexts"].as_array()?.clone();
+    let titles = join_all(
+        contexts
+            .iter()
+            .map(|context| tab_title(bidi, context["context"].as_str().unwrap_or_default())),
+    )
     .await;
-    Ok(build_tab_list(ff, &contexts, &titles))
+    let titles: Vec<Value> = titles
+        .iter()
+        .map(|title| Value::String(title.as_str().unwrap_or_default().to_string()))
+        .collect();
+    Some(build_tab_list(&contexts, &titles, index, active))
 }
 
 /// Maps a BiDi tree and titles to the shared CLI and stream tab shape.
-fn build_tab_list(ff: &mut FirefoxSession, contexts: &[Value], titles: &[Value]) -> Vec<Value> {
+fn build_tab_list(
+    contexts: &[Value],
+    titles: &[Value],
+    index: &[(String, u32, Option<String>)],
+    active: &str,
+) -> Vec<Value> {
     contexts
         .iter()
         .zip(titles)
-        .map(|(c, title)| {
+        .filter_map(|(c, title)| {
             let context = c["context"].as_str().unwrap_or_default();
-            let tab_id = ff.tab_id(context);
-            json!({
-                "tabId": format_tab_id(tab_id),
+            let (_, tab_id, label) = index.iter().find(|(known, ..)| known == context)?;
+            Some(json!({
+                "tabId": format_tab_id(*tab_id),
                 "targetId": context,
-                "label": ff.tab_labels.get(context),
+                "label": label,
                 "title": title,
                 "url": c["url"],
                 "type": "page",
-                "active": context == ff.top_context,
-            })
+                "active": context == active,
+            }))
         })
         .collect()
 }
@@ -443,7 +464,10 @@ mod tests {
 
         let cli = tab_list(&mut state).await.unwrap();
         let ff = state.firefox.as_mut().unwrap();
-        let stream = stream_tabs(ff).await.unwrap();
+        let index = ff.tab_index();
+        let stream = stream_tabs(&ff.bidi, &index, &ff.top_context)
+            .await
+            .unwrap();
         assert_eq!(cli["tabs"], json!(stream));
         assert_eq!(
             stream,
@@ -455,13 +479,14 @@ mod tests {
 
         ff.top_context = "ctx-other".into();
         let remaining = build_tab_list(
-            ff,
             &[json!({"context":"ctx-other", "url":"about:blank"})],
             &[json!("Other")],
+            &ff.tab_index(),
+            &ff.top_context,
         );
         assert_eq!(remaining[0]["tabId"], "t2");
         assert_eq!(remaining[0]["active"], true);
-        assert!(build_tab_list(ff, &[], &[]).is_empty());
+        assert!(build_tab_list(&[], &[], &ff.tab_index(), &ff.top_context).is_empty());
     }
 
     #[tokio::test]
@@ -477,23 +502,27 @@ mod tests {
         state.firefox = Some(ff);
         let cli = tab_list(&mut state).await.unwrap();
         assert!(cli["tabs"][0]["title"].is_null());
-        let tabs = stream_tabs(state.firefox.as_mut().unwrap()).await.unwrap();
+        let ff = state.firefox.as_mut().unwrap();
+        let index = ff.tab_index();
+        let tabs = stream_tabs(&ff.bidi, &index, &ff.top_context)
+            .await
+            .unwrap();
         assert_eq!(tabs[0]["title"], "");
     }
 
     #[tokio::test]
     async fn stream_tracks_commands_and_external_context_changes() {
         use crate::native::stream::{IdleActivity, StreamServer};
+        use futures_util::StreamExt;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let fail_first_tree = AtomicBool::new(true);
         let tree = Arc::new(Mutex::new(vec![
             json!({"context":"ctx-active", "url":"about:blank"}),
         ]));
         let browser_tree = tree.clone();
-        let (ff, events, calls) =
+        let (ff, events, _calls) =
             fake_session_with(move |request| match request["method"].as_str() {
                 Some("browsingContext.getTree") => {
                     if fail_first_tree.swap(false, Ordering::Relaxed) {
@@ -539,40 +568,35 @@ mod tests {
         state.engine = "firefox".into();
         state.firefox = Some(ff);
 
-        async fn cached_tabs(port: u16) -> Value {
-            let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .unwrap();
-            socket.write_all(format!("GET /api/tabs HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
-            let mut response = String::new();
-            socket.read_to_string(&mut response).await.unwrap();
-            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
-            assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
-            serde_json::from_str(body).unwrap()
+        async fn next_tabs(
+            ws: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            until: impl Fn(&Value) -> bool,
+        ) -> Value {
+            loop {
+                let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("timed out waiting for the dashboard tab list")
+                    .expect("stream ended")
+                    .expect("ws error");
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let payload: Value = serde_json::from_str(text).unwrap();
+                if payload["type"] == "tabs" && until(&payload["tabs"]) {
+                    return payload["tabs"].clone();
+                }
+            }
         }
 
         state.update_stream_client().await;
-        assert_eq!(cached_tabs(server.port()).await, json!([]));
-        state.drain_cdp_events_background().await.unwrap();
-        let initial = cached_tabs(server.port()).await;
-        assert_eq!(initial[0]["tabId"], "t1");
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}", server.port()))
+                .await
+                .unwrap();
+        let initial = next_tabs(&mut ws, |tabs| tabs[0]["tabId"] == "t1").await;
         assert_eq!(initial[0]["active"], true);
-        let tree_calls = calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|m| *m == "browsingContext.getTree")
-            .count();
-        tokio::time::sleep(Duration::from_millis(550)).await;
-        assert_eq!(
-            calls
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|m| *m == "browsingContext.getTree")
-                .count(),
-            tree_calls
-        );
 
         let run = |action: &str, id: &str| json!({"id":id, "action":action});
         let created = crate::native::actions::execute_command(
@@ -582,8 +606,7 @@ mod tests {
         .await;
         assert_eq!(created["success"], true, "{created}");
         assert_eq!(created["data"]["tabId"], "t2");
-        let tabs = cached_tabs(server.port()).await;
-        assert_eq!(tabs[1]["label"], "docs");
+        let tabs = next_tabs(&mut ws, |tabs| tabs[1]["label"] == "docs").await;
         assert_eq!(tabs[1]["active"], true);
         let listed =
             crate::native::actions::execute_command(&run("tab_list", "2"), &mut state).await;
@@ -594,7 +617,8 @@ mod tests {
         )
         .await;
         assert_eq!(switched["success"], true, "{switched}");
-        assert_eq!(cached_tabs(server.port()).await[0]["active"], true);
+        let tabs = next_tabs(&mut ws, |tabs| tabs[0]["active"] == true).await;
+        assert_eq!(tabs[0]["active"], true);
         assert_eq!(
             server.firefox_live_context().await.as_deref(),
             Some("ctx-active")
@@ -605,10 +629,8 @@ mod tests {
         )
         .await;
         assert_eq!(closed["success"], true, "{closed}");
-        assert_eq!(
-            cached_tabs(server.port()).await.as_array().unwrap().len(),
-            1
-        );
+        let tabs = next_tabs(&mut ws, |tabs| tabs.as_array().unwrap().len() == 1).await;
+        assert_eq!(tabs.as_array().unwrap().len(), 1);
 
         tree.lock()
             .unwrap()
@@ -616,9 +638,8 @@ mod tests {
         events.send(json!({"type":"event", "method":"browsingContext.contextCreated", "params":{"context":"ctx-external", "parent":null}})).unwrap();
         seen_events.recv().await.unwrap();
         state.drain_cdp_events_background().await.unwrap();
-        let tabs = cached_tabs(server.port()).await;
+        let tabs = next_tabs(&mut ws, |tabs| tabs[1]["url"] == "https://external.test/").await;
         assert_eq!(tabs[1]["tabId"], "t3");
-        assert_eq!(tabs[1]["url"], "https://external.test/");
 
         tree.lock()
             .unwrap()
@@ -626,9 +647,8 @@ mod tests {
         events.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
         seen_events.recv().await.unwrap();
         state.drain_cdp_events_background().await.unwrap();
-        let tabs = cached_tabs(server.port()).await;
+        let tabs = next_tabs(&mut ws, |tabs| tabs[0]["tabId"] == "t3").await;
         assert_eq!(tabs.as_array().unwrap().len(), 1);
-        assert_eq!(tabs[0]["tabId"], "t3");
         assert_eq!(tabs[0]["active"], true);
         assert_eq!(
             server.firefox_live_context().await.as_deref(),
@@ -639,7 +659,7 @@ mod tests {
         events.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-external", "parent":null}})).unwrap();
         seen_events.recv().await.unwrap();
         state.drain_cdp_events_background().await.unwrap();
-        assert_eq!(cached_tabs(server.port()).await, json!([]));
+        assert_eq!(next_tabs(&mut ws, Value::is_array).await, json!([]));
         server.shutdown().await;
     }
 

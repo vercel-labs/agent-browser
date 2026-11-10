@@ -16168,6 +16168,7 @@ async fn e2e_firefox_stream_modifier_masks() {
         bidi: Arc::clone(&ff.bidi),
         context: ff.top_context.clone(),
         contexts: ff.context_parents.clone(),
+        tabs: Default::default(),
         modifiers: Default::default(),
     };
     for (key, modifiers) in [("K", 8), ("J", 8), ("a", 0)] {
@@ -16214,28 +16215,30 @@ async fn e2e_firefox_stream_modifier_masks() {
     firefox_close(&mut state).await;
 }
 
-/// Firefox publishes the same tab data to the stream endpoint as its tab commands return.
+/// Firefox publishes the same tab data to the dashboard as its tab commands return.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_stream_tabs_follow_tab_commands() {
-    async fn stream_tabs(port: u16) -> Value {
-        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .unwrap();
-        socket
-            .write_all(
-                format!(
-                    "GET /api/tabs HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let mut response = String::new();
-        socket.read_to_string(&mut response).await.unwrap();
-        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
-        assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
-        serde_json::from_str(body).unwrap()
+    async fn next_tabs(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        until: impl Fn(&Value) -> bool,
+    ) -> Value {
+        loop {
+            let message = tokio::time::timeout(tokio::time::Duration::from_secs(10), ws.next())
+                .await
+                .expect("timed out waiting for the dashboard tab list")
+                .expect("dashboard stream ended")
+                .expect("dashboard stream error");
+            let Ok(text) = message.to_text() else {
+                continue;
+            };
+            let payload: Value = serde_json::from_str(text).unwrap();
+            if payload["type"] == "tabs" && until(&payload["tabs"]) {
+                return payload["tabs"].clone();
+            }
+        }
     }
 
     required_firefox_binary();
@@ -16255,7 +16258,10 @@ async fn e2e_firefox_stream_tabs_follow_tab_commands() {
     state.stream_client = Some(client_slot);
     state.stream_server = Some(Arc::clone(&server));
     launch_firefox(&mut state, json!({})).await;
-    let tabs = stream_tabs(server.port()).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}", server.port()))
+        .await
+        .unwrap();
+    let tabs = next_tabs(&mut ws, Value::is_array).await;
     assert_eq!(tabs.as_array().unwrap().len(), 1);
     assert_eq!(tabs[0]["tabId"], "t1");
     assert_eq!(tabs[0]["active"], true);
@@ -16267,14 +16273,13 @@ async fn e2e_firefox_stream_tabs_follow_tab_commands() {
     )
     .await;
     assert_success(&created);
-    let tabs = stream_tabs(server.port()).await;
+    let tabs = next_tabs(&mut ws, |tabs| tabs[1]["label"] == "docs").await;
     assert_eq!(tabs.as_array().unwrap().len(), 2);
     assert_eq!(tabs[1]["tabId"], get_data(&created)["tabId"]);
-    assert_eq!(tabs[1]["label"], "docs");
     assert_eq!(tabs[1]["active"], true);
     let listed = firefox_command(&mut state, json!({"id":"list", "action":"tab_list"})).await;
     assert_success(&listed);
-    assert_eq!(get_data(&listed)["tabs"], stream_tabs(server.port()).await);
+    assert_eq!(get_data(&listed)["tabs"], tabs);
 
     let switched = firefox_command(
         &mut state,
@@ -16282,17 +16287,17 @@ async fn e2e_firefox_stream_tabs_follow_tab_commands() {
     )
     .await;
     assert_success(&switched);
-    assert_eq!(stream_tabs(server.port()).await[0]["active"], true);
+    let tabs = next_tabs(&mut ws, |tabs| tabs[0]["active"] == true).await;
+    assert_eq!(tabs[0]["active"], true);
+    assert_eq!(tabs.as_array().unwrap().len(), 2);
     let closed = firefox_command(
         &mut state,
         json!({"id":"close-tab", "action":"tab_close", "tabId":"docs"}),
     )
     .await;
     assert_success(&closed);
-    assert_eq!(
-        stream_tabs(server.port()).await.as_array().unwrap().len(),
-        1
-    );
+    let tabs = next_tabs(&mut ws, |tabs| tabs.as_array().unwrap().len() == 1).await;
+    assert_eq!(tabs.as_array().unwrap().len(), 1);
     firefox_close(&mut state).await;
     server.shutdown().await;
 }

@@ -3,14 +3,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 use super::client::BidiClient;
 use super::input::{self, Origin};
 use super::session::{dialog_blocks_tab, owner_tab, record_context};
+use super::tabs;
 use crate::native::stream::{FrameMetadata, StreamServer};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const TAB_INTERVAL: Duration = Duration::from_secs(1);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The BiDi connection and tab the dashboard is looking at.
 #[derive(Clone)]
@@ -18,92 +21,185 @@ pub struct FirefoxLive {
     pub bidi: Arc<BidiClient>,
     pub context: String,
     pub contexts: HashMap<String, String>,
+    /// The session's tabs as (context, `t<N>` id, label), in id order.
+    pub tabs: Vec<(String, u32, Option<String>)>,
     pub modifiers: Arc<Mutex<HashMap<String, u8>>>,
 }
 
-/// Stops the polling task when dropped.
-pub struct Poller(tokio::task::JoinHandle<()>);
+/// Owns the only task that serves the Firefox dashboard, and the channel that tells it what to show.
+pub struct Poller {
+    task: tokio::task::JoinHandle<()>,
+    target: watch::Sender<Option<FirefoxLive>>,
+}
 
-impl Drop for Poller {
-    fn drop(&mut self) {
-        self.0.abort();
+impl Poller {
+    /// Points the dashboard at `live`: the tab it shows and the tabs the session has now.
+    pub fn show(&self, live: FirefoxLive) {
+        self.target.send_replace(Some(live));
     }
 }
 
-/// Starts publishing JPEG frames of the tab into the stream while dashboard clients are connected.
-pub fn spawn_poller(live: FirefoxLive, server: Arc<StreamServer>, paused: bool) -> Poller {
-    Poller(tokio::spawn(poll(live, server, paused)))
+impl Drop for Poller {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
-async fn poll(mut live: FirefoxLive, server: Arc<StreamServer>, mut paused: bool) {
+/// Starts the single task that serves this Firefox session's dashboard, for as long as the session lives.
+pub fn spawn_poller(live: FirefoxLive, server: Arc<StreamServer>) -> Poller {
+    let (target, receiver) = watch::channel(Some(live));
+    Poller {
+        task: tokio::spawn(poll(server, receiver)),
+        target,
+    }
+}
+
+struct Shot {
+    context: String,
+    data: String,
+    width: u32,
+    height: u32,
+}
+
+/// Publishes frames, viewport, tabs and dialog state for the dashboard, and only while one is connected.
+async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<FirefoxLive>>) {
+    let Some(mut live) = target.borrow_and_update().clone() else {
+        return;
+    };
     let mut events = live.bidi.subscribe_buffered();
-    let mut tick = tokio::time::interval(POLL_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut paused = false;
+    let mut frame: Option<tokio::task::JoinHandle<Option<Shot>>> = None;
+    let mut listing: Option<tokio::task::JoinHandle<Option<Vec<Value>>>> = None;
+    let mut frame_tick = tokio::time::interval(POLL_INTERVAL);
+    frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut tab_tick = tokio::time::interval(TAB_INTERVAL);
+    tab_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             Some(e) = events.recv() => {
                 record_context(&e, &mut live.contexts);
                 let context = e["params"]["context"].as_str().unwrap_or_default();
-                if dialog_blocks_tab(Some(owner_tab(context, &live.contexts)), &live.context) {
-                    match e["method"].as_str() {
-                        Some("browsingContext.userPromptOpened") => paused = true,
-                        Some("browsingContext.userPromptClosed") => paused = false,
-                        _ => {}
+                let blocks = dialog_blocks_tab(Some(owner_tab(context, &live.contexts)), &live.context);
+                match (e["method"].as_str(), blocks) {
+                    (Some("browsingContext.userPromptOpened"), true) => {
+                        paused = true;
+                        if let Some(task) = frame.take() {
+                            task.abort();
+                        }
+                    }
+                    (Some("browsingContext.userPromptClosed"), true) => paused = false,
+                    _ => {}
+                }
+            }
+            Ok(()) = target.changed() => {
+                let Some(next) = target.borrow_and_update().clone() else {
+                    break;
+                };
+                if next.context != live.context {
+                    if let Some(task) = frame.take() {
+                        task.abort();
                     }
                 }
-            },
-            _ = tick.tick() => {
+                live = next;
+                if server.has_clients().await {
+                    if let Some(task) = listing.take() {
+                        task.abort();
+                    }
+                    listing = Some(list_tabs(&live));
+                }
+            }
+            result = async { frame.as_mut().unwrap().await }, if frame.is_some() => {
+                frame = None;
+                if let Ok(Some(shot)) = result {
+                    let shown = server.firefox_live_context().await;
+                    if !paused && shown.as_deref() == Some(shot.context.as_str()) {
+                        publish_frame(&shot, &server).await;
+                    }
+                }
+            }
+            result = async { listing.as_mut().unwrap().await }, if listing.is_some() => {
+                listing = None;
+                if let Ok(Some(tabs)) = result {
+                    server.broadcast_tabs(&tabs).await;
+                }
+            }
+            _ = frame_tick.tick() => {
                 if live.bidi.is_closed() {
                     let (width, height) = server.viewport().await;
                     server.broadcast_status(false, false, width, height, "firefox").await;
                     break;
                 }
-                if !paused && server.has_clients().await {
-                    publish_frame(&live, &server).await;
+                if frame.is_none() && !paused && server.has_clients().await {
+                    frame = Some(capture_frame(&live, server.screencast_quality()));
+                }
+            }
+            _ = tab_tick.tick() => {
+                if listing.is_none() && server.has_clients().await {
+                    listing = Some(list_tabs(&live));
                 }
             }
         }
     }
 }
 
-async fn publish_frame(live: &FirefoxLive, server: &StreamServer) {
-    let quality = server.screencast_quality() as f64 / 100.0;
+/// Asks Firefox for the tab list without holding the poller's event loop.
+fn list_tabs(live: &FirefoxLive) -> tokio::task::JoinHandle<Option<Vec<Value>>> {
+    let live = live.clone();
+    tokio::spawn(async move { tabs::stream_tabs(&live.bidi, &live.tabs, &live.context).await })
+}
+
+/// Asks Firefox for a frame without holding the poller's event loop.
+fn capture_frame(live: &FirefoxLive, quality: i32) -> tokio::task::JoinHandle<Option<Shot>> {
+    let live = live.clone();
+    let quality = quality as f64 / 100.0;
+    tokio::spawn(async move { capture(&live, quality).await })
+}
+
+/// Captures the tab's viewport and size, giving up quickly so a stuck page cannot hold the dashboard.
+async fn capture(live: &FirefoxLive, quality: f64) -> Option<Shot> {
     let shot = live
         .bidi
-        .send(
+        .send_timeout(
             "browsingContext.captureScreenshot",
             json!({
                 "context": live.context,
                 "origin": "viewport",
                 "format": { "type": "image/jpeg", "quality": quality },
             }),
+            REQUEST_TIMEOUT,
         )
-        .await;
-    let Some(data) = shot.as_ref().ok().and_then(|r| r["data"].as_str()) else {
-        return;
-    };
+        .await
+        .ok()?;
+    let data = shot["data"].as_str()?.to_string();
     let size = live
         .bidi
-        .call_function(
+        .call_function_timeout(
             &live.context,
             "() => [innerWidth, innerHeight]",
-            None,
-            vec![],
+            REQUEST_TIMEOUT,
         )
         .await
         .unwrap_or_default();
-    let width = size[0].as_f64().unwrap_or(0.0) as u32;
-    let height = size[1].as_f64().unwrap_or(0.0) as u32;
-    if width > 0 && height > 0 && server.viewport().await != (width, height) {
-        server.set_viewport(width, height).await;
+    Some(Shot {
+        context: live.context.clone(),
+        data,
+        width: size[0].as_f64().unwrap_or(0.0) as u32,
+        height: size[1].as_f64().unwrap_or(0.0) as u32,
+    })
+}
+
+/// Publishes a frame together with the viewport it was captured at, so both describe the tab shown.
+async fn publish_frame(shot: &Shot, server: &StreamServer) {
+    if shot.width > 0 && shot.height > 0 && server.viewport().await != (shot.width, shot.height) {
+        server.set_viewport(shot.width, shot.height).await;
         server
-            .broadcast_status(true, false, width, height, "firefox")
+            .broadcast_status(true, false, shot.width, shot.height, "firefox")
             .await;
     }
     let (device_width, device_height) = server.viewport().await;
     let timestamp = crate::native::stream::timestamp_ms();
     server.broadcast_screencast_frame(
-        data,
+        &shot.data,
         &FrameMetadata {
             device_width,
             device_height,
@@ -197,6 +293,142 @@ pub async fn dispatch_input(live: &FirefoxLive, msg_type: &str, msg: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::bidi::session::tests::{fake_session, fake_session_with_replies, FakeReply};
+
+    async fn dashboard(
+        server: &StreamServer,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}", server.port()))
+            .await
+            .expect("dashboard should connect");
+        ws
+    }
+
+    fn asked(calls: &crate::native::bidi::session::tests::Calls, method: &str) -> usize {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| *m == method)
+            .count()
+    }
+
+    async fn wait_for(
+        calls: &crate::native::bidi::session::tests::Calls,
+        method: &str,
+        wanted: usize,
+        patience: Duration,
+    ) -> usize {
+        let deadline = tokio::time::Instant::now() + patience;
+        loop {
+            let seen = asked(calls, method);
+            if seen >= wanted || tokio::time::Instant::now() > deadline {
+                return seen;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_command_without_a_dashboard_client_asks_firefox_for_nothing() {
+        use crate::native::actions::{execute_command, DaemonState};
+        use crate::native::stream::{IdleActivity, StreamServer};
+
+        let (ff, events, calls) = fake_session().await;
+        std::mem::forget(events);
+        let activity = Arc::new(IdleActivity::new());
+        let (server, slot) =
+            StreamServer::start_without_client(0, "firefox-idle".into(), true, activity.clone())
+                .await
+                .unwrap();
+        let server = Arc::new(server);
+        let mut state = DaemonState::new_with_stream(
+            crate::session_settings::Running::defaults(),
+            Arc::new(crate::session_settings::MemStore::default()),
+            Some(slot),
+            Some(Arc::clone(&server)),
+            activity,
+        );
+        state.engine = "firefox".into();
+        state.firefox = Some(ff);
+        state.update_stream_client().await;
+        calls.lock().unwrap().clear();
+
+        execute_command(&json!({"id": "1", "action": "no-such-action"}), &mut state).await;
+        tokio::time::sleep(TAB_INTERVAL + Duration::from_millis(200)).await;
+
+        let observed = calls.lock().unwrap().clone();
+        assert!(observed.is_empty(), "{observed:?}");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_hanging_capture_does_not_stop_a_prompt_from_pausing_the_poller() {
+        use crate::native::stream::{IdleActivity, StreamServer};
+
+        let (ff, events, calls) = fake_session_with_replies(|request| {
+            if request["method"] == "browsingContext.captureScreenshot" {
+                FakeReply::Silent
+            } else {
+                FakeReply::Result(json!({}))
+            }
+        })
+        .await;
+        let activity = Arc::new(IdleActivity::new());
+        let (server, _slot) =
+            StreamServer::start_without_client(0, "firefox-prompt".into(), true, activity)
+                .await
+                .unwrap();
+        let server = Arc::new(server);
+        let live = FirefoxLive {
+            bidi: Arc::clone(&ff.bidi),
+            context: ff.top_context.clone(),
+            contexts: ff.context_parents.clone(),
+            tabs: ff.tab_index(),
+            modifiers: Default::default(),
+        };
+        let _poller = spawn_poller(live, Arc::clone(&server));
+        let _ws = dashboard(&server).await;
+
+        assert_eq!(
+            wait_for(
+                &calls,
+                "browsingContext.captureScreenshot",
+                1,
+                Duration::from_secs(5)
+            )
+            .await,
+            1,
+            "the poller should have one capture outstanding"
+        );
+        events
+            .send(
+                json!({"type": "event", "method": "browsingContext.userPromptOpened",
+                "params": {"context": "ctx-active", "type": "alert"}}),
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        events
+            .send(
+                json!({"type": "event", "method": "browsingContext.userPromptClosed",
+                "params": {"context": "ctx-active"}}),
+            )
+            .unwrap();
+
+        assert_eq!(
+            wait_for(
+                &calls,
+                "browsingContext.captureScreenshot",
+                2,
+                Duration::from_millis(1200)
+            )
+            .await,
+            2,
+            "the prompt should pause and resume the poller while the capture hangs"
+        );
+        server.shutdown().await;
+    }
 
     #[test]
     fn key_messages_become_key_actions_and_unknown_events_are_dropped() {
