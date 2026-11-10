@@ -1078,14 +1078,12 @@ fn strip_ignored_html_blocks(html: &str) -> String {
             .next()
             .unwrap_or("");
         if ["script", "style", "noscript", "svg", "head"].contains(&name) {
-            // Skip the entire block before scanning another tag. Raw text in
-            // styles and scripts may contain '<' without starting an element.
             out.push_str(&html[cursor..start]);
-            let close = format!("</{name}>");
-            cursor = lower[after_start..]
-                .find(&close)
-                .map(|relative| after_start + relative + close.len())
-                .unwrap_or(html.len());
+            cursor = if name == "svg" && lower[start + 1..after_start].ends_with("/>") {
+                after_start
+            } else {
+                ignored_html_block_end(&lower, after_start, name)
+            };
             search = cursor;
         } else {
             search = after_start;
@@ -1093,6 +1091,88 @@ fn strip_ignored_html_blocks(html: &str) -> String {
     }
     out.push_str(&html[cursor..]);
     out
+}
+
+/// Skip a container without treating child raw text, attributes or comments as its end tag.
+fn ignored_html_block_end<'a>(input: &'a str, mut cursor: usize, name: &'a str) -> usize {
+    let mut containers = vec![name];
+    let mut svg_depth = usize::from(name == "svg");
+    while let Some(&current) = containers.last() {
+        if matches!(
+            current,
+            "script" | "style" | "title" | "textarea" | "xmp" | "iframe" | "noembed" | "noframes"
+        ) {
+            cursor = raw_html_text_end(input, cursor, current);
+            containers.pop();
+            continue;
+        }
+        let Some(relative) = input[cursor..].find('<') else {
+            return input.len();
+        };
+        let start = cursor + relative;
+        if input[start..].starts_with("<![cdata[") && svg_depth > 0 {
+            cursor = input[start + 9..]
+                .find("]]>")
+                .map(|relative| start + 9 + relative + 3)
+                .unwrap_or(input.len());
+            continue;
+        }
+        cursor = html_tag_end(input, start);
+        let raw = &input[start + 1..cursor];
+        let closing = raw.starts_with('/');
+        let name = raw
+            .strip_prefix('/')
+            .unwrap_or(raw)
+            .split(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+            .next()
+            .unwrap_or("");
+        if closing {
+            if name == current {
+                containers.pop();
+                if name == "svg" {
+                    svg_depth -= 1;
+                }
+            }
+        } else if matches!(
+            name,
+            "head"
+                | "noscript"
+                | "svg"
+                | "script"
+                | "style"
+                | "title"
+                | "textarea"
+                | "xmp"
+                | "iframe"
+                | "noembed"
+                | "noframes"
+        ) && !(name == "svg" && raw.ends_with("/>"))
+        {
+            containers.push(name);
+            if name == "svg" {
+                svg_depth += 1;
+            }
+        }
+    }
+    cursor
+}
+
+/// Raw text recognizes only its own end tag, including a whitespace-delimited closing tag.
+fn raw_html_text_end(input: &str, mut cursor: usize, name: &str) -> usize {
+    while let Some(relative) = input[cursor..].find("</") {
+        let start = cursor + relative;
+        let after_name = start + 2 + name.len();
+        if input[start + 2..].starts_with(name)
+            && input
+                .as_bytes()
+                .get(after_name)
+                .is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>'))
+        {
+            return html_tag_end(input, start);
+        }
+        cursor = start + 2;
+    }
+    input.len()
 }
 
 fn handle_html_tag(raw: &str, out: &mut String, in_pre: &mut bool) {
@@ -1277,6 +1357,75 @@ mod tests {
         ] {
             assert_eq!(html_to_markdownish(html), "Visible", "{html}");
         }
+    }
+
+    #[test]
+    fn html_to_markdownish_keeps_parent_end_tags_inside_child_content() {
+        for html in [
+            r#"<head><script>const end = "</head>"; hidden();</script></head><p>Visible</p>"#,
+            r#"<head><style>.x { content: "</head>"; }</style></head><p>Visible</p>"#,
+            r#"<head><title>literal </head> text</title></head><p>Visible</p>"#,
+            r#"<head><!-- </head> -->hidden</head><p>Visible</p>"#,
+            r#"<head><meta content="</head>">hidden</head><p>Visible</p>"#,
+            r#"<svg><script>const end = "</svg>"; hidden();</script></svg><p>Visible</p>"#,
+        ] {
+            assert_eq!(html_to_markdownish(html), "Visible", "{html}");
+        }
+    }
+
+    #[test]
+    fn html_to_markdownish_skips_nested_ignored_containers() {
+        for html in [
+            "<svg><svg>inner</svg>outer</svg><p>Visible</p>",
+            "<noscript><noscript>inner</noscript>outer</noscript><p>Visible</p>",
+            r#"<head><noscript><style>.x { content: "</head>"; }</style>hidden</noscript></head><p>Visible</p>"#,
+            "<svg><![CDATA[</svg> hidden]]>outer</svg><p>Visible</p>",
+        ] {
+            assert_eq!(html_to_markdownish(html), "Visible", "{html}");
+        }
+    }
+
+    #[test]
+    fn html_to_markdownish_accepts_ignored_end_tag_whitespace() {
+        for html in [
+            "<script>hidden();</script \t\n><p>Visible</p>",
+            "<style>.x { color: red; }</STYLE\r\n ><p>Visible</p>",
+            "<noscript>hidden</noscript\t><p>Visible</p>",
+            "<svg/><p>Visible</p>",
+            "<svg><svg />hidden</svg><p>Visible</p>",
+        ] {
+            assert_eq!(html_to_markdownish(html), "Visible", "{html}");
+        }
+    }
+
+    #[test]
+    fn html_to_markdownish_only_matches_the_raw_text_end_tag() {
+        for html in [
+            r#"<script>const name = "<script>"; hidden();</script><p>Visible</p>"#,
+            r#"<script>const fake = "</scripted>"; hidden();</script><p>Visible</p>"#,
+            r#"<head><script>const fake = "</scripted> </head>"; hidden();</script></head><p>Visible</p>"#,
+        ] {
+            assert_eq!(html_to_markdownish(html), "Visible", "{html}");
+        }
+        // A real script end tag closes the raw-text element even inside a JS string.
+        assert_eq!(
+            html_to_markdownish(r#"<script>const x = "</script>";<p>Visible</p>"#),
+            "\";\n\nVisible"
+        );
+    }
+
+    #[test]
+    fn html_to_markdownish_handles_unclosed_and_deep_ignored_containers() {
+        assert_eq!(
+            html_to_markdownish(r#"<p>Before</p><head><script>const end = "</head>"; hidden();"#),
+            "Before"
+        );
+        let html = format!(
+            "{}<script>const end = '</svg>';</script>hidden{}<p>Visible</p>",
+            "<svg>".repeat(4096),
+            "</svg>".repeat(4096)
+        );
+        assert_eq!(html_to_markdownish(&html), "Visible");
     }
 
     #[test]
