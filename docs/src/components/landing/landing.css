@@ -9,20 +9,6 @@
   --font-mono: var(--font-geist-mono);
 }
 
-/* Navbar: show only the Vercel triangle, not the Labs wordmark. */
-header a[aria-label='Vercel Labs'] svg {
-  display: none;
-}
-
-header a[aria-label='Vercel Labs']::before {
-  content: '';
-  display: block;
-  width: 20px;
-  height: 18px;
-  background-color: currentColor;
-  clip-path: polygon(50% 0, 100% 100%, 0 100%);
-}
-
 body {
   background-color: var(--ds-background-200) !important;
   color: var(--ds-gray-1000);
