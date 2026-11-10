@@ -102,6 +102,51 @@ fn boundary_origin(data: &serde_json::Value) -> Option<&str> {
     None
 }
 
+/// Plain text for a `get attr` result.
+///
+/// A present attribute prints its string, including the empty string.
+/// `Element.getAttribute` returns JSON null when the attribute is absent.
+/// That case prints `null`, which is distinct from a blank line and from
+/// the generic success line used by mutating commands such as click and fill.
+/// `--json` still reports `"value": null` or `"value": ""`.
+pub(crate) fn format_attribute_text(
+    action: Option<&str>,
+    data: &serde_json::Value,
+) -> Option<String> {
+    let recognized = match action {
+        Some("getattribute") => true,
+        Some(_) => false,
+        None => is_attribute_payload(data),
+    };
+    if !recognized {
+        return None;
+    }
+    match data.get("value")? {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Null => Some("null".to_string()),
+        _ => None,
+    }
+}
+
+/// `{ value, origin }` is the `get attr` payload. Storage lookups also carry
+/// `value` (null when the key is unset) but include `key` and no page origin.
+fn is_attribute_payload(data: &serde_json::Value) -> bool {
+    let Some(obj) = data.as_object() else {
+        return false;
+    };
+    if obj.get("origin").and_then(|value| value.as_str()).is_none()
+        || !obj.contains_key("value")
+        || obj.contains_key("key")
+    {
+        return false;
+    }
+    // Leave payloads that already have a more specific text field alone.
+    const SPECIFIC: &[&str] = &[
+        "snapshot", "text", "html", "report", "content", "title", "url", "path",
+    ];
+    SPECIFIC.iter().all(|key| !obj.contains_key(*key))
+}
+
 fn format_storage_value(value: &serde_json::Value) -> String {
     value
         .as_str()
@@ -1165,6 +1210,13 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         // HTML
         if let Some(html) = data.get("html").and_then(|v| v.as_str()) {
             print_with_boundaries(html, origin, opts);
+            return;
+        }
+        // Attribute reads, including a missing attribute (JSON null).
+        // Other value-bearing commands (get value, set value) fall through
+        // to the string branch below.
+        if let Some(text) = format_attribute_text(action, data) {
+            println!("{text}");
             return;
         }
         // Value
@@ -2863,6 +2915,8 @@ Subcommands:
   html <selector>            Get inner HTML of element
   value <selector>           Get value of input element
   attr <selector> <name>     Get attribute value
+                             A missing attribute prints null.
+                             An empty attribute prints a blank line.
   title                      Get page title
   url                        Get current URL
   count <selector>           Count matching elements
@@ -4998,6 +5052,7 @@ mod tests {
         format_storage_text, format_vitals_text, format_webmcp_context, format_webmcp_text,
         format_webmcp_tool_text, format_with_boundaries, OutputOptions,
     };
+    use crate::connection::Response;
     use serde_json::json;
 
     #[test]
@@ -5097,6 +5152,110 @@ mod tests {
         let rendered = format_storage_text(&data).unwrap();
 
         assert_eq!(rendered, "token: abc123");
+    }
+
+    #[test]
+    fn get_attr_text_distinguishes_missing_from_empty() {
+        let origin = "https://example.test/page";
+        let present = json!({ "value": "1", "origin": origin });
+        let empty = json!({ "value": "", "origin": origin });
+        let missing = json!({ "value": null, "origin": origin });
+        let literal_null = json!({ "value": "null", "origin": origin });
+
+        assert_eq!(
+            super::format_attribute_text(Some("getattribute"), &present).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            super::format_attribute_text(Some("getattribute"), &empty).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            super::format_attribute_text(Some("getattribute"), &missing).as_deref(),
+            Some("null")
+        );
+        // The attribute value "null" prints the same word. `--json` still
+        // separates that string from an absent attribute.
+        assert_eq!(
+            super::format_attribute_text(Some("getattribute"), &literal_null).as_deref(),
+            Some("null")
+        );
+        assert_eq!(
+            super::format_attribute_text(None, &missing).as_deref(),
+            Some("null")
+        );
+        assert_eq!(
+            super::format_attribute_text(None, &empty).as_deref(),
+            Some("")
+        );
+
+        let with_lifecycle = json!({
+            "value": null,
+            "origin": origin,
+            "lifecycle": { "restartedBackground": true }
+        });
+        assert_eq!(
+            super::format_attribute_text(Some("getattribute"), &with_lifecycle).as_deref(),
+            Some("null")
+        );
+        assert_eq!(
+            super::format_attribute_text(None, &with_lifecycle).as_deref(),
+            Some("null")
+        );
+
+        assert_eq!(
+            super::format_attribute_text(None, &json!({ "key": "token", "value": null })),
+            None
+        );
+        assert_eq!(
+            super::format_attribute_text(None, &json!({ "value": "" })),
+            None
+        );
+        assert_eq!(super::format_attribute_text(Some("click"), &missing), None);
+        assert_ne!(
+            super::format_attribute_text(Some("getattribute"), &missing).as_deref(),
+            Some("✓ Done")
+        );
+        assert_ne!(
+            super::format_attribute_text(Some("getattribute"), &empty).as_deref(),
+            Some("null")
+        );
+
+        let missing_json = serde_json::to_string(&Response {
+            success: true,
+            data: Some(missing),
+            error: None,
+            code: None,
+            warning: None,
+            recorded: None,
+        })
+        .unwrap();
+        let empty_json = serde_json::to_string(&Response {
+            success: true,
+            data: Some(empty),
+            error: None,
+            code: None,
+            warning: None,
+            recorded: None,
+        })
+        .unwrap();
+        let literal_json = serde_json::to_string(&Response {
+            success: true,
+            data: Some(literal_null),
+            error: None,
+            code: None,
+            warning: None,
+            recorded: None,
+        })
+        .unwrap();
+        assert!(missing_json.contains("\"value\":null"), "{missing_json}");
+        assert!(empty_json.contains("\"value\":\"\""), "{empty_json}");
+        assert!(
+            literal_json.contains("\"value\":\"null\""),
+            "{literal_json}"
+        );
+        assert_ne!(missing_json, empty_json);
+        assert_ne!(missing_json, literal_json);
     }
 
     #[test]

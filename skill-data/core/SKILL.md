@@ -116,6 +116,8 @@ agent-browser get url                                # also: title, value, html,
 
 Use `read` for documentation and other text pages. A read with a URL fetches over HTTP without launching Chrome.
 
+`get attr` prints the attribute value. A missing attribute prints `null`. An empty attribute prints a blank line. `--json` reports `"value": null` or `"value": ""`.
+
 ## Interacting
 
 ```bash
