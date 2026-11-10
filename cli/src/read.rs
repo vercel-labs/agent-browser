@@ -1065,52 +1065,34 @@ fn html_tag_end(input: &str, start: usize) -> usize {
 }
 
 fn strip_ignored_html_blocks(html: &str) -> String {
-    let mut remaining = html.to_string();
-    for tag in ["script", "style", "noscript", "svg", "head"] {
-        remaining = strip_tag_block(&remaining, tag);
-    }
-    remaining
-}
-
-fn strip_tag_block(input: &str, tag: &str) -> String {
     let mut out = String::new();
     let mut cursor = 0;
-    let lower = input.to_ascii_lowercase();
-    let close = format!("</{}>", tag);
+    let mut search = 0;
+    let lower = html.to_ascii_lowercase();
 
-    while let Some(start) = find_open_tag(&lower, tag, cursor) {
-        out.push_str(&input[cursor..start]);
-        let after_start = html_tag_end(&lower, start);
-        if let Some(close_rel) = lower[after_start..].find(&close) {
-            cursor = after_start + close_rel + close.len();
-        } else {
-            cursor = input.len();
-        }
-    }
-    out.push_str(&input[cursor..]);
-    out
-}
-
-fn find_open_tag(lower: &str, tag: &str, cursor: usize) -> Option<usize> {
-    let needle = format!("<{}", tag);
-    let mut search = cursor;
     while let Some(relative) = lower[search..].find('<') {
         let start = search + relative;
-        if lower[start..].starts_with(&needle) {
-            let after_name = start + needle.len();
-            let is_boundary = lower
-                .as_bytes()
-                .get(after_name)
-                .map(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' | b'/' | b'>'))
-                .unwrap_or(true);
-            if is_boundary {
-                return Some(start);
-            }
+        let after_start = html_tag_end(&lower, start);
+        let name = lower[start + 1..after_start]
+            .split(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+            .next()
+            .unwrap_or("");
+        if ["script", "style", "noscript", "svg", "head"].contains(&name) {
+            // Skip the entire block before scanning another tag. Raw text in
+            // styles and scripts may contain '<' without starting an element.
+            out.push_str(&html[cursor..start]);
+            let close = format!("</{name}>");
+            cursor = lower[after_start..]
+                .find(&close)
+                .map(|relative| after_start + relative + close.len())
+                .unwrap_or(html.len());
+            search = cursor;
+        } else {
+            search = after_start;
         }
-        // A tag name inside an attribute or comment is not an element.
-        search = html_tag_end(lower, start);
     }
-    None
+    out.push_str(&html[cursor..]);
+    out
 }
 
 fn handle_html_tag(raw: &str, out: &mut String, in_pre: &mut bool) {
@@ -1283,6 +1265,18 @@ mod tests {
     fn html_to_markdownish_respects_quoted_attribute_delimiters() {
         let html = r#"<h1 title="x > y">Title</h1><p title='中文 > text'>Visible text</p>"#;
         assert_eq!(html_to_markdownish(html), "# Title\n\nVisible text");
+    }
+
+    #[test]
+    fn html_to_markdownish_skips_raw_text_before_other_ignored_blocks() {
+        for html in [
+            r#"<style>.x::before { content: "<"; }</style><script>hidden()</script><p>Visible</p>"#,
+            r#"<script>const x = "<";</script><style>.hidden { color: red; }</style><p>Visible</p>"#,
+            r#"<style>.x { content: '<'; }</style><script>one()</script><style>.y { content: "<"; }</style><script>two()</script><p>Visible</p>"#,
+            r#"<noscript><style>.x { content: "<"; }</style>hidden</noscript><script>hidden()</script><p>Visible</p>"#,
+        ] {
+            assert_eq!(html_to_markdownish(html), "Visible", "{html}");
+        }
     }
 
     #[test]
