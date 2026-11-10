@@ -3906,6 +3906,69 @@ async fn e2e_press_dispatches_single_keystroke() {
     assert_success(&resp);
 }
 
+/// `press` must not return until the page has run the frame and macrotask a
+/// keydown handler queued. Regression test for #2510: a key sequence used to
+/// return as soon as Chrome had dispatched the key events, so a click issued
+/// right after could land before a `setTimeout(0)` the keys scheduled had
+/// fired (e.g. MUI's ClickAwayListener arming itself on mount).
+#[tokio::test]
+#[ignore]
+async fn e2e_press_waits_for_queued_macrotasks() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true, "args": ["--no-sandbox", "--disable-dev-shm-usage"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The keydown handler arms the flag behind one animation frame and one
+    // macrotask, but the frame callback first burns 120ms of render work,
+    // like the React app in the issue (whose keystrokes delayed the
+    // mount-time timer by 86-95ms). Headless frames run too fast for a
+    // plain frame gate to fail without the fix, so the busy frame makes the
+    // race deterministic: `press` must have waited for both before
+    // returning, so the flag is already true; without the settle it would
+    // still be false.
+    let html = concat!(
+        "data:text/html,<html><body><script>",
+        "window.__armed=false;",
+        "addEventListener('keydown',e=>{if(e.key==='Enter'){requestAnimationFrame(()=>{var t=performance.now();while(performance.now()-t<120){}setTimeout(()=>{window.__armed=true;},0);});}});",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "press", "key": "Enter" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The flag can only be true if `press` waited out the busy frame and
+    // the macrotask queued after it.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "window.__armed" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!(true),
+        "press must wait for the frame and macrotask the keydown handler queued"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Raw mouse regressions
 // ---------------------------------------------------------------------------

@@ -406,6 +406,36 @@ pub async fn press_key_with_modifiers(
     Ok(())
 }
 
+/// Wait until the page has run one animation frame and one macrotask.
+///
+/// Key handlers often schedule work behind a frame or a `setTimeout(0)`
+/// (e.g. MUI's ClickAwayListener arms itself on a mount-time timer), so
+/// returning right after the key events are dispatched lets the next command
+/// land before that work has run. Evaluating a promise that resolves after
+/// one frame plus one timer covers exactly the tasks the keys queued: timers
+/// of equal delay run in queue order, so a `setTimeout(0)` scheduled by a
+/// key handler runs before this one.
+///
+/// Best-effort: if the page has no script context (e.g. a `chrome://`
+/// page) the evaluation fails, and the key events were already dispatched,
+/// so a failed settle probe must not fail the command. The fallback timer
+/// bounds the wait at 5s for pages whose frames never fire (e.g. a hidden
+/// tab).
+pub async fn wait_for_settle(client: &CdpClient, session_id: &str) {
+    let _ = client
+        .send_command_typed::<_, EvaluateResult>(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression: "new Promise((resolve) => { setTimeout(() => resolve(false), 5000); requestAnimationFrame(() => setTimeout(() => resolve(true), 0)); })"
+                    .to_string(),
+                return_by_value: Some(true),
+                await_promise: Some(true),
+            },
+            Some(session_id),
+        )
+        .await;
+}
+
 pub async fn scroll(
     client: &CdpClient,
     session_id: &str,
