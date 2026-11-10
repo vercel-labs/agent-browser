@@ -438,6 +438,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "NetworkServiceInProcess".to_string(),
     ];
     if options.webmcp {
+        // Chromium 157 removed the WebMCPTesting alias, so enable the
+        // WebMCP feature directly. The legacy flag stays so older managed
+        // Chrome builds keep working.
+        enable_features.push("WebMCP".to_string());
         enable_features.push("WebMCPTesting".to_string());
         enable_features.push("DevToolsWebMCPSupport".to_string());
     }
@@ -2476,13 +2480,19 @@ exec sleep 60
     #[test]
     fn test_build_args_enables_webmcp_by_default() {
         let result = build_chrome_args(&LaunchOptions::default()).unwrap();
-        let features = result
+        let features: Vec<&str> = result
             .args
             .iter()
-            .find(|arg| arg.starts_with("--enable-features="))
-            .unwrap();
-        assert!(features.contains("WebMCPTesting"));
-        assert!(features.contains("DevToolsWebMCPSupport"));
+            .find_map(|arg| arg.strip_prefix("--enable-features="))
+            .unwrap()
+            .split(',')
+            .collect();
+        // Chromium 157 dropped the WebMCPTesting alias, so the WebMCP
+        // feature itself must be enabled. The legacy flag stays for older
+        // managed Chrome builds.
+        assert!(features.contains(&"WebMCP"));
+        assert!(features.contains(&"WebMCPTesting"));
+        assert!(features.contains(&"DevToolsWebMCPSupport"));
     }
 
     #[test]
@@ -2492,13 +2502,16 @@ exec sleep 60
             ..Default::default()
         })
         .unwrap();
-        let features = result
+        let features: Vec<&str> = result
             .args
             .iter()
-            .find(|arg| arg.starts_with("--enable-features="))
-            .unwrap();
-        assert!(!features.contains("WebMCPTesting"));
-        assert!(!features.contains("DevToolsWebMCPSupport"));
+            .find_map(|arg| arg.strip_prefix("--enable-features="))
+            .unwrap()
+            .split(',')
+            .collect();
+        assert!(!features.contains(&"WebMCP"));
+        assert!(!features.contains(&"WebMCPTesting"));
+        assert!(!features.contains(&"DevToolsWebMCPSupport"));
     }
 
     #[test]
