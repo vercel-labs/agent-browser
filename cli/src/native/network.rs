@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use super::cdp::client::CdpClient;
 
@@ -600,25 +600,25 @@ pub struct ErrorEntry {
 }
 
 pub struct EventTracker {
-    pub console_entries: Vec<ConsoleEntry>,
-    pub error_entries: Vec<ErrorEntry>,
+    pub console_entries: VecDeque<ConsoleEntry>,
+    pub error_entries: VecDeque<ErrorEntry>,
     pub max_entries: usize,
 }
 
 impl EventTracker {
     pub fn new() -> Self {
         Self {
-            console_entries: Vec::new(),
-            error_entries: Vec::new(),
+            console_entries: VecDeque::new(),
+            error_entries: VecDeque::new(),
             max_entries: 1000,
         }
     }
 
     pub fn add_console(&mut self, level: &str, text: &str, args: Vec<Value>) {
         if self.console_entries.len() >= self.max_entries {
-            self.console_entries.remove(0);
+            self.console_entries.pop_front();
         }
-        self.console_entries.push(ConsoleEntry {
+        self.console_entries.push_back(ConsoleEntry {
             level: level.to_string(),
             text: text.to_string(),
             args,
@@ -633,9 +633,9 @@ impl EventTracker {
         col: Option<i64>,
     ) {
         if self.error_entries.len() >= self.max_entries {
-            self.error_entries.remove(0);
+            self.error_entries.pop_front();
         }
-        self.error_entries.push(ErrorEntry {
+        self.error_entries.push_back(ErrorEntry {
             text: text.to_string(),
             url: url.map(String::from),
             line,
@@ -815,6 +815,57 @@ mod tests {
         assert!(script.contains("return worker"));
         assert!(!script.contains("_wrapWorkerWithCspFallback"));
         assert!(!script.contains("return new OrigCtor(checkedUrl, options)"));
+    }
+
+    #[test]
+    fn bounded_event_queues_preserve_order_after_wraparound_and_clear() {
+        let mut tracker = EventTracker::new();
+        tracker.max_entries = 3;
+        for i in 0..10 {
+            tracker.add_console("log", &format!("log {i}"), vec![json!(i)]);
+            tracker.add_error(&format!("error {i}"), Some("app.js"), Some(i), Some(1));
+        }
+        let console = tracker.get_console_json();
+        let errors = tracker.get_errors_json();
+        for (index, i) in (7..10).enumerate() {
+            assert_eq!(console["messages"][index]["text"], format!("log {i}"));
+            assert_eq!(console["messages"][index]["args"], json!([i]));
+            assert_eq!(errors["errors"][index]["text"], format!("error {i}"));
+            assert_eq!(errors["errors"][index]["line"], i);
+        }
+        assert_eq!(tracker.console_entries.len(), 3);
+        assert_eq!(tracker.error_entries.len(), 3);
+
+        tracker.clear_console();
+        tracker.clear_errors();
+        tracker.add_console("info", "new log", vec![]);
+        tracker.add_error("new error", None, None, None);
+        assert_eq!(
+            tracker.get_console_json(),
+            json!({ "messages": [{ "type": "info", "text": "new log" }] })
+        );
+        assert_eq!(
+            tracker.get_errors_json(),
+            json!({ "errors": [{ "text": "new error", "url": null, "line": null, "column": null }] })
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_bounded_event_queues() {
+        let mut tracker = EventTracker::new();
+        let start = std::time::Instant::now();
+        for _ in 0..200_000 {
+            tracker.add_console("log", "message from page", vec![]);
+            tracker.add_error("page error", Some("app.js"), Some(12), Some(3));
+        }
+        std::hint::black_box(&tracker);
+        println!(
+            "bench_bounded_event_queues: events=400000 capacity=1000 elapsed_ms={:.2}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+        assert_eq!(tracker.console_entries.len(), 1000);
+        assert_eq!(tracker.error_entries.len(), 1000);
     }
 
     #[test]
