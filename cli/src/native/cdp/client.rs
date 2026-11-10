@@ -824,6 +824,13 @@ impl CdpClient {
     pub(crate) async fn pending_len(&self) -> usize {
         self.pending.lock().await.len()
     }
+
+    /// Test-only: count of in-flight raw commands still awaiting a response,
+    /// so a test can assert close, reader EOF and cancellation released them.
+    #[cfg(test)]
+    pub(crate) async fn raw_pending_len(&self) -> usize {
+        self.raw_pending.lock().await.len()
+    }
 }
 
 /// Lightweight handle for the inspect WebSocket proxy, holding only
@@ -1211,6 +1218,126 @@ mod tests {
             CONNECTION_CLOSED_ERROR
         );
 
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_releases_raw_pending_and_rejects_later_raw_commands() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (command_seen_tx, command_seen_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.next().await;
+            let _ = command_seen_tx.send(());
+            while ws.next().await.is_some() {}
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let command_client = client.clone();
+        let command = tokio::spawn(async move {
+            command_client
+                .send_command_typed_raw::<_, RawNodes>("Never.responds", &json!({}), None)
+                .await
+        });
+
+        command_seen_rx.await.unwrap();
+        assert_eq!(client.raw_pending_len().await, 1);
+        client.close().await;
+
+        let command_error = tokio::time::timeout(Duration::from_secs(1), command)
+            .await
+            .expect("raw command should be released")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(command_error, "CDP response channel closed");
+        assert_eq!(client.raw_pending_len().await, 0);
+
+        assert_eq!(
+            client
+                .send_command_typed_raw::<_, RawNodes>("Browser.getVersion", &json!({}), None)
+                .await
+                .unwrap_err(),
+            CONNECTION_CLOSED_ERROR
+        );
+        assert_eq!(client.raw_pending_len().await, 0);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reader_eof_releases_raw_pending_commands() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.next().await;
+            // Drop the connection without answering the command.
+            drop(ws);
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let command_client = client.clone();
+        let command = tokio::spawn(async move {
+            command_client
+                .send_command_typed_raw::<_, RawNodes>("Never.responds", &json!({}), None)
+                .await
+        });
+
+        let command_error = tokio::time::timeout(Duration::from_secs(1), command)
+            .await
+            .expect("reader EOF should release the raw command")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(command_error, "CDP response channel closed");
+        assert_eq!(client.raw_pending_len().await, 0);
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_raw_command_leaves_no_pending_entry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (command_seen_tx, command_seen_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.next().await;
+            let _ = command_seen_tx.send(());
+            while ws.next().await.is_some() {}
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let params = json!({});
+        let mut command =
+            Box::pin(client.send_command_typed_raw::<_, RawNodes>("Never.responds", &params, None));
+
+        tokio::select! {
+            _ = command_seen_rx => {}
+            result = &mut command => panic!("raw command should not complete: {result:?}"),
+        }
+        assert_eq!(client.raw_pending_len().await, 1);
+
+        // Drop the future mid-await, as an outer timeout would. The guard
+        // clears the entry from a spawned task, so give it a moment to run.
+        drop(command);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.raw_pending_len().await != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled raw command should leave no pending entry");
+        assert_eq!(client.pending_len().await, 0);
+
+        client.close().await;
         server.await.unwrap();
     }
 
