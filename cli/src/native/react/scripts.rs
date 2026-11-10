@@ -207,6 +207,12 @@ pub const RENDERS_INIT: &str = r#"
   // commit. React DevTools reads the same flag to decide whether a fiber
   // rendered.
   const PERFORMED_WORK = 1;
+  // React 16 stores effect flags in `effectTag`; React 17 renamed the field
+  // to `flags`. The bit values did not change, so read whichever field the
+  // running React provides.
+  function fiberFlags(fiber) {
+    return typeof fiber.flags === "number" ? fiber.flags : fiber.effectTag || 0;
+  }
   const data = {};
   const fps = { frames: [], last: 0, rafId: 0 };
 
@@ -335,7 +341,7 @@ pub const RENDERS_INIT: &str = r#"
     if (!fiber.alternate) return true;
     let child = fiber.child;
     while (child) {
-      if (typeof child.type === "string" && (child.flags & 6) > 0) return true;
+      if (typeof child.type === "string" && (fiberFlags(child) & 6) > 0) return true;
       child = child.sibling;
     }
     return false;
@@ -357,8 +363,8 @@ pub const RENDERS_INIT: &str = r#"
       const didRender =
         alt === null ||
         (tag === 2
-          ? fiber.child !== alt.child || (fiber.flags & PERFORMED_WORK) !== 0
-          : (fiber.flags & PERFORMED_WORK) !== 0);
+          ? fiber.child !== alt.child || (fiberFlags(fiber) & PERFORMED_WORK) !== 0
+          : (fiberFlags(fiber) & PERFORMED_WORK) !== 0);
       if (didRender) {
         const name = getName(fiber);
         if (name) {
@@ -870,6 +876,8 @@ mod tests {
     /// any flag being set, or on props/state differing from a stale
     /// alternate, re-counts bailed-out fibers on every commit (stale flags
     /// survive, and fibers never updated since mount have no alternate).
+    /// On React 16 the flags live in `effectTag` instead of `flags`, so the
+    /// profiler reads whichever field the running React provides.
     #[test]
     fn renders_profiler_counts_only_fibers_that_rendered() {
         assert!(
@@ -877,8 +885,12 @@ mod tests {
             "RENDERS_INIT must define the PerformedWork flag value"
         );
         assert!(
-            RENDERS_INIT.contains("(fiber.flags & PERFORMED_WORK) !== 0"),
+            RENDERS_INIT.contains("(fiberFlags(fiber) & PERFORMED_WORK) !== 0"),
             "RENDERS_INIT must gate counting on the PerformedWork flag"
+        );
+        assert!(
+            RENDERS_INIT.contains("fiber.effectTag"),
+            "RENDERS_INIT must read effectTag for React 16 fibers"
         );
         assert!(
             RENDERS_INIT.contains("fiber.child !== alt.child"),
