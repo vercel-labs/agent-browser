@@ -284,7 +284,7 @@ pub async fn set_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     send_scoped(session(state)?, &context, self::user_agent(user_agent)).await?;
     let ff = session(state)?;
     ff.emulation.write().unwrap().user_agent = Some(user_agent.to_string());
-    ff.record_user_agent_override();
+    ff.record_user_agent(user_agent);
     Ok(json!({ "userAgent": user_agent }))
 }
 

@@ -5939,6 +5939,7 @@ async fn launch_firefox(
         }
     }
     state.engine = "firefox".to_string();
+    state.settings.set(Key::Engine, Value::from("firefox"));
     if let Some(target) = cdp {
         state.attached_target = Some(AttachedTarget::Firefox(target));
     }
@@ -6246,13 +6247,10 @@ async fn apply_settings_patch(
         let deferred: Vec<Value> = full
             .changes
             .iter()
-            .filter(|change| change.effect() == Effect::Launch)
+            .filter(|change| change.effect == Effect::Launch)
             .map(|change| change.to_json(false))
             .collect();
-        (
-            state.settings.plan(&patch.without_launch_settings()),
-            deferred,
-        )
+        (full.live_only(&state.settings), deferred)
     };
     let changed = |key: Key| plan.changes.iter().any(|change| change.key == key);
 
@@ -6283,7 +6281,7 @@ async fn apply_settings_patch(
         .changes
         .iter()
         .map(|change| {
-            let applied = match change.effect() {
+            let applied = match change.effect {
                 Effect::Live => true,
                 // The domain filter is installed at once, browser or not.
                 Effect::Launch => had_browser || change.key == Key::AllowedDomains,
@@ -6303,7 +6301,7 @@ async fn apply_settings_patch(
         let mut keys: Vec<Key> = plan
             .changes
             .iter()
-            .filter(|change| change.effect() == Effect::Launch)
+            .filter(|change| change.effect == Effect::Launch)
             .map(|change| change.key)
             .collect();
         if keys.contains(&Key::ClearCaCert) {
@@ -6324,6 +6322,12 @@ async fn apply_settings_patch(
         None
     };
     let (next, relaunch) = (plan.next, plan.relaunch);
+
+    if !relaunch {
+        if let Some(ff) = state.firefox.as_mut() {
+            ff.apply_attached_settings(&next.launch_options()).await?;
+        }
+    }
 
     if was(Key::DefaultTimeout) {
         state.default_timeout_ms = next.default_timeout_ms();

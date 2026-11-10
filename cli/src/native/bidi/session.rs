@@ -33,12 +33,12 @@ const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptClosed",
 ];
 
-/// Changes a session made to a browser someone else runs. Firefox keeps them after
-/// `session.end`, so close undoes every one the session recorded.
+/// What a session changed in a browser someone else runs. Firefox keeps these
+/// after `session.end`, so close puts back what the session set.
 #[derive(Default)]
 struct AttachedChanges {
-    download_behavior: bool,
-    user_agent: bool,
+    download_path: Option<String>,
+    user_agent: Option<String>,
 }
 
 /// A Firefox session. Dropping it releases protocol clients and kills only an owned process.
@@ -263,7 +263,7 @@ impl FirefoxSession {
                 return Err(error);
             }
         };
-        if let Err(error) = session.apply_launch_options(options).await {
+        if let Err(error) = session.apply_attached_settings(options).await {
             session.close().await;
             return Err(error);
         }
@@ -483,21 +483,58 @@ impl FirefoxSession {
         self.is_attached() || !self.headless
     }
 
-    /// Records the overrides that close must undo in a browser someone else runs, and
-    /// applies the launch options that only take effect once the session is connected.
-    async fn apply_launch_options(&mut self, options: &LaunchOptions) -> Result<(), String> {
+    /// The tabs that are open now, so an override covers every one of them.
+    async fn open_tabs(&self, timeout: Duration) -> Result<Vec<String>, String> {
+        let tree = self
+            .bidi
+            .send_timeout("browsingContext.getTree", json!({"maxDepth": 0}), timeout)
+            .await?;
+        Ok(tree["contexts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|context| context["context"].as_str().map(str::to_owned))
+            .collect())
+    }
+
+    /// Applies the settings an attached Firefox takes in place and records what
+    /// close has to put back.
+    pub async fn apply_attached_settings(&mut self, options: &LaunchOptions) -> Result<(), String> {
         if !self.is_attached() {
             return Ok(());
         }
-        self.attached_changes.user_agent |= options.user_agent.is_some();
-        let Some(path) = options.download_path.as_deref() else {
-            return Ok(());
+        if self.attached_changes.user_agent != options.user_agent {
+            let contexts = self.open_tabs(START_TIMEOUT).await?;
+            if !contexts.is_empty() {
+                self.bidi
+                    .send(
+                        "emulation.setUserAgentOverride",
+                        json!({"userAgent": options.user_agent, "contexts": contexts}),
+                    )
+                    .await?;
+            }
+            self.emulation.write().unwrap().user_agent = options.user_agent.clone();
+            self.attached_changes.user_agent = options.user_agent.clone();
+        }
+        if self.attached_changes.download_path != options.download_path {
+            self.set_download_behavior(options.download_path.as_deref())
+                .await?;
+            self.attached_changes.download_path = options.download_path.clone();
+        }
+        Ok(())
+    }
+
+    /// Points the attached browser's downloads at `path`, or back to its own
+    /// setting for `None`.
+    async fn set_download_behavior(&self, path: Option<&str>) -> Result<(), String> {
+        let behavior = match path {
+            Some(path) => json!({"type": "allowed", "destinationFolder": path}),
+            None => Value::Null,
         };
-        self.attached_changes.download_behavior = true;
         self.bidi
             .send(
                 "browser.setDownloadBehavior",
-                json!({"downloadBehavior": {"type": "allowed", "destinationFolder": path}}),
+                json!({"downloadBehavior": behavior}),
             )
             .await
             .map(|_| ())
@@ -506,9 +543,10 @@ impl FirefoxSession {
             })
     }
 
-    /// Records that the user agent was overridden, so close resets it for a browser it does not own.
-    pub(crate) fn record_user_agent_override(&mut self) {
-        self.attached_changes.user_agent = true;
+    /// Records the user agent this session set on a browser it does not own, so
+    /// close resets it.
+    pub(crate) fn record_user_agent(&mut self, user_agent: &str) {
+        self.attached_changes.user_agent = Some(user_agent.to_string());
     }
 
     /// Undoes the overrides this session applied to a browser it does not own.
@@ -516,7 +554,7 @@ impl FirefoxSession {
         if !self.is_attached() {
             return;
         }
-        if self.attached_changes.download_behavior {
+        if self.attached_changes.download_path.is_some() {
             let _ = self
                 .bidi
                 .send_timeout(
@@ -526,8 +564,11 @@ impl FirefoxSession {
                 )
                 .await;
         }
-        if self.attached_changes.user_agent {
-            let contexts: Vec<&String> = self.tab_ids.keys().collect();
+        if self.attached_changes.user_agent.is_some() {
+            let contexts = self
+                .open_tabs(ATTACHED_RESET_TIMEOUT)
+                .await
+                .unwrap_or_default();
             if !contexts.is_empty() {
                 let _ = self
                     .bidi
@@ -1275,6 +1316,8 @@ pub(crate) mod tests {
                         error: "unknown error",
                         message: "failed",
                     }
+                } else if message["method"] == "browsingContext.getTree" {
+                    FakeReply::Result(json!({"contexts": [{"context": "ctx-active"}]}))
                 } else {
                     FakeReply::Result(json!({}))
                 }
@@ -1288,7 +1331,7 @@ pub(crate) mod tests {
                 ..LaunchOptions::default()
             };
             assert_eq!(
-                session.apply_launch_options(&options).await.is_err(),
+                session.apply_attached_settings(&options).await.is_err(),
                 reject
             );
             session.close().await;
@@ -1303,12 +1346,20 @@ pub(crate) mod tests {
                     json!("browser.setDownloadBehavior"),
                     json!({"downloadBehavior": {"type": "allowed", "destinationFolder": "/downloads"}}),
                 ));
-                expected.push((
-                    json!("browser.setDownloadBehavior"),
-                    json!({"downloadBehavior": null}),
-                ));
+                if !reject {
+                    expected.push((
+                        json!("browser.setDownloadBehavior"),
+                        json!({"downloadBehavior": null}),
+                    ));
+                }
             }
             if user_agent.is_some() {
+                expected.push((json!("browsingContext.getTree"), json!({"maxDepth": 0})));
+                expected.push((
+                    json!("emulation.setUserAgentOverride"),
+                    json!({"userAgent": "Agent/1.0", "contexts": ["ctx-active"]}),
+                ));
+                expected.push((json!("browsingContext.getTree"), json!({"maxDepth": 0})));
                 expected.push((
                     json!("emulation.setUserAgentOverride"),
                     json!({"userAgent": null, "contexts": ["ctx-active"]}),

@@ -7,6 +7,7 @@
 //! its environment.
 
 // Accessors the tests use have no non-test caller yet.
+mod attach;
 #[allow(dead_code)]
 mod patch;
 mod plan;

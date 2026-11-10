@@ -1044,6 +1044,7 @@ fn plan_is_pure_and_next_holds_the_requested_values() {
             key: Key::Profile,
             requested: Requested::Set(json!("/b")),
             running: Some(json!("/a")),
+            effect: super::spec::Effect::Launch,
         }
     );
 }
@@ -1333,6 +1334,68 @@ fn a_patch_without_launch_settings_keeps_only_live_ones() {
     let live = patch.without_launch_settings();
     assert!(live.get(Key::Profile).is_none());
     assert!(live.get(Key::DefaultTimeout).is_some());
+}
+
+#[test]
+fn attached_browser_settings_follow_the_placement_table() {
+    let attached_firefox = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let plan = attached_firefox.plan(&patch_of(&[
+        is(Key::UserAgent, json!("AttachedUA/1")),
+        is(Key::Profile, json!("/profile")),
+    ]));
+    assert_eq!(changed_keys(&plan), vec![Key::UserAgent]);
+    assert_eq!(plan.changes[0].effect, super::spec::Effect::Live);
+    assert!(!plan.relaunch, "an in-place change needs no new browser");
+    assert_eq!(plan.next.user_agent().as_deref(), Some("AttachedUA/1"));
+    assert_eq!(
+        plan.ignored.iter().map(|c| c.key).collect::<Vec<_>>(),
+        vec![Key::Profile]
+    );
+
+    let cleared = plan
+        .next
+        .plan(&patch_of(&[(Key::UserAgent, Requested::Default)]));
+    assert_eq!(changed_keys(&cleared), vec![Key::UserAgent]);
+    assert_eq!(cleared.changes[0].effect, super::spec::Effect::Live);
+    assert_eq!(cleared.next.user_agent(), None);
+
+    let launch_only = attached_firefox.plan(&patch_of(&[is(Key::Args, json!(["--x"]))]));
+    assert!(launch_only.is_empty());
+    assert_eq!(launch_only.ignored[0].key, Key::Args);
+
+    // A browser attached over CDP is unchanged: the same request is ignored.
+    let attached_chrome =
+        running_with(&[(Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x"))]);
+    let plan = attached_chrome.plan(&patch_of(&[is(Key::UserAgent, json!("AttachedUA/1"))]));
+    assert!(plan.is_empty());
+    assert_eq!(plan.ignored[0].key, Key::UserAgent);
+    assert_eq!(plan.next, attached_chrome);
+}
+
+#[test]
+fn only_in_place_changes_survive_a_command_that_never_launches() {
+    let attached_firefox = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let plan = attached_firefox
+        .plan(&patch_of(&[
+            is(Key::UserAgent, json!("AttachedUA/1")),
+            is(Key::ColorScheme, json!("dark")),
+            is(Key::DefaultTimeout, json!(5000)),
+        ]))
+        .live_only(&attached_firefox);
+    assert_eq!(
+        changed_keys(&plan),
+        vec![Key::UserAgent, Key::DefaultTimeout]
+    );
+    assert_eq!(plan.next.user_agent().as_deref(), Some("AttachedUA/1"));
+    assert_eq!(plan.next.color_scheme(), None, "a launch setting waits");
+    assert_eq!(plan.next.default_timeout_ms(), 5000);
+    assert!(!plan.relaunch);
 }
 
 #[test]

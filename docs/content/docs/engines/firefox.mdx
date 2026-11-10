@@ -75,7 +75,23 @@ The attached browser is externally owned: `close` ends the BiDi session and leav
 
 Options that need a launch are rejected when attaching: `--profile`, `--args`, `--extension`, `--allow-file-access`, `--webgpu`, and `--ca-cert`. `--headed`, `--executable-path`, and `--no-xvfb` have no effect on an already-running browser. `--allowed-domains` is rejected when attaching, as it is for any pre-existing CDP session. `--pin-tab` and its `tab_gone` guarantee apply only to Chrome over CDP; Firefox attach rejects `--pin-tab`. See [CDP Mode](/cdp-mode) for the full attach workflow.
 
-`--download-path` and `--user-agent` apply to the attached browser and `close` resets both, so Firefox keeps its own settings. `download` is refused on an attached Firefox because the file is saved on the browser's machine; `wait --download` reports the path Firefox saved to.
+<table>
+  <thead>
+    <tr><th>Option</th><th>What attach does</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--user-agent</code></td><td>Applies to every open tab in place, without reconnecting. <code>close</code> resets it, so Firefox reports its own user agent again.</td></tr>
+    <tr><td><code>--download-path</code></td><td>Applies to the attached browser. <code>close</code> clears it, so Firefox decides again where downloads go.</td></tr>
+    <tr><td><code>--color-scheme</code></td><td>Applies when the session attaches, so changing it reconnects to the same Firefox.</td></tr>
+    <tr><td><code>--proxy</code>, <code>--proxy-bypass</code></td><td>Ignored: a proxy profile belongs to a browser agent-browser launches. Pass <code>--proxy</code> to Firefox itself.</td></tr>
+    <tr><td><code>--ignore-https-errors</code></td><td>Applies to the BiDi session, so pages load with certificate errors ignored without changing Firefox's settings.</td></tr>
+    <tr><td><code>--cdp-headers</code></td><td>Used for the attach handshake only; nothing is applied to the browser.</td></tr>
+    <tr><td>Viewport set with <code>set viewport</code></td><td>Applies to the tabs this session drives, through <code>browsingContext.setViewport</code>.</td></tr>
+    <tr><td><code>--profile</code>, <code>--args</code>, <code>--extension</code>, <code>--headed</code>, <code>--hide-scrollbars</code>, <code>--executable-path</code>, <code>--allow-file-access</code>, <code>--webgpu</code>, <code>--no-xvfb</code>, <code>--state</code></td><td>Ignored, and reported in <code>lifecycle.settings.changes</code> with <code>effect: "ignored"</code>: they only describe a Firefox agent-browser launches itself.</td></tr>
+  </tbody>
+</table>
+
+`download` is refused on an attached Firefox because the file is saved on the browser's machine; `wait --download` reports the path Firefox saved to.
 
 ## Supported features
 

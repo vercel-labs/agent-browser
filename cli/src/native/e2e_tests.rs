@@ -15659,6 +15659,82 @@ async fn e2e_firefox_attach_to_running_firefox() {
     firefox_close(&mut state).await;
 }
 
+/// `--user-agent` reaches an attached Firefox in place, and `close` puts Firefox's own user agent back.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_attach_user_agent_applies_in_place_and_is_reset() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut firefox = start_running_firefox(&[&fixture.url]);
+    let mut state = DaemonState::new();
+
+    let target = format!(
+        "http://127.0.0.1:{}?devtools={}",
+        firefox.bidi_port, firefox.devtools_port
+    );
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    let own = firefox_eval(&mut state, "navigator.userAgent").await;
+    assert!(
+        own.as_str()
+            .is_some_and(|user_agent| user_agent.contains("Firefox")),
+        "the attached browser must report its own user agent: {own}"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({
+            "id": "user-agent",
+            "action": "launch",
+            "cdpUrl": target,
+            "settings": { "user-agent": "AttachedUA/1" },
+        }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["relaunchedBrowser"],
+        false,
+        "an in-place setting must not reconnect: {resp}"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        json!("AttachedUA/1")
+    );
+
+    firefox_close(&mut state).await;
+    assert!(
+        firefox.alive(),
+        "close must leave the attached Firefox running"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "clear", "action": "session_info", "settings": { "user-agent": null } }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach-again", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        own,
+        "close must put back the user agent Firefox had"
+    );
+    firefox_close(&mut state).await;
+}
+
 /// Fill replaces controlled values and reaches password inputs by ref, fill/type reach contenteditables and cross-origin frames, and inserttext and raw char succeed without editing when beforeinput is canceled, like Chrome.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
