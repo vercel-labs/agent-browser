@@ -125,8 +125,9 @@ impl Contexts {
         }
         let mut seen = HashSet::new();
         ids(&tree["contexts"], &mut seen);
+        let mut adopted = false;
         for info in tree["contexts"].as_array().into_iter().flatten() {
-            self.record(info);
+            adopted |= self.record(info);
         }
         let gone = self
             .nodes
@@ -134,7 +135,9 @@ impl Contexts {
             .filter(|context| !seen.contains(*context))
             .cloned()
             .collect();
-        self.drop_contexts(gone)
+        let mut removed = self.drop_contexts(gone);
+        removed.active_changed |= adopted;
+        removed
     }
 
     /// Drops `context` and everything nested in it.

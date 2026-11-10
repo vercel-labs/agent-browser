@@ -512,13 +512,19 @@ mod tests {
     #[test]
     fn launch_parses_url_and_drop_removes_profile() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = fake(
-            dir.path(),
-            "echo noise >&2\necho 'WebDriver BiDi listening on ws://127.0.0.1:4242' >&2\nexec sleep 30",
+        let args_path = dir.path().join("args");
+        let body = format!(
+            "printf '%s\\n' \"$@\" > '{}'\necho noise >&2\necho 'WebDriver BiDi listening on ws://127.0.0.1:4242' >&2\nexec sleep 30",
+            args_path.display()
         );
+        let bin = fake(dir.path(), &body);
         let p = FirefoxProcess::launch(&bin, true, None, Duration::from_secs(10)).unwrap();
         assert_eq!(p.bidi_url, "ws://127.0.0.1:4242");
         let profile = p.profile_dir.clone();
+        let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(!args.lines().any(|arg| arg == "--start-debugger-server"));
+        let prefs = std::fs::read_to_string(profile.join("user.js")).unwrap();
+        assert!(!prefs.contains("devtools."));
         assert!(profile
             .file_name()
             .unwrap()
