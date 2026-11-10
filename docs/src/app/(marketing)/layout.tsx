@@ -12,7 +12,7 @@ import { config } from '@/lib/geistdocs/config';
 import { ProductProvider, ProductWordmark } from '@/components/landing/product-context';
 import page from '../../../content/landing/home';
 import '@/components/landing/landing.css';
-import '@/components/navbar-brand.css';
+import '@/components/navbar-labs-wordmark.css';
 
 export { metadata, viewport } from '@/lib/site-metadata';
 
