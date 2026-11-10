@@ -1095,14 +1095,20 @@ fn strip_ignored_html_blocks(html: &str) -> String {
 
 /// Skip a container without treating child raw text, attributes or comments as its end tag.
 fn ignored_html_block_end<'a>(input: &'a str, mut cursor: usize, name: &'a str) -> usize {
-    let mut containers = vec![name];
-    let mut svg_depth = usize::from(name == "svg");
-    while let Some(&current) = containers.last() {
-        if matches!(
-            current,
-            "script" | "style" | "title" | "textarea" | "xmp" | "iframe" | "noembed" | "noframes"
-        ) {
-            cursor = raw_html_text_end(input, cursor, current);
+    #[derive(Clone, Copy)]
+    struct Container<'a> {
+        name: &'a str,
+        svg_children: bool,
+        raw_text: bool,
+    }
+    let mut containers = vec![Container {
+        name,
+        svg_children: name == "svg",
+        raw_text: matches!(name, "script" | "style"),
+    }];
+    while let Some(current) = containers.last().copied() {
+        if current.raw_text {
+            cursor = raw_html_text_end(input, cursor, current.name, current.svg_children);
             containers.pop();
             continue;
         }
@@ -1110,7 +1116,7 @@ fn ignored_html_block_end<'a>(input: &'a str, mut cursor: usize, name: &'a str) 
             return input.len();
         };
         let start = cursor + relative;
-        if input[start..].starts_with("<![cdata[") && svg_depth > 0 {
+        if input[start..].starts_with("<![cdata[") && current.svg_children {
             cursor = input[start + 9..]
                 .find("]]>")
                 .map(|relative| start + 9 + relative + 3)
@@ -1127,30 +1133,36 @@ fn ignored_html_block_end<'a>(input: &'a str, mut cursor: usize, name: &'a str) 
             .next()
             .unwrap_or("");
         if closing {
-            if name == current {
+            if name == current.name {
                 containers.pop();
-                if name == "svg" {
-                    svg_depth -= 1;
-                }
             }
-        } else if matches!(
-            name,
-            "head"
-                | "noscript"
-                | "svg"
-                | "script"
-                | "style"
-                | "title"
-                | "textarea"
-                | "xmp"
-                | "iframe"
-                | "noembed"
-                | "noframes"
-        ) && !(name == "svg" && raw.ends_with("/>"))
-        {
-            containers.push(name);
-            if name == "svg" {
-                svg_depth += 1;
+        } else {
+            let svg_element = current.svg_children || name == "svg";
+            if svg_element && raw.ends_with("/>") {
+                continue;
+            }
+            // These SVG elements parse their children as HTML. Their own empty
+            // element syntax still belongs to SVG, including <title/>.
+            let integration_point =
+                current.svg_children && matches!(name, "foreignobject" | "desc" | "title");
+            let raw_text = !integration_point
+                && matches!(
+                    name,
+                    "script"
+                        | "style"
+                        | "title"
+                        | "textarea"
+                        | "xmp"
+                        | "iframe"
+                        | "noembed"
+                        | "noframes"
+                );
+            if raw_text || integration_point || matches!(name, "head" | "noscript" | "svg") {
+                containers.push(Container {
+                    name,
+                    svg_children: svg_element && !integration_point,
+                    raw_text,
+                });
             }
         }
     }
@@ -1158,11 +1170,19 @@ fn ignored_html_block_end<'a>(input: &'a str, mut cursor: usize, name: &'a str) 
 }
 
 /// Raw text recognizes only its own end tag, including a whitespace-delimited closing tag.
-fn raw_html_text_end(input: &str, mut cursor: usize, name: &str) -> usize {
-    while let Some(relative) = input[cursor..].find("</") {
+fn raw_html_text_end(input: &str, mut cursor: usize, name: &str, svg: bool) -> usize {
+    while let Some(relative) = input[cursor..].find('<') {
         let start = cursor + relative;
+        if svg && input[start..].starts_with("<![cdata[") {
+            cursor = input[start + 9..]
+                .find("]]>")
+                .map(|relative| start + 9 + relative + 3)
+                .unwrap_or(input.len());
+            continue;
+        }
         let after_name = start + 2 + name.len();
-        if input[start + 2..].starts_with(name)
+        if input[start..].starts_with("</")
+            && input[start + 2..].starts_with(name)
             && input
                 .as_bytes()
                 .get(after_name)
@@ -1170,7 +1190,7 @@ fn raw_html_text_end(input: &str, mut cursor: usize, name: &str) -> usize {
         {
             return html_tag_end(input, start);
         }
-        cursor = start + 2;
+        cursor = start + 1;
     }
     input.len()
 }
@@ -1426,6 +1446,41 @@ mod tests {
             "</svg>".repeat(4096)
         );
         assert_eq!(html_to_markdownish(&html), "Visible");
+    }
+
+    #[test]
+    fn html_to_markdownish_honors_self_closing_svg_children() {
+        for html in [
+            "<svg><title/></svg><p>Visible</p>",
+            "<svg><style /><script/><noscript/></svg><p>Visible</p>",
+            "<svg><g><title data-name='x > y' /></g></svg><p>Visible</p>",
+            "<svg><foreignObject/><desc/></svg><p>Visible</p>",
+        ] {
+            assert_eq!(html_to_markdownish(html), "Visible", "{html}");
+        }
+    }
+
+    #[test]
+    fn html_to_markdownish_keeps_html_raw_text_in_svg_integration_points() {
+        for html in [
+            r#"<svg><foreignObject><script/>const end = "</svg>"; hidden();</script></foreignObject></svg><p>Visible</p>"#,
+            r#"<svg><title><script>const end = "</title></svg>"; hidden();</script></title></svg><p>Visible</p>"#,
+            r#"<svg><desc><style>.x { content: "</desc></svg>"; }</style></desc></svg><p>Visible</p>"#,
+            r#"<svg><foreignObject><svg><title/></svg><script>const end = "</svg>";</script></foreignObject></svg><p>Visible</p>"#,
+            r#"<head><script/>const end = "</head>";</script></head><p>Visible</p>"#,
+        ] {
+            assert_eq!(html_to_markdownish(html), "Visible", "{html}");
+        }
+    }
+
+    #[test]
+    fn html_to_markdownish_keeps_cdata_end_tags_inside_svg_raw_text() {
+        for html in [
+            r#"<svg><script><![CDATA[const end = "</script></svg>";]]></script></svg><p>Visible</p>"#,
+            r#"<svg><style><![CDATA[.x { content: "</style></svg>"; }]]></style></svg><p>Visible</p>"#,
+        ] {
+            assert_eq!(html_to_markdownish(html), "Visible", "{html}");
+        }
     }
 
     #[test]
