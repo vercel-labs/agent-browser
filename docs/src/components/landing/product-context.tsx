@@ -48,8 +48,13 @@ export function useProduct() {
   return context;
 }
 
+/**
+ * Nav product name shared by every navbar. Follows the homepage hero switcher
+ * when a ProductProvider is mounted, and falls back to agent-browser elsewhere
+ * (docs pages have no hero switcher).
+ */
 export function ProductWordmark() {
-  const { selected } = useProduct();
+  const selected = useContext(ProductContext)?.selected ?? 'browser';
   return (
     <span className="font-[family-name:var(--font-geist-pixel-square)] text-lg leading-none tracking-tight">
       agent-{selected}

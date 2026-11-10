@@ -9,7 +9,7 @@ import { SpeedInsights } from '@vercel/speed-insights/next';
 import { Analytics } from '@vercel/analytics/next';
 import { DocsProvider } from '@/components/geistdocs-provider';
 import { config } from '@/lib/geistdocs/config';
-import { ProductProvider, ProductWordmark } from '@/components/landing/product-context';
+import { ProductProvider } from '@/components/landing/product-context';
 import page from '../../../content/landing/home';
 import '@/components/landing/landing.css';
 import '@/components/navbar-labs-wordmark.css';
@@ -34,7 +34,7 @@ export default function MarketingLayout({ children }: { children: ReactNode }) {
             desktop={page.hero.desktop}
             defaultProduct={page.hero.defaultProduct}
           >
-            <Navbar config={{ ...config, logo: <ProductWordmark /> }} />
+            <Navbar config={config} />
             {children}
             <Footer />
           </ProductProvider>

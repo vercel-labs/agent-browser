@@ -1,18 +1,12 @@
 import { defineConfig } from "@vercel/geistdocs/config";
 import { siteUrl } from "@/lib/site";
+import { ProductWordmark } from "@/components/landing/product-context";
 
 export const config = defineConfig({
   title: "agent-browser",
   siteUrl,
   defaultLanguage: "en",
-  logo: (
-    <span
-      className="font-medium tracking-tight"
-      style={{ fontFamily: "var(--font-geist-pixel-square)" }}
-    >
-      agent-browser
-    </span>
-  ),
+  logo: <ProductWordmark />,
   navbarActiveProduct: "agent-browser",
   navbarBrand: "labs",
   github: {
