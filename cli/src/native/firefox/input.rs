@@ -1,9 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::native::actions::{
-    interpolated_mouse_bend, interpolated_mouse_duration, interpolated_mouse_point,
-    interpolated_mouse_steps, RawKey,
-};
+use crate::native::actions::{plan_pointer_move, PointerMoveOptions, RawKey};
 use crate::native::interaction::{char_to_key_info, key_text, named_key_info};
 
 /// Target of a pointer action: a shared element id or a viewport position.
@@ -95,36 +92,38 @@ pub(crate) fn pointer_hover(origin: &Origin) -> Value {
     pointer_source("mouse", vec![pointer_move(origin)])
 }
 
-/// Builds timed mouse moves using the same path calculations as Chrome.
+/// Build the BiDi actions for a mouse button press at the current position.
+pub(crate) fn pointer_press(button: &str) -> Value {
+    pointer_source(
+        "mouse",
+        vec![json!({ "type": "pointerDown", "button": mouse_button(button) })],
+    )
+}
+
+/// Build the BiDi actions for a mouse button release at the current position.
+pub(crate) fn pointer_release(button: &str) -> Value {
+    pointer_source(
+        "mouse",
+        vec![json!({ "type": "pointerUp", "button": mouse_button(button) })],
+    )
+}
+
+/// Builds the BiDi actions for a planned pointer path from `start` toward `target`.
 pub(crate) fn pointer_mousemove(
     start: (f64, f64),
     target: (f64, f64),
-    duration_ms: u64,
-    requested_steps: Option<usize>,
-    human: bool,
-    seed: u64,
+    options: &PointerMoveOptions,
 ) -> Value {
-    let dx = target.0 - start.0;
-    let dy = target.1 - start.1;
-    let distance = dx.hypot(dy);
-    let duration_ms = interpolated_mouse_duration(distance, duration_ms, human);
-    let steps = interpolated_mouse_steps(distance, duration_ms, requested_steps, human);
-    let bend = interpolated_mouse_bend(distance, human, seed);
-    let (perp_x, perp_y) = if distance > 0.0 {
-        (-dy / distance, dx / distance)
-    } else {
-        (0.0, 0.0)
-    };
-    let actions = (1..=steps)
-        .map(|step| {
-            let (x, y) = interpolated_mouse_point(
-                start.0, start.1, target.0, target.1, perp_x, perp_y, bend, step, steps,
-            );
-            let mut action = pointer_move(&Origin::Viewport { x, y });
-            action["duration"] = json!(
-                duration_ms / steps as u64 + u64::from(step as u64 <= duration_ms % steps as u64)
-            );
-            action
+    let actions = plan_pointer_move(start, target, options)
+        .into_iter()
+        .map(|(x, y, duration)| {
+            json!({
+                "type": "pointerMove",
+                "x": x,
+                "y": y,
+                "origin": "viewport",
+                "duration": duration,
+            })
         })
         .collect();
     pointer_source("mouse", actions)
@@ -457,9 +456,27 @@ mod tests {
         value[0]["actions"].as_array().unwrap()
     }
 
+    fn options(
+        mode: &str,
+        seed: u64,
+        duration_ms: u64,
+        steps: Option<usize>,
+    ) -> PointerMoveOptions {
+        PointerMoveOptions {
+            mode: mode.into(),
+            seed,
+            duration_ms,
+            steps,
+        }
+    }
+
     #[test]
     fn mouse_path_preserves_timing_seed_and_endpoint() {
-        let path = pointer_mousemove((10.0, 20.0), (130.0, 20.0), 101, Some(4), true, 42);
+        let path = pointer_mousemove(
+            (10.0, 20.0),
+            (130.0, 20.0),
+            &options("human", 42, 101, Some(4)),
+        );
         let moves = steps(&path);
         assert_eq!(moves.len(), 4);
         assert_eq!(
@@ -474,13 +491,25 @@ mod tests {
         assert_eq!(moves.last().unwrap()["y"], json!(20.0));
         assert_eq!(
             path,
-            pointer_mousemove((10.0, 20.0), (130.0, 20.0), 101, Some(4), true, 42)
+            pointer_mousemove(
+                (10.0, 20.0),
+                (130.0, 20.0),
+                &options("human", 42, 101, Some(4))
+            )
         );
         assert_ne!(
             path,
-            pointer_mousemove((10.0, 20.0), (130.0, 20.0), 101, Some(4), true, 43)
+            pointer_mousemove(
+                (10.0, 20.0),
+                (130.0, 20.0),
+                &options("human", 43, 101, Some(4))
+            )
         );
-        let straight = pointer_mousemove((10.0, 20.0), (130.0, 20.0), 0, Some(2), false, 42);
+        let straight = pointer_mousemove(
+            (10.0, 20.0),
+            (130.0, 20.0),
+            &options("instant", 42, 0, Some(2)),
+        );
         assert_eq!(steps(&straight)[0]["x"], json!(70.0));
         assert_eq!(steps(&straight)[0]["y"], json!(20.0));
         assert_eq!(steps(&straight)[0]["duration"], 0);
@@ -488,7 +517,8 @@ mod tests {
 
     #[test]
     fn mouse_path_clamps_steps_and_handles_stationary_and_long_moves() {
-        let stationary = pointer_mousemove((10.0, 20.0), (10.0, 20.0), 0, Some(0), true, 0);
+        let stationary =
+            pointer_mousemove((10.0, 20.0), (10.0, 20.0), &options("human", 0, 0, Some(0)));
         assert_eq!(steps(&stationary).len(), 1);
         assert_eq!(steps(&stationary)[0]["duration"], 100);
         assert_eq!(steps(&stationary)[0]["x"], json!(10.0));
@@ -496,10 +526,7 @@ mod tests {
         let long = pointer_mousemove(
             (0.0, 0.0),
             (100.0, 100.0),
-            u64::MAX,
-            Some(usize::MAX),
-            false,
-            0,
+            &options("instant", 0, u64::MAX, Some(usize::MAX)),
         );
         assert_eq!(steps(&long).len(), 240);
         assert_eq!(

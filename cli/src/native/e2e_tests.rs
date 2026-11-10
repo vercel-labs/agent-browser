@@ -15997,6 +15997,101 @@ async fn e2e_firefox_smoke() {
     );
 }
 
+/// Pointer motion follows the requested input mode and seed for click and drag.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_pointer_motion_follows_input_mode() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(&mut state, r#"document.body.innerHTML = '<button id="hit" style="position:fixed;left:300px;top:200px;width:80px;height:40px">Hit</button><div id="drag-source" style="position:fixed;left:40px;top:120px;width:60px;height:60px"></div><div id="drag-target" style="position:fixed;left:360px;top:300px;width:80px;height:60px"></div>'; window.moves = []; document.addEventListener('pointermove', event => moves.push([Math.round(event.clientX), Math.round(event.clientY), event.buttons]), true); true"#).await;
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "instant", "action": "click", "selector": "#hit", "inputMode": "instant", "seed": 7 }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "moves.splice(0)").await,
+        json!([[340, 220, 0]]),
+        "instant input reaches the target in one move"
+    );
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "away", "action": "mousemove", "x": 40, "y": 40 }),
+        )
+        .await,
+    );
+    firefox_eval(&mut state, "moves = []; true").await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "human", "action": "click", "selector": "#hit", "inputMode": "human", "seed": 42 }),
+        )
+        .await,
+    );
+    let moves = firefox_eval(&mut state, "moves").await;
+    let moves = moves.as_array().cloned().unwrap_or_default();
+    assert!(moves.len() > 2, "human input samples the path: {moves:?}");
+    assert_eq!(moves.last(), Some(&json!([340, 220, 0])), "{moves:?}");
+    assert!(
+        moves
+            .iter()
+            .any(|point| point[1].as_f64().is_some_and(|y| y > 40.0 && y < 220.0)),
+        "human input visits intermediate points: {moves:?}"
+    );
+
+    firefox_eval(&mut state, "moves = []; true").await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "drag", "action": "drag", "source": "#drag-source", "target": "#drag-target", "inputMode": "human", "seed": 5 }),
+        )
+        .await,
+    );
+    let moves = firefox_eval(&mut state, "moves").await;
+    let moves = moves.as_array().cloned().unwrap_or_default();
+    assert_eq!(moves.last(), Some(&json!([400, 330, 1])), "{moves:?}");
+    assert!(
+        moves.iter().filter(|point| point[2] == 1).count() > 2,
+        "drag moves through intermediate points while the button is held: {moves:?}"
+    );
+    assert!(
+        moves.iter().any(|point| point[2] == 0),
+        "the drag approaches the source before pressing: {moves:?}"
+    );
+
+    firefox_eval(&mut state, "window.downs = 0; document.addEventListener('pointerdown', () => downs++, true); document.querySelector('#hit').addEventListener('pointerover', () => confirm('moved'), { once: true }); true").await;
+    let blocked = firefox_command(
+        &mut state,
+        json!({ "id": "dialog-move", "action": "click", "selector": "#hit" }),
+    )
+    .await;
+    assert_success(&blocked);
+    assert_eq!(get_data(&blocked)["dialogOpened"], true, "{blocked}");
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "dismiss", "action": "dialog", "response": "dismiss" }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "downs").await,
+        json!(0),
+        "a dialog opened on the way stops the press"
+    );
+    firefox_close(&mut state).await;
+}
+
 /// PR2: fill, click by ref, title reflects the action, and refs survive DOM changes.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]

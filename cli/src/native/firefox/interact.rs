@@ -5,13 +5,13 @@ use serde_json::{json, Value};
 use super::daemon::session;
 use super::input::{
     modifier_actions, modifier_names, mouse_button_mask, mouse_button_name, pointer_click,
-    pointer_down, pointer_hover, pointer_mousemove, pointer_move_buttons, pointer_up,
-    pointer_wheel, touch_event, touch_swipe_path, touch_tap, Origin,
+    pointer_down, pointer_hover, pointer_mousemove, pointer_move_buttons, pointer_press,
+    pointer_release, pointer_up, pointer_wheel, touch_event, touch_swipe_path, touch_tap, Origin,
 };
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
 use crate::native::actions::{
-    next_mouse_buttons, raw_mouse, DaemonState, MouseState, PendingDialog,
+    next_mouse_buttons, raw_mouse, DaemonState, MouseState, PendingDialog, PointerMoveOptions,
 };
 use crate::native::element::{
     intercepted_error, not_actionable_error, ACTIONABILITY_JS, BLOCKER_AT_JS,
@@ -304,10 +304,27 @@ fn apply_mouse_action(mouse_state: &mut MouseState, action: &Value) {
     }
 }
 
+/// Moves the mouse along the planned path and records where it landed.
+async fn move_mouse(
+    ff: &FirefoxSession,
+    mouse_state: &mut MouseState,
+    context: &str,
+    to: (f64, f64),
+    options: &PointerMoveOptions,
+) -> Result<bool, String> {
+    let from = map_mouse_position(ff, context, (mouse_state.x, mouse_state.y), -1).await?;
+    let dialog_opened = perform_actions(ff, context, pointer_mousemove(from, to, options)).await?;
+    commit_mouse_position(ff, mouse_state, context, to).await;
+    Ok(dialog_opened)
+}
+
+/// Performs a pointer batch. With motion, the shared path moves the pointer first and the
+/// batch's own moves are dropped.
 async fn perform_pointer(
     ff: &FirefoxSession,
     state: PointerState<'_>,
     plan: PointerPlan,
+    motion: Option<&PointerMoveOptions>,
 ) -> Result<ActionOutcome, String> {
     let PointerPlan {
         context,
@@ -316,61 +333,58 @@ async fn perform_pointer(
         actions,
         mut value,
     } = plan;
-    let mut dialog_opened = false;
     let mouse_source = actions
         .as_array()
         .and_then(|sources| sources.first())
         .filter(|source| {
             source["type"] == "pointer" && source["parameters"]["pointerType"] == "mouse"
         });
+    let mut dialog_opened = match (motion, mouse_source) {
+        (Some(options), Some(_)) => {
+            move_mouse(ff, state.mouse, &context, position, options).await?
+        }
+        _ => false,
+    };
     if let Some(source) = mouse_source {
-        let pointer_actions = source["actions"].as_array().cloned().unwrap_or_default();
-        let staged = pointer_actions
-            .iter()
-            .any(|item| matches!(item["type"].as_str(), Some("pointerDown" | "pointerUp")));
-        if staged {
-            for pointer_action in &pointer_actions {
-                let request = json!([{
-                    "type": "pointer",
-                    "id": source["id"],
-                    "parameters": source["parameters"],
-                    "actions": [pointer_action],
-                }]);
-                dialog_opened = perform_actions(ff, &context, request).await?;
-                if pointer_action["type"] == "pointerMove" {
-                    let point = if pointer_action["origin"] == "viewport" {
-                        match (pointer_action["x"].as_f64(), pointer_action["y"].as_f64()) {
-                            (Some(x), Some(y)) => (x, y),
-                            _ => position,
-                        }
-                    } else {
-                        position
-                    };
-                    commit_mouse_position(ff, state.mouse, &context, point).await;
-                }
-                apply_mouse_action(state.mouse, pointer_action);
-                match pointer_action["type"].as_str() {
-                    Some("pointerDown") if dialog_opened => {
-                        if let Some(button) = pointer_action["button"].as_u64() {
-                            *state.pending_release = Some(PendingRelease {
-                                session_id: context.clone(),
-                                x: position.0,
-                                y: position.1,
-                                button: mouse_button_name(button as u8).to_string(),
-                            });
-                        }
-                    }
-                    Some("pointerUp") => *state.pending_release = None,
-                    _ => {}
-                }
-                if dialog_opened {
-                    break;
-                }
+        for pointer_action in source["actions"].as_array().cloned().unwrap_or_default() {
+            if dialog_opened {
+                break;
             }
-        } else {
-            dialog_opened = perform_actions(ff, &context, actions).await?;
-            if !matches!(action, PointerAction::Tap) {
-                commit_mouse_position(ff, state.mouse, &context, position).await;
+            if motion.is_some() && pointer_action["type"] == "pointerMove" {
+                continue;
+            }
+            let request = json!([{
+                "type": "pointer",
+                "id": source["id"],
+                "parameters": source["parameters"],
+                "actions": [pointer_action],
+            }]);
+            dialog_opened = perform_actions(ff, &context, request).await?;
+            if pointer_action["type"] == "pointerMove" {
+                let point = if pointer_action["origin"] == "viewport" {
+                    match (pointer_action["x"].as_f64(), pointer_action["y"].as_f64()) {
+                        (Some(x), Some(y)) => (x, y),
+                        _ => position,
+                    }
+                } else {
+                    position
+                };
+                commit_mouse_position(ff, state.mouse, &context, point).await;
+            }
+            apply_mouse_action(state.mouse, &pointer_action);
+            match pointer_action["type"].as_str() {
+                Some("pointerDown") if dialog_opened => {
+                    if let Some(button) = pointer_action["button"].as_u64() {
+                        *state.pending_release = Some(PendingRelease {
+                            session_id: context.clone(),
+                            x: position.0,
+                            y: position.1,
+                            button: mouse_button_name(button as u8).to_string(),
+                        });
+                    }
+                }
+                Some("pointerUp") => *state.pending_release = None,
+                _ => {}
             }
         }
     } else {
@@ -401,28 +415,24 @@ async fn perform_pointer(
     })
 }
 
-pub(super) async fn act_element(
+/// Runs one element pointer action: positions the pointer, then presses its buttons.
+async fn act_pointer(
     state: &mut DaemonState,
+    cmd: &Value,
     target: &Target,
     label: &str,
     action: PointerAction,
     actions: Value,
     value: Value,
 ) -> Result<ActionOutcome, String> {
-    let position = {
-        let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
-        prepare(ff, target, label, action).await?
-    };
-    let (ff, mouse_state, pending_release) = (
-        &state.firefox,
-        &mut state.mouse_state,
-        &mut state.pending_pointer_release,
-    );
+    let options = PointerMoveOptions::from_cmd(cmd, state);
+    let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
+    let position = prepare(ff, target, label, action).await?;
     perform_pointer(
-        ff.as_ref().ok_or("Browser not launched")?,
+        ff,
         PointerState {
-            mouse: mouse_state,
-            pending_release,
+            mouse: &mut state.mouse_state,
+            pending_release: &mut state.pending_pointer_release,
         },
         PointerPlan {
             context: target.context.clone(),
@@ -431,8 +441,48 @@ pub(super) async fn act_element(
             actions,
             value,
         },
+        Some(&options),
     )
     .await
+}
+
+/// Performs one pointer step of a drag, reporting whether it opened a dialog.
+async fn drag_step(
+    ff: &FirefoxSession,
+    mouse: &mut MouseState,
+    pending_release: &mut Option<PendingRelease>,
+    context: &str,
+    position: (f64, f64),
+    actions: Value,
+) -> Result<bool, String> {
+    perform_pointer(
+        ff,
+        PointerState {
+            mouse,
+            pending_release,
+        },
+        PointerPlan {
+            context: context.to_string(),
+            position,
+            action: PointerAction::Drag,
+            actions,
+            value: json!({}),
+        },
+        None,
+    )
+    .await
+    .map(|outcome| outcome.dialog_opened)
+}
+
+pub(super) async fn act_element(
+    state: &mut DaemonState,
+    target: &Target,
+    label: &str,
+    action: PointerAction,
+    actions: Value,
+    value: Value,
+) -> Result<ActionOutcome, String> {
+    act_pointer(state, &Value::Null, target, label, action, actions, value).await
 }
 
 async fn act_raw(
@@ -461,6 +511,7 @@ async fn act_raw(
             actions,
             value,
         },
+        None,
     )
     .await
 }
@@ -488,8 +539,9 @@ pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         button,
         click_count,
     );
-    Ok(act_element(
+    Ok(act_pointer(
         state,
+        cmd,
         &target,
         selector,
         PointerAction::Click,
@@ -529,8 +581,9 @@ pub async fn dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .ok_or("Missing 'selector' parameter")?;
     let target = resolve_target(state, selector).await?;
     let actions = pointer_click(&Origin::Element(target.shared_id.clone()), "left", 2);
-    Ok(act_element(
+    Ok(act_pointer(
         state,
+        cmd,
         &target,
         selector,
         PointerAction::DoubleClick,
@@ -549,8 +602,9 @@ pub async fn hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         .ok_or("Missing 'selector' parameter")?;
     let target = resolve_target(state, selector).await?;
     let actions = pointer_hover(&Origin::Element(target.shared_id.clone()));
-    Ok(act_element(
+    Ok(act_pointer(
         state,
+        cmd,
         &target,
         selector,
         PointerAction::Hover,
@@ -661,6 +715,7 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
         return Err("Dragging between different frames is not supported on Firefox".to_string());
     }
 
+    let options = PointerMoveOptions::from_cmd(cmd, state);
     let (firefox, mouse_state, pending_release) = (
         &state.firefox,
         &mut state.mouse_state,
@@ -668,6 +723,7 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
     );
     let ff = firefox.as_ref().ok_or("Browser not launched")?;
     let top_level = source_target.context == ff.contexts.active_tab();
+    let context = source_target.context.clone();
     let (sx, sy) = prepare(ff, &source_target, source, PointerAction::Drag).await?;
     let html5 = ff
         .bidi
@@ -737,88 +793,50 @@ pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
         }
         return Ok(json!({ "dragged": true, "source": source, "target": target_selector }));
     }
-    let source_origin = Origin::Viewport { x: sx, y: sy };
-    let mut release_at = source_origin.clone();
+    let mut release_at = (sx, sy);
     let mut dialog_opened = false;
     let result: Result<(), String> = async {
-        let outcome = perform_pointer(
-            ff,
-            PointerState {
-                mouse: mouse_state,
+        dialog_opened = move_mouse(ff, mouse_state, &context, (sx, sy), &options).await?;
+        if !dialog_opened {
+            dialog_opened = drag_step(
+                ff,
+                mouse_state,
                 pending_release,
-            },
-            PointerPlan {
-                context: source_target.context.clone(),
-                position: (sx, sy),
-                action: PointerAction::Drag,
-                actions: pointer_down(&source_origin, "left"),
-                value: json!({}),
-            },
-        )
-        .await?;
-        if outcome.dialog_opened {
-            dialog_opened = true;
-            return Ok(());
+                &context,
+                (sx, sy),
+                pointer_press("left"),
+            )
+            .await?;
         }
-        let (tx, ty) = prepare(ff, &target, target_selector, PointerAction::Drag).await?;
-        let target_origin = Origin::Viewport { x: tx, y: ty };
-        release_at = target_origin.clone();
-        let outcome = perform_pointer(
-            ff,
-            PointerState {
-                mouse: mouse_state,
-                pending_release,
-            },
-            PointerPlan {
-                context: source_target.context.clone(),
-                position: (tx, ty),
-                action: PointerAction::Drag,
-                actions: pointer_hover(&target_origin),
-                value: json!({}),
-            },
-        )
-        .await?;
-        if outcome.dialog_opened {
-            dialog_opened = true;
-            return Ok(());
+        if !dialog_opened {
+            let point = prepare(ff, &target, target_selector, PointerAction::Drag).await?;
+            release_at = point;
+            dialog_opened = move_mouse(ff, mouse_state, &context, point, &options).await?;
+            if !dialog_opened {
+                dialog_opened = drag_step(
+                    ff,
+                    mouse_state,
+                    pending_release,
+                    &context,
+                    point,
+                    pointer_release("left"),
+                )
+                .await?;
+            }
         }
-        let outcome = perform_pointer(
-            ff,
-            PointerState {
-                mouse: mouse_state,
-                pending_release,
-            },
-            PointerPlan {
-                context: source_target.context.clone(),
-                position: (tx, ty),
-                action: PointerAction::Drag,
-                actions: pointer_up(&target_origin, "left"),
-                value: json!({}),
-            },
-        )
-        .await?;
-        dialog_opened = outcome.dialog_opened;
         Ok(())
     }
     .await;
     if let Err(error) = result {
-        if let Origin::Viewport { x, y } = release_at {
-            let _ = perform_pointer(
-                ff,
-                PointerState {
-                    mouse: mouse_state,
-                    pending_release,
-                },
-                PointerPlan {
-                    context: source_target.context.clone(),
-                    position: (x, y),
-                    action: PointerAction::Drag,
-                    actions: pointer_up(&Origin::Viewport { x, y }, "left"),
-                    value: json!({}),
-                },
-            )
-            .await;
-        }
+        let _ = drag_step(
+            ff,
+            mouse_state,
+            pending_release,
+            &context,
+            release_at,
+            pointer_release("left"),
+        )
+        .await;
         return Err(error);
     }
     if dialog_opened {
@@ -959,36 +977,11 @@ pub async fn mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 pub async fn mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let x = cmd.get("x").and_then(Value::as_f64).unwrap_or(0.0);
     let y = cmd.get("y").and_then(Value::as_f64).unwrap_or(0.0);
-    let duration = cmd.get("duration").and_then(Value::as_u64).unwrap_or(0);
-    let mut steps = cmd
-        .get("steps")
-        .and_then(Value::as_u64)
-        .map(|value| value as usize);
-    let mode = cmd
-        .get("inputMode")
-        .and_then(Value::as_str)
-        .unwrap_or(&state.input_mode);
-    if mode == "instant" && duration == 0 && steps.is_none() {
-        steps = Some(1);
-    }
-    let start = local_mouse_position(state).await?;
-    let actions = pointer_mousemove(
-        start,
-        (x, y),
-        duration,
-        steps,
-        mode == "human",
-        cmd.get("seed").and_then(Value::as_u64).unwrap_or(0),
-    );
-
-    Ok(act_raw(
-        state,
-        actions,
-        (x, y),
-        json!({ "moved": true, "x": x, "y": y }),
-    )
-    .await?
-    .value)
+    let options = PointerMoveOptions::from_cmd(cmd, state);
+    let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
+    let context = ff.contexts.active().to_string();
+    move_mouse(ff, &mut state.mouse_state, &context, (x, y), &options).await?;
+    Ok(json!({ "moved": true, "x": x, "y": y }))
 }
 
 /// Presses a mouse button at the last known position.

@@ -7285,11 +7285,8 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left");
     let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
 
-    let input_mode = cmd
-        .get("inputMode")
-        .and_then(Value::as_str)
-        .unwrap_or(&state.input_mode);
-    if input_mode != "instant" {
+    let options = PointerMoveOptions::from_cmd(cmd, state);
+    if options.mode != "instant" {
         let (x, y, target_session_id) = super::element::resolve_element_center(
             &mgr.client,
             &session_id,
@@ -7306,16 +7303,18 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &state.iframe_sessions,
         )
         .await?;
+        let options = PointerMoveOptions {
+            duration_ms: if options.mode == "smooth" { 200 } else { 0 },
+            steps: None,
+            ..options
+        };
         move_mouse_interpolated(
             &mgr.client,
             &target_session_id,
             &mut state.mouse_state,
             x,
             y,
-            if input_mode == "smooth" { 200 } else { 0 },
-            None,
-            input_mode == "human",
-            cmd.get("seed").and_then(Value::as_u64).unwrap_or(0),
+            &options,
             0,
             offset,
             &state.recording_state.shared_cursor,
@@ -11913,12 +11912,8 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     )
     .await?;
 
-    let mode = cmd
-        .get("inputMode")
-        .and_then(Value::as_str)
-        .unwrap_or(&state.input_mode);
-    let human = mode == "human";
-    let seed = cmd.get("seed").and_then(Value::as_u64).unwrap_or(0);
+    let options = PointerMoveOptions::from_cmd(cmd, state);
+    let human = options.human();
 
     // Approach the source before pressing so hover and pointer path handlers fire.
     let source_offset = super::element::session_viewport_offset(
@@ -11941,10 +11936,11 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &mut state.mouse_state,
         sx,
         sy,
-        0,
-        if human { None } else { Some(1) },
-        human,
-        seed,
+        &PointerMoveOptions {
+            duration_ms: 0,
+            steps: (!human).then_some(1),
+            ..options.clone()
+        },
         0,
         source_offset,
         &state.recording_state.shared_cursor,
@@ -11972,10 +11968,12 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &mut state.mouse_state,
         tx,
         ty,
-        if human { 250 } else { 100 },
-        if human { None } else { Some(10) },
-        human,
-        seed.wrapping_add(1),
+        &PointerMoveOptions {
+            duration_ms: if human { 250 } else { 100 },
+            steps: (!human).then_some(10),
+            seed: options.seed.wrapping_add(1),
+            ..options
+        },
         1,
         target_offset,
         &state.recording_state.shared_cursor,
@@ -15349,11 +15347,89 @@ async fn handle_inserttext(cmd: &Value, state: &DaemonState) -> Result<Value, St
     Ok(json!({ "inserted": true }))
 }
 
-/// Move the session cursor along a deterministic eased curve. Human mode adds
-/// a seeded perpendicular bend and samples the path frequently enough for
-/// animation-heavy pages while preserving exact, reproducible endpoints.
-/// Schedule steps against one clock so Chrome's response time counts toward
-/// the requested duration instead of being added to every step's delay.
+/// Pointer motion settings shared by the Chrome and Firefox engines.
+#[derive(Clone)]
+pub(crate) struct PointerMoveOptions {
+    pub mode: String,
+    pub seed: u64,
+    pub duration_ms: u64,
+    pub steps: Option<usize>,
+}
+
+impl PointerMoveOptions {
+    /// Reads the motion settings from a command, falling back to the session input mode.
+    pub(crate) fn from_cmd(cmd: &Value, state: &DaemonState) -> Self {
+        let mode = cmd
+            .get("inputMode")
+            .and_then(Value::as_str)
+            .unwrap_or(&state.input_mode);
+        let duration_ms = cmd.get("duration").and_then(Value::as_u64).unwrap_or(0);
+        let mut steps = cmd
+            .get("steps")
+            .and_then(Value::as_u64)
+            .map(|steps| steps as usize);
+        if mode == "instant" && duration_ms == 0 && steps.is_none() {
+            steps = Some(1);
+        }
+        Self {
+            mode: mode.to_string(),
+            seed: cmd.get("seed").and_then(Value::as_u64).unwrap_or(0),
+            duration_ms,
+            steps,
+        }
+    }
+
+    /// Whether the pointer samples a human-like path.
+    pub(crate) fn human(&self) -> bool {
+        self.mode == "human"
+    }
+}
+
+/// Plans the points a pointer visits on its way from `from` to `to` as
+/// `(x, y, delay_ms)`, ending exactly on `to`. Human mode adds a seeded
+/// perpendicular bend and samples the path frequently enough for
+/// animation-heavy pages.
+pub(crate) fn plan_pointer_move(
+    from: (f64, f64),
+    to: (f64, f64),
+    options: &PointerMoveOptions,
+) -> Vec<(f64, f64, u64)> {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    let distance = dx.hypot(dy);
+    let human = options.human();
+    let duration_ms = interpolated_mouse_duration(distance, options.duration_ms, human);
+    let steps = interpolated_mouse_steps(distance, duration_ms, options.steps, human);
+    let bend = interpolated_mouse_bend(distance, human, options.seed);
+    let (perpendicular_x, perpendicular_y) = if distance > 0.0 {
+        (-dy / distance, dx / distance)
+    } else {
+        (0.0, 0.0)
+    };
+
+    (1..=steps)
+        .map(|step| {
+            let (x, y) = interpolated_mouse_point(
+                from.0,
+                from.1,
+                to.0,
+                to.1,
+                perpendicular_x,
+                perpendicular_y,
+                bend,
+                step,
+                steps,
+            );
+            let delay_ms =
+                duration_ms / steps as u64 + u64::from(step as u64 <= duration_ms % steps as u64);
+            (x, y, delay_ms)
+        })
+        .collect()
+}
+
+/// Move the session cursor along a planned path. Steps are scheduled against
+/// one clock so Chrome's response time counts toward the requested duration
+/// instead of being added to every step's delay.
 #[allow(clippy::too_many_arguments)]
 async fn move_mouse_interpolated(
     client: &CdpClient,
@@ -15361,41 +15437,20 @@ async fn move_mouse_interpolated(
     mouse_state: &mut MouseState,
     target_x: f64,
     target_y: f64,
-    duration_ms: u64,
-    requested_steps: Option<usize>,
-    human: bool,
-    seed: u64,
+    options: &PointerMoveOptions,
     buttons: i32,
     viewport_offset: (f64, f64),
     recording_cursor: &recording::SharedRecordingCursor,
 ) -> Result<(), String> {
     // Cursor state stays in page coordinates even when dispatching to an OOPIF.
-    let start_x = mouse_state.x - viewport_offset.0;
-    let start_y = mouse_state.y - viewport_offset.1;
-    let dx = target_x - start_x;
-    let dy = target_y - start_y;
-    let distance = dx.hypot(dy);
-    let duration_ms = interpolated_mouse_duration(distance, duration_ms, human);
-    let steps = interpolated_mouse_steps(distance, duration_ms, requested_steps, human);
-    let bend = interpolated_mouse_bend(distance, human, seed);
-    let (perp_x, perp_y) = if distance > 0.0 {
-        (-dy / distance, dx / distance)
-    } else {
-        (0.0, 0.0)
-    };
-    let schedule = if duration_ms == 0 {
-        None
-    } else {
-        Some((
-            tokio::time::Instant::now(),
-            tokio::time::Duration::from_millis(duration_ms),
-        ))
-    };
+    let start = (
+        mouse_state.x - viewport_offset.0,
+        mouse_state.y - viewport_offset.1,
+    );
+    let started = tokio::time::Instant::now();
+    let mut elapsed_ms = 0;
 
-    for i in 1..=steps {
-        let (x, y) = interpolated_mouse_point(
-            start_x, start_y, target_x, target_y, perp_x, perp_y, bend, i, steps,
-        );
+    for (x, y, delay_ms) in plan_pointer_move(start, (target_x, target_y), options) {
         let params = build_mouse_event_params(
             mouse_state,
             "mouseMoved",
@@ -15416,8 +15471,10 @@ async fn move_mouse_interpolated(
         if let Ok(mut cursor) = recording_cursor.lock() {
             cursor.record(mouse_state.x, mouse_state.y, buttons);
         }
-        if let Some((started, duration)) = schedule {
-            tokio::time::sleep_until(started + duration.mul_f64(i as f64 / steps as f64)).await;
+        elapsed_ms += delay_ms;
+        if elapsed_ms > 0 {
+            tokio::time::sleep_until(started + tokio::time::Duration::from_millis(elapsed_ms))
+                .await;
         }
     }
     Ok(())
@@ -15490,17 +15547,7 @@ async fn handle_mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let session_id = mgr.active_session_id()?.to_string();
     let x = cmd.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let y = cmd.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let duration = cmd.get("duration").and_then(Value::as_u64).unwrap_or(0);
-    let mut steps = cmd.get("steps").and_then(Value::as_u64).map(|v| v as usize);
-    let mode = cmd
-        .get("inputMode")
-        .and_then(Value::as_str)
-        .unwrap_or(&state.input_mode);
-    let human = mode == "human";
-    if mode == "instant" && duration == 0 && steps.is_none() {
-        steps = Some(1);
-    }
-    let seed = cmd.get("seed").and_then(Value::as_u64).unwrap_or(0);
+    let options = PointerMoveOptions::from_cmd(cmd, state);
     let buttons = state.mouse_state.buttons;
     move_mouse_interpolated(
         &mgr.client,
@@ -15508,10 +15555,7 @@ async fn handle_mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &mut state.mouse_state,
         x,
         y,
-        duration,
-        steps,
-        human,
-        seed,
+        &options,
         buttons,
         (0.0, 0.0),
         &state.recording_state.shared_cursor,
@@ -18920,10 +18964,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             &mut mouse,
             400.0,
             200.0,
-            1000,
-            Some(4),
-            true,
-            42,
+            &PointerMoveOptions {
+                mode: "human".into(),
+                seed: 42,
+                duration_ms: 1000,
+                steps: Some(4),
+            },
             1,
             (0.0, 0.0),
             &history,
