@@ -34,11 +34,11 @@ syncBuiltinESMExports();
 await import('./bin/agent-browser.js');
 `,
   );
-  for (const { name, marker } of binaries) {
+  for (const { name, marker, script } of binaries) {
     const fakeBinaryPath = join(binDirectory, name);
     await writeFile(
       fakeBinaryPath,
-      `#!/bin/sh
+      script ?? `#!/bin/sh
 printf '%s\\n' ${JSON.stringify(marker)} "$@"
 `,
     );
@@ -112,4 +112,36 @@ test('macOS ARM64 launcher keeps selecting the ARM64 executable', async (t) => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.stdout.trim().split('\n'), ['arm64-binary-ran', ...args]);
+});
+
+for (const signal of ['SIGTERM', 'SIGKILL']) {
+  test(`launcher preserves native child termination by ${signal}`, async (t) => {
+    const result = await runLauncher(t, {
+      platform: 'darwin',
+      arch: 'arm64',
+      binaries: [{
+        name: 'agent-browser-darwin-arm64',
+        script: `#!/bin/sh\nkill -s ${signal.slice(3)} $$\n`,
+      }],
+      args: ['mcp'],
+    });
+
+    assert.equal(result.status, null, result.stderr);
+    assert.equal(result.signal, signal, result.stderr);
+  });
+}
+
+test('launcher preserves a native child failure exit code', async (t) => {
+  const result = await runLauncher(t, {
+    platform: 'darwin',
+    arch: 'arm64',
+    binaries: [{
+      name: 'agent-browser-darwin-arm64',
+      script: '#!/bin/sh\nexit 7\n',
+    }],
+    args: ['--version'],
+  });
+
+  assert.equal(result.status, 7, result.stderr);
+  assert.equal(result.signal, null);
 });
