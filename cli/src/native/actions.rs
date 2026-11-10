@@ -1155,43 +1155,44 @@ impl DaemonState {
         };
 
         let client = browser.client.clone();
-        let mut rx = browser.client.subscribe();
+        // A lossless method tap, not the shared broadcast: a broadcast
+        // receiver can lag and drop the opening event, and a dropped event
+        // means the dialog is never dismissed and the tab wedges (#2511).
+        let mut rx = browser
+            .client
+            .subscribe_methods(&["Page.javascriptDialogOpening"]);
 
         self.dialog_handler_task = Some(tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) if event.method == "Page.javascriptDialogOpening" => {
-                        let dialog_type = event
-                            .params
-                            .get("type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if matches!(dialog_type, "beforeunload" | "alert") {
-                            let message = event
-                                .params
-                                .get("message")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            eprintln!("[auto-dismiss] {} dialog: {}", dialog_type, message);
-                            let sid = event.session_id.clone().unwrap_or_default();
-                            if let Err(e) = client
-                                .send_command(
-                                    "Page.handleJavaScriptDialog",
-                                    Some(json!({ "accept": true })),
-                                    Some(&sid),
-                                )
-                                .await
-                            {
-                                eprintln!(
-                                    "[auto-dismiss] failed to dismiss {} dialog: {}",
-                                    dialog_type, e
-                                );
-                            }
-                        }
+            while let Some(event) = rx.recv().await {
+                if event.method != "Page.javascriptDialogOpening" {
+                    continue;
+                }
+                let dialog_type = event
+                    .params
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if matches!(dialog_type, "beforeunload" | "alert") {
+                    let message = event
+                        .params
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    eprintln!("[auto-dismiss] {} dialog: {}", dialog_type, message);
+                    let sid = event.session_id.clone().unwrap_or_default();
+                    if let Err(e) = client
+                        .send_command(
+                            "Page.handleJavaScriptDialog",
+                            Some(json!({ "accept": true })),
+                            Some(&sid),
+                        )
+                        .await
+                    {
+                        eprintln!(
+                            "[auto-dismiss] failed to dismiss {} dialog: {}",
+                            dialog_type, e
+                        );
                     }
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => break,
                 }
             }
         }));
@@ -2260,23 +2261,22 @@ impl DaemonState {
                                     event.params.clone(),
                                 )
                             {
-                                // When auto_dialog is enabled, alert and beforeunload
-                                // dialogs are handled by the background dialog_handler_task.
-                                // Skip tracking them to avoid a stale warning.
-                                let auto_handled = self.auto_dialog
-                                    && matches!(
-                                        dialog_event.dialog_type.as_str(),
-                                        "beforeunload" | "alert"
-                                    );
-                                if !auto_handled {
-                                    self.pending_dialog = Some(PendingDialog {
-                                        dialog_type: dialog_event.dialog_type,
-                                        message: dialog_event.message,
-                                        url: dialog_event.url,
-                                        default_prompt: dialog_event.default_prompt,
-                                        session_id: event.session_id.clone(),
-                                    });
-                                }
+                                // Track every dialog, including the ones the
+                                // background dialog_handler_task auto-dismisses.
+                                // The dismiss usually lands first and the
+                                // closed event clears this on the next drain;
+                                // but if the dismiss is missed or fails, the
+                                // dialog must still be visible to `dialog
+                                // status`, the fail-fast gate, and the timeout
+                                // path, or an open alert looks exactly like a
+                                // wedged tab (#2511).
+                                self.pending_dialog = Some(PendingDialog {
+                                    dialog_type: dialog_event.dialog_type,
+                                    message: dialog_event.message,
+                                    url: dialog_event.url,
+                                    default_prompt: dialog_event.default_prompt,
+                                    session_id: event.session_id.clone(),
+                                });
                             }
                         }
                         "Page.javascriptDialogClosed" => {
@@ -3452,7 +3452,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // A pending confirm/prompt dialog blocks the renderer's main thread, so
     // any command that touches the page would hang until the client read
     // timeout. Fail fast with instructions instead. Actions in skip_launch
-    // never touch the page; dialog/screenshot/url/title are browser-side.
+    // never touch the page; dialog/screenshot are browser-side. url and
+    // title evaluate JavaScript in the page, so they hang on a
+    // dialog-blocked renderer like any other page command and must fail
+    // fast too (#2511).
     // Only a dialog on the ACTIVE tab blocks: one on a background tab leaves
     // the active tab's renderer responsive.
     if let Some(ref dialog) = state.pending_dialog {
@@ -3477,14 +3480,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         let safe_during_dialog = (skip_launch && !read_touches_active_tab)
             || matches!(
                 action,
-                "dialog"
-                    | "screenshot"
-                    | "url"
-                    | "title"
-                    | "tab_list"
-                    | "tab_new"
-                    | "tab_switch"
-                    | "tab_close"
+                "dialog" | "screenshot" | "tab_list" | "tab_new" | "tab_switch" | "tab_close"
             );
         if on_active_tab && !safe_during_dialog {
             let mut resp = error_response(
@@ -22078,17 +22074,42 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[test]
-    fn test_pending_dialog_not_set_for_auto_handled_alert() {
-        // Simulate what handle_browser_event does: when auto_dialog is true,
-        // alert/beforeunload should NOT populate pending_dialog.
-        let auto_dialog = true;
-        for dialog_type in &["alert", "beforeunload"] {
-            let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
-            assert!(
-                auto_handled,
-                "{dialog_type} should be auto-handled when auto_dialog is true"
-            );
-        }
+    fn test_pending_dialog_tracked_for_auto_handled_alert() {
+        // Auto-dismissed dialogs are still tracked in pending_dialog (#2511):
+        // the background dismiss usually lands first and the closed event
+        // clears this on the next drain, but a missed or failed dismiss must
+        // stay visible to `dialog status` and the fail-fast gate.
+        let mut state = DaemonState::new();
+        let (events, receiver) = broadcast::channel(16);
+        state.event_rx = Some(receiver);
+
+        events
+            .send(CdpEvent {
+                method: "Page.javascriptDialogOpening".to_string(),
+                params: json!({"type": "alert", "message": "hi", "url": "https://example.com/"}),
+                session_id: None,
+            })
+            .unwrap();
+        let _ = state.drain_cdp_events();
+        let dialog = state
+            .pending_dialog
+            .as_ref()
+            .expect("an auto-handled alert must still be tracked");
+        assert_eq!(dialog.dialog_type, "alert");
+        assert_eq!(dialog.message, "hi");
+
+        events
+            .send(CdpEvent {
+                method: "Page.javascriptDialogClosed".to_string(),
+                params: json!({}),
+                session_id: None,
+            })
+            .unwrap();
+        let _ = state.drain_cdp_events();
+        assert!(
+            state.pending_dialog.is_none(),
+            "a closed dialog must clear tracking"
+        );
     }
 
     #[test]
