@@ -208,6 +208,17 @@ impl FirefoxSession {
         self.contexts.partition(self.contexts.active())
     }
 
+    /// Reads the context tree when no context is active, which happens when the event that
+    /// announced the next tab was lost. Returns true when a tab became active.
+    pub async fn recover_active_context(&mut self) -> Result<bool, String> {
+        if !self.contexts.active().is_empty() {
+            return Ok(false);
+        }
+        let tree = self.bidi.send("browsingContext.getTree", json!({})).await?;
+        self.contexts.sync(&tree);
+        Ok(!self.contexts.active().is_empty())
+    }
+
     /// Removes the user contexts this session created once their last tab is gone.
     pub async fn release_unused_user_contexts(&mut self) {
         for user_context in self.contexts.take_unused_user_contexts() {

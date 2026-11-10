@@ -1345,6 +1345,9 @@ impl DaemonState {
         self.drain_firefox_events();
         if let Some(ff) = self.firefox.as_mut() {
             ff.release_unused_user_contexts().await;
+            if ff.recover_active_context().await? {
+                firefox::daemon::reset_page(self);
+            }
         }
         let drained = self.drain_cdp_events();
         self.apply_drained_events(drained).await
