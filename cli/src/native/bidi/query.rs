@@ -10,6 +10,7 @@ use crate::native::element::{
     ELEMENT_STYLES_ALL_JS, ELEMENT_TEXT_JS, ELEMENT_VISIBLE_JS,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 const TEMP_NODE_ID: i64 = -1;
 
@@ -311,7 +312,7 @@ async fn semantic_target(
         .ok_or_else(|| format!("Missing '{param}' parameter"))?;
     let exact = cmd.get("exact").and_then(Value::as_bool).unwrap_or(false);
     let ff = session(state)?;
-    let context = ff.context.clone();
+    let context = ff.contexts.active().to_string();
     let node = if matches!(strategy, "text" | "label") {
         let js = if strategy == "text" {
             FIND_TEXT_JS
@@ -389,7 +390,7 @@ pub async fn getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     let name = cmd.get("name").and_then(Value::as_str);
     let exact = cmd.get("exact").and_then(Value::as_bool).unwrap_or(false);
     let ff = session(state)?;
-    let context = ff.context.clone();
+    let context = ff.contexts.active().to_string();
     let target = if chrome::is_presentational_role(role) || role.eq_ignore_ascii_case("directory") {
         let locator = chrome::build_presentational_role_locator_js(role, name, exact);
         let js = format!("function() {{ return ({locator})(document); }}");
@@ -490,7 +491,7 @@ pub async fn nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> 
             "script.evaluate",
             json!({
                 "expression": nth_js(sel, index),
-                "target": {"context": ff.context},
+                "target": {"context": ff.contexts.active()},
                 "awaitPromise": true,
                 "resultOwnership": "none",
             }),
@@ -510,7 +511,7 @@ pub async fn nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> 
             index, sel
         ));
     }
-    let target = target_from_node(&ff.context, &value["result"])?;
+    let target = target_from_node(ff.contexts.active(), &value["result"])?;
     run_subaction(cmd, state, &target).await
 }
 
@@ -521,8 +522,94 @@ const FRAME_WINDOW_JS: &str = r#"function() {
     return { label: this.name || this.id || this.src || '', window: w };
 }"#;
 
-/// `frame <selector>`: make the iframe's browsing context active for later commands.
+const FRAME_NAMES_JS: &str = r#"() => Array.from(document.querySelectorAll('iframe,frame')).map(f => [f.name, f.contentWindow])"#;
+
+/// Frame names of every descendant context, keyed by context id, read from the frame elements that own them.
+async fn frame_names(
+    ff: &super::session::FirefoxSession,
+    tree: &Value,
+) -> Result<HashMap<String, String>, String> {
+    let mut names = HashMap::new();
+    let mut pending: Vec<&Value> = tree["contexts"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .collect();
+    while let Some(context) = pending.pop() {
+        let Some(id) = context["context"].as_str() else {
+            continue;
+        };
+        let Some(children) = context["children"].as_array() else {
+            continue;
+        };
+        pending.extend(children);
+        let frames = ff
+            .bidi
+            .call_function(id, FRAME_NAMES_JS, None, vec![])
+            .await?;
+        for frame in frames.as_array().into_iter().flatten() {
+            if let (Some(name), Some(child)) = (frame[0].as_str(), frame[1].as_str()) {
+                names.insert(child.to_string(), name.to_string());
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// The first context of `tree` in frame-tree order whose frame name equals `name` or whose URL contains `url`.
+fn find_context(
+    tree: &Value,
+    name: Option<&str>,
+    url: Option<&str>,
+    names: &HashMap<String, String>,
+) -> Option<String> {
+    let context = tree["context"].as_str()?;
+    let by_name = name.is_some_and(|name| names.get(context).is_some_and(|frame| frame == name));
+    let by_url = url.is_some_and(|url| {
+        tree["url"]
+            .as_str()
+            .is_some_and(|frame| frame.contains(url))
+    });
+    if by_name || by_url {
+        return Some(context.to_string());
+    }
+    tree["children"]
+        .as_array()?
+        .iter()
+        .find_map(|child| find_context(child, name, url, names))
+}
+
+/// `frame`: make the iframe matched by selector, name or url the active browsing context for later commands.
 pub async fn frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let name = cmd.get("name").and_then(Value::as_str);
+    let url = cmd.get("url").and_then(Value::as_str);
+    if cmd.get("selector").is_none() && (name.is_some() || url.is_some()) {
+        let ff = session(state)?;
+        let tree = ff
+            .bidi
+            .send(
+                "browsingContext.getTree",
+                json!({"root": ff.contexts.active_tab()}),
+            )
+            .await?;
+        let names = match name {
+            Some(_) => frame_names(ff, &tree).await?,
+            None => HashMap::new(),
+        };
+        let context = tree["contexts"]
+            .as_array()
+            .and_then(|roots| {
+                roots
+                    .iter()
+                    .find_map(|root| find_context(root, name, url, &names))
+            })
+            .ok_or_else(|| "Frame not found".to_string())?;
+        ff.contexts.record(&tree["contexts"][0]);
+        ff.contexts.activate(&context);
+        state.active_frame_id = Some(context);
+        return Ok(json!({ "frame": name.or(url).unwrap_or("frame") }));
+    }
     let sel = selector(cmd)?;
     let from_ref = parse_ref(sel).is_some();
     let target = resolve_target(state, sel).await?;
@@ -541,7 +628,9 @@ pub async fn frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         .filter(|label| !label.is_empty())
         .unwrap_or(sel)
         .to_string();
-    ff.context = window.to_string();
+    ff.contexts
+        .record(&json!({"context": window, "parent": target.context}));
+    ff.contexts.activate(window);
     state.active_frame_id = Some(window.to_string());
     Ok(json!({ "frame": label }))
 }
@@ -549,7 +638,7 @@ pub async fn frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 /// `frame main`: return to the active top-level tab.
 pub async fn mainframe(state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    ff.context = ff.top_context.clone();
+    ff.contexts.leave_frame();
     state.active_frame_id = None;
     Ok(json!({ "frame": "main" }))
 }
@@ -567,7 +656,7 @@ pub async fn evalhandle(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             "script.evaluate",
             json!({
                 "expression": script,
-                "target": {"context": ff.context},
+                "target": {"context": ff.contexts.active()},
                 "awaitPromise": true,
                 "resultOwnership": "root",
             }),
@@ -706,7 +795,9 @@ mod tests {
     async fn mainframe_returns_to_the_active_tab() {
         let mut state = DaemonState::new();
         let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
-        ff.context = "ctx-frame".into();
+        ff.contexts
+            .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
+        ff.contexts.activate("ctx-frame");
         state.firefox = Some(ff);
         state.active_frame_id = Some("ctx-frame".into());
 
@@ -714,7 +805,10 @@ mod tests {
             mainframe(&mut state).await.unwrap(),
             json!({"frame": "main"})
         );
-        assert_eq!(state.firefox.as_ref().unwrap().context, "ctx-active");
+        assert_eq!(
+            state.firefox.as_ref().unwrap().contexts.active(),
+            "ctx-active"
+        );
         assert!(state.active_frame_id.is_none());
     }
 

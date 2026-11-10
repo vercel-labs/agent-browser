@@ -1,9 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::native::actions::{
-    interpolated_mouse_bend, interpolated_mouse_duration, interpolated_mouse_point,
-    interpolated_mouse_steps,
-};
+use crate::native::actions::{plan_pointer_move, PointerMoveOptions, RawKey};
 use crate::native::interaction::{char_to_key_info, key_text, named_key_info};
 
 /// Target of a pointer action: a shared element id or a viewport position.
@@ -31,16 +28,40 @@ pub(crate) fn key_chord_actions(chord: &str) -> Value {
     let (key_name, _, _) = named_key_info(&key);
     let value = key_value(&key_name);
 
-    let mut actions = Vec::new();
-    for modifier in &modifiers {
-        actions.push(json!({ "type": "keyDown", "value": modifier_value(modifier) }));
-    }
+    let mut actions = modifier_steps("keyDown", &modifiers);
     actions.push(json!({ "type": "keyDown", "value": value }));
     actions.push(json!({ "type": "keyUp", "value": value }));
-    for modifier in modifiers.iter().rev() {
-        actions.push(json!({ "type": "keyUp", "value": modifier_value(modifier) }));
-    }
+    actions.extend(modifier_steps("keyUp", &modifiers));
     key_source(actions)
+}
+
+/// Resolves the key a raw key event dispatches: the logical key, else the
+/// physical code, else the text.
+pub(crate) fn key_from_raw(raw: &RawKey<'_>) -> Result<String, String> {
+    match raw
+        .key
+        .filter(|key| !key.is_empty() && *key != "Unidentified")
+    {
+        Some(key) => Ok(key.to_string()),
+        None => match raw.code {
+            Some(code) => code_key_name(code)
+                .ok_or_else(|| format!("Raw key code {code} is not supported on Firefox")),
+            None => Ok(raw.text.unwrap_or_default().to_string()),
+        },
+    }
+}
+
+/// Names the modifiers a CDP bitmask holds.
+pub(crate) fn modifier_names(mask: i32) -> Vec<&'static str> {
+    [(1, "Alt"), (2, "Control"), (4, "Meta"), (8, "Shift")]
+        .into_iter()
+        .filter_map(|(bit, name)| (mask & bit != 0).then_some(name))
+        .collect()
+}
+
+/// Build the BiDi actions that press or release `modifiers` in place.
+pub(crate) fn modifier_actions(event_type: &str, modifiers: &[&str]) -> Value {
+    key_source(modifier_steps(event_type, modifiers))
 }
 
 /// Build the BiDi actions for one key event (`keyDown` or `keyUp`) of `key`.
@@ -71,36 +92,38 @@ pub(crate) fn pointer_hover(origin: &Origin) -> Value {
     pointer_source("mouse", vec![pointer_move(origin)])
 }
 
-/// Builds timed mouse moves using the same path calculations as Chrome.
+/// Build the BiDi actions for a mouse button press at the current position.
+pub(crate) fn pointer_press(button: &str) -> Value {
+    pointer_source(
+        "mouse",
+        vec![json!({ "type": "pointerDown", "button": mouse_button(button) })],
+    )
+}
+
+/// Build the BiDi actions for a mouse button release at the current position.
+pub(crate) fn pointer_release(button: &str) -> Value {
+    pointer_source(
+        "mouse",
+        vec![json!({ "type": "pointerUp", "button": mouse_button(button) })],
+    )
+}
+
+/// Builds the BiDi actions for a planned pointer path from `start` toward `target`.
 pub(crate) fn pointer_mousemove(
     start: (f64, f64),
     target: (f64, f64),
-    duration_ms: u64,
-    requested_steps: Option<usize>,
-    human: bool,
-    seed: u64,
+    options: &PointerMoveOptions,
 ) -> Value {
-    let dx = target.0 - start.0;
-    let dy = target.1 - start.1;
-    let distance = dx.hypot(dy);
-    let duration_ms = interpolated_mouse_duration(distance, duration_ms, human);
-    let steps = interpolated_mouse_steps(distance, duration_ms, requested_steps, human);
-    let bend = interpolated_mouse_bend(distance, human, seed);
-    let (perp_x, perp_y) = if distance > 0.0 {
-        (-dy / distance, dx / distance)
-    } else {
-        (0.0, 0.0)
-    };
-    let actions = (1..=steps)
-        .map(|step| {
-            let (x, y) = interpolated_mouse_point(
-                start.0, start.1, target.0, target.1, perp_x, perp_y, bend, step, steps,
-            );
-            let mut action = pointer_move(&Origin::Viewport { x, y });
-            action["duration"] = json!(
-                duration_ms / steps as u64 + u64::from(step as u64 <= duration_ms % steps as u64)
-            );
-            action
+    let actions = plan_pointer_move(start, target, options)
+        .into_iter()
+        .map(|(x, y, duration)| {
+            json!({
+                "type": "pointerMove",
+                "x": x,
+                "y": y,
+                "origin": "viewport",
+                "duration": duration,
+            })
         })
         .collect();
     pointer_source("mouse", actions)
@@ -126,6 +149,20 @@ pub(crate) fn pointer_up(origin: &Origin, button: &str) -> Value {
             json!({ "type": "pointerUp", "button": mouse_button(button) }),
         ],
     )
+}
+
+/// Build the BiDi actions that move to `origin` and leave exactly the buttons in
+/// `wanted` pressed, given `held` before the event.
+pub(crate) fn pointer_move_buttons(origin: &Origin, held: i32, wanted: i32) -> Value {
+    let changed = |mask: i32| (0..5u8).filter(move |button| mask & mouse_button_mask(*button) != 0);
+    let mut actions = vec![pointer_move(origin)];
+    actions.extend(
+        changed(held & !wanted).map(|button| json!({ "type": "pointerUp", "button": button })),
+    );
+    actions.extend(
+        changed(wanted & !held).map(|button| json!({ "type": "pointerDown", "button": button })),
+    );
+    pointer_source("mouse", actions)
 }
 
 /// Build the BiDi actions for a wheel scroll at `origin`.
@@ -309,6 +346,77 @@ fn modifier_value(modifier: &str) -> String {
     }
 }
 
+fn modifier_steps(event_type: &str, modifiers: &[&str]) -> Vec<Value> {
+    let release = event_type == "keyUp";
+    let event_type = if release { "keyUp" } else { "keyDown" };
+    let ordered: Vec<&str> = if release {
+        modifiers.iter().rev().copied().collect()
+    } else {
+        modifiers.to_vec()
+    };
+    ordered
+        .into_iter()
+        .map(|modifier| json!({ "type": event_type, "value": modifier_value(modifier) }))
+        .collect()
+}
+
+/// Maps a DOM `KeyboardEvent.code` to the key BiDi can dispatch, if any.
+fn code_key_name(code: &str) -> Option<String> {
+    if let Some(letter) = code.strip_prefix("Key") {
+        if letter.len() == 1 && letter.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+            return Some(letter.to_ascii_lowercase());
+        }
+    }
+    for prefix in ["Digit", "Numpad"] {
+        if let Some(digit) = code.strip_prefix(prefix) {
+            if digit.len() == 1 && digit.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Some(digit.to_string());
+            }
+        }
+    }
+    if code
+        .strip_prefix('F')
+        .and_then(|number| number.parse::<u8>().ok())
+        .is_some_and(|number| (1..=12).contains(&number))
+    {
+        return Some(code.to_string());
+    }
+    let name = match code {
+        "Space" => " ",
+        "Enter" | "NumpadEnter" => "Enter",
+        "Tab" => "Tab",
+        "Backspace" => "Backspace",
+        "Escape" => "Escape",
+        "Delete" => "Delete",
+        "Insert" => "Insert",
+        "Home" => "Home",
+        "End" => "End",
+        "PageUp" => "PageUp",
+        "PageDown" => "PageDown",
+        "ArrowUp" => "ArrowUp",
+        "ArrowDown" => "ArrowDown",
+        "ArrowLeft" => "ArrowLeft",
+        "ArrowRight" => "ArrowRight",
+        "ShiftLeft" | "ShiftRight" => "Shift",
+        "ControlLeft" | "ControlRight" => "Control",
+        "AltLeft" | "AltRight" => "Alt",
+        "MetaLeft" | "MetaRight" => "Meta",
+        "Semicolon" => ";",
+        "Equal" | "NumpadAdd" => "=",
+        "Comma" => ",",
+        "Minus" | "NumpadSubtract" => "-",
+        "Period" | "NumpadDecimal" => ".",
+        "Slash" | "NumpadDivide" => "/",
+        "Backquote" => "`",
+        "BracketLeft" => "[",
+        "Backslash" => "\\",
+        "BracketRight" => "]",
+        "Quote" => "'",
+        _ => return None,
+    };
+    Some(name.to_string())
+}
+
 fn split_chord(chord: &str) -> (String, Vec<&'static str>) {
     let parts: Vec<&str> = chord.split('+').collect();
     if parts.len() < 2 {
@@ -348,9 +456,27 @@ mod tests {
         value[0]["actions"].as_array().unwrap()
     }
 
+    fn options(
+        mode: &str,
+        seed: u64,
+        duration_ms: u64,
+        steps: Option<usize>,
+    ) -> PointerMoveOptions {
+        PointerMoveOptions {
+            mode: mode.into(),
+            seed,
+            duration_ms,
+            steps,
+        }
+    }
+
     #[test]
     fn mouse_path_preserves_timing_seed_and_endpoint() {
-        let path = pointer_mousemove((10.0, 20.0), (130.0, 20.0), 101, Some(4), true, 42);
+        let path = pointer_mousemove(
+            (10.0, 20.0),
+            (130.0, 20.0),
+            &options("human", 42, 101, Some(4)),
+        );
         let moves = steps(&path);
         assert_eq!(moves.len(), 4);
         assert_eq!(
@@ -365,13 +491,25 @@ mod tests {
         assert_eq!(moves.last().unwrap()["y"], json!(20.0));
         assert_eq!(
             path,
-            pointer_mousemove((10.0, 20.0), (130.0, 20.0), 101, Some(4), true, 42)
+            pointer_mousemove(
+                (10.0, 20.0),
+                (130.0, 20.0),
+                &options("human", 42, 101, Some(4))
+            )
         );
         assert_ne!(
             path,
-            pointer_mousemove((10.0, 20.0), (130.0, 20.0), 101, Some(4), true, 43)
+            pointer_mousemove(
+                (10.0, 20.0),
+                (130.0, 20.0),
+                &options("human", 43, 101, Some(4))
+            )
         );
-        let straight = pointer_mousemove((10.0, 20.0), (130.0, 20.0), 0, Some(2), false, 42);
+        let straight = pointer_mousemove(
+            (10.0, 20.0),
+            (130.0, 20.0),
+            &options("instant", 42, 0, Some(2)),
+        );
         assert_eq!(steps(&straight)[0]["x"], json!(70.0));
         assert_eq!(steps(&straight)[0]["y"], json!(20.0));
         assert_eq!(steps(&straight)[0]["duration"], 0);
@@ -379,7 +517,8 @@ mod tests {
 
     #[test]
     fn mouse_path_clamps_steps_and_handles_stationary_and_long_moves() {
-        let stationary = pointer_mousemove((10.0, 20.0), (10.0, 20.0), 0, Some(0), true, 0);
+        let stationary =
+            pointer_mousemove((10.0, 20.0), (10.0, 20.0), &options("human", 0, 0, Some(0)));
         assert_eq!(steps(&stationary).len(), 1);
         assert_eq!(steps(&stationary)[0]["duration"], 100);
         assert_eq!(steps(&stationary)[0]["x"], json!(10.0));
@@ -387,10 +526,7 @@ mod tests {
         let long = pointer_mousemove(
             (0.0, 0.0),
             (100.0, 100.0),
-            u64::MAX,
-            Some(usize::MAX),
-            false,
-            0,
+            &options("instant", 0, u64::MAX, Some(usize::MAX)),
         );
         assert_eq!(steps(&long).len(), 240);
         assert_eq!(

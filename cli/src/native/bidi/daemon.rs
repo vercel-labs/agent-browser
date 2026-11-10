@@ -15,8 +15,8 @@ pub fn reset_page(state: &mut DaemonState) {
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     if let Some(ff) = state.firefox.as_mut() {
-        ff.context = ff.top_context.clone();
-        ff.refs.clear();
+        ff.contexts.leave_frame();
+        ff.forget_refs();
     }
 }
 
@@ -31,11 +31,14 @@ pub fn forget_context(state: &mut DaemonState, context: &str) -> Result<bool, St
 mod tests {
     use super::*;
     use crate::native::bidi::session::tests::fake_session;
+    use serde_json::json;
 
     #[tokio::test]
     async fn reset_page_drops_frame_refs_and_keeps_monotonic_node_ids() {
         let (mut ff, _, _) = fake_session().await;
-        ff.context = "ctx-frame".into();
+        ff.contexts
+            .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
+        ff.contexts.activate("ctx-frame");
         ff.next_node_id = 42;
         ff.refs.insert(("ctx-frame".into(), "node".into()), 17);
         let mut state = DaemonState::new();
@@ -59,7 +62,7 @@ mod tests {
         assert!(state.active_iframe_sessions.is_empty());
         assert!(state.active_frame_id.is_none());
         let ff = state.firefox.as_ref().unwrap();
-        assert_eq!(ff.context, ff.top_context);
+        assert_eq!(ff.contexts.active(), "ctx-active");
         assert!(ff.refs.is_empty());
         assert_eq!(ff.next_node_id, 42);
     }

@@ -902,7 +902,6 @@ mod tests {
             bidi: ff.bidi.clone(),
             context: "ctx-old".into(),
             contexts: Default::default(),
-            tabs: Default::default(),
             modifiers: Default::default(),
         };
         server.set_firefox_live(Some(live.clone())).await;
@@ -941,7 +940,6 @@ mod tests {
                 bidi: ff.bidi.clone(),
                 context: "ctx-old".into(),
                 contexts: Default::default(),
-                tabs: Default::default(),
                 modifiers: Default::default(),
             }))
             .await;

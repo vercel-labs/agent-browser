@@ -1,9 +1,9 @@
 //! WebDriver BiDi engine support. Firefox is the implemented engine; Firefox-only DevTools code lives in `firefox.rs` and `firefox_devtools.rs`.
-#![allow(dead_code)]
 
 pub mod actions;
 pub mod capture;
 pub mod client;
+pub mod contexts;
 pub mod daemon;
 pub mod emulation;
 pub mod firefox;

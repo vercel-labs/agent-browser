@@ -10,6 +10,7 @@ use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
 use crate::native::cookies::Cookie;
 use crate::native::state::{self, OriginStorage, StorageState};
+use crate::native::storage::storage_js_name;
 use crate::validation::{is_valid_session_name, session_name_error};
 
 const ORIGIN_STORAGE_JS: &str = r#"() => {
@@ -28,13 +29,6 @@ const ORIGIN_STORAGE_JS: &str = r#"() => {
     } catch(e) { return null; }
     return result;
 }"#;
-
-fn storage_js_name(storage_type: &str) -> &'static str {
-    match storage_type {
-        "session" => "sessionStorage",
-        _ => "localStorage",
-    }
-}
 
 fn same_site_to_state(value: &Value) -> Option<String> {
     match value.as_str()?.to_ascii_lowercase().as_str() {
@@ -207,7 +201,10 @@ fn append_context_urls(contexts: &[Value], urls: &mut Vec<url::Url>) {
 async fn cookie_urls(ff: &FirefoxSession) -> Result<Vec<url::Url>, String> {
     let tree = ff
         .bidi
-        .send("browsingContext.getTree", json!({"root": ff.top_context}))
+        .send(
+            "browsingContext.getTree",
+            json!({"root": ff.contexts.active_tab()}),
+        )
         .await?;
     let contexts = tree["contexts"]
         .as_array()
@@ -853,7 +850,9 @@ mod tests {
             }]})
         })
         .await;
-        ff.context = "ctx-frame".into();
+        ff.contexts
+            .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
+        ff.contexts.activate("ctx-frame");
 
         let urls = cookie_urls(&ff).await.unwrap();
 

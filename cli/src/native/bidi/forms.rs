@@ -7,11 +7,13 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::daemon::session;
-use super::input::{key_chord_actions, key_event_actions, key_text_actions, pointer_click, Origin};
+use super::input::{
+    key_chord_actions, key_event_actions, key_from_raw, key_text_actions, pointer_click, Origin,
+};
 use super::interact::{act_element, perform_actions, PointerAction};
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
-use crate::native::actions::DaemonState;
+use crate::native::actions::{raw_key, DaemonState};
 use crate::native::element::ELEMENT_CHECKED_JS;
 use crate::native::interaction::{
     CLEAR_INPUT_JS, CLEAR_VALUE_JS, CLICK_CHECKBOX_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
@@ -100,7 +102,7 @@ pub(super) async fn run(
 }
 
 async fn focused_context(ff: &FirefoxSession, context: &str) -> Result<String, String> {
-    let mut focused = ff.top_context.clone();
+    let mut focused = ff.contexts.active_tab().to_string();
     let mut visited = HashSet::new();
     while visited.insert(focused.clone()) {
         let child = ff
@@ -112,7 +114,7 @@ async fn focused_context(ff: &FirefoxSession, context: &str) -> Result<String, S
         };
         focused = child.to_string();
     }
-    Ok(if focused == ff.top_context {
+    Ok(if focused == ff.contexts.active_tab() {
         context.to_string()
     } else {
         focused
@@ -280,7 +282,7 @@ pub async fn type_text(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 pub async fn press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let key = require(cmd, "key")?;
     let ff = session(state)?;
-    perform_actions(ff, &ff.context, key_chord_actions(key)).await?;
+    perform_actions(ff, ff.contexts.active(), key_chord_actions(key)).await?;
     Ok(json!({ "pressed": key }))
 }
 
@@ -288,7 +290,7 @@ pub async fn press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 pub async fn keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let key = require(cmd, "key")?;
     let ff = session(state)?;
-    perform_actions(ff, &ff.context, key_event_actions("keyDown", key)).await?;
+    perform_actions(ff, ff.contexts.active(), key_event_actions("keyDown", key)).await?;
     Ok(json!({ "keydown": key }))
 }
 
@@ -296,7 +298,7 @@ pub async fn keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 pub async fn keyup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let key = require(cmd, "key")?;
     let ff = session(state)?;
-    perform_actions(ff, &ff.context, key_event_actions("keyUp", key)).await?;
+    perform_actions(ff, ff.contexts.active(), key_event_actions("keyUp", key)).await?;
     Ok(json!({ "keyup": key }))
 }
 
@@ -306,7 +308,7 @@ pub async fn keyboard(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         Some("type") => {
             let text = require(cmd, "text")?;
             let ff = session(state)?;
-            send_text(ff, &ff.context, text, None).await?;
+            send_text(ff, ff.contexts.active(), text, None).await?;
             Ok(json!({ "typed": text }))
         }
         Some("insertText") => inserttext(cmd, state).await,
@@ -324,16 +326,17 @@ pub async fn input_keyboard(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     if event_type == "char" {
         let text = require(cmd, "text")?;
         let ff = session(state)?;
-        literal_edit(ff, &ff.context, None, text, false).await?;
+        literal_edit(ff, ff.contexts.active(), None, text, false).await?;
         return Ok(json!({ "dispatched": event_type }));
     }
-    let key = cmd
-        .get("key")
-        .and_then(Value::as_str)
-        .or_else(|| cmd.get("text").and_then(Value::as_str))
-        .unwrap_or("");
+    let key = key_from_raw(&raw_key(cmd))?;
     let ff = session(state)?;
-    perform_actions(ff, &ff.context, key_event_actions(event_type, key)).await?;
+    perform_actions(
+        ff,
+        ff.contexts.active(),
+        key_event_actions(event_type, &key),
+    )
+    .await?;
     Ok(json!({ "dispatched": event_type }))
 }
 
@@ -342,7 +345,7 @@ pub async fn inserttext(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let text = require(cmd, "text")?;
     let ff = session(state)?;
     if !text.is_empty() {
-        literal_edit(ff, &ff.context, None, text, false).await?;
+        literal_edit(ff, ff.contexts.active(), None, text, false).await?;
     }
     Ok(json!({ "inserted": true }))
 }
@@ -669,6 +672,50 @@ mod tests {
                 "script.callFunction",
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn input_keyboard_dispatches_the_key_a_physical_code_names() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request: &Value| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = state_with(ff);
+
+        assert_eq!(
+            input_keyboard(&json!({"type": "keyDown", "code": "KeyA"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"dispatched": "keyDown"})
+        );
+        assert_eq!(
+            input_keyboard(&json!({"type": "keyUp", "code": "ShiftLeft"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"dispatched": "keyUp"})
+        );
+        assert_eq!(
+            input_keyboard(&json!({"type": "keyDown", "code": "Launch42"}), &mut state)
+                .await
+                .unwrap_err(),
+            "Raw key code Launch42 is not supported on Firefox"
+        );
+        assert_eq!(
+            requests.lock().unwrap()[0]["params"]["actions"],
+            json!([{ "type": "key", "id": "key", "actions": [
+                { "type": "keyDown", "value": "a" }
+            ] }])
+        );
+        assert_eq!(
+            requests.lock().unwrap()[1]["params"]["actions"],
+            json!([{ "type": "key", "id": "key", "actions": [
+                { "type": "keyUp", "value": "\u{E008}" }
+            ] }])
+        );
+        assert_eq!(requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

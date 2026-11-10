@@ -6,8 +6,9 @@ use serde_json::{json, Value};
 use tokio::sync::{watch, Mutex};
 
 use super::client::BidiClient;
+use super::contexts::Contexts;
 use super::input::{self, Origin};
-use super::session::{dialog_blocks_tab, owner_tab, record_context};
+use super::session::dialog_blocks_tab;
 use super::tabs;
 use crate::native::stream::{FrameMetadata, StreamServer};
 
@@ -20,9 +21,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct FirefoxLive {
     pub bidi: Arc<BidiClient>,
     pub context: String,
-    pub contexts: HashMap<String, String>,
+    pub contexts: Contexts,
     /// The session's tabs as (context, `t<N>` id, label), in id order.
-    pub tabs: Vec<(String, u32, Option<String>)>,
     pub modifiers: Arc<Mutex<HashMap<String, u8>>>,
 }
 
@@ -77,9 +77,9 @@ async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<Fire
     loop {
         tokio::select! {
             Some(e) = events.recv() => {
-                record_context(&e, &mut live.contexts);
+                live.contexts.apply(&e);
                 let context = e["params"]["context"].as_str().unwrap_or_default();
-                let blocks = dialog_blocks_tab(Some(owner_tab(context, &live.contexts)), &live.context);
+                let blocks = dialog_blocks_tab(live.contexts.tab_of(context).or(Some(context)), &live.context);
                 match (e["method"].as_str(), blocks) {
                     (Some("browsingContext.userPromptOpened"), true) => {
                         paused = true;
@@ -145,7 +145,7 @@ async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<Fire
 /// Asks Firefox for the tab list without holding the poller's event loop.
 fn list_tabs(live: &FirefoxLive) -> tokio::task::JoinHandle<Option<Vec<Value>>> {
     let live = live.clone();
-    tokio::spawn(async move { tabs::stream_tabs(&live.bidi, &live.tabs, &live.context).await })
+    tokio::spawn(async move { tabs::stream_tabs(&live.bidi, &live.contexts, &live.context).await })
 }
 
 /// Asks Firefox for a frame without holding the poller's event loop.
@@ -162,7 +162,7 @@ async fn capture(live: &FirefoxLive, quality: f64) -> Option<Shot> {
         .send_timeout(
             "browsingContext.captureScreenshot",
             json!({
-                "context": live.context,
+                "context": &live.context,
                 "origin": "viewport",
                 "format": { "type": "image/jpeg", "quality": quality },
             }),
@@ -280,7 +280,7 @@ pub async fn dispatch_input(live: &FirefoxLive, msg_type: &str, msg: &Value) {
             .bidi
             .send_no_wait(
                 "input.performActions",
-                json!({ "context": live.context, "actions": actions }),
+                json!({ "context": &live.context, "actions": actions }),
             )
             .await
             .is_ok()
@@ -383,9 +383,8 @@ mod tests {
         let server = Arc::new(server);
         let live = FirefoxLive {
             bidi: Arc::clone(&ff.bidi),
-            context: ff.top_context.clone(),
-            contexts: ff.context_parents.clone(),
-            tabs: ff.tab_index(),
+            context: ff.contexts.active_tab().to_string(),
+            contexts: ff.contexts.clone(),
             modifiers: Default::default(),
         };
         let _poller = spawn_poller(live, Arc::clone(&server));

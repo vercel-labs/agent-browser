@@ -1,7 +1,5 @@
 use super::types::{LocalValue, RemoteValue};
 use futures_util::{SinkExt, StreamExt};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -156,18 +154,6 @@ impl BidiClient {
             .send(Message::Text(body))
             .await
             .map_err(|e| format!("BiDi send failed: {e}"))
-    }
-
-    /// Sends a command with serializable params and deserializes its `result`.
-    pub async fn send_typed<P: Serialize, R: DeserializeOwned>(
-        &self,
-        method: &str,
-        params: &P,
-    ) -> Result<R, String> {
-        let params =
-            serde_json::to_value(params).map_err(|e| format!("Failed to serialize params: {e}"))?;
-        serde_json::from_value(self.send(method, params).await?)
-            .map_err(|e| format!("Failed to deserialize BiDi response for {method}: {e}"))
     }
 
     /// Runs `script.callFunction` in a browsing context and returns the decoded result.

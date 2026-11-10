@@ -931,7 +931,6 @@ mod tests {
             bidi,
             context: "ctx".to_string(),
             contexts: Default::default(),
-            tabs: Default::default(),
             modifiers: Default::default(),
         })));
         let reader_task = tokio::spawn(async move {
