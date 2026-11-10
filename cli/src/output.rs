@@ -127,6 +127,33 @@ fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     Some(format!("{}: {}", key, format_storage_value(value)))
 }
 
+/// Formats the `state show` summary. The daemon reports cookie and origin
+/// counts as an object; an older daemon sends a preformatted string, which is
+/// passed through so a version-skewed CLI still prints something useful.
+fn format_state_show_text(data: &serde_json::Value) -> Option<String> {
+    let summary = data.get("summary")?;
+    let encrypted = data
+        .get("encrypted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let enc_str = if encrypted { " (encrypted)" } else { "" };
+
+    if let Some(counts) = summary.as_object() {
+        let cookies = counts.get("cookies").and_then(|v| v.as_u64()).unwrap_or(0);
+        let origins = counts.get("origins").and_then(|v| v.as_u64()).unwrap_or(0);
+        return Some(format!(
+            "State file summary{}:\n  Cookies: {}\n  Origins with localStorage: {}",
+            enc_str, cookies, origins
+        ));
+    }
+
+    Some(format!(
+        "State file summary{}:\n  {}",
+        enc_str,
+        summary.as_str()?
+    ))
+}
+
 /// Formats the daemon's preformatted React tree, including an empty-tree hint.
 fn format_react_tree_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     if action != Some("react_tree") {
@@ -984,6 +1011,16 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
 
     if let Some(data) = &resp.data {
         print_lifecycle_note(data);
+
+        // State show summary. A state file carries `filename` and `path`, the
+        // same fields the download formatter claims, so this has to be decided
+        // before any generic path branch below.
+        if action == Some("state_show") {
+            if let Some(output) = format_state_show_text(data) {
+                println!("{}", output);
+                return;
+            }
+        }
 
         // Dialog status response
         if action == Some("dialog") {
@@ -1849,21 +1886,6 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 color::success_indicator(),
                 cleared
             );
-            return;
-        }
-
-        // State show summary
-        if let Some(summary) = data.get("summary") {
-            let cookies = summary.get("cookies").and_then(|v| v.as_i64()).unwrap_or(0);
-            let origins = summary.get("origins").and_then(|v| v.as_i64()).unwrap_or(0);
-            let encrypted = data
-                .get("encrypted")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let enc_str = if encrypted { " (encrypted)" } else { "" };
-            println!("State file summary{}:", enc_str);
-            println!("  Cookies: {}", cookies);
-            println!("  Origins with localStorage: {}", origins);
             return;
         }
 
@@ -5005,8 +5027,8 @@ mod tests {
 
     use super::{
         boundary_origin, format_a11y_text, format_react_tree_text, format_snapshot_delta,
-        format_storage_text, format_vitals_text, format_webmcp_context, format_webmcp_text,
-        format_webmcp_tool_text, format_with_boundaries, OutputOptions,
+        format_state_show_text, format_storage_text, format_vitals_text, format_webmcp_context,
+        format_webmcp_text, format_webmcp_tool_text, format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
 
@@ -5118,6 +5140,77 @@ mod tests {
         let rendered = format_storage_text(&data).unwrap();
 
         assert_eq!(rendered, "No storage entries");
+    }
+
+    #[test]
+    fn test_format_state_show_text_reports_counts() {
+        let data = json!({
+            "encrypted": false,
+            "summary": { "cookies": 12, "origins": 3 }
+        });
+
+        let rendered = format_state_show_text(&data).unwrap();
+
+        assert_eq!(
+            rendered,
+            "State file summary:\n  Cookies: 12\n  Origins with localStorage: 3"
+        );
+    }
+
+    #[test]
+    fn test_format_state_show_text_marks_encrypted_files() {
+        let data = json!({
+            "encrypted": true,
+            "summary": { "cookies": 0, "origins": 0 }
+        });
+
+        let rendered = format_state_show_text(&data).unwrap();
+
+        assert_eq!(
+            rendered,
+            "State file summary (encrypted):\n  Cookies: 0\n  Origins with localStorage: 0"
+        );
+    }
+
+    /// An older daemon sends `summary` as preformatted text. Passing it through
+    /// keeps `state show` readable when the CLI and daemon versions differ.
+    #[test]
+    fn test_format_state_show_text_accepts_legacy_string_summary() {
+        let data = json!({
+            "encrypted": false,
+            "summary": "4 cookies, 2 origins"
+        });
+
+        let rendered = format_state_show_text(&data).unwrap();
+
+        assert_eq!(rendered, "State file summary:\n  4 cookies, 2 origins");
+    }
+
+    #[test]
+    fn test_format_state_show_text_ignores_other_payloads() {
+        assert!(format_state_show_text(&json!({ "state": {} })).is_none());
+    }
+
+    /// A state file carries `filename` and `path`, the same fields the download
+    /// formatter claims. The `state_show` branch therefore has to run first, and
+    /// this payload is the one that used to print "Downloaded to ...".
+    #[test]
+    fn test_format_state_show_text_wins_over_download_fields() {
+        let data = json!({
+            "filename": "my-session-default.json",
+            "path": "/home/user/.agent-browser/sessions/my-session-default.json",
+            "size": 363,
+            "encrypted": false,
+            "summary": { "cookies": 2, "origins": 1 },
+            "state": { "cookies": [], "origins": [] }
+        });
+
+        let rendered = format_state_show_text(&data).unwrap();
+
+        assert_eq!(
+            rendered,
+            "State file summary:\n  Cookies: 2\n  Origins with localStorage: 1"
+        );
     }
 
     #[test]
