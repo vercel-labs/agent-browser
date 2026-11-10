@@ -4,12 +4,14 @@
   --text: calc(85cqw - 48px);
   --pitch: calc(var(--text) + 96px);
   --line-extension: 20px;
+  --edge-fade: clamp(64px, 8vw, 128px);
   position: relative;
   margin-inline: calc(var(--bleed) * -1);
   timeline-scope: --rail;
 }
 .track {
   position: relative;
+  z-index: 0;
   display: flex;
   list-style: none;
   margin: calc(-1 * var(--line-extension)) 0;
@@ -22,53 +24,43 @@
 }
 .track::-webkit-scrollbar { display: none; }
 
-/* Hover intent: passing beneath the pointer should not flash a highlight.
-   Scroll activity cancels it immediately; keyboard focus stays independent. */
-.track [data-tweet-mention] {
-  transition: color 120ms ease-out;
-}
-@media (hover: hover) and (pointer: fine) {
-  .track:not([data-scrolling]) a:hover [data-tweet-mention] {
-    color: var(--ds-blue-700);
-    transition-delay: 120ms;
-  }
-  .track[data-scrolling] [data-tweet-mention] {
-    transition: none;
-  }
-}
-.track a:focus-visible [data-tweet-mention] {
-  color: var(--ds-blue-700);
-}
-@media (prefers-reduced-motion: reduce) {
-  .track [data-tweet-mention] {
-    transition: none;
-  }
-}
-
 .item {
   --inset-start: 48px;
   --inset-end: 48px;
   position: relative;
   flex: none;
   width: var(--pitch);
-  padding-inline: var(--inset-start) var(--inset-end);
 }
 .item:first-child { --inset-start: 0px; width: calc(var(--text) + 48px); }
 .item:last-child { --inset-end: 0px; width: calc(var(--text) + 48px); }
+.item > article > a {
+  padding-inline: var(--inset-start) var(--inset-end);
+}
 
-/* Rules travel in the gaps. The solid span aligns with the quote's first
-   cap height and the handle's baseline, with short fades beyond them. */
+/* Base and hover tint share one mask, so the entire rule, including its
+   feathered ends, changes contrast together. */
 .item + .item::before {
   content: '';
   position: absolute;
   inset-block: calc(-1 * var(--line-extension));
   left: 0;
   width: 1px;
-  background: var(--ds-gray-alpha-400);
+  background-color: var(--ds-gray-400);
+  background-image: linear-gradient(var(--rule-highlight, transparent), var(--rule-highlight, transparent));
   mask-image: linear-gradient(to bottom, transparent,
       #000 calc(var(--line-extension) + 7px),
       #000 calc(100% - var(--line-extension) - 4px), transparent);
   pointer-events: none;
+}
+
+/* Scroll activity cancels hover immediately; focus remains independent. */
+@media (hover: hover) and (pointer: fine) {
+  .track:not([data-scrolling]) .item + .item:has(a:hover)::before {
+    --rule-highlight: var(--ds-gray-alpha-500);
+  }
+}
+.item + .item:has(a:focus-visible)::before {
+  --rule-highlight: var(--ds-gray-alpha-500);
 }
 
 @container (min-width: 601px) {
@@ -80,7 +72,9 @@
 
 .scrim {
   position: absolute;
+  z-index: 1;
   inset-block: calc(-1 * var(--line-extension));
+  width: var(--edge-fade);
   pointer-events: none;
   background: var(--ds-background-200);
   /* Eased alpha stops, so the fade has no visible start or end edge. */
@@ -89,14 +83,11 @@
 }
 .start {
   left: 0;
-  /* Only soften content in the outer page gutter, never the reading column. */
-  width: var(--bleed);
   mask-image: linear-gradient(to right, var(--eased));
 }
 .end {
   right: 0;
   /* Fade only at the viewport edge, independent of the page's outer gutter. */
-  width: clamp(64px, 8vw, 128px);
   mask-image: linear-gradient(to left, var(--eased));
 }
 

@@ -19,6 +19,19 @@
   text-wrap: balance;
 }
 
+@container (max-width: 600px) {
+  /* Balance splits this heading into three short lines on phones. */
+  [data-element='AgentTweetWall'] .landing-heading {
+    text-wrap: pretty;
+  }
+
+  /* Fits "Your agent can write code," on one line from 390px. */
+  .landing-heading[data-size='64'] {
+    font-size: 30px;
+    letter-spacing: -1.2px;
+  }
+}
+
 @container (min-width: 961px) {
   .landing-heading[data-size='56'] {
     font-size: 56px;

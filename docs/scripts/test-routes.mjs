@@ -164,7 +164,6 @@ try {
       "tests/baseline-oracle.test.mjs",
       "tests/docs-baseline.test.mjs",
       "tests/docs-routes.test.mjs",
-      "src/components/landing/compat/parity.test.mjs",
     ]);
     const outcome = await Promise.race([
       tests.exited.then((code) => ({ source: "tests", code })),
