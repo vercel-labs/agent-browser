@@ -60,9 +60,17 @@ impl Contexts {
     }
 
     /// Records one `browsingContext.Info`, a `getTree` entry or a `contextCreated` event, along
-    /// with the contexts nested in it.
-    pub fn record(&mut self, info: &Value) {
+    /// with the contexts nested in it. Returns true when it became the active context because
+    /// no open tab was active.
+    pub fn record(&mut self, info: &Value) -> bool {
         self.record_under(info, None);
+        let context = info["context"].as_str().unwrap_or_default();
+        let adopted = !self.nodes.contains_key(&self.active)
+            && matches!(self.nodes.get(context), Some(Node::Tab(_)));
+        if adopted {
+            self.active = context.to_string();
+        }
+        adopted
     }
 
     fn record_under(&mut self, info: &Value, parent: Option<&str>) {
@@ -297,6 +305,10 @@ mod tests {
         assert!(contexts.remove("tab-a").active_changed);
         assert_eq!(contexts.active(), "tab-b");
         assert!(!contexts.remove("unknown").active_changed);
+        assert!(contexts.remove("tab-b").active_changed);
+        assert!(contexts.record(&json!({"context": "tab-d", "parent": null})));
+        assert!(!contexts.record(&json!({"context": "tab-e", "parent": null})));
+        assert_eq!(contexts.active(), "tab-d");
     }
 
     #[test]

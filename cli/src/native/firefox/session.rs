@@ -187,16 +187,16 @@ impl FirefoxSession {
             .await;
     }
 
-    /// Applies buffered BiDi events and returns whether the active context was destroyed.
+    /// Applies buffered BiDi events and returns whether the active context changed.
     pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> bool {
-        let mut active_destroyed = false;
+        let mut active_changed = false;
         loop {
             match self.events.try_recv() {
                 Ok(e) => {
                     let params = &e["params"];
                     match e["method"].as_str() {
                         Some("browsingContext.contextCreated") => {
-                            self.contexts.record(params);
+                            active_changed |= self.contexts.record(params);
                             if let Some(url) = params["url"].as_str() {
                                 self.note_visit(url);
                             }
@@ -208,7 +208,7 @@ impl FirefoxSession {
                         }
                         Some("browsingContext.contextDestroyed") => {
                             if let Some(context) = params["context"].as_str() {
-                                active_destroyed |= self.forget_context(context, dialog);
+                                active_changed |= self.forget_context(context, dialog);
                             }
                         }
                         _ => {}
@@ -219,7 +219,7 @@ impl FirefoxSession {
                 Err(_) => break,
             }
         }
-        active_destroyed
+        active_changed
     }
 
     /// Forgets a browsing context that is gone and everything nested in it: element refs and
