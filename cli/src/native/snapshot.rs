@@ -336,10 +336,10 @@ mod compact_snapshot_regressions {
         .await;
         server.abort();
 
-        // Plain -i output still skips rows; -i -c shows them.
+        // Plain -i output still skips rows; -i -c shows them under the table.
         assert!(!plain.contains("- row"), "{plain}");
         assert!(
-            compact.starts_with("- row\n  - columnheader \"ID\""),
+            compact.starts_with("- table \"Users\"\n  - row\n    - columnheader \"ID\""),
             "{compact}"
         );
         assert!(
@@ -352,12 +352,107 @@ mod compact_snapshot_regressions {
         assert_eq!(rows.len(), 7, "{compact}");
         for row in rows {
             assert!(row.contains("button \"Edit\""), "{row}");
-            assert!(row.starts_with("  - cell \"U-"), "{row}");
+            assert!(row.trim_start().starts_with("- cell \"U-"), "{row}");
         }
         let plain_lines = ref_lines(&plain);
         for line in ref_lines(&compact) {
             assert!(plain_lines.contains(&line), "{line:?}");
         }
+    }
+
+    /// Two adjacent action tables with `rows_each` rows each, every row holding
+    /// a plain-text ID cell and Edit and Delete buttons.
+    fn two_short_actions_tables_nodes(rows_each: i64) -> Value {
+        let ax = |id: i64, role: &str, name: &str, children: Vec<i64>| {
+            json!({
+                "nodeId": id.to_string(),
+                "role": {"type": "role", "value": role},
+                "name": {"type": "computedString", "value": name},
+                "childIds": children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "backendDOMNodeId": id,
+            })
+        };
+        let tables: Vec<i64> = vec![2, 3];
+        let mut nodes = vec![ax(1, "RootWebArea", "Two tables", tables.clone())];
+        for (t, &table) in tables.iter().enumerate() {
+            let base = 100 + t as i64 * 1_000;
+            let header = base - 10;
+            let rows: Vec<i64> = (0..rows_each).map(|r| base + r * 10).collect();
+            nodes.push(ax(
+                table,
+                "table",
+                &format!("Table {t}"),
+                [vec![header], rows.clone()].concat(),
+            ));
+            nodes.push(ax(header, "row", "", vec![header + 1, header + 2]));
+            nodes.push(ax(header + 1, "columnheader", "ID", vec![]));
+            nodes.push(ax(header + 2, "columnheader", "Actions", vec![]));
+            for (r, &row) in rows.iter().enumerate() {
+                nodes.push(ax(row, "row", "", vec![row + 1, row + 2]));
+                nodes.push(ax(row + 1, "cell", &format!("T{t}-U-{r}"), vec![]));
+                nodes.push(ax(row + 2, "cell", "Edit Delete", vec![row + 3, row + 4]));
+                nodes.push(ax(row + 3, "button", "Edit", vec![]));
+                nodes.push(ax(row + 4, "button", "Delete", vec![]));
+            }
+        }
+        Value::Array(nodes)
+    }
+
+    /// Each of two adjacent tables stays below the row-collapse threshold, so
+    /// `-i -c` must keep every control. Dropping their `table` wrappers would
+    /// make both tables' rows one fourteen-item run and hide controls.
+    #[tokio::test]
+    async fn interactive_compact_keeps_controls_in_separate_short_tables() {
+        const ROWS: i64 = 7; // fewer than the 12-item collapse threshold
+        let (url, server) = serve(two_short_actions_tables_nodes(ROWS)).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        let (plain, _) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                interactive: true,
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        let (compact, _) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                interactive: true,
+                compact: true,
+                max_tokens: Some(DEFAULT_MAX_TOKENS),
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            !plain.contains("- table") && !plain.contains("- row"),
+            "plain -i still skips structure: {plain}"
+        );
+        assert_eq!(
+            compact.matches("button \"Edit\"").count(),
+            2 * ROWS as usize,
+            "{compact}"
+        );
+        assert_eq!(
+            compact.matches("button \"Delete\"").count(),
+            2 * ROWS as usize,
+            "{compact}"
+        );
+        for t in 0..2 {
+            for r in 0..ROWS {
+                assert!(
+                    compact.contains(&format!("cell \"T{t}-U-{r}\"")),
+                    "table {t} row {r} lost its identity:\n{compact}"
+                );
+            }
+        }
+        assert!(!compact.contains('…'), "{compact}");
+        assert!(!compact.contains("(compact:"), "{compact}");
     }
 
     #[test]
@@ -1718,10 +1813,18 @@ fn render_tree(
     }
 
     // Budgeted `-i -c` keeps row lines so compaction can collapse whole rows
-    // and keep each row's cells together. Rows have no ref, so this changes
-    // neither plain `-i` output nor ref allocation.
-    let keep_row = options.compact && options.max_tokens.is_some() && role == "row";
-    if options.interactive && !node.has_ref && !keep_row {
+    // and keep each row's cells together. It keeps the table wrappers above
+    // them too: dropping those makes the rows of separate short tables
+    // adjacent siblings, and compaction collapses them as one repeated run.
+    // These lines have no refs, so this changes neither plain `-i` output nor
+    // ref allocation.
+    let keeps_repeated_structure = options.compact
+        && options.max_tokens.is_some()
+        && matches!(
+            role.as_str(),
+            "row" | "rowgroup" | "table" | "grid" | "treegrid"
+        );
+    if options.interactive && !node.has_ref && !keeps_repeated_structure {
         // In interactive mode, skip non-interactive but render children
         for &child in &node.children {
             render_tree(nodes, child, indent, output, options, layout);

@@ -7683,7 +7683,11 @@ async fn e2e_snapshot_compact_budget_and_ref_stability() {
     let tight_text = get_data(&tight)["snapshot"].as_str().unwrap();
     assert!(tight_text.contains("button \"Edit 150\""), "{tight_text}");
     assert!(
-        tight_text.contains("- row\n  - cell \"Customer 150\""),
+        tight_text
+            .lines()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|w| w[0].trim() == "- row" && w[1].trim().starts_with("- cell \"Customer 150\"")),
         "the focused button keeps its row's name: {tight_text}"
     );
     assert!(!tight_text.contains("Long text"), "{tight_text}");

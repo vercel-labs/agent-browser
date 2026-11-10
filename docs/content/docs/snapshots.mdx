@@ -73,7 +73,7 @@ agent-browser snapshot -c
 # (compact: showing 92 of 5022 lines; use --max-tokens <n>, -s <selector>, or no -c for more)
 ```
 
-Compaction only hides lines. A compact snapshot assigns the same refs as a full snapshot of the same page, and refs of hidden lines still work with `click`, `fill`, and other commands. `-i` combines with `-c`: the interactive tree is collapsed and budgeted the same way. `-i -c` also prints table row lines (they have no ref), so a table collapses by whole rows and each kept button or link is shown with its row's identifying cell. Plain `-i` output does not change.
+Compaction only hides lines. A compact snapshot assigns the same refs as a full snapshot of the same page, and refs of hidden lines still work with `click`, `fill`, and other commands. `-i` combines with `-c`: the interactive tree is collapsed and budgeted the same way. `-i -c` also prints table rows and the `table`/`rowgroup` lines above them (they have no ref), so a table collapses by whole rows, rows from separate tables never share one collapsed run, and each kept button or link is shown with its row's identifying cell. Plain `-i` output does not change.
 
 The budget is estimated from line length, calibrated against the o200k tokenizer, and errs high, so real token counts usually land at or under the budget. `diff snapshot --compact` only removes empty structure and does not apply a budget, so diffs stay complete.
 
