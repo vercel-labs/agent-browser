@@ -1022,24 +1022,18 @@ async fn read_limited_text(response: reqwest::Response) -> Result<(String, bool)
 fn html_to_markdownish(html: &str) -> String {
     let stripped = strip_ignored_html_blocks(html);
     let mut out = String::new();
-    let mut chars = stripped.chars().peekable();
+    let mut cursor = 0;
     let mut in_pre = false;
 
-    while let Some(ch) = chars.next() {
-        if ch != '<' {
-            out.push(ch);
-            continue;
-        }
-
-        let mut tag = String::new();
-        for next in chars.by_ref() {
-            if next == '>' {
-                break;
-            }
-            tag.push(next);
-        }
-        handle_html_tag(&tag, &mut out, &mut in_pre);
+    while let Some(relative) = stripped[cursor..].find('<') {
+        let start = cursor + relative;
+        out.push_str(&stripped[cursor..start]);
+        let end = html_tag_end(&stripped, start);
+        let raw = &stripped[start + 1..end];
+        handle_html_tag(raw.strip_suffix('>').unwrap_or(raw), &mut out, &mut in_pre);
+        cursor = end;
     }
+    out.push_str(&stripped[cursor..]);
 
     let decoded = decode_html_entities(&out);
     if in_pre {
@@ -1047,6 +1041,27 @@ fn html_to_markdownish(html: &str) -> String {
     } else {
         normalize_markdownish(&decoded)
     }
+}
+
+/// Return the position after a tag or comment, respecting quoted attributes.
+fn html_tag_end(input: &str, start: usize) -> usize {
+    if input[start..].starts_with("<!--") {
+        return input[start + 4..]
+            .find("-->")
+            .map(|relative| start + 4 + relative + 3)
+            .unwrap_or(input.len());
+    }
+
+    let mut quote = None;
+    for (relative, byte) in input.as_bytes()[start + 1..].iter().copied().enumerate() {
+        match (quote, byte) {
+            (Some(open), close) if open == close => quote = None,
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return start + 1 + relative + 1,
+            _ => {}
+        }
+    }
+    input.len()
 }
 
 fn strip_ignored_html_blocks(html: &str) -> String {
@@ -1065,10 +1080,7 @@ fn strip_tag_block(input: &str, tag: &str) -> String {
 
     while let Some(start) = find_open_tag(&lower, tag, cursor) {
         out.push_str(&input[cursor..start]);
-        let after_start = lower[start..]
-            .find('>')
-            .map(|idx| start + idx + 1)
-            .unwrap_or(input.len());
+        let after_start = html_tag_end(&lower, start);
         if let Some(close_rel) = lower[after_start..].find(&close) {
             cursor = after_start + close_rel + close.len();
         } else {
@@ -1082,18 +1094,21 @@ fn strip_tag_block(input: &str, tag: &str) -> String {
 fn find_open_tag(lower: &str, tag: &str, cursor: usize) -> Option<usize> {
     let needle = format!("<{}", tag);
     let mut search = cursor;
-    while let Some(rel) = lower[search..].find(&needle) {
-        let start = search + rel;
-        let after_name = start + needle.len();
-        let is_boundary = lower
-            .as_bytes()
-            .get(after_name)
-            .map(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' | b'/' | b'>'))
-            .unwrap_or(true);
-        if is_boundary {
-            return Some(start);
+    while let Some(relative) = lower[search..].find('<') {
+        let start = search + relative;
+        if lower[start..].starts_with(&needle) {
+            let after_name = start + needle.len();
+            let is_boundary = lower
+                .as_bytes()
+                .get(after_name)
+                .map(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' | b'/' | b'>'))
+                .unwrap_or(true);
+            if is_boundary {
+                return Some(start);
+            }
         }
-        search = after_name;
+        // A tag name inside an attribute or comment is not an element.
+        search = html_tag_end(lower, start);
     }
     None
 }
@@ -1262,6 +1277,30 @@ mod tests {
                 "https://example.com/llms.txt",
             ]
         );
+    }
+
+    #[test]
+    fn html_to_markdownish_respects_quoted_attribute_delimiters() {
+        let html = r#"<h1 title="x > y">Title</h1><p title='中文 > text'>Visible text</p>"#;
+        assert_eq!(html_to_markdownish(html), "# Title\n\nVisible text");
+    }
+
+    #[test]
+    fn html_to_markdownish_ignores_complete_comments() {
+        let html = "<p>Before</p><!-- x > y <h1>Hidden</h1> <script> --> <p>After</p>";
+        assert_eq!(html_to_markdownish(html), "Before\n\nAfter");
+    }
+
+    #[test]
+    fn html_to_markdownish_keeps_text_after_tag_names_in_attributes() {
+        let html = r#"<p title="literal <script> and > text">Visible</p>"#;
+        assert_eq!(html_to_markdownish(html), "Visible");
+    }
+
+    #[test]
+    fn html_to_markdownish_skips_ignored_blocks_with_quoted_end_tags() {
+        let html = r#"<script data-example="> </script>">hidden()</script><p>Visible</p>"#;
+        assert_eq!(html_to_markdownish(html), "Visible");
     }
 
     #[test]
