@@ -869,6 +869,7 @@ mod tests {
                 secure: false,
                 session: true,
                 same_site: Some("Lax".to_string()),
+                partition_key: None,
             }],
             origins: vec![OriginStorage {
                 origin: "https://example.com".to_string(),
@@ -1014,6 +1015,7 @@ mod tests {
             secure: true,
             session: false,
             same_site: Some("Strict".to_string()),
+            partition_key: None,
         };
 
         let json = serde_json::to_value(&cookie).unwrap();
