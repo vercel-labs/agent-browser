@@ -17,11 +17,17 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(reqwest::Client::new)
 }
 
+/// Atlas Cloud is the backend only when the AI Gateway key is absent and an
+/// Atlas Cloud key is present. Key, base URL and default model all follow this.
+pub(crate) fn atlas_is_selected() -> bool {
+    std::env::var("AI_GATEWAY_API_KEY").is_err() && std::env::var("ATLASCLOUD_API_KEY").is_ok()
+}
+
 pub(crate) fn configured_chat_base_url() -> String {
     if let Ok(url) = std::env::var("AI_GATEWAY_URL") {
         return url.trim_end_matches('/').to_string();
     }
-    if std::env::var("ATLASCLOUD_API_KEY").is_ok() {
+    if atlas_is_selected() {
         return std::env::var("ATLASCLOUD_API_BASE")
             .unwrap_or_else(|_| DEFAULT_ATLASCLOUD_URL.to_string())
             .trim_end_matches('/')
@@ -36,17 +42,21 @@ pub(crate) fn configured_chat_api_key() -> Option<String> {
         .or_else(|| std::env::var("ATLASCLOUD_API_KEY").ok())
 }
 
-/// Model used when no env override applies. `fallback` is the surface's own
-/// non-Atlas default (CLI chat and dashboard server differ upstream).
-pub(crate) fn default_chat_model(fallback: &str) -> String {
-    if let Ok(model) = std::env::var("AI_GATEWAY_MODEL") {
-        return model;
+/// Default model for a surface. `fallback` is that surface's own non-Atlas
+/// default. `read_gateway_model_env` is true only for the dashboard server,
+/// which (as upstream) honors `AI_GATEWAY_MODEL`; the chat CLI does not.
+/// Atlas-specific values apply only when Atlas Cloud is the selected backend.
+pub(crate) fn default_chat_model(fallback: &str, read_gateway_model_env: bool) -> String {
+    let gateway_model = || std::env::var("AI_GATEWAY_MODEL").ok();
+    if atlas_is_selected() {
+        return gateway_model()
+            .or_else(|| std::env::var("ATLASCLOUD_MODEL").ok())
+            .unwrap_or_else(|| DEFAULT_ATLASCLOUD_MODEL.to_string());
     }
-    if let Ok(model) = std::env::var("ATLASCLOUD_MODEL") {
-        return model;
-    }
-    if std::env::var("ATLASCLOUD_API_KEY").is_ok() {
-        return DEFAULT_ATLASCLOUD_MODEL.to_string();
+    if read_gateway_model_env {
+        if let Some(m) = gateway_model() {
+            return m;
+        }
     }
     fallback.to_string()
 }
@@ -63,7 +73,7 @@ pub(super) fn chat_status_json() -> String {
     let enabled = is_chat_enabled();
     let mut obj = json!({ "enabled": enabled });
     if enabled {
-        obj["model"] = Value::String(default_chat_model(DEFAULT_AI_GATEWAY_MODEL));
+        obj["model"] = Value::String(default_chat_model(DEFAULT_AI_GATEWAY_MODEL, true));
     }
     obj.to_string()
 }
@@ -766,7 +776,7 @@ pub(super) async fn handle_chat_request(
         }
     };
 
-    let default_model = default_chat_model(DEFAULT_AI_GATEWAY_MODEL);
+    let default_model = default_chat_model(DEFAULT_AI_GATEWAY_MODEL, true);
 
     let parsed: Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -1190,11 +1200,11 @@ mod tests {
         assert_eq!(configured_chat_api_key(), None);
         assert_eq!(configured_chat_base_url(), DEFAULT_AI_GATEWAY_URL);
         assert_eq!(
-            default_chat_model(DEFAULT_AI_GATEWAY_MODEL),
+            default_chat_model(DEFAULT_AI_GATEWAY_MODEL, true),
             "openai/gpt-6-luna-fast"
         );
         assert_eq!(
-            default_chat_model("anthropic/claude-sonnet-4.6"),
+            default_chat_model("anthropic/claude-sonnet-4.6", false),
             "anthropic/claude-sonnet-4.6"
         );
     }
@@ -1211,7 +1221,7 @@ mod tests {
         assert_eq!(configured_chat_api_key().as_deref(), Some("atlas-test-key"));
         assert_eq!(configured_chat_base_url(), DEFAULT_ATLASCLOUD_URL);
         assert_eq!(
-            default_chat_model(DEFAULT_AI_GATEWAY_MODEL),
+            default_chat_model(DEFAULT_AI_GATEWAY_MODEL, true),
             DEFAULT_ATLASCLOUD_MODEL
         );
     }
@@ -1231,7 +1241,10 @@ mod tests {
 
         assert_eq!(configured_chat_api_key().as_deref(), Some("gateway-key"));
         assert_eq!(configured_chat_base_url(), "https://gateway.example/v1");
-        assert_eq!(default_chat_model(DEFAULT_AI_GATEWAY_MODEL), "openai/o3");
+        assert_eq!(
+            default_chat_model(DEFAULT_AI_GATEWAY_MODEL, true),
+            "openai/o3"
+        );
     }
 
     #[test]
@@ -1246,8 +1259,70 @@ mod tests {
 
         assert_eq!(configured_chat_base_url(), "https://proxy.example/atlas");
         assert_eq!(
-            default_chat_model(DEFAULT_AI_GATEWAY_MODEL),
+            default_chat_model(DEFAULT_AI_GATEWAY_MODEL, true),
             "deepseek-ai/deepseek-v4-pro"
+        );
+    }
+
+    #[test]
+    fn both_keys_keep_gateway_backend_and_non_atlas_defaults() {
+        let env = EnvGuard::new(CHAT_ENV);
+        for name in CHAT_ENV {
+            env.remove(name);
+        }
+        env.set("AI_GATEWAY_API_KEY", "gateway-key");
+        env.set("ATLASCLOUD_API_KEY", "atlas-key");
+        env.set("ATLASCLOUD_MODEL", "deepseek-ai/deepseek-v4-pro");
+
+        assert!(!atlas_is_selected());
+        assert_eq!(configured_chat_api_key().as_deref(), Some("gateway-key"));
+        assert_eq!(configured_chat_base_url(), DEFAULT_AI_GATEWAY_URL);
+        assert_eq!(
+            default_chat_model(DEFAULT_AI_GATEWAY_MODEL, true),
+            "openai/gpt-6-luna-fast"
+        );
+        assert_eq!(
+            default_chat_model("anthropic/claude-sonnet-4.6", false),
+            "anthropic/claude-sonnet-4.6"
+        );
+    }
+
+    #[test]
+    fn chat_cli_ignores_gateway_model_env_unless_atlas_selected() {
+        let env = EnvGuard::new(CHAT_ENV);
+        for name in CHAT_ENV {
+            env.remove(name);
+        }
+        env.set("AI_GATEWAY_API_KEY", "gateway-key");
+        env.set("AI_GATEWAY_MODEL", "openai/o3");
+
+        assert_eq!(
+            default_chat_model("anthropic/claude-sonnet-4.6", false),
+            "anthropic/claude-sonnet-4.6"
+        );
+        assert_eq!(
+            default_chat_model(DEFAULT_AI_GATEWAY_MODEL, true),
+            "openai/o3"
+        );
+    }
+
+    #[test]
+    fn atlas_only_selects_atlas_base_and_default_model_on_both_surfaces() {
+        let env = EnvGuard::new(CHAT_ENV);
+        for name in CHAT_ENV {
+            env.remove(name);
+        }
+        env.set("ATLASCLOUD_API_KEY", "atlas-key");
+
+        assert!(atlas_is_selected());
+        assert_eq!(configured_chat_base_url(), DEFAULT_ATLASCLOUD_URL);
+        assert_eq!(
+            default_chat_model("anthropic/claude-sonnet-4.6", false),
+            DEFAULT_ATLASCLOUD_MODEL
+        );
+        assert_eq!(
+            default_chat_model(DEFAULT_AI_GATEWAY_MODEL, true),
+            DEFAULT_ATLASCLOUD_MODEL
         );
     }
 }

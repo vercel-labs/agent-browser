@@ -44,7 +44,7 @@ pub fn run_chat(flags: &Flags, message: Option<String>) {
     let model = flags
         .model
         .clone()
-        .unwrap_or_else(|| chat::default_chat_model(DEFAULT_MODEL));
+        .unwrap_or_else(|| chat::default_chat_model(DEFAULT_MODEL, false));
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 
