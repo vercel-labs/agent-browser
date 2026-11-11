@@ -7216,7 +7216,9 @@ async fn e2e_snapshot_hints_ambiguous_controls() {
 </li></ul>
 <input type="email" name="login-email" placeholder="Email">
 <label>Email <input type="email" name="newsletter-email"></label>
-<button>Save</button>"##;
+<button>Save</button>
+<ul><li>Invoice 1 <div onclick="void 0">Edit</div></li><li>Invoice 2 <div onclick="void 0">Edit</div></li></ul>
+<div onclick="void 0">Archive</div>"##;
     let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
 
     let resp = execute_command(
@@ -7241,6 +7243,8 @@ async fn e2e_snapshot_hints_ambiguous_controls() {
         r#"hint="img:pencil; id:edit-btn; in:Blue mug""#,
         r#"hint="name:login-email""#,
         r#"hint="name:newsletter-email""#,
+        r#"hint="in:Invoice 1""#,
+        r#"hint="in:Invoice 2""#,
     ] {
         assert!(
             snapshot.contains(hint),
@@ -7250,15 +7254,17 @@ async fn e2e_snapshot_hints_ambiguous_controls() {
         );
     }
 
-    let save_line = snapshot
-        .lines()
-        .find(|line| line.contains("button \"Save\""))
-        .expect("unique Save button should be in the snapshot");
-    assert!(
-        !save_line.contains("hint="),
-        "Uniquely named control should not get a hint:\n{}",
-        snapshot,
-    );
+    for unique in ["button \"Save\"", "generic \"Archive\""] {
+        let line = snapshot
+            .lines()
+            .find(|line| line.contains(unique))
+            .expect("uniquely named control should be in the snapshot");
+        assert!(
+            !line.contains("hint="),
+            "Uniquely named control should not get a hint:\n{}",
+            snapshot,
+        );
+    }
 
     for line in snapshot.lines().filter(|line| line.contains("hint=")) {
         assert!(

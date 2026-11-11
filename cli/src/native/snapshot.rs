@@ -251,6 +251,21 @@ impl TreeNode {
         self.depth = 0;
         self.cursor_info = None;
     }
+
+    /// The name an interactive snapshot prints: the accessible name, or the cursor-interactive text when that is empty.
+    fn label(&self) -> &str {
+        match &self.cursor_info {
+            Some(cursor_info) if self.name.is_empty() => &cursor_info.text,
+            _ => &self.name,
+        }
+    }
+}
+
+/// How a ref's printed role and label identify it among the refs of one snapshot.
+enum LabelState {
+    Unique,
+    Shared,
+    Empty,
 }
 
 /// The type of a hidden form input found inside a cursor-interactive element.
@@ -568,23 +583,33 @@ pub async fn take_snapshot(
 
     ref_map.set_next_ref_num(next_ref);
 
+    let mut label_counts: HashMap<(&str, &str), usize> = HashMap::new();
+    for &(idx, _) in &nodes_with_refs {
+        let node = &tree_nodes[idx];
+        *label_counts
+            .entry((node.role.as_str(), node.label()))
+            .or_default() += 1;
+    }
     let hint_nodes: Vec<(usize, i64)> = nodes_with_refs
         .iter()
         .filter_map(|&(idx, _)| {
             let node = &tree_nodes[idx];
             let is_control = node.cursor_info.is_some()
                 || (INTERACTIVE_ROLES.contains(&node.role.as_str()) && node.role != "Iframe");
-            let has_text = node
-                .cursor_info
-                .as_ref()
-                .is_some_and(|c| !c.text.is_empty());
-            let is_ambiguous = if node.name.is_empty() {
-                !has_text
-            } else {
-                duplicates.contains_key(&format!("{}:{}", node.role, node.name))
+            let state = match (
+                node.label(),
+                label_counts[&(node.role.as_str(), node.label())],
+            ) {
+                ("", _) => LabelState::Empty,
+                (_, 1) => LabelState::Unique,
+                _ => LabelState::Shared,
+            };
+            let needs_hint = match state {
+                LabelState::Unique => false,
+                LabelState::Shared | LabelState::Empty => true,
             };
             node.backend_node_id
-                .filter(|_| is_control && is_ambiguous)
+                .filter(|_| is_control && needs_hint)
                 .map(|bid| (idx, bid))
         })
         .collect();
@@ -1299,16 +1324,10 @@ fn render_tree(
     let mut line = format!("{}- {}", prefix, role);
 
     // Use ARIA name if available, only fall back to cursor-interactive textContent in interactive mode since their visible text in child nodes is filtered out
-    let unescaped_display_name = if !node.name.is_empty() {
-        &node.name
-    } else if options.interactive {
-        if let Some(ref ci) = node.cursor_info {
-            &ci.text
-        } else {
-            &node.name
-        }
+    let unescaped_display_name = if options.interactive {
+        node.label()
     } else {
-        &node.name
+        node.name.as_str()
     };
     if !unescaped_display_name.is_empty() {
         if let Ok(display_name) =
