@@ -1258,7 +1258,9 @@ impl DaemonState {
         let (Some(poller), Some(live)) = (self.firefox_poller.as_ref(), self.firefox_live()) else {
             return;
         };
-        poller.show(live);
+        if poller.serves(&live.bidi) {
+            poller.show(live);
+        }
     }
 
     /// The Firefox tab the dashboard shows and the tabs the session has now.
@@ -1294,8 +1296,8 @@ impl DaemonState {
             .await;
         server.set_firefox_live(live.clone()).await;
         match (live, self.firefox_poller.as_ref()) {
-            (Some(live), Some(poller)) => poller.show(live),
-            (Some(live), None) => {
+            (Some(live), Some(poller)) if poller.serves(&live.bidi) => poller.show(live),
+            (Some(live), _) => {
                 self.firefox_poller = Some(bidi::stream::spawn_poller(live, Arc::clone(&server)));
             }
             (None, _) => self.firefox_poller = None,
@@ -1407,7 +1409,7 @@ impl DaemonState {
         let firefox_tabs_changed = bidi::network::drain(self).await;
         if let Some(ff) = self.firefox.as_mut() {
             ff.release_unused_user_contexts().await;
-            if ff.recover_active_context().await? {
+            if ff.recover_lost_events(&mut self.pending_dialog).await? {
                 bidi::daemon::reset_page(self);
             }
         }

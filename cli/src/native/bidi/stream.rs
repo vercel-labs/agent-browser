@@ -29,9 +29,17 @@ pub struct FirefoxLive {
 pub struct Poller {
     task: tokio::task::JoinHandle<()>,
     target: watch::Sender<Option<FirefoxLive>>,
+    bidi: Arc<BidiClient>,
 }
 
 impl Poller {
+    /// Whether this poller is still running for the session behind `bidi`. A poller listens to
+    /// one session's events and stops when that session's socket closes, so a relaunched or
+    /// reattached Firefox needs its own.
+    pub fn serves(&self, bidi: &Arc<BidiClient>) -> bool {
+        Arc::ptr_eq(&self.bidi, bidi) && !self.task.is_finished()
+    }
+
     /// Points the dashboard at `live`: the tab it shows and the tabs the session has now.
     pub fn show(&self, live: FirefoxLive) {
         self.target.send_replace(Some(live));
@@ -46,10 +54,12 @@ impl Drop for Poller {
 
 /// Starts the single task that serves this Firefox session's dashboard, for as long as the session lives.
 pub fn spawn_poller(live: FirefoxLive, server: Arc<StreamServer>) -> Poller {
+    let bidi = Arc::clone(&live.bidi);
     let (target, receiver) = watch::channel(Some(live));
     Poller {
         task: tokio::spawn(poll(server, receiver)),
         target,
+        bidi,
     }
 }
 
@@ -365,6 +375,54 @@ mod tests {
 
         let observed = calls.lock().unwrap().clone();
         assert!(observed.is_empty(), "{observed:?}");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_new_firefox_session_gets_its_own_poller() {
+        use crate::native::actions::DaemonState;
+        use crate::native::stream::{IdleActivity, StreamServer};
+
+        let (first, first_events, _) = fake_session().await;
+        let (second, second_events, calls) = fake_session().await;
+        std::mem::forget((first_events, second_events));
+        let activity = Arc::new(IdleActivity::new());
+        let (server, slot) = StreamServer::start_without_client(
+            0,
+            "firefox-relaunch".into(),
+            true,
+            activity.clone(),
+        )
+        .await
+        .unwrap();
+        let server = Arc::new(server);
+        let mut state = DaemonState::new_with_stream(
+            crate::session_settings::Running::defaults(),
+            Arc::new(crate::session_settings::MemStore::default()),
+            Some(slot),
+            Some(Arc::clone(&server)),
+            activity,
+        );
+        state.engine = "firefox".into();
+        first.bidi.stop_reader();
+        state.firefox = Some(first);
+        state.update_stream_client().await;
+        tokio::time::sleep(POLL_INTERVAL * 3).await;
+
+        state.firefox = Some(second);
+        state.update_stream_client().await;
+        let _ws = dashboard(&server).await;
+        assert!(
+            wait_for(
+                &calls,
+                "browsingContext.captureScreenshot",
+                1,
+                Duration::from_secs(3)
+            )
+            .await
+                >= 1,
+            "the dashboard must get frames from the session that replaced a closed one"
+        );
         server.shutdown().await;
     }
 

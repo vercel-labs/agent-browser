@@ -435,15 +435,24 @@ impl FirefoxSession {
         self.contexts.partition(self.contexts.active())
     }
 
-    /// Reads the context tree when no context is active, which happens when the event that
-    /// announced the next tab was lost. Returns true when a tab became active.
-    pub async fn recover_active_context(&mut self) -> Result<bool, String> {
-        if !self.contexts.active().is_empty() {
+    /// Rebuilds what events keep current when events were dropped or no context is active: the
+    /// context tree is read again, and after a drop the unfinished requests are forgotten, since
+    /// their completions may be among the lost events. Returns true when the active context
+    /// changed.
+    pub async fn recover_lost_events(
+        &mut self,
+        dialog: &mut Option<PendingDialog>,
+    ) -> Result<bool, String> {
+        let lost = self.bidi.take_event_loss();
+        if !lost && !self.contexts.active().is_empty() {
             return Ok(false);
         }
         let tree = self.bidi.send("browsingContext.getTree", json!({})).await?;
-        self.contexts.sync(&tree);
-        Ok(!self.contexts.active().is_empty())
+        let removed = self.contexts.sync(&tree);
+        if lost {
+            self.inflight.clear();
+        }
+        Ok(self.forget(removed, dialog))
     }
 
     /// Removes the user contexts this session created once their last tab is gone.
@@ -1649,6 +1658,25 @@ pub(crate) mod tests {
         assert!(ff.active_tab_contains("ctx-frame").await);
         assert!(ff.context_is_in_active_tab("ctx-frame"));
         assert!(!ff.active_tab_contains("ctx-other").await);
+    }
+
+    #[tokio::test]
+    async fn dropped_events_rebuild_the_context_tree_and_forget_unfinished_requests() {
+        let (mut ff, _tx, _) = fake_session_with(|request| match request["method"].as_str() {
+            Some("browsingContext.getTree") => json!({"contexts": [{"context": "ctx-next"}]}),
+            _ => json!({}),
+        })
+        .await;
+        ff.inflight
+            .insert("unfinished".into(), Some("ctx-active".into()));
+        assert!(!ff.recover_lost_events(&mut None).await.unwrap());
+        assert_eq!(ff.inflight.len(), 1);
+
+        ff.bidi.lost_events.store(true, Ordering::Relaxed);
+        assert!(ff.recover_lost_events(&mut None).await.unwrap());
+        assert!(ff.inflight.is_empty());
+        assert_eq!(ff.contexts.active(), "ctx-next");
+        assert!(!ff.recover_lost_events(&mut None).await.unwrap());
     }
 
     #[tokio::test]
