@@ -40,7 +40,7 @@ export async function snapshotUrl(url: string) {
   return withAgentBrowserSandbox(async (sandbox) => {
     await runAgentBrowserCommand(sandbox, ["open", url]);
 
-    const result = await runAgentBrowserCommand(sandbox, ["snapshot", "-i", "-c"], {
+    const result = await runAgentBrowserCommand(sandbox, ["snapshot", "-i"], {
       json: false,
     });
 
@@ -121,7 +121,7 @@ export async function GET() {
       "open", "https://example.com/pricing",
     ]);
     const snap = await runAgentBrowserCommand(sandbox, [
-      "snapshot", "-i", "-c",
+      "snapshot", "-i",
     ], { json: false });
     await runAgentBrowserCommand(sandbox, ["close"], { json: false });
     return snap.stdout;

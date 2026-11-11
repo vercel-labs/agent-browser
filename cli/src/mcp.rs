@@ -964,8 +964,8 @@ fn tools() -> Vec<Value> {
             "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
-                "compact": { "type": "boolean", "default": false, "description": "Budget mode: drop empty structure, collapse long tables and lists, truncate long text, and keep the highest-priority lines (controls first, then headings and landmarks, labels, other text) within maxTokens. Omitted content is marked with lines such as '… 480 more rows'. Refs match the full snapshot." },
-                "maxTokens": { "type": "integer", "minimum": 0, "description": "Approximate token budget for compact snapshots (default 2000, 0 for no cap). Implies compact." },
+                "compact": { "type": "boolean", "default": false, "description": "Budget mode: drop empty structure, collapse long tables and lists, truncate long text and values, and keep the highest-priority lines (controls first, then headings and landmarks, labels, other text) within maxTokens. Omitted content is marked with lines such as '… 480 more rows'. Refs match the full snapshot." },
+                "maxTokens": { "type": "integer", "minimum": 0, "description": "Approximate token budget for compact snapshots (default 2000, 0 for no cap). Implies compact. Collapsing and truncation apply at any budget, so raising it only restores lines the budget cut; set compact to false to see collapsed items." },
                 "depth": { "type": "integer", "minimum": 0, "description": "Limit tree depth." },
                 "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector." },
                 "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." },

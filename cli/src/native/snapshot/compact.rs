@@ -349,7 +349,7 @@ pub(super) fn compact_lines(
     loop {
         let selected = select_lines(lines, &tree, &candidates, &context, &costs, line_budget);
         let output = render(
-            lines, &tree, &live, &selected, &collapsed, &group_of, &groups, total_live,
+            lines, &tree, &live, &selected, &collapsed, &hidden, &group_of, &groups, total_live,
         );
         if max_tokens == usize::MAX || line_budget < 16 {
             return output;
@@ -576,6 +576,7 @@ fn render(
     live: &[bool],
     selected: &[bool],
     collapsed: &[bool],
+    hidden: &[bool],
     group_of: &[Option<usize>],
     groups: &[CollapseGroup],
     total_live: usize,
@@ -591,10 +592,22 @@ fn render(
     };
     let mut out = String::new();
     let shown = ctx.render_children(None, &mut out);
-    if shown < total_live && shown > 0 {
+    if shown < total_live {
+        // Collapsing and truncation happen at any budget, so only dropping
+        // -c brings collapsed items back. A larger budget or a narrower
+        // scope only helps when the budget cut lines.
+        let budget_cut = (0..lines.len()).any(|i| live[i] && !hidden[i] && !selected[i]);
+        let collapsed_any = (0..lines.len()).any(|i| live[i] && collapsed[i]);
+        let advice = match (budget_cut, collapsed_any) {
+            (true, false) => "use --max-tokens <n>, -s <selector>, or no -c for more",
+            (true, true) => {
+                "use --max-tokens <n> or -s <selector> for more, or drop -c to see collapsed items"
+            }
+            _ => "drop -c to see collapsed items",
+        };
         out.push_str(&format!(
-            "(compact: showing {} of {} lines; use --max-tokens <n>, -s <selector>, or no -c for more)\n",
-            shown, total_live
+            "(compact: showing {} of {} lines; {})\n",
+            shown, total_live, advice
         ));
     }
     out
@@ -1144,6 +1157,71 @@ mod tests {
         let out = compact_lines(&lines, false, 150);
         assert!(out.contains("link \"visible link\""), "{out}");
         assert!(!out.contains("link \"other link\""), "{out}");
+    }
+
+    /// The trailing hint line, if any.
+    fn hint(out: &str) -> Option<&str> {
+        out.lines().last().filter(|l| l.starts_with("(compact: "))
+    }
+
+    #[test]
+    fn hint_says_drop_c_when_only_collapsing_hid_lines() {
+        // Collapsing happens at any budget, so a larger budget brings
+        // nothing back; only dropping -c does.
+        for budget in [DEFAULT_MAX_TOKENS, usize::MAX] {
+            let out = compact_lines(&table(40), false, budget);
+            assert!(out.contains("- … 33 more rows (40 total)\n"), "{out}");
+            let hint = hint(&out).expect(&out);
+            assert!(hint.ends_with("; drop -c to see collapsed items)"), "{out}");
+            assert!(!hint.contains("--max-tokens"), "{out}");
+            assert!(!hint.contains("-s <selector>"), "{out}");
+        }
+    }
+
+    #[test]
+    fn hint_suggests_a_larger_budget_only_when_the_budget_cut_lines() {
+        // Budget cut, nothing collapsed.
+        let mut lines = vec![line(0, "main", "", None)];
+        for i in 0..10 {
+            lines.push(line(1, "paragraph", "", None));
+            lines.push(line(2, "StaticText", &format!("Paragraph {i} text"), None));
+        }
+        let out = compact_lines(&lines, false, 60);
+        assert!(
+            hint(&out)
+                .expect(&out)
+                .ends_with("; use --max-tokens <n>, -s <selector>, or no -c for more)"),
+            "{out}"
+        );
+        // Budget cut and rows collapsed.
+        let out = compact_lines(&table(500), false, 120);
+        assert!(out.contains("more rows (500 total)"), "{out}");
+        assert!(
+            hint(&out).expect(&out).ends_with(
+                "; use --max-tokens <n> or -s <selector> for more, or drop -c to see collapsed items)"
+            ),
+            "{out}"
+        );
+        // Nothing hidden: no hint.
+        let out = compact_lines(&table(3), false, usize::MAX);
+        assert_eq!(hint(&out), None, "{out}");
+    }
+
+    #[test]
+    fn hint_explains_output_when_nothing_fits_the_budget() {
+        let mut lines = vec![line(0, "main", "", None)];
+        for i in 0..10 {
+            lines.push(line(1, "paragraph", "", None));
+            lines.push(line(2, "StaticText", &format!("Paragraph {i} text"), None));
+        }
+        let out = compact_lines(&lines, false, 30);
+        assert!(out.starts_with("- … 1 more main\n"), "{out}");
+        assert!(
+            hint(&out)
+                .expect(&out)
+                .starts_with("(compact: showing 0 of 21 lines; use --max-tokens"),
+            "{out}"
+        );
     }
 
     #[test]

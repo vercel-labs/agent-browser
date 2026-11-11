@@ -10,7 +10,7 @@ const url = process.argv[2] ?? "https://example.com";
 
 const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
   await runAgentBrowserCommand(sandbox, ["open", url]);
-  const result = await runAgentBrowserCommand(sandbox, ["snapshot", "-i", "-c"], {
+  const result = await runAgentBrowserCommand(sandbox, ["snapshot", "-i"], {
     json: false,
   });
   await runAgentBrowserCommand(sandbox, ["close"], { json: false });

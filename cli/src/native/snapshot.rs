@@ -455,6 +455,206 @@ mod compact_snapshot_regressions {
         assert!(!compact.contains("(compact:"), "{compact}");
     }
 
+    fn ax_node(id: i64, role: &str, name: &str, children: &[i64]) -> Value {
+        json!({
+            "nodeId": id.to_string(),
+            "role": {"type": "role", "value": role},
+            "name": {"type": "computedString", "value": name},
+            "childIds": children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            "backendDOMNodeId": id,
+        })
+    }
+
+    async fn plain_and_compact_interactive(nodes: Value, depth: Option<usize>) -> (String, String) {
+        let (url, server) = serve(nodes).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        let (plain, _) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                interactive: true,
+                depth,
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        let (compact, _) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                interactive: true,
+                compact: true,
+                max_tokens: Some(DEFAULT_MAX_TOKENS),
+                depth,
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        server.abort();
+        (plain, compact)
+    }
+
+    /// Two adjacent lists (or trees) of seven links (or tree items) each.
+    /// Each stays below the collapse threshold, so `-i -c` must print every
+    /// item, as plain `-i` does. Dropping the `list`/`tree` wrappers would make
+    /// the two short runs one fourteen-item run and collapse it.
+    #[tokio::test]
+    async fn interactive_compact_keeps_items_in_separate_short_lists_and_trees() {
+        const ITEMS: i64 = 7;
+        for (container, item_role) in [("list", "link"), ("tree", "treeitem")] {
+            let lists = [2, 3];
+            let mut nodes = vec![ax_node(1, "RootWebArea", "Lists", &lists)];
+            for (l, &list) in lists.iter().enumerate() {
+                let base = 100 + l as i64 * 1_000;
+                let items: Vec<i64> = (0..ITEMS).map(|i| base + i * 10).collect();
+                nodes.push(ax_node(list, container, "", &items));
+                for (i, &item) in items.iter().enumerate() {
+                    let name = format!("L{l} item {i}");
+                    if container == "list" {
+                        nodes.push(ax_node(item, "listitem", "", &[item + 1]));
+                        nodes.push(ax_node(item + 1, item_role, &name, &[]));
+                    } else {
+                        nodes.push(ax_node(item, item_role, &name, &[]));
+                    }
+                }
+            }
+            let (plain, compact) = plain_and_compact_interactive(Value::Array(nodes), None).await;
+            for out in [&plain, &compact] {
+                for l in 0..2 {
+                    for i in 0..ITEMS {
+                        assert!(
+                            out.contains(&format!("{item_role} \"L{l} item {i}\" [ref=")),
+                            "{container} {l} item {i} missing:\n{out}"
+                        );
+                    }
+                }
+            }
+            assert!(!compact.contains('…'), "{compact}");
+            assert!(!compact.contains("(compact:"), "{compact}");
+            assert_eq!(
+                compact.matches(&format!("- {container}\n")).count(),
+                2,
+                "{compact}"
+            );
+            assert!(!plain.contains(&format!("- {container}\n")), "{plain}");
+        }
+    }
+
+    /// `-d` counts only the lines plain `-i` prints, so the `table`,
+    /// `rowgroup`, `row`, and `list` lines budgeted `-i -c` adds do not push
+    /// controls past the depth limit.
+    #[tokio::test]
+    async fn interactive_compact_depth_cuts_the_same_controls_as_plain_interactive() {
+        let rows: Vec<i64> = (0..3).map(|r| 100 + r * 10).collect();
+        let mut nodes = vec![
+            ax_node(1, "RootWebArea", "Depth", &[2, 5]),
+            ax_node(2, "table", "Users", &[3]),
+            ax_node(3, "rowgroup", "", &rows),
+            ax_node(5, "list", "", &[6]),
+            ax_node(6, "listitem", "", &[7]),
+            ax_node(7, "link", "Outer", &[8]),
+            ax_node(8, "button", "Inner", &[9]),
+            ax_node(9, "checkbox", "Innermost", &[]),
+        ];
+        for (r, &row) in rows.iter().enumerate() {
+            nodes.push(ax_node(row, "row", "", &[row + 1, row + 2]));
+            nodes.push(ax_node(row + 1, "cell", &format!("U-{r}"), &[]));
+            nodes.push(ax_node(row + 2, "cell", "Edit", &[row + 3]));
+            nodes.push(ax_node(row + 3, "button", "Edit", &[]));
+        }
+        let nodes = Value::Array(nodes);
+        let printed = |out: &str| -> Vec<String> {
+            ref_lines(out).into_iter().map(|(_, line)| line).collect()
+        };
+        for depth in 0..=3 {
+            let (plain, compact) = plain_and_compact_interactive(nodes.clone(), Some(depth)).await;
+            assert_eq!(
+                printed(&compact),
+                printed(&plain),
+                "-d {depth}\nplain:\n{plain}\ncompact:\n{compact}"
+            );
+            assert!(!printed(&plain).is_empty(), "{plain}");
+            // Cells carry refs, so their buttons sit one level below them.
+            assert_eq!(compact.matches("cell \"U-").count(), 3, "{compact}");
+            assert_eq!(
+                compact.matches("button \"Edit\"").count(),
+                if depth >= 1 { 3 } else { 0 },
+                "-d {depth}: {compact}"
+            );
+            assert!(compact.contains("- rowgroup"), "{compact}");
+            assert_eq!(
+                compact.contains("button \"Inner\""),
+                depth >= 1,
+                "-d {depth}: {compact}"
+            );
+            assert_eq!(
+                compact.contains("checkbox \"Innermost\""),
+                depth >= 2,
+                "-d {depth}: {compact}"
+            );
+        }
+    }
+
+    /// Budgeted compact snapshots shorten long values on interactive lines
+    /// too, so a textarea with a long value keeps its ref instead of costing
+    /// more than the whole budget. Interactive names stay whole.
+    #[tokio::test]
+    async fn budgeted_compact_shortens_long_values_on_interactive_lines() {
+        let long_value = "Meeting notes. ".repeat(1_000);
+        let long_name = format!("Save {}", "and publish ".repeat(15));
+        let mut textarea = ax_node(3, "textbox", "Notes", &[]);
+        textarea["value"] = json!({"type": "string", "value": long_value});
+        let nodes = Value::Array(vec![
+            ax_node(1, "RootWebArea", "Editor", &[2]),
+            ax_node(2, "form", "Editor", &[3, 4]),
+            textarea,
+            ax_node(4, "button", &long_name, &[]),
+        ]);
+        let (url, server) = serve(nodes).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        let (full, _) = snapshot(&client, &mut refs, SnapshotOptions::default()).await;
+        let mut outputs = Vec::new();
+        for interactive in [false, true] {
+            let (out, _) = snapshot(
+                &client,
+                &mut refs,
+                SnapshotOptions {
+                    interactive,
+                    compact: true,
+                    max_tokens: Some(DEFAULT_MAX_TOKENS),
+                    ..SnapshotOptions::default()
+                },
+            )
+            .await;
+            outputs.push(out);
+        }
+        server.abort();
+
+        assert!(
+            full.contains(long_value.trim_end()),
+            "full output keeps the value"
+        );
+        let textbox_ref = &ref_lines(&full)
+            .into_iter()
+            .find(|(_, line)| line.starts_with("- textbox"))
+            .unwrap()
+            .0;
+        for out in outputs {
+            let line = out
+                .lines()
+                .find(|l| l.contains("textbox \"Notes\""))
+                .unwrap_or_else(|| panic!("textbox dropped:\n{out}"));
+            assert!(line.contains(&format!("ref={textbox_ref}")), "{line}");
+            assert!(line.ends_with('…'), "{line}");
+            assert!(line.len() < 200, "{line}");
+            let name = serde_json::to_string(long_name.as_str()).unwrap();
+            assert!(out.contains(&format!("button {name}")), "{out}");
+            assert!(!out.contains("more textbox"), "{out}");
+        }
+    }
+
     #[test]
     fn layout_placement_from_cdp() {
         let snapshot = json!({"documents": [{
@@ -1087,6 +1287,7 @@ async fn snapshot_lines(
         render_tree(
             &tree_nodes,
             root_idx,
+            0,
             0,
             &mut output,
             options,
@@ -1774,10 +1975,15 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
     (tree_nodes, root_indices)
 }
 
+/// Render `nodes[idx]` and its subtree. `indent` is the printed indentation;
+/// `depth` counts only the ancestors plain `-i` would print, so the
+/// structural lines budgeted `-i -c` adds do not change what `-d` cuts.
+#[allow(clippy::too_many_arguments)]
 fn render_tree(
     nodes: &[TreeNode],
     idx: usize,
     indent: usize,
+    depth: usize,
     output: &mut Vec<SnapshotLine>,
     options: &SnapshotOptions,
     layout: Option<&LayoutInfo>,
@@ -1791,13 +1997,13 @@ fn render_tree(
     {
         // Ignored node -- still render children
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options, layout);
+            render_tree(nodes, child, indent, depth, output, options, layout);
         }
         return;
     }
 
     if let Some(max_depth) = options.depth {
-        if indent > max_depth {
+        if depth > max_depth {
             return;
         }
     }
@@ -1807,27 +2013,30 @@ fn render_tree(
     // Skip root WebArea wrapper
     if role == "RootWebArea" || role == "WebArea" {
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options, layout);
+            render_tree(nodes, child, indent, depth, output, options, layout);
         }
         return;
     }
 
     // Budgeted `-i -c` keeps row lines so compaction can collapse whole rows
-    // and keep each row's cells together. It keeps the table wrappers above
-    // them too: dropping those makes the rows of separate short tables
-    // adjacent siblings, and compaction collapses them as one repeated run.
-    // These lines have no refs, so this changes neither plain `-i` output nor
-    // ref allocation.
-    let keeps_repeated_structure = options.compact
+    // and keep each row's cells together. It keeps the table, list, and tree
+    // wrappers too: dropping those makes the rows or links of separate short
+    // tables and lists adjacent siblings, and compaction collapses them as
+    // one repeated run. These lines have no refs, so this changes neither
+    // plain `-i` output nor ref allocation, and they do not count toward
+    // `-d`.
+    let keeps_repeated_structure = options.interactive
+        && options.compact
         && options.max_tokens.is_some()
+        && !node.has_ref
         && matches!(
             role.as_str(),
-            "row" | "rowgroup" | "table" | "grid" | "treegrid"
+            "row" | "rowgroup" | "table" | "grid" | "treegrid" | "list" | "tree"
         );
     if options.interactive && !node.has_ref && !keeps_repeated_structure {
         // In interactive mode, skip non-interactive but render children
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options, layout);
+            render_tree(nodes, child, indent, depth, output, options, layout);
         }
         return;
     }
@@ -1836,7 +2045,8 @@ fn render_tree(
     let mut line = format!("{}- {}", prefix, role);
     let interactive = INTERACTIVE_ROLES.contains(&role.as_str()) || node.cursor_info.is_some();
     // Budgeted compact snapshots shorten long text; interactive names stay whole.
-    let truncate = options.compact && options.max_tokens.is_some() && !interactive;
+    let budgeted = options.compact && options.max_tokens.is_some();
+    let truncate = budgeted && !interactive;
 
     // Use ARIA name if available, only fall back to cursor-interactive textContent in interactive mode since their visible text in child nodes is filtered out
     let unescaped_display_name = if !node.name.is_empty() {
@@ -1915,7 +2125,9 @@ fn render_tree(
     let mut has_value = false;
     if let Some(ref val) = node.value_text {
         if !val.is_empty() && val != &node.name {
-            if truncate {
+            // Values are shortened on interactive lines too: a long textarea
+            // value would otherwise cost more than the whole budget.
+            if budgeted {
                 line.push_str(&format!(": {}", compact::truncate_text(val)));
             } else {
                 line.push_str(&format!(": {}", val));
@@ -1942,8 +2154,21 @@ fn render_tree(
         placement: layout.map_or(Placement::Unknown, |l| l.placement(node.backend_node_id)),
     });
 
+    let child_depth = if keeps_repeated_structure {
+        depth
+    } else {
+        depth + 1
+    };
     for &child in &node.children {
-        render_tree(nodes, child, indent + 1, output, options, layout);
+        render_tree(
+            nodes,
+            child,
+            indent + 1,
+            child_depth,
+            output,
+            options,
+            layout,
+        );
     }
 }
 

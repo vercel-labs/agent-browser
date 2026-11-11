@@ -73,7 +73,7 @@ export async function snapshotUrl(url: string) {
     ]);
     const title = titleResult.json?.data?.title || url;
 
-    const snapResult = await runAgentBrowserCommand(sandbox, ["snapshot", "-i", "-c"], {
+    const snapResult = await runAgentBrowserCommand(sandbox, ["snapshot", "-i"], {
       json: false,
     });
 
@@ -196,7 +196,7 @@ Combine with Vercel Cron Jobs for recurring browser tasks:
 export async function GET() {
   const result = await withBrowser(async (sandbox) => {
     await sandbox.runCommand("agent-browser", ["open", "https://example.com/pricing"]);
-    const snap = await sandbox.runCommand("agent-browser", ["snapshot", "-i", "-c"]);
+    const snap = await sandbox.runCommand("agent-browser", ["snapshot", "-i"]);
     await sandbox.runCommand("agent-browser", ["close"]);
     return await snap.stdout();
   });

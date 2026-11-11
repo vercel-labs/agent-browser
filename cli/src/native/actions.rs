@@ -6695,7 +6695,9 @@ fn snapshot_delta_response(
     refs: &serde_json::Map<String, Value>,
     origin: &str,
 ) -> Value {
-    if previous.tree == tree {
+    // Compact snapshots hide lines, so a ref can change while the printed
+    // tree stays the same.
+    if previous.tree == tree && previous.refs == *refs {
         return json!({
             "snapshot": { "kind": "unchanged", "baseRevision": previous.revision, "revision": revision },
             "origin": origin,
@@ -18726,6 +18728,49 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert_eq!(result["snapshot"]["kind"], "unchanged");
         assert_eq!(result["snapshot"]["baseRevision"], 4);
         assert!(result["snapshot"].get("tree").is_none());
+    }
+
+    #[test]
+    fn test_snapshot_delta_reports_ref_changes_hidden_from_the_tree() {
+        // A compact snapshot prints the same tree when only a collapsed
+        // row's ref changes; the delta must still report that ref.
+        let tree = format!(
+            "{}- … 30 more rows (40 total)",
+            (1..=7)
+                .map(|i| format!(
+                    "- row\n  - cell \"Customer {i}\"\n  - button \"Edit {i}\" [ref=e{i}]\n"
+                ))
+                .collect::<String>()
+        );
+        let refs_for = |hidden_name: &str| -> serde_json::Map<String, Value> {
+            let mut refs = serde_json::Map::new();
+            for i in 1..=7 {
+                refs.insert(
+                    format!("e{i}"),
+                    json!({"role": "button", "name": format!("Edit {i}")}),
+                );
+            }
+            refs.insert("e20".into(), json!({"role": "button", "name": hidden_name}));
+            refs
+        };
+        let previous = SnapshotRevision {
+            revision: 1,
+            url: "https://example.com".to_string(),
+            options: "{}".to_string(),
+            tree: tree.clone(),
+            refs: refs_for("Edit 20"),
+        };
+        let refs = refs_for("Archive 20");
+        let result = snapshot_delta_response(&previous, 2, &tree, &refs, &previous.url);
+        assert_eq!(result["snapshot"]["kind"], "delta", "{result}");
+        let changes = result["snapshot"]["changes"].as_array().unwrap();
+        assert_eq!(
+            changes,
+            &vec![json!({"op": "replace", "ref": "@e20", "field": "name", "value": "Archive 20"})],
+            "{result}"
+        );
+        assert_eq!(result["snapshot"]["treeChange"]["deleteCount"], 0);
+        assert_eq!(result["snapshot"]["treeChange"]["lines"], json!([]));
     }
 
     #[test]
