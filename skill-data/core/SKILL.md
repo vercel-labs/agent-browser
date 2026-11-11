@@ -73,6 +73,7 @@ Load another skill with `agent-browser skills get <name>` when the task is outsi
 | `dogfood` | Exploratory testing, QA, and bug hunts with a report |
 | `derive-client` | Record a HAR and generate a standalone API client for a site |
 | `webmcp-gen` | Build and validate WebMCP tools for a page |
+| `modern-web-guidance` | Apply Chrome's Modern Web Guidance to UI code and verify the built page in the browser |
 | `vercel-sandbox` | agent-browser inside Vercel Sandbox microVMs |
 | `protected-vercel-deployments` | Vercel deployments behind Authentication, SSO, or Deployment Protection |
 | `agentcore` | AWS Bedrock AgentCore cloud browsers |
