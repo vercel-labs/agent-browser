@@ -567,6 +567,9 @@ pub struct DaemonState {
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
     snapshot_revisions: HashMap<String, SnapshotRevision>,
+    /// Text of the last snapshot taken per page session, the implicit baseline
+    /// for `diff snapshot`. Bounded like `snapshot_revisions`.
+    last_snapshot_text: HashMap<String, String>,
     screenshot_observations: HashMap<(String, String), ScreenshotObservation>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
@@ -773,6 +776,7 @@ impl DaemonState {
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
+            last_snapshot_text: HashMap::new(),
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
                 // An empty list is no filter, as when it is cleared live.
@@ -6602,6 +6606,8 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     )
     .await?;
 
+    remember_snapshot_text(&mut state.last_snapshot_text, &session_id, &tree);
+
     let url = mgr.get_url().await.unwrap_or_default();
 
     let refs: serde_json::Map<String, Value> = state
@@ -6678,6 +6684,17 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         },
     );
     Ok(response)
+}
+
+/// Keep `text` as the last snapshot of `session_id`, evicting another page
+/// session when 32 are already tracked.
+fn remember_snapshot_text(store: &mut HashMap<String, String>, session_id: &str, text: &str) {
+    if store.len() >= 32 && !store.contains_key(session_id) {
+        if let Some(evict) = store.keys().next().cloned() {
+            store.remove(&evict);
+        }
+    }
+    store.insert(session_id.to_string(), text.to_string());
 }
 
 fn snapshot_delta_response(
@@ -8153,7 +8170,13 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
             contents
         }
         Some(b) => b.to_string(),
-        None => String::new(),
+        // Without --baseline, compare against the last snapshot taken on this
+        // page session. With none yet, every line is reported as an addition.
+        None => state
+            .last_snapshot_text
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default(),
     };
 
     let result = diff::diff_snapshots(
@@ -8161,6 +8184,7 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         &diff::snapshot_comparison_text(&current),
     );
     state.ref_map = current_ref_map;
+    remember_snapshot_text(&mut state.last_snapshot_text, &session_id, &current);
     Ok(json!({
         "diff": result.diff,
         "additions": result.additions,
@@ -15541,6 +15565,27 @@ mod tests {
             }
         });
         (url, calls)
+    }
+
+    #[test]
+    fn remember_snapshot_text_keeps_latest_per_session() {
+        let mut store = std::collections::HashMap::new();
+        super::remember_snapshot_text(&mut store, "s1", "- button \"A\" [ref=e1]");
+        super::remember_snapshot_text(&mut store, "s2", "- link \"B\" [ref=e1]");
+        super::remember_snapshot_text(&mut store, "s1", "- button \"A2\" [ref=e1]");
+        assert_eq!(store.len(), 2);
+        assert_eq!(store["s1"], "- button \"A2\" [ref=e1]");
+        assert_eq!(store["s2"], "- link \"B\" [ref=e1]");
+    }
+
+    #[test]
+    fn remember_snapshot_text_is_bounded() {
+        let mut store = std::collections::HashMap::new();
+        for i in 0..40 {
+            super::remember_snapshot_text(&mut store, &format!("s{i}"), "tree");
+        }
+        assert_eq!(store.len(), 32);
+        assert!(store.contains_key("s39"));
     }
 
     #[tokio::test]
