@@ -1,0 +1,201 @@
+---
+title: "Modern Web Guidance"
+navTitle: "Modern Web Guidance"
+---
+
+[Modern Web Guidance](https://developer.chrome.com/docs/modern-web-guidance) is a set of agent skills from Chrome that puts web platform best practices and Baseline compatibility data into your agent's context. It guides the code an agent writes. It does not run that code, so it cannot tell you whether a dialog holds focus, whether a transition respects reduced motion, or whether a fix removed the layout shift it was meant to remove.
+
+Use the two together. Modern Web Guidance answers what the modern implementation looks like. agent-browser runs the built page in Chrome and answers whether it behaves that way, using Core Web Vitals, emulated media preferences, the accessibility tree, and recorded video.
+
+## Installation
+
+Run the guidance installer in your project directory, then install agent-browser and its Chrome:
+
+```bash
+npx modern-web-guidance@latest install
+
+npm install -g agent-browser
+agent-browser install
+```
+
+The installer asks which agent you use and writes the skill into its configuration. You can also query the guidance without installing it. `search` returns candidate guide IDs and `retrieve` prints one or more full guides:
+
+```bash
+npx modern-web-guidance@latest search "animate a dialog"
+# [{"id":"animate-to-from-top-layer","description":"Animate elements such as dialogs, popovers, and tooltips as they enter and exit the top layer."}, ...]
+
+npx modern-web-guidance@latest retrieve "animate-to-from-top-layer"
+# Output (10.7 KB, 244 lines) saved to /tmp/mwg-guide-8450-1794353476272.md to prevent CLI stdout truncation.
+```
+
+Large guides are written to a temporary file and the CLI prints the path. Read that file before applying the guidance.
+
+## Split the work
+
+<table>
+  <thead>
+    <tr><th>Question</th><th>Use</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Which platform API should this component use, and which fallbacks are required?</td><td>Modern Web Guidance: <code>search</code>, then <code>retrieve</code></td></tr>
+    <tr><td>Does the page shift while it loads?</td><td>agent-browser: <code>vitals</code></td></tr>
+    <tr><td>Does the transition respect <code>prefers-reduced-motion</code>?</td><td>agent-browser: <code>set media</code>, <code>record</code></td></tr>
+    <tr><td>Does the dialog hold focus and inert the page behind it?</td><td>agent-browser: <code>snapshot</code>, <code>eval</code>, <code>click</code></td></tr>
+  </tbody>
+</table>
+
+Each workflow below follows the same order: retrieve the guidance, implement it, then measure the page with agent-browser.
+
+## Verify a layout-shift fix
+
+Start with the guidance for the pattern you are fixing. Images without dimensions, fonts without fallback metrics, and content injected after load each have their own rule:
+
+```bash
+npx modern-web-guidance@latest search "prevent layout shift"
+npx modern-web-guidance@latest retrieve "performance"
+```
+
+Take a baseline before changing the code. `vitals` measures the page the active tab loaded, so open the page and read the metrics in the same session:
+
+```bash
+agent-browser open http://localhost:3000/products
+agent-browser vitals
+# url: http://localhost:3000/products
+# ttfb: 3.6ms  fcp: 40ms  lcp: 40ms  cls: 0.12  inp: -
+# lcp: element: p
+# hydration: -  phases: 0  hydratedComponents: 0
+```
+
+A CLS above 0.1 needs attention. Add `--json` to see each shift and when it happened, then match that time to the code that runs at that point:
+
+```bash
+agent-browser vitals --json
+```
+
+The `data.cls` object holds a `score` and an `entries` array. Each entry has a `startTime` in milliseconds and a `value` for the shift it contributed. The baseline run above produced one entry near 518ms that accounted for the whole score, which points at content added after the initial paint rather than at the page shell.
+
+After the fix, run the same two commands on the same URL:
+
+```bash
+agent-browser open http://localhost:3000/products
+agent-browser vitals
+# url: http://localhost:3000/products
+# ttfb: 0.8ms  fcp: 32ms  lcp: 32ms  cls: 0  inp: -
+# lcp: element: h1
+# hydration: -  phases: 0  hydratedComponents: 0
+```
+
+`cls: 0` with an empty `entries` array confirms the browser reserved space before the image painted. If the score drops but does not reach zero, read the remaining entries and address the largest one before closing the task.
+
+## Check a dialog transition with reduced motion
+
+Retrieve the transition guidance before adjusting the CSS:
+
+```bash
+npx modern-web-guidance@latest search "animate a dialog"
+npx modern-web-guidance@latest retrieve "animate-to-from-top-layer"
+```
+
+Emulate the operating system preference, then confirm the page sees it and the computed duration changes:
+
+```bash
+agent-browser open http://localhost:3000/account
+agent-browser set media reduced-motion
+agent-browser eval "matchMedia('(prefers-reduced-motion: reduce)').matches"
+# true
+agent-browser eval "getComputedStyle(document.querySelector('dialog')).transitionDuration"
+# "0s"
+```
+
+Clear the emulation and read the same property. A stylesheet that ignores the preference returns the same duration in both cases:
+
+```bash
+agent-browser set media
+agent-browser eval "getComputedStyle(document.querySelector('dialog')).transitionDuration"
+# "0.2s, 0.2s, 0.2s, 0.2s"
+```
+
+The duration list has one value per animated property. Under reduced motion it collapses to a single `0s`.
+
+Record the transition so a person can review the motion, not only the duration. Recording requires ffmpeg on `PATH`; see [Video Recording](/recording) for formats and options.
+
+```bash
+agent-browser set media reduced-motion
+agent-browser record start ./dialog-reduced.webm --fps 60
+agent-browser click "#open-account-dialog"
+agent-browser wait 300
+agent-browser record stop
+# ✓ Recording saved to ./dialog-reduced.webm (60 fps)
+```
+
+Record the same interaction again after `agent-browser set media` and compare the files. At 60 fps a 200ms transition stays visible frame by frame, which is enough to tell a suppressed animation from a slowed one.
+
+## Check focus and inert behavior of a dialog
+
+The dialog guide states that the native `<dialog>` element provides page inertness, focus containment, top layer rendering, `Esc` dismissal, and focus return to the invoker. Verify each promise against the built page.
+
+1. Open the page and snapshot the background.
+
+```bash
+agent-browser open http://localhost:3000/account
+agent-browser snapshot -i
+# - heading "Account" [level=1, ref=e1]
+# - link "Settings" [ref=e2]
+# - button "Delete account" [ref=e3]
+```
+
+2. Open the dialog and snapshot again.
+
+```bash
+agent-browser click "#delete-account"
+agent-browser snapshot -i
+# - heading "Delete account?" [level=2, ref=e4]
+# - button "Cancel" [ref=e5]
+# - button "Delete" [ref=e6]
+```
+
+Only the dialog remains in the tree. Inert content is excluded from the accessibility tree, so a modal dialog that works as documented removes the rest of the page from the snapshot.
+
+3. Check where focus landed.
+
+```bash
+agent-browser eval "document.activeElement.id || document.activeElement.textContent"
+# "Cancel"
+```
+
+`autofocus` on the safe action should win. If focus is still on the trigger button or on the document body, the dialog is not containing focus.
+
+4. Check that the page behind the dialog rejects input.
+
+```bash
+agent-browser click "a[href='/settings']"
+# ✗ Element 'a[href='/settings']' is covered by <dialog#confirm-delete> at its click point, so the input would land on that element instead. Dismiss or interact with the covering element first (it is often a dialog, banner, or sticky header).
+```
+
+5. Press `Esc` and confirm that the page returns and focus goes back to the invoker.
+
+```bash
+agent-browser press Escape
+agent-browser snapshot -i
+# - heading "Account" [level=1, ref=e1]
+# - link "Settings" [ref=e2]
+# - button "Delete account" [ref=e3]
+agent-browser eval "document.activeElement.id"
+# "delete-account"
+```
+
+If the snapshot still lists background content while the dialog is open, or focus ends up outside the dialog, the build is missing the behavior the guidance assumes. Fix the component before writing more tests around it.
+
+## Related
+
+<table>
+  <thead>
+    <tr><th>Need</th><th>Use</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Core Web Vitals and React hydration</td><td><a href="/react">React &amp; Web Vitals</a></td></tr>
+    <tr><td>Accessibility tree and element refs</td><td><a href="/snapshots">Snapshots</a></td></tr>
+    <tr><td>Video artifacts and contact sheets</td><td><a href="/recording">Video Recording</a></td></tr>
+    <tr><td>Console, page errors, and DevTools traces</td><td><a href="/debugging">Debugging</a></td></tr>
+  </tbody>
+</table>

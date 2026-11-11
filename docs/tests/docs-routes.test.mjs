@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   currentPages as pages,
+  publicPages,
   currentResources,
   origin,
   hash,
@@ -33,7 +34,7 @@ assert.ok(
 const noindex = process.env.DOCS_EXPECT_NOINDEX === "1";
 const query = "?utm_source=route-test&value=a%2Fb&value=two";
 const agent = { "user-agent": "ClaudeBot/1.0", accept: "text/markdown" };
-const pageAt = (path) => pages.find((page) => page.path === path);
+const pageAt = (path) => publicPages.find((page) => page.path === path);
 const legacyPath = (path) =>
   `/api/docs-markdown?path=${encodeURIComponent(path)}`;
 const htmlCache = new Map();
@@ -641,7 +642,71 @@ test("native search empty and unmatched queries return arrays, not legacy object
   }
 });
 
-test("sitemap contains exactly the 39 canonical production URLs", async () => {
+test("Modern Web Guidance page renders its workflows, metadata and Markdown representations", async () => {
+  const path = "/modern-web-guidance";
+  const response = await get(path);
+  responseType(response, "text/html");
+  representationHeaders(response);
+  const html = await response.text();
+  indexing(response, html);
+  assert.deepEqual(
+    [...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/gi)].map((match) =>
+      text(match[1]),
+    ),
+    ["Modern Web Guidance | agent-browser"],
+  );
+  assert.deepEqual(meta(html, "og:url"), [canonical(path)]);
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "canonical")
+      .map((tag) => tag.href),
+    [canonical(path)],
+  );
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "alternate" && tag.type === "text/markdown")
+      .map((tag) => tag.href),
+    [`${origin}${markdownPath(path)}`],
+  );
+  const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
+  assert.ok(main, "content must be in main, not only Flight scripts");
+  const visible = text(main);
+  for (const sample of [
+    "Verify a layout-shift fix",
+    "Check a dialog transition with reduced motion",
+    "Check focus and inert behavior of a dialog",
+    "agent-browser vitals",
+    "prefers-reduced-motion",
+  ])
+    assert.ok(visible.includes(normalize(sample)), `SSR lost ${sample}`);
+  const internalLinks = new Set(
+    tags(main, "a")
+      .map((tag) => tag.href)
+      .filter((href) => typeof href === "string" && href.startsWith("/")),
+  );
+  for (const href of ["/react", "/snapshots", "/recording", "/debugging"])
+    assert.ok(internalLinks.has(href), `lost related link ${href}`);
+  for (const href of internalLinks) {
+    const link = await get(href);
+    assert.equal(link.status, 200, href);
+  }
+  const bodies = [];
+  for (const [markdownPathOrRoute, headers] of [
+    [apiPath(path), {}],
+    [markdownPath(path), {}],
+    [path, { accept: "text/markdown" }],
+  ]) {
+    const body = await get(markdownPathOrRoute, { headers });
+    responseType(body, "text/markdown");
+    representationHeaders(body);
+    bodies.push(await body.text());
+  }
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(bodies[1], bodies[2]);
+  assert.ok(bodies[1].includes("## Verify a layout-shift fix"));
+});
+
+test("sitemap contains exactly the 40 canonical production URLs", async () => {
   const response = await get("/sitemap.xml", { headers: agent });
   responseType(response, "application/xml");
   indexing(response);
@@ -652,7 +717,7 @@ test("sitemap contains exactly the 39 canonical production URLs", async () => {
   );
   assert.deepEqual(
     locations.sort(),
-    pages.map((page) => canonical(page.path)).sort(),
+    publicPages.map((page) => canonical(page.path)).sort(),
   );
   assert.ok(
     !xml.includes("/en/") &&
@@ -662,7 +727,7 @@ test("sitemap contains exactly the 39 canonical production URLs", async () => {
 });
 
 for (const path of ["/llms.txt", "/sitemap.md"]) {
-  test(`${path}: agent index exposes all 39 public pages and Markdown alternatives exactly once`, async () => {
+  test(`${path}: agent index exposes all 40 public pages and Markdown alternatives exactly once`, async () => {
     const response = await get(path, { headers: agent });
     responseType(
       response,
@@ -675,7 +740,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       links.sort((a, b) => a[1].localeCompare(b[1])),
-      pages
+      publicPages
         .map((page) => [page.markdownTitle, canonical(page.path)])
         .sort((a, b) => a[1].localeCompare(b[1])),
     );
@@ -684,7 +749,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       markdownLinks.sort(),
-      pages.map((page) => `${origin}${markdownPath(page.path)}`).sort(),
+      publicPages.map((page) => `${origin}${markdownPath(page.path)}`).sort(),
     );
     assert.ok(
       !body.includes("/en/") &&

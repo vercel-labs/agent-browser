@@ -59,6 +59,17 @@ for (const path of Object.keys(edits.pages))
 /** Baseline pages with intentional edits applied: the floor for live routes. */
 export const currentPages = pages.map(applyEdits);
 
+/**
+ * Pages added after the baseline was pinned. They have no baseline fixture, but
+ * they belong to the public route inventory that the route suite audits.
+ */
+export const addedPages = [
+  { path: "/modern-web-guidance", markdownTitle: "Modern Web Guidance" },
+];
+
+/** Every public page: the baseline floor plus pages added since. */
+export const publicPages = [...currentPages, ...addedPages];
+
 /** Baseline resources with intentionally changed bytes replaced. */
 export const currentResources = baseline.resources.map((resource) => ({
   ...resource,
