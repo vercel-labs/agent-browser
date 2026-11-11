@@ -16113,6 +16113,29 @@ async fn e2e_firefox_pointer_motion_follows_input_mode() {
     firefox_close(&mut state).await;
 }
 
+/// Refs inside open shadow roots resolve whether or not the host has an id.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_shadow_refs_without_host_ids() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(&mut state, r#"document.body.innerHTML = '<div id="withid"></div><div class="noid"></div><my-card></my-card>'; window.clicked = []; for (const [host, name] of [['#withid', 'A'], ['.noid', 'B'], ['my-card', 'C']]) { const button = document.createElement('button'); button.textContent = name + ' btn'; button.onclick = () => clicked.push(name); document.querySelector(host).attachShadow({ mode: 'open' }).append(button); } true"#).await;
+    for name in ["A btn", "B btn", "C btn"] {
+        let button = firefox_ref(&mut state, name).await;
+        assert_success(&firefox_act(&mut state, "click", &button, json!({})).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, "clicked").await,
+        json!(["A", "B", "C"])
+    );
+    firefox_close(&mut state).await;
+}
+
 /// PR2: fill, click by ref, title reflects the action, and refs survive DOM changes.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
