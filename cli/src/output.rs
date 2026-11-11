@@ -4000,6 +4000,8 @@ Snapshot Diff:
   Options:
     -b, --baseline <file>    Compare against a saved snapshot file
     -s, --selector <sel>     Scope snapshot to a CSS selector or @ref
+    -i, --interactive        Only include interactive elements (match a
+                             baseline taken with snapshot -i)
     -c, --compact            Use compact snapshot format
     -d, --depth <n>          Limit snapshot tree depth
 

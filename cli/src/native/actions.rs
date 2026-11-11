@@ -8117,10 +8117,16 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    let interactive = cmd
+        .get("interactive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let options = SnapshotOptions {
         compact,
         depth: max_depth,
         selector,
+        interactive,
         ..SnapshotOptions::default()
     };
     // Reuse the current document identities without committing a failed capture.
