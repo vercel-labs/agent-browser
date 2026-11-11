@@ -162,6 +162,52 @@ async fn send_scoped_bidi(
     bidi.send(method, params).await.map(|_| ())
 }
 
+/// The commands that clear every override in `settings` from `contexts`, so a browser the
+/// session does not own gets its own values back.
+pub(crate) fn resets(settings: &Settings, contexts: &[String]) -> Vec<Command> {
+    let shared = [
+        (
+            settings.user_agent.is_some(),
+            "emulation.setUserAgentOverride",
+            "userAgent",
+        ),
+        (
+            settings.locale.is_some(),
+            "emulation.setLocaleOverride",
+            "locale",
+        ),
+        (
+            settings.timezone.is_some(),
+            "emulation.setTimezoneOverride",
+            "timezone",
+        ),
+        (
+            settings.geolocation.is_some(),
+            "emulation.setGeolocationOverride",
+            "coordinates",
+        ),
+        (
+            settings.offline == Some(true),
+            "emulation.setNetworkConditions",
+            "networkConditions",
+        ),
+    ];
+    let viewports = contexts
+        .iter()
+        .filter(|_| settings.viewport.is_some())
+        .map(|context| {
+            (
+                "browsingContext.setViewport",
+                json!({ "context": context, "viewport": null, "devicePixelRatio": null }),
+            )
+        });
+    let shared = shared
+        .into_iter()
+        .filter(|(set, ..)| *set)
+        .map(|(_, method, field)| (method, json!({ field: null, "contexts": contexts })));
+    viewports.chain(shared).collect()
+}
+
 /// Applies color scheme and print media to the selected tab through its DevTools configuration actor.
 pub(crate) async fn update_tab_configuration(
     bidi: &BidiClient,
@@ -282,9 +328,7 @@ pub async fn set_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         .ok_or("Missing 'userAgent' parameter")?;
     let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::user_agent(user_agent)).await?;
-    let ff = session(state)?;
-    ff.emulation.write().unwrap().user_agent = Some(user_agent.to_string());
-    ff.record_user_agent(user_agent);
+    session(state)?.emulation.write().unwrap().user_agent = Some(user_agent.to_string());
     Ok(json!({ "userAgent": user_agent }))
 }
 

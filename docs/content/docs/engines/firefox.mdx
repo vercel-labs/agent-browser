@@ -75,7 +75,7 @@ The session starts on the tab selected in Firefox, or on the first tab when none
 
 Options that describe a browser agent-browser launches are ignored when attaching, as they are for any attached browser: `--profile`, `--args`, `--extension`, `--allow-file-access`, `--webgpu`, `--headed`, `--executable-path`, and `--no-xvfb`. `--ca-cert` and `--allowed-domains` are rejected when attaching. `--pin-tab` and its `tab_gone` guarantee apply only to Chrome over CDP; Firefox attach rejects `--pin-tab`. See [CDP Mode](/cdp-mode) for the full attach workflow.
 
-`--download-path` and `--user-agent` apply to the attached browser in place, and `close` resets both, so Firefox keeps its own settings. `download` is refused on an attached Firefox because the file is saved on the browser's machine; `wait --download` reports the path Firefox saved to.
+`--download-path` and `--user-agent` apply to the attached browser in place. Attaching leaves the size of your tabs alone. `close` resets the download folder and every override the session set (viewport, user agent, locale, timezone, geolocation, and offline mode), so Firefox keeps its own settings. `download` is refused on an attached Firefox because the file is saved on the browser's machine; `wait --download` reports the path Firefox saved to.
 
 ## Supported features
 

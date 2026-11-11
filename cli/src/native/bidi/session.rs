@@ -35,14 +35,6 @@ const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptClosed",
 ];
 
-/// What a session changed in a browser someone else runs. Firefox keeps these
-/// after `session.end`, so close puts back what the session set.
-#[derive(Default)]
-struct AttachedChanges {
-    download_path: Option<String>,
-    user_agent: Option<String>,
-}
-
 /// A Firefox session. Dropping it releases protocol clients and kills only an owned process.
 pub struct FirefoxSession {
     process: Option<FirefoxProcess>,
@@ -68,7 +60,9 @@ pub struct FirefoxSession {
     /// Launch download directory, restored after `download` redirects it.
     pub download_dir: Option<String>,
     /// Settings this session changed in a browser it does not own.
-    attached_changes: AttachedChanges,
+    /// The download folder set on a browser someone else runs. Firefox keeps it and the
+    /// emulation overrides after `session.end`, so close puts them back.
+    attached_download_path: Option<String>,
     events: mpsc::Receiver<Value>,
     pub net: NetContext,
     /// True once the single global network intercept is installed; it is never installed twice.
@@ -363,6 +357,7 @@ impl FirefoxSession {
         let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
             viewport: options
                 .viewport_size
+                .filter(|_| !attached)
                 .map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
             user_agent: options.user_agent.clone(),
             media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
@@ -394,7 +389,7 @@ impl FirefoxSession {
             shadow_ids: Default::default(),
             emulation,
             download_dir: options.download_path.clone(),
-            attached_changes: AttachedChanges::default(),
+            attached_download_path: None,
             events,
             net,
             intercepting: false,
@@ -519,7 +514,7 @@ impl FirefoxSession {
             return Ok(());
         }
         if changed.contains(&Key::UserAgent)
-            && self.attached_changes.user_agent != options.user_agent
+            && self.emulation.read().unwrap().user_agent != options.user_agent
         {
             let contexts = self.open_tabs(START_TIMEOUT).await?;
             if !contexts.is_empty() {
@@ -531,14 +526,13 @@ impl FirefoxSession {
                     .await?;
             }
             self.emulation.write().unwrap().user_agent = options.user_agent.clone();
-            self.attached_changes.user_agent = options.user_agent.clone();
         }
         if changed.contains(&Key::DownloadPath)
-            && self.attached_changes.download_path != options.download_path
+            && self.attached_download_path != options.download_path
         {
             self.set_download_behavior(options.download_path.as_deref())
                 .await?;
-            self.attached_changes.download_path = options.download_path.clone();
+            self.attached_download_path = options.download_path.clone();
         }
         Ok(())
     }
@@ -562,18 +556,13 @@ impl FirefoxSession {
             })
     }
 
-    /// Records the user agent this session set on a browser it does not own, so
-    /// close resets it.
-    pub(crate) fn record_user_agent(&mut self, user_agent: &str) {
-        self.attached_changes.user_agent = Some(user_agent.to_string());
-    }
-
-    /// Undoes the overrides this session applied to a browser it does not own.
+    /// Undoes the download folder and the emulation overrides this session holds, in every
+    /// open tab of a browser it does not own.
     async fn undo_attached_changes(&self) {
         if !self.is_attached() {
             return;
         }
-        if self.attached_changes.download_path.is_some() {
+        if self.attached_download_path.is_some() {
             let _ = self
                 .bidi
                 .send_timeout(
@@ -583,21 +572,19 @@ impl FirefoxSession {
                 )
                 .await;
         }
-        if self.attached_changes.user_agent.is_some() {
-            let contexts = self
-                .open_tabs(ATTACHED_RESET_TIMEOUT)
-                .await
-                .unwrap_or_default();
-            if !contexts.is_empty() {
-                let _ = self
-                    .bidi
-                    .send_timeout(
-                        "emulation.setUserAgentOverride",
-                        json!({"userAgent": null, "contexts": contexts}),
-                        ATTACHED_RESET_TIMEOUT,
-                    )
-                    .await;
-            }
+        let contexts = self
+            .open_tabs(ATTACHED_RESET_TIMEOUT)
+            .await
+            .unwrap_or_default();
+        if contexts.is_empty() {
+            return;
+        }
+        let settings = self.emulation.read().unwrap().clone();
+        for (method, params) in emulation::resets(&settings, &contexts) {
+            let _ = self
+                .bidi
+                .send_timeout(method, params, ATTACHED_RESET_TIMEOUT)
+                .await;
         }
     }
 
@@ -1173,7 +1160,7 @@ pub(crate) mod tests {
             shadow_ids: Default::default(),
             emulation: Arc::default(),
             download_dir: None,
-            attached_changes: AttachedChanges::default(),
+            attached_download_path: None,
             visited_origins: HashSet::new(),
             events,
             net: NetContext::default(),
@@ -1244,7 +1231,9 @@ pub(crate) mod tests {
                     json!("emulation.setUserAgentOverride"),
                     json!({"userAgent": "Agent/1.0", "contexts": ["ctx-active"]}),
                 ));
-                expected.push((json!("browsingContext.getTree"), json!({"maxDepth": 0})));
+            }
+            expected.push((json!("browsingContext.getTree"), json!({"maxDepth": 0})));
+            if user_agent.is_some() {
                 expected.push((
                     json!("emulation.setUserAgentOverride"),
                     json!({"userAgent": null, "contexts": ["ctx-active"]}),
@@ -1468,20 +1457,24 @@ pub(crate) mod tests {
             devtools: fake_devtools().await,
             devtools_explicit: true,
         };
-        let session = FirefoxSession::attach(
-            &target,
-            &LaunchOptions::default(),
-            NetContext::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let options = LaunchOptions {
+            viewport_size: Some((1280, 720)),
+            ..LaunchOptions::default()
+        };
+        let session = FirefoxSession::attach(&target, &options, NetContext::default(), false)
+            .await
+            .unwrap();
         assert_eq!(session.contexts.active(), "ctx-new");
+        let calls = calls.lock().unwrap();
         assert!(calls
-            .lock()
-            .unwrap()
             .iter()
             .any(|method| method == "browsingContext.create"));
+        assert!(
+            !calls
+                .iter()
+                .any(|method| method == "browsingContext.setViewport"),
+            "attaching must not resize a tab the user owns"
+        );
     }
 
     /// A session whose BiDi server records full messages, answers `browsingContext.create`

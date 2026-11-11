@@ -15753,6 +15753,9 @@ async fn e2e_firefox_attach_user_agent_applies_in_place_and_is_reset() {
             .is_some_and(|user_agent| user_agent.contains("Firefox")),
         "the attached browser must report its own user agent: {own}"
     );
+    let page =
+        "[innerWidth, navigator.language, Intl.DateTimeFormat().resolvedOptions().timeZone].join()";
+    let own_page = firefox_eval(&mut state, page).await;
 
     let resp = firefox_command(
         &mut state,
@@ -15791,6 +15794,17 @@ async fn e2e_firefox_attach_user_agent_applies_in_place_and_is_reset() {
         json!("CommandUA/1"),
         "changing an unrelated setting must keep the user agent a command set"
     );
+    for step in [
+        json!({ "id": "viewport", "action": "viewport", "width": 500, "height": 400 }),
+        json!({ "id": "locale", "action": "locale", "locale": "fr-FR" }),
+        json!({ "id": "timezone", "action": "timezone", "timezoneId": "Asia/Tokyo" }),
+    ] {
+        assert_success(&firefox_command(&mut state, step).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, page).await,
+        json!("500,fr-FR,Asia/Tokyo")
+    );
 
     firefox_close(&mut state).await;
     assert!(
@@ -15815,6 +15829,11 @@ async fn e2e_firefox_attach_user_agent_applies_in_place_and_is_reset() {
         firefox_eval(&mut state, "navigator.userAgent").await,
         own,
         "close must put back the user agent Firefox had"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, page).await,
+        own_page,
+        "close must put back the viewport, locale and timezone Firefox had"
     );
     firefox_close(&mut state).await;
 }
