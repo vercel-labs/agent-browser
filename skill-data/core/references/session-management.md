@@ -104,9 +104,11 @@ Use `agent-browser session info --json` for diagnostics:
 agent-browser --session "$SESSION" session info --json
 ```
 
+If restore reports `loaded_partial`, read `runtime.restoreStorageFailures` for the skipped origins and reasons. For example, the attached browser may lack CDP DOMStorage support. Cookies and storage for other origins can still load. The default `--restore-save auto` policy keeps the previous state file after a partial restore.
+
 ### Manual State Files
 
-Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.
+Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Check `storageFailures` in `state load --json` for storage that could not be restored. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.
 
 ## Common Patterns
 

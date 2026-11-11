@@ -1770,15 +1770,6 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                         color::success_indicator(),
                         color::green(path)
                     );
-                    if let Some(skipped) = data.get("skippedOrigins").and_then(|v| v.as_array()) {
-                        for origin in skipped.iter().filter_map(|v| v.as_str()) {
-                            println!(
-                                "{} Skipped storage for {} (page did not stay on that origin)",
-                                color::warning_indicator(),
-                                origin
-                            );
-                        }
-                    }
                 }
                 // video_start and other commands that provide a path with a note
                 "video_start" => {
@@ -3622,8 +3613,8 @@ Save, restore, list, and manage browser state (cookies, localStorage, sessionSto
 
 Operations:
   save <path>                        Save current state to file
-  load <path>                        Load state from file (origins that redirect
-                                     elsewhere are skipped and listed)
+  load <path>                        Load state from file and report any origins
+                                     whose storage could not be restored
   list                               List saved state files
   show <filename>                    Show state summary
   rename <old-name> <new-name>       Rename state file
@@ -3634,6 +3625,8 @@ Automatic State Persistence:
   Use --restore to auto-save/restore state across restarts:
   agent-browser --session myapp --restore open https://example.com
   Or set AGENT_BROWSER_RESTORE environment variable.
+  If any origin's storage is skipped, the default auto policy keeps the saved file.
+  Run session info --json to see the skipped origins and reasons.
 
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.
