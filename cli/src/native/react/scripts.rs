@@ -338,7 +338,15 @@ pub const RENDERS_INIT: &str = r#"
   }
 
   function walkFiber(fiber) {
-    if (!fiber) return;
+    const siblings = [];
+    while (fiber) {
+      recordFiber(fiber);
+      if (fiber.sibling) siblings.push(fiber.sibling);
+      fiber = fiber.child || siblings.pop();
+    }
+  }
+
+  function recordFiber(fiber) {
     const tag = fiber.tag;
     if (tag === 0 || tag === 1 || tag === 2 || tag === 11 || tag === 15) {
       const didRender =
@@ -377,8 +385,6 @@ pub const RENDERS_INIT: &str = r#"
         }
       }
     }
-    walkFiber(fiber.child);
-    walkFiber(fiber.sibling);
   }
 })()
 "#;
