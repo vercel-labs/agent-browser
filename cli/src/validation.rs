@@ -13,7 +13,7 @@ pub fn sanitize_session_component(value: &str) -> String {
 
     for c in value.chars() {
         if c.is_alphanumeric() {
-            out.extend(c.to_lowercase());
+            out.extend(c.to_lowercase().filter(|c| c.is_alphanumeric()));
             last_was_sep = false;
         } else if c == '-' || c == '_' {
             if !out.is_empty() && !last_was_sep {
@@ -70,5 +70,32 @@ mod tests {
     #[test]
     fn sanitize_session_component_trims_separators() {
         assert_eq!(sanitize_session_component(" --Agent__ "), "agent");
+    }
+
+    #[test]
+    fn sanitize_session_component_accepts_dotted_capital_i() {
+        for (input, expected) in [
+            ("İstanbul", "istanbul"),
+            (" --İSTANBUL__東京 ", "istanbul_東京"),
+            ("Ångström-東京_7", "ångström-東京_7"),
+        ] {
+            let component = sanitize_session_component(input);
+            assert_eq!(component, expected);
+            assert!(is_valid_session_name(&component), "{input}: {component}");
+        }
+    }
+
+    #[test]
+    fn sanitized_alphanumeric_characters_remain_valid_session_components() {
+        for code in 0..=char::MAX as u32 {
+            let Some(c) = char::from_u32(code).filter(|c| c.is_alphanumeric()) else {
+                continue;
+            };
+            let component = sanitize_session_component(&c.to_string());
+            assert!(
+                is_valid_session_name(&component),
+                "U+{code:04X} produced invalid session component {component:?}"
+            );
+        }
     }
 }
