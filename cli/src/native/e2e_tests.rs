@@ -15775,6 +15775,23 @@ async fn e2e_firefox_attach_user_agent_applies_in_place_and_is_reset() {
         json!("AttachedUA/1")
     );
 
+    for step in [
+        json!({ "id": "command", "action": "useragent", "userAgent": "CommandUA/1" }),
+        json!({
+            "id": "timeout",
+            "action": "launch",
+            "cdpUrl": target,
+            "settings": { "default-timeout": 5000 },
+        }),
+    ] {
+        assert_success(&firefox_command(&mut state, step).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        json!("CommandUA/1"),
+        "changing an unrelated setting must keep the user agent a command set"
+    );
+
     firefox_close(&mut state).await;
     assert!(
         firefox.alive(),

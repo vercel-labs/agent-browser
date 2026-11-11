@@ -6319,7 +6319,8 @@ async fn apply_settings_patch(
 
     if !relaunch {
         if let Some(ff) = state.firefox.as_mut() {
-            ff.apply_attached_settings(&next.launch_options()).await?;
+            ff.apply_attached_settings(&next.launch_options(), &touched)
+                .await?;
         }
     }
 

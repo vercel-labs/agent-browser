@@ -17,6 +17,7 @@ use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
 use super::types::UserPromptOpened;
 use crate::native::actions::{EmulatedMedia, PendingDialog};
 use crate::native::cdp::chrome::LaunchOptions;
+use crate::session_settings::Key;
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -277,7 +278,8 @@ impl FirefoxSession {
                 return Err(error);
             }
         };
-        if let Err(error) = session.apply_attached_settings(options).await {
+        let in_place = [Key::UserAgent, Key::DownloadPath];
+        if let Err(error) = session.apply_attached_settings(options, &in_place).await {
             session.close().await;
             return Err(error);
         }
@@ -496,13 +498,20 @@ impl FirefoxSession {
             .collect())
     }
 
-    /// Applies the settings an attached Firefox takes in place and records what
-    /// close has to put back.
-    pub async fn apply_attached_settings(&mut self, options: &LaunchOptions) -> Result<(), String> {
+    /// Applies those of `changed` an attached Firefox takes in place and records what close has
+    /// to put back. A setting that did not change is left alone, so it cannot undo what a
+    /// command such as `useragent` set since.
+    pub async fn apply_attached_settings(
+        &mut self,
+        options: &LaunchOptions,
+        changed: &[Key],
+    ) -> Result<(), String> {
         if !self.is_attached() {
             return Ok(());
         }
-        if self.attached_changes.user_agent != options.user_agent {
+        if changed.contains(&Key::UserAgent)
+            && self.attached_changes.user_agent != options.user_agent
+        {
             let contexts = self.open_tabs(START_TIMEOUT).await?;
             if !contexts.is_empty() {
                 self.bidi
@@ -515,7 +524,9 @@ impl FirefoxSession {
             self.emulation.write().unwrap().user_agent = options.user_agent.clone();
             self.attached_changes.user_agent = options.user_agent.clone();
         }
-        if self.attached_changes.download_path != options.download_path {
+        if changed.contains(&Key::DownloadPath)
+            && self.attached_changes.download_path != options.download_path
+        {
             self.set_download_behavior(options.download_path.as_deref())
                 .await?;
             self.attached_changes.download_path = options.download_path.clone();
@@ -1193,7 +1204,10 @@ pub(crate) mod tests {
                 ..LaunchOptions::default()
             };
             assert_eq!(
-                session.apply_attached_settings(&options).await.is_err(),
+                session
+                    .apply_attached_settings(&options, &[Key::UserAgent, Key::DownloadPath])
+                    .await
+                    .is_err(),
                 reject
             );
             session.close().await;
