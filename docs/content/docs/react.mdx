@@ -55,6 +55,10 @@ agent-browser vitals https://example.com --json
 
 By default, `vitals` prints a summary using the same fields as the structured `--json` response. Reported metrics include LCP, CLS, TTFB, FCP, INP, and hydration timing when available.
 
+- CLS reports the largest layout-shift session window, with less than one second between shifts and a span of less than five seconds. Shifts after recent user input are excluded.
+- INP groups events by interaction and estimates the 98th percentile of interaction latency. Events without an interaction ID do not contribute.
+- TTFB includes DNS, connection setup, and other time before the request is sent. For prerendered pages, it is measured from activation and cannot be negative.
+
 ## SPA navigation
 
 `pushstate` performs client-side navigation without forcing a full browser reload. On Next.js apps, it attempts to use `window.next.router.push` so RSC fetches still run. Other frameworks fall back to `history.pushState` plus navigation events.
