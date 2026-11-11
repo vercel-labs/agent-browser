@@ -4154,7 +4154,7 @@ Requires AI_GATEWAY_API_KEY or ATLASCLOUD_API_KEY to be set.
 In interactive mode, type "quit", "exit", or "q" to leave the REPL.
 
 Chat Options:
-  --model <name>         AI model (or AI_GATEWAY_MODEL env, default: openai/gpt-6-luna-fast)
+  --model <name>         AI model (or AI_GATEWAY_MODEL env, default: anthropic/claude-sonnet-4.6)
   -v, --verbose          Show tool commands and their raw output
   -q, --quiet            Show only the AI text response (hide tool calls)
 
@@ -4831,7 +4831,7 @@ Environment:
   AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
   AI_GATEWAY_URL                 Vercel AI Gateway base URL (default: https://ai-gateway.vercel.sh)
   AI_GATEWAY_API_KEY             API key for the AI Gateway (enables chat command and dashboard AI chat)
-  AI_GATEWAY_MODEL               Default AI model (default: openai/gpt-6-luna-fast, or --model flag)
+  AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6, or --model flag)
 
 Install:
   npm install -g agent-browser           # npm

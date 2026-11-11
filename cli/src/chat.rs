@@ -7,6 +7,8 @@ use crate::color;
 use crate::flags::Flags;
 use crate::native::stream::chat;
 
+const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4.6";
+
 #[derive(Clone, Copy, PartialEq)]
 enum Verbosity {
     Quiet,
@@ -39,7 +41,10 @@ pub fn run_chat(flags: &Flags, message: Option<String>) {
         Verbosity::Normal
     };
 
-    let model = flags.model.clone().unwrap_or_else(chat::default_chat_model);
+    let model = flags
+        .model
+        .clone()
+        .unwrap_or_else(|| chat::default_chat_model(DEFAULT_MODEL));
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 

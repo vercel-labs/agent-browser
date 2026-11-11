@@ -36,7 +36,9 @@ pub(crate) fn configured_chat_api_key() -> Option<String> {
         .or_else(|| std::env::var("ATLASCLOUD_API_KEY").ok())
 }
 
-pub(crate) fn default_chat_model() -> String {
+/// Model used when no env override applies. `fallback` is the surface's own
+/// non-Atlas default (CLI chat and dashboard server differ upstream).
+pub(crate) fn default_chat_model(fallback: &str) -> String {
     if let Ok(model) = std::env::var("AI_GATEWAY_MODEL") {
         return model;
     }
@@ -46,7 +48,7 @@ pub(crate) fn default_chat_model() -> String {
     if std::env::var("ATLASCLOUD_API_KEY").is_ok() {
         return DEFAULT_ATLASCLOUD_MODEL.to_string();
     }
-    DEFAULT_AI_GATEWAY_MODEL.to_string()
+    fallback.to_string()
 }
 
 pub(crate) fn missing_api_key_message() -> &'static str {
@@ -61,7 +63,7 @@ pub(super) fn chat_status_json() -> String {
     let enabled = is_chat_enabled();
     let mut obj = json!({ "enabled": enabled });
     if enabled {
-        obj["model"] = Value::String(default_chat_model());
+        obj["model"] = Value::String(default_chat_model(DEFAULT_AI_GATEWAY_MODEL));
     }
     obj.to_string()
 }
@@ -764,7 +766,7 @@ pub(super) async fn handle_chat_request(
         }
     };
 
-    let default_model = default_chat_model();
+    let default_model = default_chat_model(DEFAULT_AI_GATEWAY_MODEL);
 
     let parsed: Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -1187,7 +1189,14 @@ mod tests {
         assert!(!is_chat_enabled());
         assert_eq!(configured_chat_api_key(), None);
         assert_eq!(configured_chat_base_url(), DEFAULT_AI_GATEWAY_URL);
-        assert_eq!(default_chat_model(), DEFAULT_AI_GATEWAY_MODEL);
+        assert_eq!(
+            default_chat_model(DEFAULT_AI_GATEWAY_MODEL),
+            "openai/gpt-6-luna-fast"
+        );
+        assert_eq!(
+            default_chat_model("anthropic/claude-sonnet-4.6"),
+            "anthropic/claude-sonnet-4.6"
+        );
     }
 
     #[test]
@@ -1201,7 +1210,10 @@ mod tests {
         assert!(is_chat_enabled());
         assert_eq!(configured_chat_api_key().as_deref(), Some("atlas-test-key"));
         assert_eq!(configured_chat_base_url(), DEFAULT_ATLASCLOUD_URL);
-        assert_eq!(default_chat_model(), DEFAULT_ATLASCLOUD_MODEL);
+        assert_eq!(
+            default_chat_model(DEFAULT_AI_GATEWAY_MODEL),
+            DEFAULT_ATLASCLOUD_MODEL
+        );
     }
 
     #[test]
@@ -1219,7 +1231,7 @@ mod tests {
 
         assert_eq!(configured_chat_api_key().as_deref(), Some("gateway-key"));
         assert_eq!(configured_chat_base_url(), "https://gateway.example/v1");
-        assert_eq!(default_chat_model(), "openai/o3");
+        assert_eq!(default_chat_model(DEFAULT_AI_GATEWAY_MODEL), "openai/o3");
     }
 
     #[test]
@@ -1233,6 +1245,9 @@ mod tests {
         env.set("ATLASCLOUD_MODEL", "deepseek-ai/deepseek-v4-pro");
 
         assert_eq!(configured_chat_base_url(), "https://proxy.example/atlas");
-        assert_eq!(default_chat_model(), "deepseek-ai/deepseek-v4-pro");
+        assert_eq!(
+            default_chat_model(DEFAULT_AI_GATEWAY_MODEL),
+            "deepseek-ai/deepseek-v4-pro"
+        );
     }
 }
