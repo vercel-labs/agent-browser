@@ -1237,7 +1237,9 @@ impl DaemonState {
         let (Some(poller), Some(live)) = (self.firefox_poller.as_ref(), self.firefox_live()) else {
             return;
         };
-        poller.show(live);
+        if poller.serves(&live.bidi) {
+            poller.show(live);
+        }
     }
 
     /// The Firefox tab the dashboard shows and the tabs the session has now.
@@ -1273,8 +1275,8 @@ impl DaemonState {
             .await;
         server.set_firefox_live(live.clone()).await;
         match (live, self.firefox_poller.as_ref()) {
-            (Some(live), Some(poller)) => poller.show(live),
-            (Some(live), None) => {
+            (Some(live), Some(poller)) if poller.serves(&live.bidi) => poller.show(live),
+            (Some(live), _) => {
                 self.firefox_poller = Some(bidi::stream::spawn_poller(live, Arc::clone(&server)));
             }
             (None, _) => self.firefox_poller = None,
