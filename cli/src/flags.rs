@@ -8,6 +8,19 @@ use std::path::{Path, PathBuf};
 const CONFIG_DIR: &str = ".agent-browser";
 const CONFIG_FILENAME: &str = "config.json";
 const PROJECT_CONFIG_FILENAME: &str = "agent-browser.json";
+pub(crate) const PROJECT_CONFIG_ALLOWED_KEYS: &[&str] = &[
+    "headed",
+    "json",
+    "debug",
+    "userAgent",
+    "hideScrollbars",
+    "annotate",
+    "colorScheme",
+    "maxOutput",
+    "screenshotQuality",
+    "screenshotFormat",
+    "idleTimeout",
+];
 
 /// Split `--args` into launch args. Newlines always separate args; commas separate
 /// only before another `--` flag, so values like `--disable-features=A,B` and
@@ -43,8 +56,15 @@ fn push_launch_arg(args: &mut Vec<String>, current: &mut String) {
     current.clear();
 }
 
-/// Parse idle timeout from user-friendly format.
-/// Supports: "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
+fn split_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|d| d.trim().to_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect()
+}
+
+/// Parse idle timeout from user-friendly format, returning an error on conversion overflow.
+/// Supports "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
 fn parse_idle_timeout(s: &str) -> Result<String, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -56,12 +76,15 @@ fn parse_idle_timeout(s: &str) -> Result<String, String> {
         let (num_str, unit) = s.split_at(s.len() - 1);
         let num: u64 = num_str.parse().map_err(|_| "Invalid number")?;
 
-        let ms = match unit {
-            "s" => num * 1000,
-            "m" => num * 60 * 1000,
-            "h" => num * 60 * 60 * 1000,
+        let multiplier: u64 = match unit {
+            "s" => 1000,
+            "m" => 60 * 1000,
+            "h" => 60 * 60 * 1000,
             _ => return Err("Invalid idle timeout unit (use s, m, h, or raw ms)".to_string()),
         };
+        let ms = num
+            .checked_mul(multiplier)
+            .ok_or("Idle timeout too large")?;
         return Ok(ms.to_string());
     }
 
@@ -83,6 +106,22 @@ fn parse_idle_timeout_value(value: Option<String>, source: &str) -> Option<Strin
             None
         }
     })
+}
+
+/// Parse max-output with usize's existing syntax and warn when the value is invalid.
+fn parse_max_output_value(value: &str, source: &str) -> Option<usize> {
+    match value.parse::<usize>() {
+        Ok(limit) => Some(limit),
+        Err(_) => {
+            eprintln!(
+                "{} Invalid {} value: {}",
+                color::warning_indicator(),
+                source,
+                value
+            );
+            None
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -120,6 +159,7 @@ pub struct Config {
     pub use_system_ca: Option<bool>,
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
+    pub cdp_headers: Option<String>,
     pub auto_connect: Option<bool>,
     pub pin_tab: Option<bool>,
     pub headers: Option<String>,
@@ -129,6 +169,7 @@ pub struct Config {
     pub content_boundaries: Option<bool>,
     pub max_output: Option<usize>,
     pub allowed_domains: Option<Vec<String>>,
+    pub capture: Option<Vec<String>>,
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: Option<bool>,
@@ -204,6 +245,7 @@ impl Config {
             use_system_ca: other.use_system_ca.or(self.use_system_ca),
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
+            cdp_headers: other.cdp_headers.or(self.cdp_headers),
             auto_connect: other.auto_connect.or(self.auto_connect),
             pin_tab: other.pin_tab.or(self.pin_tab),
             headers: other.headers.or(self.headers),
@@ -213,6 +255,7 @@ impl Config {
             content_boundaries: other.content_boundaries.or(self.content_boundaries),
             max_output: other.max_output.or(self.max_output),
             allowed_domains: other.allowed_domains.or(self.allowed_domains),
+            capture: other.capture.or(self.capture),
             action_policy: other.action_policy.or(self.action_policy),
             confirm_actions: other.confirm_actions.or(self.confirm_actions),
             confirm_interactive: other.confirm_interactive.or(self.confirm_interactive),
@@ -234,9 +277,37 @@ impl Config {
     }
 }
 
-fn read_config_file(path: &Path) -> Option<Config> {
+/// Read configuration, applying the preference allowlist to automatic project files.
+fn read_config_file(path: &Path, is_auto_project_config: bool) -> Option<Config> {
     let content = fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<Config>(&content) {
+    let parsed = if is_auto_project_config {
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&content).and_then(
+            |mut object| {
+                let mut ignored = 0;
+                object.retain(|key, value| {
+                    let allowed = PROJECT_CONFIG_ALLOWED_KEYS.contains(&key.as_str());
+                    if !allowed && key != "$schema" && !value.is_null() {
+                        ignored += 1;
+                    }
+                    allowed
+                });
+                if ignored > 0 {
+                    eprintln!(
+                        "{} ignoring {} unsupported settings from ./{} (automatic project config is untrusted). Set required settings in ~/{}/{} or select a trusted file with --config or AGENT_BROWSER_CONFIG when starting the CLI or MCP server. An explicitly selected file replaces default config discovery.",
+                        color::warning_indicator(),
+                        ignored,
+                        PROJECT_CONFIG_FILENAME,
+                        CONFIG_DIR,
+                        CONFIG_FILENAME
+                    );
+                }
+                serde_json::from_value::<Config>(serde_json::Value::Object(object))
+            },
+        )
+    } else {
+        serde_json::from_str::<Config>(&content)
+    };
+    match parsed {
         Ok(mut config) => {
             config.idle_timeout = parse_idle_timeout_value(
                 config.idle_timeout.take(),
@@ -245,12 +316,20 @@ fn read_config_file(path: &Path) -> Option<Config> {
             Some(config)
         }
         Err(e) => {
-            eprintln!(
-                "{} invalid config file {}: {}",
-                color::warning_indicator(),
-                path.display(),
-                e
-            );
+            if is_auto_project_config {
+                eprintln!(
+                    "{} invalid config file ./{}: expected a JSON object with correctly typed preferences",
+                    color::warning_indicator(),
+                    PROJECT_CONFIG_FILENAME
+                );
+            } else {
+                eprintln!(
+                    "{} invalid config file {}: {}",
+                    color::warning_indicator(),
+                    path.display(),
+                    e
+                );
+            }
             None
         }
     }
@@ -313,7 +392,7 @@ fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
 /// Boolean flags (--content-boundaries, --confirm-interactive, etc.) are
 /// intentionally absent -- they don't take a value, so they can't cause
 /// the next argument to be mis-consumed.
-fn extract_config_path(args: &[String]) -> Option<Option<String>> {
+pub(crate) fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     const FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
         "--restore-save",
@@ -324,6 +403,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--headers",
         "--executable-path",
         "--cdp",
+        "--cdp-headers",
         "--extension",
         "--init-script",
         "--enable",
@@ -341,6 +421,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--download-path",
         "--max-output",
         "--allowed-domains",
+        "--capture",
         "--action-policy",
         "--confirm-actions",
         "--engine",
@@ -354,6 +435,9 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     ];
     let mut i = 0;
     while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
         if args[i] == "--config" {
             return Some(args.get(i + 1).cloned());
         }
@@ -365,7 +449,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     None
 }
 
-/// Load merged configuration; the auto-discovered project file cannot set executablePath, args or plugins.
+/// Load trusted configuration and allowed preferences from the automatic project file.
 pub fn load_config(args: &[String]) -> Result<Config, String> {
     let explicit = extract_config_path(args)
         .map(|p| ("--config", p))
@@ -381,46 +465,21 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
         if !path.exists() {
             return Err(format!("config file not found: {}", path_str));
         }
-        return read_config_file(&path)
+        return read_config_file(&path, false)
             .ok_or_else(|| format!("failed to load config from {}", path_str));
     }
 
-    let user_config = dirs::home_dir()
+    let user_config = std::env::home_dir()
         .map(|d| d.join(CONFIG_DIR).join(CONFIG_FILENAME))
-        .and_then(|p| read_config_file(&p))
+        .and_then(|p| read_config_file(&p, false))
         .unwrap_or_default();
 
-    let project_config = read_config_file(&PathBuf::from(PROJECT_CONFIG_FILENAME));
+    let project_config = read_config_file(Path::new(PROJECT_CONFIG_FILENAME), true);
 
     Ok(match project_config {
-        Some(project) => merge_project_config(user_config, project),
+        Some(project) => user_config.merge(project),
         None => user_config,
     })
-}
-
-fn merge_project_config(user: Config, mut project: Config) -> Config {
-    let mut ignored = Vec::new();
-    if project.executable_path.take().is_some() {
-        ignored.push("executablePath");
-    }
-    if project.args.take().is_some() {
-        ignored.push("args");
-    }
-    if project.plugins.take().is_some_and(|p| !p.is_empty()) {
-        ignored.push("plugins");
-    }
-    if !ignored.is_empty() {
-        eprintln!(
-            "{} ignoring {} from ./{} (a project file cannot set what runs programs). Set them in ~/{}/{}, env vars such as AGENT_BROWSER_ARGS, CLI flags, or trust the file with --config ./{}",
-            color::warning_indicator(),
-            ignored.join(", "),
-            PROJECT_CONFIG_FILENAME,
-            CONFIG_DIR,
-            CONFIG_FILENAME,
-            PROJECT_CONFIG_FILENAME
-        );
-    }
-    user.merge(project)
 }
 
 pub struct Flags {
@@ -428,6 +487,7 @@ pub struct Flags {
     pub headed: bool,
     pub debug: bool,
     pub session: String,
+    pub session_source: &'static str,
     pub restore: Option<String>,
     pub restore_save: Option<String>,
     pub restore_check_url: Option<String>,
@@ -438,6 +498,9 @@ pub struct Flags {
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
+    /// JSON object of WebSocket headers for `--cdp` connect (e.g. Authorization).
+    /// Distinct from page/origin `--headers`.
+    pub cdp_headers: Option<String>,
     pub extensions: Vec<String>,
     pub init_scripts: Vec<String>,
     pub enable: Vec<String>,
@@ -459,6 +522,8 @@ pub struct Flags {
     /// Env-only (AGENT_BROWSER_NO_XVFB): disable automatic Xvfb for headed
     /// launches on displayless Linux hosts.
     pub no_xvfb: bool,
+    /// AGENT_BROWSER_NO_XVFB is set, to any value, so an off value can be sent.
+    pub no_xvfb_set: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
     pub pin_tab: bool,
@@ -469,6 +534,7 @@ pub struct Flags {
     pub content_boundaries: bool,
     pub max_output: Option<usize>,
     pub allowed_domains: Option<Vec<String>>,
+    pub capture: Option<Vec<String>>,
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
@@ -479,6 +545,8 @@ pub struct Flags {
     pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
     pub default_timeout: Option<u64>, // AGENT_BROWSER_DEFAULT_TIMEOUT in ms
     pub no_auto_dialog: bool,
+    /// `--relaunch`: relaunch the session's browser even when no setting changed.
+    pub relaunch: bool,
     pub model: Option<String>,
     pub plugins: Vec<PluginConfig>,
     pub verbose: bool,
@@ -507,6 +575,11 @@ pub struct Flags {
     pub cli_headed: bool,
     pub cli_webgpu: bool,
     pub cli_no_webmcp: bool,
+    /// True when `--auto-connect` was passed on the command line.
+    pub cli_auto_connect: bool,
+    /// True when `--no-auto-connect` (or `--auto-connect false`) was passed:
+    /// the session returns to a local launch, whatever env or config say.
+    pub no_auto_connect: bool,
     pub cli_restore: bool,
     /// True when --pin-tab / --no-pin-tab was passed on the command line, so
     /// an explicit disable can be sent to the daemon (a bare `pin_tab: false`
@@ -517,10 +590,15 @@ pub struct Flags {
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
-    let config = load_config(args).unwrap_or_else(|e| {
+    try_parse_flags(args).unwrap_or_else(|e| {
         eprintln!("{} {}", color::warning_indicator(), e);
         std::process::exit(1);
-    });
+    })
+}
+
+/// Parse flags and return errors when the selected config cannot be loaded.
+pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
+    let config = load_config(args)?;
 
     let extensions_env = env::var("AGENT_BROWSER_EXTENSIONS")
         .ok()
@@ -594,14 +672,22 @@ pub fn parse_flags(args: &[String]) -> Flags {
         env_var_bool("AGENT_BROWSER_CLEAR_CA_CERT"),
     );
 
+    let session_env = env::var("AGENT_BROWSER_SESSION").ok();
+    let session_source = if session_env.is_some() {
+        "AGENT_BROWSER_SESSION"
+    } else if config.session.is_some() {
+        "config session"
+    } else {
+        "default"
+    };
     let mut flags = Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
         headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
         debug: env_var_is_truthy("AGENT_BROWSER_DEBUG") || config.debug.unwrap_or(false),
-        session: env::var("AGENT_BROWSER_SESSION")
-            .ok()
+        session: session_env
             .or(config.session)
             .unwrap_or_else(|| "default".to_string()),
+        session_source,
         restore: env::var("AGENT_BROWSER_RESTORE").ok().or(config.restore),
         restore_save: env::var("AGENT_BROWSER_RESTORE_SAVE")
             .ok()
@@ -624,6 +710,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.executable_path),
         cdp: env::var("AGENT_BROWSER_CDP").ok().or(config.cdp),
+        cdp_headers: env::var("AGENT_BROWSER_CDP_HEADERS")
+            .ok()
+            .or(config.cdp_headers),
         extensions,
         init_scripts,
         enable,
@@ -664,6 +753,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         no_webmcp: env_var_is_truthy("AGENT_BROWSER_NO_WEBMCP")
             || config.no_webmcp.unwrap_or(false),
         no_xvfb: env_var_is_truthy("AGENT_BROWSER_NO_XVFB"),
+        no_xvfb_set: env::var_os("AGENT_BROWSER_NO_XVFB").is_some(),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
@@ -682,7 +772,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             || config.content_boundaries.unwrap_or(false),
         max_output: env::var("AGENT_BROWSER_MAX_OUTPUT")
             .ok()
-            .and_then(|s| s.parse().ok())
+            .and_then(|value| parse_max_output_value(&value, "AGENT_BROWSER_MAX_OUTPUT"))
             .or(config.max_output),
         allowed_domains: env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
             .ok()
@@ -693,6 +783,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     .collect()
             })
             .or(config.allowed_domains),
+        capture: env::var("AGENT_BROWSER_CAPTURE")
+            .ok()
+            .map(|s| split_list(&s))
+            .or(config.capture),
         action_policy: env::var("AGENT_BROWSER_ACTION_POLICY")
             .ok()
             .or(config.action_policy),
@@ -723,6 +817,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .and_then(|s| s.parse::<u64>().ok()),
         no_auto_dialog: env_var_is_truthy("AGENT_BROWSER_NO_AUTO_DIALOG")
             || config.no_auto_dialog.unwrap_or(false),
+        relaunch: false,
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
         plugins,
         verbose: false,
@@ -747,6 +842,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_headed: false,
         cli_webgpu: false,
         cli_no_webmcp: false,
+        cli_auto_connect: false,
+        no_auto_connect: false,
         cli_restore: false,
         cli_pin_tab: false,
         cli_input_mode: false,
@@ -754,9 +851,16 @@ pub fn parse_flags(args: &[String]) -> Flags {
 
     let mut i = 0;
     let mut seen_command = false;
+    let mut wait_command_seen = false;
     while i < args.len() {
         let arg = args[i].as_str();
+        if arg == "--" {
+            break;
+        }
         if !arg.starts_with('-') && looks_like_command(arg) {
+            if !seen_command {
+                wait_command_seen = arg == "wait";
+            }
             seen_command = true;
         }
         match arg {
@@ -811,6 +915,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
+                    flags.session_source = "--session";
                     i += 1;
                 }
             }
@@ -921,6 +1026,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--cdp-headers" => {
+                if let Some(h) = args.get(i + 1) {
+                    flags.cdp_headers = Some(h.clone());
+                    i += 1;
+                }
+            }
             "--profile" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.profile = Some(s.clone());
@@ -929,10 +1040,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 }
             }
             "--state" => {
-                if let Some(s) = args.get(i + 1) {
-                    flags.state = Some(s.clone());
-                    flags.cli_state = true;
-                    i += 1;
+                if !wait_command_seen {
+                    if let Some(s) = args.get(i + 1) {
+                        flags.state = Some(s.clone());
+                        flags.cli_state = true;
+                        i += 1;
+                    }
                 }
             }
             "--proxy" => {
@@ -1028,6 +1141,21 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--auto-connect" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.auto_connect = val;
+                if val {
+                    flags.cli_auto_connect = true;
+                } else {
+                    flags.no_auto_connect = true;
+                }
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--no-auto-connect" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                if val {
+                    flags.auto_connect = false;
+                    flags.no_auto_connect = true;
+                }
                 if consumed {
                     i += 1;
                 }
@@ -1084,7 +1212,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             }
             "--max-output" => {
                 if let Some(s) = args.get(i + 1) {
-                    if let Ok(n) = s.parse::<usize>() {
+                    if let Some(n) = parse_max_output_value(s, "--max-output") {
                         flags.max_output = Some(n);
                     }
                     i += 1;
@@ -1098,6 +1226,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                             .filter(|d| !d.is_empty())
                             .collect(),
                     );
+                    i += 1;
+                }
+            }
+            "--capture" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.capture = Some(split_list(s));
                     i += 1;
                 }
             }
@@ -1184,6 +1318,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--relaunch" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.relaunch = val;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--model" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.model = Some(s.clone());
@@ -1204,11 +1345,40 @@ pub fn parse_flags(args: &[String]) -> Flags {
         }
         i += 1;
     }
-    flags
+    // The policy is stored with the session and read again by later daemons,
+    // which start in whatever directory their command ran from.
+    if let (Some(path), Ok(cwd)) = (flags.action_policy.as_mut(), env::current_dir()) {
+        *path = absolute_policy_path(path, &cwd).map_err(|e| format!("--action-policy: {}", e))?;
+    }
+    Ok(flags)
+}
+
+/// `path` made absolute against `cwd`; a blank value (a reset) is left alone.
+/// A result that is not valid UTF-8 is an error: storing a lossy path would
+/// point nowhere and the policy would deny every action.
+pub(crate) fn absolute_policy_path(path: &str, cwd: &std::path::Path) -> Result<String, String> {
+    if path.trim().is_empty() {
+        return Ok(path.to_string());
+    }
+    let joined = cwd.join(path);
+    joined.to_str().map(str::to_string).ok_or_else(|| {
+        format!(
+            "the policy path {} must be valid UTF-8; pass an absolute path to a file whose directories are valid UTF-8",
+            joined.display()
+        )
+    })
 }
 
 fn looks_like_command(value: &str) -> bool {
     crate::commands::is_top_level_command(value)
+}
+
+/// Return arguments before the end-of-options marker.
+pub fn before_end_of_options(args: &[String]) -> &[String] {
+    &args[..args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len())]
 }
 
 pub fn clean_args(args: &[String]) -> Vec<String> {
@@ -1226,6 +1396,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--allow-file-access",
         "--hide-scrollbars",
         "--auto-connect",
+        "--no-auto-connect",
         "--pin-tab",
         "--no-pin-tab",
         "--no-ca-cert",
@@ -1234,6 +1405,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--content-boundaries",
         "--confirm-interactive",
         "--no-auto-dialog",
+        "--relaunch",
         "-v",
         "--verbose",
         "-q",
@@ -1254,6 +1426,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--headers",
         "--executable-path",
         "--cdp",
+        "--cdp-headers",
         "--extension",
         "--init-script",
         "--enable",
@@ -1271,6 +1444,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--download-path",
         "--max-output",
         "--allowed-domains",
+        "--capture",
         "--action-policy",
         "--confirm-actions",
         "--config",
@@ -1286,6 +1460,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
 
     let mut i = 0;
     let mut seen_command = false;
+    let mut wait_command_seen = false;
     while i < args.len() {
         let arg = &args[i];
         if skip_next {
@@ -1293,7 +1468,16 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
+        if arg == "--" {
+            result.extend_from_slice(&args[i..]);
+            break;
+        }
         if arg.starts_with("--restore=") {
+            i += 1;
+            continue;
+        }
+        if arg == "--state" && wait_command_seen {
+            result.push(arg.clone());
             i += 1;
             continue;
         }
@@ -1323,6 +1507,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             continue;
         }
         if !arg.starts_with('-') && looks_like_command(arg) {
+            if !seen_command {
+                wait_command_seen = arg == "wait";
+            }
             seen_command = true;
         }
         result.push(arg.clone());
@@ -1331,8 +1518,62 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     result
 }
 
+/// Reports whether a token is a global or top-level control flag.
+pub fn is_global_flag(arg: &str) -> bool {
+    matches!(arg, "--help" | "-h" | "--version" | "-V") || clean_args(&[arg.to_string()]).is_empty()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_policy_path_is_made_absolute_against_the_given_directory() {
+        use std::path::{Path, PathBuf};
+        let (a, b) = (
+            std::env::temp_dir().join("a"),
+            std::env::temp_dir().join("b"),
+        );
+        let abs =
+            |path: &str, cwd: &Path| PathBuf::from(super::absolute_policy_path(path, cwd).unwrap());
+        assert_eq!(abs("policy.json", &a), a.join("policy.json"));
+        assert_eq!(abs("policy.json", &b), b.join("policy.json"));
+        let absolute = std::env::temp_dir().join("abs").join("p.json");
+        assert_eq!(abs(absolute.to_str().unwrap(), &a), absolute);
+        assert_eq!(super::absolute_policy_path("", &a).unwrap(), "");
+        assert_eq!(super::absolute_policy_path("  ", &a).unwrap(), "  ");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_policy_path_in_a_non_utf8_directory_is_an_error() {
+        use std::os::unix::ffi::OsStrExt;
+        let cwd = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfe"));
+
+        let err = super::absolute_policy_path("policy.json", cwd).unwrap_err();
+
+        assert!(err.contains("valid UTF-8"), "{err}");
+        assert!(err.contains("absolute path"), "{err}");
+        // An absolute path needs nothing from the directory.
+        assert_eq!(
+            super::absolute_policy_path("/ok/p.json", cwd).unwrap(),
+            "/ok/p.json"
+        );
+    }
+
+    #[test]
+    fn test_parsed_action_policy_flag_is_absolute() {
+        let args: Vec<String> = ["--action-policy", "rel/policy.json", "open"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let flags = parse_flags(&args);
+        let policy = flags.action_policy.unwrap();
+        assert!(std::path::Path::new(&policy).is_absolute(), "{policy}");
+        assert!(
+            std::path::Path::new(&policy)
+                .ends_with(std::path::Path::new("rel").join("policy.json")),
+            "{policy}"
+        );
+    }
     use super::*;
     use crate::test_utils::EnvGuard;
 
@@ -1404,6 +1645,63 @@ mod tests {
     }
 
     #[test]
+    fn test_wait_state_is_not_parsed_as_global_state() {
+        for input in [
+            "wait #spinner --state hidden",
+            "wait --state hidden #spinner",
+        ] {
+            let flags = parse_flags(&args(input));
+            assert_eq!(flags.state, None);
+            assert!(!flags.cli_state);
+        }
+    }
+
+    #[test]
+    fn test_global_state_before_wait_and_on_other_commands_is_preserved() {
+        let before_wait = parse_flags(&args("--state /tmp/auth.json wait #spinner"));
+        assert_eq!(before_wait.state.as_deref(), Some("/tmp/auth.json"));
+        assert!(before_wait.cli_state);
+
+        let other_command = parse_flags(&args("open example.com --state /tmp/auth.json"));
+        assert_eq!(other_command.state.as_deref(), Some("/tmp/auth.json"));
+        assert!(other_command.cli_state);
+    }
+
+    #[test]
+    fn test_clean_args_keeps_wait_state_and_strips_global_state() {
+        for input in [
+            "wait #spinner --state hidden",
+            "wait --state hidden #spinner",
+        ] {
+            assert_eq!(clean_args(&args(input)), args(input));
+        }
+        assert_eq!(
+            clean_args(&args("--state /tmp/auth.json wait #spinner")),
+            args("wait #spinner")
+        );
+        assert_eq!(
+            clean_args(&args("open example.com --state /tmp/auth.json")),
+            args("open example.com")
+        );
+    }
+
+    #[test]
+    fn test_parse_cdp_headers_flag() {
+        let flags = parse_flags(&[
+            "snapshot".to_string(),
+            "--cdp".to_string(),
+            "wss://example.com/cdp".to_string(),
+            "--cdp-headers".to_string(),
+            r#"{"Authorization":"Bearer t"}"#.to_string(),
+        ]);
+        assert_eq!(flags.cdp.as_deref(), Some("wss://example.com/cdp"));
+        assert_eq!(
+            flags.cdp_headers.as_deref(),
+            Some(r#"{"Authorization":"Bearer t"}"#)
+        );
+    }
+
+    #[test]
     fn test_parse_idle_timeout_raw_ms() {
         assert_eq!(parse_idle_timeout("10").unwrap(), "10");
     }
@@ -1421,6 +1719,19 @@ mod tests {
     #[test]
     fn test_parse_idle_timeout_hours() {
         assert_eq!(parse_idle_timeout("1h").unwrap(), "3600000");
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_overflow_and_accepts_boundary() {
+        assert!(parse_idle_timeout("2305843009213693957s").is_err());
+        assert!(parse_idle_timeout(&format!("{}m", u64::MAX)).is_err());
+        assert!(parse_idle_timeout("144115188075855872h").is_err());
+
+        let max_seconds = u64::MAX / 1000;
+        assert_eq!(
+            parse_idle_timeout(&format!("{}s", max_seconds)).unwrap(),
+            (max_seconds * 1000).to_string()
+        );
     }
 
     #[test]
@@ -1799,7 +2110,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_merge_project_overrides_user() {
+    fn test_config_merge_overrides_values() {
         let user = Config {
             headed: Some(true),
             proxy: Some("http://user-proxy:8080".to_string()),
@@ -1819,27 +2130,119 @@ mod tests {
     }
 
     #[test]
-    fn test_project_config_cannot_set_executable_path_args_or_plugins() {
-        let user = Config {
-            executable_path: Some("/user/chrome".to_string()),
-            ..Config::default()
-        };
-        let project = Config {
-            executable_path: Some("/project/chrome".to_string()),
-            args: Some("--no-sandbox".to_string()),
-            plugins: Some(vec![PluginConfig {
-                name: "captcha".to_string(),
-                command: "npx".to_string(),
-                ..PluginConfig::default()
-            }]),
-            headed: Some(true),
-            ..Config::default()
-        };
-        let merged = merge_project_config(user, project);
-        assert_eq!(merged.executable_path.as_deref(), Some("/user/chrome"));
-        assert!(merged.args.is_none());
-        assert!(merged.plugins.is_none());
-        assert_eq!(merged.headed, Some(true));
+    fn test_project_config_only_applies_allowed_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        fs::write(
+            &config_path,
+            r#"{
+                "$schema": "https://example.com/config.schema.json",
+                "headed": false,
+                "json": true,
+                "debug": true,
+                "userAgent": "test-agent",
+                "hideScrollbars": false,
+                "annotate": true,
+                "colorScheme": "dark",
+                "maxOutput": 500,
+                "screenshotQuality": 80,
+                "screenshotFormat": "jpeg",
+                "idleTimeout": "10s",
+                "session": "test-session",
+                "executablePath": "/test/chrome",
+                "args": "test-argument",
+                "plugins": [{"name": "test", "command": "test-plugin"}],
+                "extensions": ["/test/extension"],
+                "profile": "/test/profile",
+                "proxy": "http://test:1234",
+                "allowedDomains": ["example.com"],
+                "clearCaCert": true,
+                "unknownFutureKey": "value"
+            }"#,
+        )
+        .unwrap();
+
+        let project = read_config_file(&config_path, true).unwrap();
+        assert_eq!(project.headed, Some(false));
+        assert_eq!(project.json, Some(true));
+        assert_eq!(project.debug, Some(true));
+        assert_eq!(project.user_agent.as_deref(), Some("test-agent"));
+        assert_eq!(project.hide_scrollbars, Some(false));
+        assert_eq!(project.annotate, Some(true));
+        assert_eq!(project.color_scheme.as_deref(), Some("dark"));
+        assert_eq!(project.max_output, Some(500));
+        assert_eq!(project.screenshot_quality, Some(80));
+        assert_eq!(project.screenshot_format.as_deref(), Some("jpeg"));
+        assert_eq!(project.idle_timeout.as_deref(), Some("10000"));
+        assert!(project.session.is_none());
+        assert!(project.executable_path.is_none());
+        assert!(project.args.is_none());
+        assert!(project.plugins.is_none());
+        assert!(project.extensions.is_none());
+        assert!(project.profile.is_none());
+        assert!(project.proxy.is_none());
+        assert!(project.allowed_domains.is_none());
+        assert!(project.clear_ca_cert.is_none());
+
+        let mut user = read_config_file(&config_path, false).unwrap();
+        assert_eq!(user.session.as_deref(), Some("test-session"));
+        assert_eq!(user.extensions, Some(vec!["/test/extension".to_string()]));
+        assert_eq!(user.profile.as_deref(), Some("/test/profile"));
+        assert_eq!(user.idle_timeout.as_deref(), Some("10000"));
+        user.headed = Some(true);
+        let merged = user.merge(project);
+        assert_eq!(merged.headed, Some(false));
+        assert_eq!(merged.executable_path.as_deref(), Some("/test/chrome"));
+        assert_eq!(merged.args.as_deref(), Some("test-argument"));
+        assert_eq!(merged.plugins.as_ref().unwrap()[0].command, "test-plugin");
+        assert_eq!(merged.proxy.as_deref(), Some("http://test:1234"));
+        assert_eq!(
+            merged.allowed_domains,
+            Some(vec!["example.com".to_string()])
+        );
+        assert_eq!(merged.clear_ca_cert, Some(true));
+    }
+
+    #[test]
+    fn test_project_config_ignores_disallowed_fields_before_deserialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cli should have a repository parent");
+        let schema: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(repo_root.join("agent-browser.schema.json")).unwrap(),
+        )
+        .unwrap();
+        let expected_allowed_keys = [
+            "headed",
+            "json",
+            "debug",
+            "userAgent",
+            "hideScrollbars",
+            "annotate",
+            "colorScheme",
+            "maxOutput",
+            "screenshotQuality",
+            "screenshotFormat",
+            "idleTimeout",
+        ];
+        for key in schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !expected_allowed_keys.contains(key))
+            .chain(["unknownFutureKey", "$schema"])
+        {
+            fs::write(
+                &config_path,
+                serde_json::json!({"headed": true, key: {}}).to_string(),
+            )
+            .unwrap();
+            let config = read_config_file(&config_path, true).unwrap();
+            assert_eq!(config.headed, Some(true), "{key}");
+        }
     }
 
     #[test]
@@ -1864,7 +2267,7 @@ mod tests {
         let mut f = fs::File::create(&config_path).unwrap();
         writeln!(f, r#"{{"headed": true, "proxy": "http://test:1234"}}"#).unwrap();
 
-        let config = read_config_file(&config_path).unwrap();
+        let config = read_config_file(&config_path, false).unwrap();
         assert_eq!(config.headed, Some(true));
         assert_eq!(config.proxy.as_deref(), Some("http://test:1234"));
 
@@ -1873,24 +2276,8 @@ mod tests {
     }
 
     #[test]
-    fn test_load_config_from_file_parses_idle_timeout() {
-        use std::io::Write;
-        let dir = std::env::temp_dir().join("ab-test-idle-timeout-config");
-        let _ = fs::create_dir_all(&dir);
-        let config_path = dir.join("test-config.json");
-        let mut f = fs::File::create(&config_path).unwrap();
-        writeln!(f, r#"{{"idleTimeout": "10s"}}"#).unwrap();
-
-        let config = read_config_file(&config_path).unwrap();
-        assert_eq!(config.idle_timeout.as_deref(), Some("10000"));
-
-        let _ = fs::remove_file(&config_path);
-        let _ = fs::remove_dir(&dir);
-    }
-
-    #[test]
     fn test_load_config_missing_file_returns_none() {
-        let result = read_config_file(&PathBuf::from("/nonexistent/agent-browser.json"));
+        let result = read_config_file(Path::new("/nonexistent/agent-browser.json"), false);
         assert!(result.is_none());
     }
 
@@ -1903,11 +2290,57 @@ mod tests {
         let mut f = fs::File::create(&config_path).unwrap();
         writeln!(f, "{{not valid json}}").unwrap();
 
-        let result = read_config_file(&config_path);
-        assert!(result.is_none());
+        for is_auto_project_config in [false, true] {
+            assert!(read_config_file(&config_path, is_auto_project_config).is_none());
+        }
 
         let _ = fs::remove_file(&config_path);
         let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_load_config_rejects_invalid_allowed_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        for content in [
+            r#"{"headed": "true"}"#,
+            r#"{"maxOutput": -1}"#,
+            r#"{"idleTimeout": 10}"#,
+            "null",
+        ] {
+            fs::write(&config_path, content).unwrap();
+            for is_auto_project_config in [false, true] {
+                assert!(read_config_file(&config_path, is_auto_project_config).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn test_project_config_requires_an_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        for content in ["[]", "[true]", "true", "1", r#""config""#] {
+            fs::write(&config_path, content).unwrap();
+            assert!(read_config_file(&config_path, true).is_none());
+        }
+    }
+
+    #[test]
+    fn test_load_config_discards_invalid_idle_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        for timeout in ["", "1d", "18446744073709551615h"] {
+            fs::write(
+                &config_path,
+                serde_json::json!({"headed": true, "idleTimeout": timeout}).to_string(),
+            )
+            .unwrap();
+            for is_auto_project_config in [false, true] {
+                let config = read_config_file(&config_path, is_auto_project_config).unwrap();
+                assert_eq!(config.headed, Some(true));
+                assert!(config.idle_timeout.is_none());
+            }
+        }
     }
 
     #[test]
@@ -1931,6 +2364,28 @@ mod tests {
     #[test]
     fn test_extract_config_path_skips_flag_values() {
         assert_eq!(extract_config_path(&args("--args --config open")), None);
+    }
+
+    #[test]
+    fn test_end_of_options_stops_global_and_config_parsing() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_CONFIG"]);
+        env.remove("AGENT_BROWSER_CONFIG");
+        let input = args("fill #field -- --config /missing --json --session literal");
+        let baseline = try_parse_flags(&args("fill #field")).unwrap();
+        let flags = try_parse_flags(&input).unwrap();
+
+        assert_eq!(flags.json, baseline.json);
+        assert_eq!(flags.session, baseline.session);
+        assert_eq!(extract_config_path(&input), None);
+        assert_eq!(
+            clean_args(&input),
+            args("fill #field -- --config /missing --json --session literal")
+        );
+
+        let help_args = args("fill #field --help -- --version");
+        assert_eq!(before_end_of_options(&help_args), &help_args[..3]);
+        let version_args = args("fill #field --version -- --help");
+        assert_eq!(before_end_of_options(&version_args), &version_args[..3]);
     }
 
     #[test]
@@ -2393,6 +2848,95 @@ mod tests {
         ];
         let clean = clean_args(&input);
         assert_eq!(clean, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_no_auto_connect_flag() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let flags = parse_flags(&args("--no-auto-connect open example.com"));
+        assert!(flags.no_auto_connect);
+        assert!(!flags.auto_connect);
+        assert!(!flags.cli_auto_connect);
+        assert_eq!(
+            clean_args(&args("--no-auto-connect open example.com")),
+            args("open example.com")
+        );
+        assert_eq!(
+            clean_args(&args("--no-auto-connect true open example.com")),
+            args("open example.com")
+        );
+    }
+
+    #[test]
+    fn test_no_auto_connect_false_is_not_a_reset() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let flags = parse_flags(&args("--no-auto-connect false open"));
+        assert!(!flags.no_auto_connect);
+    }
+
+    #[test]
+    fn test_auto_connect_false_is_the_same_reset() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let flags = parse_flags(&args("--auto-connect false open"));
+        assert!(flags.no_auto_connect);
+        assert!(!flags.auto_connect);
+        assert!(!flags.cli_auto_connect);
+        let flags = parse_flags(&args("--auto-connect open"));
+        assert!(flags.auto_connect && flags.cli_auto_connect && !flags.no_auto_connect);
+    }
+
+    #[test]
+    fn test_no_auto_connect_beats_env_auto_connect() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.set("AGENT_BROWSER_AUTO_CONNECT", "1");
+        assert!(parse_flags(&args("open")).auto_connect);
+        let flags = parse_flags(&args("--no-auto-connect open"));
+        assert!(!flags.auto_connect);
+        assert!(flags.no_auto_connect);
+    }
+
+    #[test]
+    fn test_auto_connect_env_is_on_only_for_a_truthy_value() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        for (value, on) in [
+            ("1", true),
+            ("true", true),
+            ("0", false),
+            ("false", false),
+            ("no", false),
+            ("", false),
+        ] {
+            guard.set("AGENT_BROWSER_AUTO_CONNECT", value);
+            let patch = crate::session_settings::Patch::from_flags(&parse_flags(&args("open")));
+            let expected = on.then_some(serde_json::Value::Bool(true));
+            assert_eq!(
+                patch.value(crate::session_settings::Key::AutoConnect),
+                expected.as_ref(),
+                "AGENT_BROWSER_AUTO_CONNECT={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_no_auto_connect_beats_config_auto_connect() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT"]);
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"autoConnect": true}"#).unwrap();
+        let config = config.to_string_lossy().into_owned();
+        let with_config = |extra: &str| {
+            let mut a = vec!["--config".to_string(), config.clone()];
+            a.extend(args(extra));
+            parse_flags(&a)
+        };
+        assert!(with_config("open").auto_connect);
+        let flags = with_config("--no-auto-connect open");
+        assert!(!flags.auto_connect);
+        assert!(flags.no_auto_connect);
     }
 
     #[test]
