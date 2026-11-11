@@ -565,14 +565,11 @@ impl BrowserEvents {
         if let Some(last_sequence) = last_sequence {
             // The reader publishes to the method tap before the broadcast, so
             // every target up to this sequence is already available here.
-            loop {
-                let Some(event) = self
-                    .pending_target
-                    .take()
-                    .or_else(|| self.targets.try_recv().ok())
-                else {
-                    break;
-                };
+            while let Some(event) = self
+                .pending_target
+                .take()
+                .or_else(|| self.targets.try_recv().ok())
+            {
                 if event.sequence > last_sequence {
                     self.pending_target = Some(event);
                     break;
