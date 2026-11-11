@@ -214,14 +214,20 @@ fn isolated_env(dir: &std::path::Path) -> EnvGuard<'static> {
     guard
 }
 
+/// Snapshot command that attaches the way the CLI does now. The daemon no
+/// longer reads `AGENT_BROWSER_CDP` at startup; the endpoint rides on the
+/// command and is committed when the attach succeeds.
+fn snapshot_on_cdp(url: &str) -> Value {
+    json!({"action":"snapshot", "settings": {"cdp": url}})
+}
+
 #[tokio::test]
 async fn first_snapshot_after_auto_connect_uses_initial_iframe_session() {
     let dir = tempfile::tempdir().unwrap();
-    let guard = isolated_env(dir.path());
+    let _guard = isolated_env(dir.path());
     let mock = mock_browser(false).await;
-    guard.set("AGENT_BROWSER_CDP", &mock.url);
     let mut state = DaemonState::new();
-    let response = execute_command(&json!({"action":"snapshot"}), &mut state).await;
+    let response = execute_command(&snapshot_on_cdp(&mock.url), &mut state).await;
     assert_eq!(response["success"], true, "{response}");
     assert!(
         response["data"]["snapshot"]
@@ -290,11 +296,10 @@ async fn target_events_keep_wire_order_without_broadcast_duplicates() {
 #[tokio::test]
 async fn first_snapshot_retains_initial_targets_when_broadcast_overflows() {
     let dir = tempfile::tempdir().unwrap();
-    let guard = isolated_env(dir.path());
+    let _guard = isolated_env(dir.path());
     let mock = mock_browser_with_event_burst(false, 5000).await;
-    guard.set("AGENT_BROWSER_CDP", &mock.url);
     let mut state = DaemonState::new();
-    let response = execute_command(&json!({"action":"snapshot"}), &mut state).await;
+    let response = execute_command(&snapshot_on_cdp(&mock.url), &mut state).await;
     assert_eq!(response["success"], true, "{response}");
     assert!(
         response["data"]["snapshot"]
