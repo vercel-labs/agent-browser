@@ -55,11 +55,10 @@ npx modern-web-guidance@latest search "prevent layout shift"
 npx modern-web-guidance@latest retrieve "performance"
 ```
 
-Take a baseline before changing the code. `vitals` measures the page the active tab loaded, so open the page and read the metrics in the same session:
+Take a baseline before changing the code. `vitals` loads the URL you give it and measures that fresh load, so pass the URL directly instead of opening the page first. Without a URL it reloads the current tab. Both ways measure a new load rather than the tab's current client state, so an open dialog or a client-side route is gone by the time it reports numbers:
 
 ```bash
-agent-browser open http://localhost:3000/products
-agent-browser vitals
+agent-browser vitals http://localhost:3000/products
 # url: http://localhost:3000/products
 # ttfb: 3.6ms  fcp: 40ms  lcp: 40ms  cls: 0.12  inp: -
 # lcp: element: p
@@ -69,7 +68,7 @@ agent-browser vitals
 A CLS above 0.1 needs attention. Add `--json` to see each shift and when it happened, then match that time to the code that runs at that point:
 
 ```bash
-agent-browser vitals --json
+agent-browser vitals http://localhost:3000/products --json
 ```
 
 The `data.cls` object holds a `score` and an `entries` array. Each entry has a `startTime` in milliseconds and a `value` for the shift it contributed. The baseline run above produced one entry near 518ms that accounted for the whole score, which points at content added after the initial paint rather than at the page shell.
@@ -77,8 +76,7 @@ The `data.cls` object holds a `score` and an `entries` array. Each entry has a `
 After the fix, run the same two commands on the same URL:
 
 ```bash
-agent-browser open http://localhost:3000/products
-agent-browser vitals
+agent-browser vitals http://localhost:3000/products
 # url: http://localhost:3000/products
 # ttfb: 0.8ms  fcp: 32ms  lcp: 32ms  cls: 0  inp: -
 # lcp: element: h1

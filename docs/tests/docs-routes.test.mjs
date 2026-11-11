@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  currentPages as pages,
+  fixturePages,
   publicPages,
   currentResources,
   origin,
@@ -14,6 +14,7 @@ import {
   decode,
   tags,
   meta,
+  renderedHeadings,
   get,
   rawGet,
   responseType,
@@ -54,7 +55,7 @@ async function htmlFor(page) {
   return htmlCache.get(page.path);
 }
 
-for (const page of pages) {
+for (const page of publicPages) {
   test(`${page.path}: original title, description, OG and Twitter metadata plus canonical links`, async () => {
     const html = await htmlFor(page);
     assert.deepEqual(
@@ -100,7 +101,9 @@ for (const page of pages) {
       [`${origin}${markdownPath(page.path)}`],
     );
   });
+}
 
+for (const page of fixturePages) {
   test(`${page.path}: original prose, every table cell, code example and link are server rendered`, async () => {
     const html = await htmlFor(page);
     assert.equal(tags(html, "main").length, 1);
@@ -188,7 +191,9 @@ for (const page of pages) {
     indexing(response);
     assertLegacyMarkdown(await response.text(), page);
   });
+}
 
+for (const page of publicPages) {
   test(`${page.path}: HEAD preserves all five representations without a response body`, async () => {
     for (const [path, headers, type] of [
       [page.path, {}, "text/html"],
@@ -363,7 +368,7 @@ test("alternating representations and queries never contaminate one another", as
   }
 });
 
-for (const page of pages) {
+for (const page of publicPages) {
   test(`${page.path}: locale alias is a permanent query-preserving, cookie-free redirect`, async () => {
     for (const suffix of ["", ".md"]) {
       const target = suffix ? markdownPath(page.path) : page.path;
@@ -387,7 +392,7 @@ for (const page of pages) {
 }
 
 test("trailing slashes keep permanent public paths and query strings", async () => {
-  for (const page of pages.filter((page) => page.path !== "/")) {
+  for (const page of publicPages.filter((page) => page.path !== "/")) {
     const response = await get(`${page.path}/${query}`);
     assert.equal(response.status, 308, page.path);
     assert.equal(response.headers.get("set-cookie"), null);
@@ -538,7 +543,7 @@ test("WebMCP search results use Features without changing the public URL", async
   assert.ok(!nativeMatches[0].breadcrumbs.includes("Reference"));
 });
 
-for (const page of pages.filter(
+for (const page of fixturePages.filter(
   (page) =>
     ["Providers", "Engines"].includes(page.navigation.section) ||
     page.path === "/changelog",
@@ -704,6 +709,11 @@ test("Modern Web Guidance page renders its workflows, metadata and Markdown repr
   assert.equal(bodies[0], bodies[1]);
   assert.equal(bodies[1], bodies[2]);
   assert.ok(bodies[1].includes("## Verify a layout-shift fix"));
+  for (const heading of renderedHeadings(main))
+    assert.ok(
+      bodies[1].includes(`${"#".repeat(heading.level)} ${heading.text}`),
+      `Markdown lost heading ${heading.text}`,
+    );
 });
 
 test("sitemap contains exactly the 40 canonical production URLs", async () => {
@@ -806,7 +816,7 @@ for (const resource of currentResources) {
   });
 }
 
-for (const page of pages) {
+for (const page of publicPages) {
   test(`${page.path}: original OG endpoint returns an actual 1200x630 PNG for agents`, async () => {
     const response = await get(`/og${page.path === "/" ? "" : page.path}`, {
       headers: agent,
