@@ -10725,6 +10725,92 @@ async fn e2e_recording_honors_requested_fps() {
     assert_success(&resp);
 }
 
+/// Verify that a page whose device scale is emulated records at that scale:
+/// Chrome's screencast captures at the window's real scale, so the recorder
+/// switches to full-density screenshots, and every frame keeps the detail.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_emulated_scale_captures_full_density() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 640, "height": 400, "deviceScaleFactor": 2.0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Something always moving, so the screencast sends frames to compare.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "navigate",
+            "url": "data:text/html,<style>@keyframes s{to{transform:rotate(360deg)}}div{width:80px;height:80px;background:%230a72ef;animation:s 1s linear infinite}</style><h1>Density</h1><div></div>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-density-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["capture"], "screenshots", "{data}");
+    assert_eq!(data["deviceScaleFactor"], 2.0);
+    assert!(
+        data.get("warning").is_none(),
+        "frames should be full density: {data}"
+    );
+    let captured = data["capturedFrames"].as_u64().unwrap();
+    assert!(
+        captured >= 10,
+        "an animated page should keep capturing frames, got {captured}"
+    );
+
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&rec_path)
+        .output()
+        .expect("ffprobe should inspect the recording");
+    assert!(probe.status.success());
+    assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "1280,800");
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verify that an output path without an extension is rejected before the
 /// recording context exists: no new tab, no file, nothing to stop.
 #[tokio::test]
