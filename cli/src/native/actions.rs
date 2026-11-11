@@ -5829,12 +5829,17 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
         ("userAgent", Key::UserAgent),
         ("colorScheme", Key::ColorScheme),
         ("downloadPath", Key::DownloadPath),
-        ("engine", Key::Engine),
         ("caCert", Key::CaCert),
     ] {
         if let Some(value) = string(field) {
             set(key, value);
         }
+    }
+    let settings_engine = Patch::from_wire(cmd.get("settings"))
+        .ok()
+        .and_then(|settings| settings.value(Key::Engine).cloned());
+    if let Some(engine) = string("engine").or(settings_engine) {
+        set(Key::Engine, engine);
     }
     for (field, key) in [
         ("ignoreHTTPSErrors", Key::IgnoreHttpsErrors),
@@ -24430,6 +24435,24 @@ mod firefox_routing_tests {
         close_all_browser_backends(&mut state).await.unwrap();
         assert!(state.dialog_handler_task.is_none());
         assert!(client.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_the_firefox_engine_like_cdp_settings() {
+        let _guard = clean_env();
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({"id":"1","action":"launch","cdpPort":9,"settings":{"engine":"firefox"}}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false);
+        let error = resp["error"].as_str().unwrap();
+        assert!(
+            error.contains("connect and --cdp are not supported with --engine firefox"),
+            "{error}"
+        );
+        assert!(state.browser.is_none());
     }
 
     #[tokio::test]
