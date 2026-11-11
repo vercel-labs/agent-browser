@@ -331,6 +331,106 @@ fn action_policy_categories_reach_the_daemon() {
 }
 
 #[test]
+fn locator_commands_check_their_resolved_subaction() {
+    // A locator command is filed under `get` and then dispatches its
+    // subaction, so a click deny has to reach `find role button` (default
+    // click) and a fill deny has to reach `find text ... fill`.
+    let click_denied = Session::new();
+    let click_policy = click_denied.tmp.path().join("policy.json");
+    fs::write(&click_policy, r#"{"default":"allow","deny":["click"]}"#).unwrap();
+    click_denied.touch(&["--action-policy", click_policy.to_str().unwrap()]);
+    let out = click_denied.output(&["find", "role", "button"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("denied by policy") && text(&out).contains("'click'"),
+        "{}",
+        text(&out)
+    );
+    click_denied.kill_daemon();
+
+    let fill_denied = Session::new();
+    let fill_policy = fill_denied.tmp.path().join("policy.json");
+    fs::write(&fill_policy, r#"{"default":"allow","deny":["fill"]}"#).unwrap();
+    fill_denied.touch(&["--action-policy", fill_policy.to_str().unwrap()]);
+    let out = fill_denied.output(&["find", "text", "Email", "fill", "a@example.com"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("denied by policy") && text(&out).contains("'fill'"),
+        "{}",
+        text(&out)
+    );
+    fill_denied.kill_daemon();
+}
+
+#[test]
+fn wait_function_is_denied_by_the_eval_category() {
+    // `wait --fn` runs the expression through Runtime.evaluate, so denying
+    // `eval` has to block it even though the command is filed under `wait`.
+    let session = Session::new();
+    let policy = session.tmp.path().join("policy.json");
+    fs::write(&policy, r#"{"default":"allow","deny":["eval"]}"#).unwrap();
+    session.touch(&["--action-policy", policy.to_str().unwrap()]);
+
+    let out = session.output(&["wait", "--fn", "window.ready === true"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("denied by policy") && text(&out).contains("'evaluate'"),
+        "{}",
+        text(&out)
+    );
+
+    session.kill_daemon();
+
+    // The documented restrictive example allows `wait` but not `eval`, so it
+    // keeps blocking `wait --fn` now that `wait` matches its category.
+    let restrictive = Session::new();
+    let policy = restrictive.tmp.path().join("policy.json");
+    fs::write(
+        &policy,
+        r#"{"default":"deny","allow":["navigate","snapshot","click","scroll","wait","get"]}"#,
+    )
+    .unwrap();
+    restrictive.touch(&["--action-policy", policy.to_str().unwrap()]);
+    let out = restrictive.output(&["wait", "--fn", "window.ready === true"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("denied by policy") && text(&out).contains("'evaluate'"),
+        "{}",
+        text(&out)
+    );
+    restrictive.kill_daemon();
+}
+
+#[test]
+fn diff_url_is_denied_by_the_navigate_category() {
+    // `diff url` navigates to both URLs, so a snapshot-only allow list must
+    // not admit it while `navigate` is denied.
+    let session = Session::new();
+    let policy = session.tmp.path().join("policy.json");
+    fs::write(
+        &policy,
+        r#"{"default":"deny","allow":["snapshot"],"deny":["navigate"]}"#,
+    )
+    .unwrap();
+    session.touch(&["--action-policy", policy.to_str().unwrap()]);
+
+    let out = session.output(&[
+        "diff",
+        "url",
+        "https://example.com/a",
+        "https://example.com/b",
+    ]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("denied by policy") && text(&out).contains("'navigate'"),
+        "{}",
+        text(&out)
+    );
+
+    session.kill_daemon();
+}
+
+#[test]
 fn a_close_parked_for_confirmation_keeps_the_settings() {
     let session = Session::new();
     session.touch(&[

@@ -4129,16 +4129,18 @@ fn call_chat(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
-fn call_eval(arguments: &Value) -> Result<Value, ProtocolError> {
-    let script = required_string(arguments, "script")?;
-    call_cli_tool(arguments, eval_command_args(), Some(script))
-}
-
 /// The eval tool sends its script on stdin so it never has to put page code in
 /// the argument list. The CLI still parses it as the `evaluate` action, which
-/// is what the action policy and confirm-actions lists check.
-fn eval_command_args() -> Vec<String> {
-    vec!["eval".to_string(), "--stdin".to_string()]
+/// is what the action policy and confirm-actions lists check; the CLI side of
+/// that contract is covered by `mcp_eval_tool_is_denied_by_the_eval_category`
+/// in `cli/tests/mcp_call_cli.rs`.
+fn call_eval(arguments: &Value) -> Result<Value, ProtocolError> {
+    let script = required_string(arguments, "script")?;
+    call_cli_tool(
+        arguments,
+        vec!["eval".to_string(), "--stdin".to_string()],
+        Some(script),
+    )
 }
 
 fn call_close(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -6082,34 +6084,6 @@ mod tests {
             crate::native::actions::execute_command(&command, &mut state).await;
             assert_eq!(state.input_mode, "instant");
         }
-    }
-
-    #[tokio::test]
-    async fn mcp_eval_is_denied_by_the_eval_category() {
-        assert_eq!(eval_command_args(), ["eval", "--stdin"]);
-
-        // The tool's script arrives on stdin; the CLI parses the same command
-        // as the `evaluate` protocol action the daemon's policy checks.
-        let args = ["eval", "1 + 1"].map(str::to_string);
-        let flags = crate::flags::parse_flags(&args);
-        let command = crate::commands::parse_command(&args, &flags).unwrap();
-        assert_eq!(command["action"], "evaluate");
-
-        let dir = tempfile::tempdir().unwrap();
-        let policy_path = dir.path().join("policy.json");
-        std::fs::write(&policy_path, r#"{"default":"allow","deny":["eval"]}"#).unwrap();
-        let mut state = crate::native::actions::DaemonState::new();
-        state.policy =
-            Some(crate::native::policy::ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
-
-        let resp = crate::native::actions::execute_command(&command, &mut state).await;
-
-        assert_eq!(resp["success"], false, "{resp}");
-        assert!(
-            resp["error"].as_str().unwrap().contains("denied by policy"),
-            "{resp}"
-        );
-        assert!(state.browser.is_none(), "{resp}");
     }
 
     #[test]
