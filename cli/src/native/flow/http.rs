@@ -1,22 +1,29 @@
-//! Sending a saved request directly, with the session's cookies.
+//! The direct-HTTP tier: the saved request sent with the session's cookies.
 
+use std::sync::Arc;
+
+use super::net::{client_proxies, refusal_in, Reach, ReachResolver};
 use super::*;
 
-/// A session route (`network route`) that matches the request answers it,
-/// so mocks apply to a run too.
+/// How long a request, or the lookup of a proxy's address, may take.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A session route (`network route`) that matches the request answers it on
+/// the HTTP tier too, so mocks apply to the whole session.
 pub struct RoutedResponse {
     pub abort: bool,
     pub status: u16,
     pub body: String,
 }
 
-/// Send the request directly, with cookies from the live session.
+/// Tier 1: send the request directly, with cookies from the live session.
 pub async fn run_http(
     clients: &HttpClients,
     req: &PreparedRequest,
     cookie_header: Option<&str>,
     routed: Option<RoutedResponse>,
-) -> RequestResult {
+    deadline: Instant,
+) -> TierResult {
     let started = Instant::now();
     if let Some(r) = routed {
         let outcome = if r.abort {
@@ -28,13 +35,14 @@ pub async fn run_http(
         } else {
             Ok((r.status, r.body))
         };
-        return request_result(req, started, outcome);
+        return tier_result_of(req, Tier::Http, started, outcome, false);
     }
     let method = match reqwest::Method::from_bytes(req.method.as_bytes()) {
         Ok(m) => m,
         Err(_) => {
-            return request_result(
+            return tier_result(
                 req,
+                Tier::Http,
                 started,
                 Err(Failure::new(
                     true,
@@ -44,7 +52,20 @@ pub async fn run_http(
             )
         }
     };
-    let mut builder = clients.for_request(req).request(method, &req.url);
+    // The request gets no more than the run has left.
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return tier_result(
+            req,
+            Tier::Http,
+            started,
+            Err(Failure::unavailable("the run's time is up".to_string())),
+        );
+    }
+    let mut builder = clients
+        .for_request(req)
+        .request(method, &req.url)
+        .timeout(left.min(Duration::from_secs(20)));
     for (k, v) in &req.headers {
         builder = builder.header(k, v);
     }
@@ -86,8 +107,9 @@ pub async fn run_http(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                return request_result(
+                return tier_result(
                     req,
+                    Tier::Http,
                     started,
                     Err(Failure {
                         status: Some(status),
@@ -95,21 +117,38 @@ pub async fn run_http(
                         drift: false,
                         shape_changed: false,
                         stop: None,
+                        transport: false,
+                        skipped: false,
                     }),
                 );
             }
             resp.text().await.map(|t| (status, t)).map_err(|e| {
-                Failure::new(true, Some(status), format!("could not read body: {}", e))
+                // A body cut short by the run's clock says nothing about the site.
+                let late = e.is_timeout() || Instant::now() >= deadline;
+                if late && req.write {
+                    Failure::unknown_outcome(format!("the write's answer did not arrive: {}", e))
+                } else if late {
+                    Failure::transport(format!("the answer did not arrive in time: {}", e))
+                } else if req.write {
+                    // The site answered the write, so it may have applied it.
+                    Failure::unknown_outcome(format!("the write's answer could not be read: {}", e))
+                } else {
+                    Failure::transport(format!("could not read body: {}", e))
+                }
             })
         }
-        // A write that left the machine may have been applied.
-        Err(e) if req.write && !e.is_connect() => Err(Failure::unknown_outcome(format!(
-            "the write was sent but no response came back: {}",
-            e
-        ))),
-        Err(e) => Err(Failure::new(false, None, format!("request failed: {}", e))),
+        Err(e) => match refusal_in(&e) {
+            // The resolver refused the destination before any connection.
+            Some(reason) => Err(Failure::refused(reason)),
+            // A write that left the machine may have been applied.
+            None if req.write && !e.is_connect() => Err(Failure::unknown_outcome(format!(
+                "the write was sent but no response came back: {}",
+                e
+            ))),
+            None => Err(Failure::transport(format!("request failed: {}", e))),
+        },
     };
-    with_retry_after(request_result(req, started, outcome), retry_after)
+    with_retry_after(tier_result(req, Tier::Http, started, outcome), retry_after)
 }
 
 /// The clients of a run: reads follow same-site redirects, writes never
@@ -129,14 +168,37 @@ impl HttpClients {
     }
 }
 
-pub fn http_client(
+pub async fn http_client(
     filter: Option<crate::native::network::DomainFilter>,
     flow: &Flow,
 ) -> Result<HttpClients, String> {
+    let env = |k: &str| std::env::var(k).ok();
+    let (proxies, names) = client_proxies(env, reqwest::NoProxy::from_env())?;
+    let mut resolver = ReachResolver::system(Reach::of_flow(flow));
+    resolver.trusted = names.trusted;
+    resolver.stand_ins = names.stand_ins;
+    resolver.no_recorded_reach = flow.reach.is_none();
+    http_client_with(filter, flow, Arc::new(resolver), proxies)
+}
+
+/// `http_client` with the resolver and proxies given. The environment's
+/// proxies are read by `http_client` only, so a test's client has none
+/// unless it passes them.
+pub(crate) fn http_client_with<R: reqwest::dns::Resolve + 'static>(
+    filter: Option<crate::native::network::DomainFilter>,
+    flow: &Flow,
+    resolver: Arc<R>,
+    proxies: Vec<reqwest::Proxy>,
+) -> Result<HttpClients, String> {
     let build = |policy| {
-        reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder().no_proxy();
+        for p in &proxies {
+            builder = builder.proxy(p.clone());
+        }
+        builder
             .redirect(policy)
-            .timeout(Duration::from_secs(20))
+            .dns_resolver(resolver.clone())
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))
     };
@@ -176,4 +238,16 @@ pub fn cookie_header(cookies: &[crate::native::cookies::Cookie]) -> String {
         .map(|c| format!("{}={}", c.name, c.value))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// The HTTP tier over a browser session's cookies and routes.
+pub async fn send(
+    client: &HttpClients,
+    browser: &mut dyn Browser,
+    req: &PreparedRequest,
+    deadline: Instant,
+) -> TierResult {
+    let cookie = browser.cookie_header(&req.url).await;
+    let routed = browser.routed_response(&req.url).await;
+    run_http(client, req, cookie.as_deref(), routed, deadline).await
 }

@@ -243,7 +243,7 @@ function ContextMeter({ used, total }: { used: number; total: number }) {
   );
 }
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4.6";
+const DEFAULT_MODEL = "openai/gpt-6-luna-fast";
 
 function useTimeAgo(ts: number | undefined) {
   const [, setTick] = useState(0);

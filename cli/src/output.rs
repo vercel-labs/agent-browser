@@ -399,33 +399,66 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
                     dropped
                 ));
             }
+            if let Some(note) = data.get("reachNote").and_then(|n| n.as_str()) {
+                out.push_str(&format!("Not marked local: {}\n", note));
+            }
             out.push_str("Unverified until the first successful `flow run`.");
             Some(out)
         }
         Some("flow_run") => {
-            let steps: Vec<String> = data
+            let tiers: Vec<String> = data
                 .get("steps")?
                 .as_array()?
                 .iter()
-                .map(|s| format!("{} in {}ms", s["id"].as_str().unwrap_or(""), s["ms"]))
+                .map(|s| {
+                    let fell_back: Vec<String> = s["fellBack"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| {
+                            format!(
+                                "{}: {}",
+                                f["tier"].as_str().unwrap_or("-"),
+                                f["error"].as_str().unwrap_or("")
+                            )
+                        })
+                        .collect();
+                    let mut line = format!(
+                        "{} via {} in {}ms",
+                        s["id"].as_str().unwrap_or(""),
+                        s["tier"].as_str().unwrap_or("-"),
+                        s["ms"]
+                    );
+                    if !fell_back.is_empty() {
+                        line.push_str(&format!(" after {}", fell_back.join("; ")));
+                    }
+                    line
+                })
                 .collect();
             let body = data.get("data").cloned().unwrap_or(serde_json::Value::Null);
             let status = match data.get("drift") {
                 Some(d) => format!(
-                    "unverified: {}",
-                    d["reason"].as_str().unwrap_or("response changed")
+                    "unverified: {} on the {} tier",
+                    d["reason"].as_str().unwrap_or("response changed"),
+                    d["tier"].as_str().unwrap_or("-")
                 ),
                 None if data.get("empty") == Some(&serde_json::Value::Bool(true)) => {
                     "no results, so the flow's verified state is unchanged".to_string()
                 }
                 None => "verified".to_string(),
             };
+            let saved = data
+                .get("saveError")
+                .and_then(|e| e.as_str())
+                .map(|e| format!("\nThe flow file was not updated: {}", e))
+                .unwrap_or_default();
             Some(format!(
-                "Flow '{}' ran in {}ms ({}), {}\n{}",
+                "Flow '{}' ran in {}ms ({}), {}{}\n{}",
                 data.get("name")?.as_str()?,
                 data.get("ms")?,
-                steps.join(", "),
+                tiers.join(", "),
                 status,
+                saved,
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             ))
         }
@@ -4121,7 +4154,7 @@ Requires AI_GATEWAY_API_KEY or ATLASCLOUD_API_KEY to be set.
 In interactive mode, type "quit", "exit", or "q" to leave the REPL.
 
 Chat Options:
-  --model <name>         AI model (or AI_GATEWAY_MODEL env, default: anthropic/claude-sonnet-4.6)
+  --model <name>         AI model (or AI_GATEWAY_MODEL env, default: openai/gpt-6-luna-fast)
   -v, --verbose          Show tool commands and their raw output
   -q, --quiet            Show only the AI text response (hide tool calls)
 
@@ -4480,9 +4513,11 @@ WebMCP (experimental):
 Saved flows (experimental, open the session with --capture flow):
   flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed
   flow save <name>           Save the steps since the last open as a flow; accepts --from <seq>,
-                             --to <seq>, --param k=v, --output <id>, and --description <text>
-  flow run <name>            Send over HTTP; accepts --param k=v, --where f=v, --fields a,b, --limit n,
-                             --origin <host>, and --allow-write <all|id,...>
+                             --to <seq>, --param k=v, --output <id>, --description <text>,
+                             and --timeout <ms>
+  flow run <name>            Send the saved requests directly, then from the page, then by replaying
+                             the recorded commands; accepts --param k=v, --where f=v, --fields a,b,
+                             --limit n, --origin <host>, --allow-write <all|id,...>, and --timeout <ms>
   flow list [--origin <host>] Saved flows with params and verified state
 
 React (requires `open --enable react-devtools`):
@@ -4796,7 +4831,7 @@ Environment:
   AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
   AI_GATEWAY_URL                 Vercel AI Gateway base URL (default: https://ai-gateway.vercel.sh)
   AI_GATEWAY_API_KEY             API key for the AI Gateway (enables chat command and dashboard AI chat)
-  AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6, or --model flag)
+  AI_GATEWAY_MODEL               Default AI model (default: openai/gpt-6-luna-fast, or --model flag)
 
 Install:
   npm install -g agent-browser           # npm
@@ -4935,6 +4970,29 @@ pub fn print_version() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn flow_save_text_shows_why_a_flow_is_not_local() {
+        let data = serde_json::json!({
+            "name": "items",
+            "origin": "lvh.me",
+            "path": "/tmp/items.json",
+            "requests": [],
+            "params": [],
+            "reachNote": "lvh.me resolves to 127.0.0.1 on port 4719, but the browser reached it at 127.0.0.1:4720"
+        });
+        let text = super::format_flow_text(Some("flow_save"), &data).unwrap();
+        assert!(
+            text.contains("Not marked local: lvh.me resolves to 127.0.0.1"),
+            "{text}"
+        );
+        let mut plain = data.clone();
+        plain.as_object_mut().unwrap().remove("reachNote");
+        assert!(!super::format_flow_text(Some("flow_save"), &plain)
+            .unwrap()
+            .contains("Not marked local"));
+    }
+
     use super::{
         boundary_origin, format_a11y_text, format_react_tree_text, format_snapshot_delta,
         format_storage_text, format_vitals_text, format_webmcp_context, format_webmcp_text,

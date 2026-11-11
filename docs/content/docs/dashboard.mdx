@@ -148,7 +148,7 @@ Optionally override the gateway URL or model:
 
 ```bash
 export AI_GATEWAY_URL=https://ai-gateway.vercel.sh   # this is the default
-export AI_GATEWAY_MODEL=openai/gpt-4o-mini           # default: anthropic/claude-sonnet-4.6
+export AI_GATEWAY_MODEL=openai/gpt-4o-mini           # default: openai/gpt-6-luna-fast
 ```
 
 Atlas Cloud can be used as the OpenAI-compatible chat backend:
@@ -171,7 +171,7 @@ Chat runs one agent-browser command per tool call. A `;` or `&&` inside a quoted
   <tbody>
     <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
     <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the AI Gateway. Required to enable AI chat responses unless <code>ATLASCLOUD_API_KEY</code> is set.</td><td>(none)</td></tr>
-    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for chat requests.</td><td><code>anthropic/claude-sonnet-4.6</code></td></tr>
+    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for chat requests.</td><td><code>openai/gpt-6-luna-fast</code></td></tr>
     <tr><td><code>ATLASCLOUD_API_KEY</code></td><td>Atlas Cloud API key for the OpenAI-compatible chat backend.</td><td>(none)</td></tr>
     <tr><td><code>ATLASCLOUD_API_BASE</code></td><td>Atlas Cloud OpenAI-compatible base URL.</td><td><code>https://api.atlascloud.ai</code></td></tr>
     <tr><td><code>ATLASCLOUD_MODEL</code></td><td>Default Atlas Cloud chat model when <code>AI_GATEWAY_MODEL</code> is not set.</td><td><code>qwen/qwen3.5-flash</code></td></tr>

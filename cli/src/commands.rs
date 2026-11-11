@@ -381,7 +381,8 @@ fn reject_batch_global_flag(batch_item: bool, arg: &str) -> Result<(), ParseErro
     }
 }
 
-/// Stamps `timeout` on a wait-family command that has none.
+/// Stamps `timeout` on a wait-family command, `flow_save` or `flow_run` that
+/// has none, so the client read timeout follows it.
 pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     let Some(timeout) = timeout else {
         return;
@@ -389,7 +390,9 @@ pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     let is_wait = cmd
         .get("action")
         .and_then(Value::as_str)
-        .is_some_and(|action| action.starts_with("wait"));
+        .is_some_and(|action| {
+            action.starts_with("wait") || action == "flow_save" || action == "flow_run"
+        });
     if is_wait && cmd.get("timeout").is_none() {
         cmd["timeout"] = json!(timeout);
     }
@@ -2213,7 +2216,7 @@ fn parse_command_inner(
     }
 }
 
-/// Parse `flow <steps|save|run|list>`: save a task captured with `--capture flow`, run it over HTTP.
+/// Parse `flow <steps|save|run|list>`: save a task captured with `--capture flow`, run it by sending its requests directly, from the page, or by replaying the recorded commands.
 fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["steps", "save", "run", "list"];
     const USAGE: &str = "flow <steps [--json]|save <name> [--from <seq>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]|run <name> [--param k=v]... [--origin <host>] [--allow-write <all|id,...>]|list [--origin <host>]>";
@@ -2250,10 +2253,32 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             .and_then(|i| args.get(i + 1).copied())
     }
 
+    /// `--timeout <ms>`, which `flow save` and `flow run` both take.
+    fn timeout_flag(
+        args: &[&str],
+        cmd: &mut Value,
+        context: &str,
+        usage: &'static str,
+    ) -> Result<(), ParseError> {
+        if !args.contains(&"--timeout") {
+            return Ok(());
+        }
+        let raw = flag_value(args, "--timeout").ok_or_else(|| ParseError::MissingArguments {
+            context: context.to_string(),
+            usage,
+        })?;
+        let n: u64 = raw.parse().map_err(|_| ParseError::InvalidValue {
+            message: format!("Invalid --timeout '{}': expected a number in ms", raw),
+            usage,
+        })?;
+        cmd["timeout"] = json!(n);
+        Ok(())
+    }
+
     match rest.first().copied() {
         Some("steps") => Ok(json!({ "id": id, "action": "flow_steps" })),
         Some("save") => {
-            const SAVE_USAGE: &str = "flow save <name> [--from <seq>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>]";
+            const SAVE_USAGE: &str = "flow save <name> [--from <seq>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>] [--timeout <ms>]";
             let name = rest
                 .get(1)
                 .filter(|n| !n.starts_with("--"))
@@ -2287,6 +2312,7 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             if let Some(description) = flag_value(rest, "--description") {
                 cmd["description"] = json!(description);
             }
+            timeout_flag(rest, &mut cmd, "flow save --timeout", SAVE_USAGE)?;
             Ok(cmd)
         }
         Some("run") => {
@@ -2296,7 +2322,7 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 .ok_or_else(|| ParseError::MissingArguments {
                     context: "flow run".to_string(),
                     usage:
-                        "flow run <name> [--param name=value]... [--origin <host>] [--allow-write <all|id,...>]",
+                        "flow run <name> [--param name=value]... [--origin <host>] [--allow-write <all|id,...>] [--timeout <ms>]",
                 })?;
             let mut cmd = json!({
                 "id": id,
@@ -2349,6 +2375,12 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 })?;
                 cmd["limit"] = json!(n);
             }
+            timeout_flag(
+                rest,
+                &mut cmd,
+                "flow run --timeout",
+                "flow run <name> --timeout <ms>",
+            )?;
             Ok(cmd)
         }
         Some("list") => {
@@ -4685,6 +4717,10 @@ mod tests {
         assert!(parse_flow(&["save", "--from", "1"], "1").is_err());
         assert!(parse_flow(&["save", "a", "--from", "open"], "1").is_err());
         assert!(parse_flow(&["save", "a", "--to", "x"], "1").is_err());
+        let cmd = parse_flow(&["save", "a", "--timeout", "1500"], "1").unwrap();
+        assert_eq!(cmd["timeout"], 1500);
+        assert!(parse_flow(&["save", "a", "--timeout", "soon"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--timeout"], "1").is_err());
     }
 
     #[test]
@@ -6356,6 +6392,26 @@ mod tests {
         let mut f = default_flags();
         f.default_timeout = Some(ms);
         f
+    }
+
+    #[test]
+    fn test_flow_save_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(40000);
+        let cmd = parse_command(&args("flow save stoves"), &flags).unwrap();
+        assert_eq!(cmd["action"], "flow_save");
+        assert_eq!(cmd["timeout"], 40000);
+        let none = parse_command(&args("flow save stoves"), &default_flags()).unwrap();
+        assert!(none.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_flow_run_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(40000);
+        let cmd = parse_command(&args("flow run stoves"), &flags).unwrap();
+        assert_eq!(cmd["action"], "flow_run");
+        assert_eq!(cmd["timeout"], 40000);
+        let none = parse_command(&args("flow run stoves"), &default_flags()).unwrap();
+        assert!(none.get("timeout").is_none());
     }
 
     #[test]

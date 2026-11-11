@@ -15071,7 +15071,15 @@ const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
 <button id="items" onclick="items()">Items</button>
 <button id="gql" onclick="gql()">Gql</button>
 <button id="add" onclick="add()">Add</button>
+<button id="flaky" onclick="fetch('/api/flaky?_=' + Date.now())">Flaky</button>
 <button id="cartadd" onclick="fetch('/cart/remove?id=7')">CartAdd</button>
+<button id="slow" onclick="fetch('/api/slow?q=stove')">Slow</button>
+<button id="stream" onclick="fetch('/api/stream')">Stream</button>
+<button id="moved" onclick="fetch('/api/moved')">Moved</button>
+<button id="hang" onclick="fetch('/api/hang?q=1')">Hang</button>
+<button id="hold" onclick="fetch('/api/hold')">Hold</button>
+<button id="both" onclick="login(); fetch('/api/hang?q=1')">Both</button>
+<button id="hangs" onclick="fetch('/api/hangs/' + document.getElementById('pw').value)">Hangs</button>
 <script>
 let csrf = ''; let user = '';
 async function login() { await fetch('/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: document.getElementById('email').value, pw: document.getElementById('pw').value }) }); }
@@ -15107,10 +15115,11 @@ const FLOW_FIXTURE_FIRES: &[(&str, &str)] = &[
     ("#gql", "POST /graphql"),
     ("#add", "POST /api/cart"),
     ("#cartadd", "GET /cart/remove"),
+    ("#flaky", "GET /api/flaky"),
 ];
 
 impl FlowFixture {
-    /// Wait until `done` holds, for the page's own requests to reach the server.
+    /// Wait until `done` holds, for as long as a replay waits for a response.
     async fn wait_until(&self, done: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !done() && std::time::Instant::now() < deadline {
@@ -15245,6 +15254,26 @@ async fn flow_fixture() -> FlowFixture {
                     )
                     .await
                 }
+                ("GET", "/api/flaky") if path.contains("_=") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"ok":true}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/flaky") => {
+                    reply(
+                        &mut stream,
+                        "401 Unauthorized",
+                        "application/json",
+                        "",
+                        "{}",
+                    )
+                    .await
+                }
                 ("GET", "/api/session") if signed_in => {
                     reply(
                         &mut stream,
@@ -15262,6 +15291,81 @@ async fn flow_fixture() -> FlowFixture {
                         "application/json",
                         "",
                         r#"{"items":[{"id":1,"name":"kettle"},{"id":2,"name":"toaster"}]}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/moved") => {
+                    reply(
+                        &mut stream,
+                        "302 Found",
+                        "text/plain",
+                        "Location: /api/target\r\n",
+                        "",
+                    )
+                    .await
+                }
+                ("GET", "/api/target") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"items":[{"id":1,"name":"stove"}]}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/old") => {
+                    reply(
+                        &mut stream,
+                        "302 Found",
+                        "text/plain",
+                        "Location: /\r\n",
+                        "",
+                    )
+                    .await
+                }
+                ("GET", r) if r.starts_with("/api/hangs/") => {
+                    tokio::spawn(async move {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n[")
+                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    });
+                }
+                ("GET", "/api/hold") => {
+                    // A long poll: the server holds the request and writes nothing.
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                        drop(stream);
+                    });
+                }
+                ("GET", "/api/hang") => {
+                    // First-party JSON headers, then a body that never ends.
+                    tokio::spawn(async move {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n[")
+                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    });
+                }
+                ("GET", "/api/stream") => {
+                    // Headers go out and the body never ends.
+                    tokio::spawn(async move {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nAccess-Control-Allow-Origin: *\r\n\r\ndata: hi\n\n")
+                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    });
+                }
+                ("GET", "/api/slow") => {
+                    // The request is in flight when the click returns.
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"items":[{"id":1,"name":"stove"}]}"#,
                     )
                     .await
                 }
@@ -15537,6 +15641,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
     );
     assert!(cart_text.contains(r#""source": "typed""#));
     assert!(cart_text.contains("{{email}}"));
+    assert!(cart_text.contains("<redacted>"));
     assert!(dir.path().join("127.0.0.1").join("browse.json").exists());
 
     // Runs: a read flow needs no confirmation; a write flow asks first.
@@ -15593,6 +15698,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
             .position(|s| !s["requests"].as_array().unwrap().is_empty())
             .unwrap();
         flow["steps"][at]["requests"][0]["url"] = json!(target);
+        flow["steps"][at]["requests"][0]["tier"] = json!("http");
         std::fs::write(&browse_path, serde_json::to_string(&flow).unwrap()).unwrap();
         let resp = exec(
             &run(
@@ -15625,6 +15731,553 @@ async fn e2e_flow_capture_save_run_and_guards() {
     let closed = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
     assert_success(&closed);
     assert!(closed["data"].get("unsaved").is_none(), "{closed}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_includes_requests_still_in_flight() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    assert_success(
+        &exec(
+            &json!({ "id": "1", "action": "launch", "headless": true, "capture": ["flow"] }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &exec(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/", fx.site) }),
+            &mut state,
+        )
+        .await,
+    );
+    // Save as soon as the server has the request, before its response is read.
+    for i in 0..3 {
+        let before = fx.hits("GET /api/slow");
+        assert_success(
+            &exec(
+                &json!({ "id": format!("c{i}"), "action": "click", "selector": "#slow" }),
+                &mut state,
+            )
+            .await,
+        );
+        fx.wait_until(|| fx.hits("GET /api/slow") > before).await;
+        let saved = exec(
+            &json!({ "id": format!("s{i}"), "action": "flow_save", "name": format!("stoves{i}") }),
+            &mut state,
+        )
+        .await;
+        assert_success(&saved);
+        assert_eq!(
+            saved["data"]["requests"].as_array().unwrap().len(),
+            1,
+            "{saved}"
+        );
+    }
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_does_not_wait_for_streaming_responses() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    assert_success(
+        &exec(
+            &json!({ "id": "1", "action": "launch", "headless": true, "capture": ["flow"] }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &exec(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/", fx.site) }),
+            &mut state,
+        )
+        .await,
+    );
+    for (id, sel) in [("c1", "#stream"), ("c2", "#slow")] {
+        assert_success(
+            &exec(
+                &json!({ "id": id, "action": "click", "selector": sel }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    fx.wait_until(|| fx.hits("GET /api/stream") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "streams" }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+async fn flow_fixture_session(fx: &FlowFixture, state: &mut DaemonState) {
+    assert_success(
+        &exec(
+            &json!({ "id": "1", "action": "launch", "headless": true, "capture": ["flow"] }),
+            state,
+        )
+        .await,
+    );
+    assert_success(
+        &exec(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/", fx.site) }),
+            state,
+        )
+        .await,
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_does_not_wait_on_redirected_requests() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/target") > 0).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "moved", "timeout": 6000 }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(3),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_har_finalizes_a_redirect_hop() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/target") > 0).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    state.drain_cdp_events_background().await.unwrap();
+    let hop = state
+        .har_entries
+        .iter()
+        .find(|e| e.url.ends_with("/api/moved"))
+        .expect("redirect hop recorded");
+    assert_eq!(hop.status, Some(302), "{:?}", hop.status);
+    assert!(hop.loading_finished_timestamp.is_some());
+    assert!(hop
+        .response_headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("location") && v == "/api/target"));
+    let target = state
+        .har_entries
+        .iter()
+        .find(|e| e.url.ends_with("/api/target"))
+        .expect("redirect target recorded");
+    assert_eq!(target.status, Some(200));
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_does_not_wait_on_a_long_poll() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for (id, sel) in [("c1", "#hang"), ("c2", "#slow")] {
+        assert_success(
+            &exec(
+                &json!({ "id": id, "action": "click", "selector": sel }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    fx.wait_until(|| fx.hits("GET /api/hang") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    // The JSON long poll has its headers; only /api/slow is waited on.
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "poll", "timeout": 10000 }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(3),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    assert!(saved["data"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["reason"] == "still loading at save: GET /api/hang"));
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_does_not_wait_on_a_held_request_from_an_earlier_step() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for (id, sel) in [("c1", "#hold"), ("c2", "#slow")] {
+        assert_success(
+            &exec(
+                &json!({ "id": id, "action": "click", "selector": sel }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    fx.wait_until(|| fx.hits("GET /api/hold") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    // The held request has no headers, but a later step ran while it hung.
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "held", "timeout": 10000 }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(3),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    assert!(saved["data"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["reason"] == "still loading at save: GET /api/hold"));
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_failure_names_the_request_still_loading() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#hang" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/hang") > 0).await;
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "only-hang", "timeout": 400 }),
+        &mut state,
+    )
+    .await;
+    let err = saved["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("still loading at save: GET /api/hang"),
+        "{saved}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_reports_requests_still_loading_at_the_deadline() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for (id, sel) in [("c1", "#hang"), ("c2", "#slow")] {
+        assert_success(
+            &exec(
+                &json!({ "id": id, "action": "click", "selector": sel }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    fx.wait_until(|| fx.hits("GET /api/hang") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "hang", "timeout": 1500 }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    let gaps = saved["data"]["gaps"].as_array().unwrap();
+    // The step that started the request owns the gap, and nothing else is
+    // said about that step.
+    let for_step_2: Vec<&Value> = gaps.iter().filter(|g| g["step"] == 2).collect();
+    assert_eq!(for_step_2.len(), 1, "{saved}");
+    assert_eq!(for_step_2[0]["command"], "click #hang", "{saved}");
+    assert_eq!(
+        for_step_2[0]["reason"], "still loading at save: GET /api/hang",
+        "{saved}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_gap_for_a_loading_request_does_not_print_a_secret() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for cmd in [
+        json!({ "id": "f", "action": "fill", "selector": "#pw", "value": "tk-91ab-77" }),
+        json!({ "id": "c1", "action": "click", "selector": "#hangs" }),
+        json!({ "id": "c2", "action": "click", "selector": "#slow" }),
+    ] {
+        assert_success(&exec(&cmd, &mut state).await);
+    }
+    fx.wait_until(|| fx.hits("GET /api/hangs/") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "secret", "timeout": 1500 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    assert!(!saved.to_string().contains("91ab"), "{saved}");
+    let text = crate::output::format_flow_text(Some("flow_save"), &saved["data"]).unwrap();
+    assert!(!text.contains("91ab"), "{text}");
+    assert!(text.contains("still loading at save"), "{text}");
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_requests_finalizes_a_redirect_hop() {
+    let fx = flow_fixture().await;
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(&exec(&json!({ "id": "r0", "action": "requests" }), &mut state).await);
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/target") > 0).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    state.drain_cdp_events_background().await.unwrap();
+    let listed = exec(&json!({ "id": "r1", "action": "requests" }), &mut state).await;
+    assert_success(&listed);
+    let requests = listed["data"]["requests"].as_array().unwrap();
+    let hop = requests
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().ends_with("/api/moved"))
+        .expect("hop listed");
+    assert_eq!(hop["status"], 302, "{listed}");
+    let target = requests
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().ends_with("/api/target"))
+        .expect("target listed");
+    assert_eq!(target["status"], 200, "{listed}");
+    assert_eq!(target["mimeType"], "application/json", "{listed}");
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_keeps_the_secret_gap_next_to_the_loading_gap() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for cmd in [
+        json!({ "id": "f1", "action": "fill", "selector": "#email", "value": "ana@example.com" }),
+        json!({ "id": "f2", "action": "fill", "selector": "#pw", "value": "tk-91ab-77" }),
+        json!({ "id": "c1", "action": "click", "selector": "#both" }),
+        json!({ "id": "c2", "action": "click", "selector": "#slow" }),
+    ] {
+        assert_success(&exec(&cmd, &mut state).await);
+    }
+    fx.wait_until(|| {
+        fx.hits("POST /login") > 0 && fx.hits("GET /api/hang") > 0 && fx.hits("GET /api/slow") > 0
+    })
+    .await;
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "both", "timeout": 1500 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let gaps = saved["data"]["gaps"].as_array().unwrap();
+    let on_step: Vec<String> = gaps
+        .iter()
+        .filter(|g| g["command"] == "click #both")
+        .map(|g| g["reason"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        on_step.iter().any(|r| r.contains("secret field")),
+        "{saved}"
+    );
+    assert!(
+        on_step.iter().any(|r| r.contains("still loading at save")),
+        "{saved}"
+    );
+    assert!(!saved.to_string().contains("91ab"), "{saved}");
+    assert!(gaps.iter().all(|g| g.get("kind").is_none()), "{saved}");
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_request_detail_returns_the_final_redirect_hop() {
+    let fx = flow_fixture().await;
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(&exec(&json!({ "id": "r0", "action": "requests" }), &mut state).await);
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/target") > 0).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    state.drain_cdp_events_background().await.unwrap();
+    let id = state
+        .tracked_requests
+        .iter()
+        .find(|r| r.url.ends_with("/api/moved"))
+        .unwrap()
+        .request_id
+        .clone();
+    let detail = exec(
+        &json!({ "id": "d", "action": "request_detail", "requestId": id }),
+        &mut state,
+    )
+    .await;
+    assert_success(&detail);
+    assert_eq!(detail["data"]["status"], 200, "{detail}");
+    assert!(
+        detail["data"]["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/api/target"),
+        "{detail}"
+    );
+    assert!(
+        detail["data"]["responseBody"].to_string().contains("stove"),
+        "{detail}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 
 #[tokio::test]
@@ -15698,16 +16351,499 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
         !text.contains("key9"),
         "typed password reached the flow file"
     );
-    assert!(
-        saved["data"]["gaps"]
-            .to_string()
-            .contains("typed or pasted into a secret field"),
-        "{saved}"
-    );
+    assert!(text.contains("<redacted>"));
     let _ = exec(
         &run(&mut n, json!({ "action": "auth_delete", "name": profile })),
         &mut state,
     )
     .await;
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_replay_runs_once_per_run() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("c{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#items" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "ci" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let requests = saved["data"]["requests"].as_array().unwrap();
+    let id_of = |suffix: &str| {
+        requests
+            .iter()
+            .find(|r| r["url"].as_str().unwrap().contains(suffix))
+            .and_then(|r| r["id"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    let (session_id, items_id) = (id_of("/api/session"), id_of("/api/items"));
+    let resaved = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_save", "name": "ci", "from": 1, "output": items_id }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resaved);
+
+    // The output reads the session response, and both fall back to the replay.
+    let path = dir.path().join("127.0.0.1").join("ci.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["id"] == items_id.as_str() {
+                req["url"] = json!(format!(
+                    "{}/api/items?u={{{{@{}.user}}}}",
+                    fx.site, session_id
+                ));
+            }
+            if req["id"] == items_id.as_str() || req["id"] == session_id.as_str() {
+                req["tier"] = json!("replay");
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    assert!(
+        dir.path().join("127.0.0.1").join("ci.json").exists()
+            && flow["writes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["url"].as_str().unwrap().ends_with("/api/cart"))
+    );
+
+    let before = fx.hits("POST /api/cart");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert_eq!(
+        fx.hits("POST /api/cart"),
+        before + 1,
+        "an approved write is sent once per run: {sent}"
+    );
+    // The items click follows the session click at once; it must send the
+    // user the session response set, never an empty one.
+    let log_start = fx.log.lock().unwrap().len();
+    for _ in 0..4 {
+        let again = exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+            ),
+            &mut state,
+        )
+        .await;
+        assert_eq!(again["data"]["ok"], true, "{again}");
+    }
+    let log = fx.log.lock().unwrap().clone();
+    let items: Vec<&String> = log[log_start..]
+        .iter()
+        .filter(|l| l.contains("GET /api/items"))
+        .collect();
+    assert!(!items.is_empty(), "{log:#?}");
+    assert!(
+        items.iter().all(|l| l.contains("GET /api/items?u=ana ")),
+        "an items request went out without the session value: {items:#?}"
+    );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_replay_leaves_the_session_capture_untouched() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("c{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#items" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "ci" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let requests = saved["data"]["requests"].as_array().unwrap();
+    let id_of = |suffix: &str| {
+        requests
+            .iter()
+            .find(|r| r["url"].as_str().unwrap().contains(suffix))
+            .and_then(|r| r["id"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    let (session_id, items_id) = (id_of("/api/session"), id_of("/api/items"));
+    let path = dir.path().join("127.0.0.1").join("ci.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["id"] == items_id.as_str() || req["id"] == session_id.as_str() {
+                req["tier"] = json!("replay");
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+
+    let steps_before = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
+    assert_success(&steps_before);
+    let har_before = state.har_entries.len();
+    let ids_before: Vec<String> = state
+        .har_entries
+        .iter()
+        .map(|e| e.request_id.clone())
+        .collect();
+
+    let hits_before = fx.hits("GET /api/items");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert!(
+        fx.hits("GET /api/items") > hits_before,
+        "the run did not reach the replay tier"
+    );
+    settle_responses(&mut state).await;
+
+    let steps_after = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
+    assert_success(&steps_after);
+    assert_eq!(
+        steps_after["data"]["steps"], steps_before["data"]["steps"],
+        "a run added steps to the user's recording"
+    );
+    let leaked: Vec<String> = state
+        .har_entries
+        .iter()
+        .filter(|e| !ids_before.contains(&e.request_id))
+        .map(|e| e.url.clone())
+        .collect();
+    assert_eq!(
+        state.har_entries.len(),
+        har_before,
+        "a run left entries in the session capture: {leaked:#?}"
+    );
+
+    // The next save holds only what the user did.
+    assert_success(
+        &fx.run_settled(
+            &mut state,
+            &run(&mut n, json!({ "action": "click", "selector": "#add" })),
+        )
+        .await,
+    );
+    let next = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "next" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&next);
+    let urls: Vec<String> = next["data"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["url"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        urls.iter().filter(|u| u.contains("/api/items")).count() <= 1,
+        "the next save carries a run's requests: {urls:#?}"
+    );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_a_write_the_replay_sent_is_not_sent_again_by_a_later_request() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("w{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "cs" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let requests = saved["data"]["requests"].as_array().unwrap();
+    let id_of = |suffix: &str| {
+        requests
+            .iter()
+            .find(|r| r["url"].as_str().unwrap().contains(suffix))
+            .and_then(|r| r["id"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    let (session_id, add_id) = (id_of("/api/session"), id_of("/api/cart"));
+    assert_success(
+        &exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_save", "name": "cs", "from": 1, "output": add_id }),
+            ),
+            &mut state,
+        )
+        .await,
+    );
+    // The read falls back to the replay, which clicks Add; the write then
+    // comes up on the HTTP tier and must not be sent a second time.
+    let path = dir.path().join("127.0.0.1").join("cs.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["id"] == session_id.as_str() {
+                req["tier"] = json!("replay");
+            }
+        }
+    }
+    assert!(flow["steps"]
+        .to_string()
+        .contains(&format!("{{{{@{}.", session_id)));
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    let before = fx.hits("POST /api/cart");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "cs", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert_eq!(
+        fx.hits("POST /api/cart"),
+        before + 1,
+        "one POST per run: {sent}"
+    );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_the_page_tier_fetch_does_not_answer_for_the_replay() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("p{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#flaky" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    assert_success(
+        &exec(
+            &run(&mut n, json!({ "action": "flow_save", "name": "pf" })),
+            &mut state,
+        )
+        .await,
+    );
+    // The page tier asks the exact URL, which the site rejects; the replay's
+    // own request carries a cache-buster and is answered.
+    let path = dir.path().join("127.0.0.1").join("pf.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["url"].as_str().unwrap().contains("/api/flaky") {
+                req["url"] = json!(format!("{}/api/flaky", fx.site));
+                req["tier"] = json!("page");
+                req["expect"]["strippedAuth"] = json!(true);
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    let out = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "pf", "params": {} }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(out["data"]["ok"], true, "{out}");
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_a_route_limited_by_resource_type_applies_the_same_on_both_tiers() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("rt{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "rt" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let add_id = saved["data"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().contains("/api/cart"))
+        .and_then(|r| r["id"].as_str())
+        .unwrap()
+        .to_string();
+    assert_success(
+        &exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_save", "name": "rt", "from": 1, "output": add_id }),
+            ),
+            &mut state,
+        )
+        .await,
+    );
+    let path = dir.path().join("127.0.0.1").join("rt.json");
+    let original = std::fs::read_to_string(&path).unwrap();
+    for tier in ["http", "page"] {
+        let mut flow: Value = serde_json::from_str(&original).unwrap();
+        for step in flow["steps"].as_array_mut().unwrap() {
+            for req in step["requests"].as_array_mut().unwrap() {
+                if req["id"] == add_id.as_str() {
+                    req["tier"] = json!(tier);
+                }
+            }
+        }
+        std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+        // (route limited to, whether the mock answers the write); Chrome
+        // reports the in-page fetch() as an XHR to request interception
+        for (limit, mocked) in [("fetch", false), ("xhr", true)] {
+            assert_success(
+                &exec(
+                    &run(
+                        &mut n,
+                        json!({
+                            "action": "route",
+                            "url": "*/api/cart",
+                            "resourceType": limit,
+                            "response": { "status": 200, "body": "{\"cart\":[7]}" },
+                        }),
+                    ),
+                    &mut state,
+                )
+                .await,
+            );
+            let before = fx.hits("POST /api/cart");
+            let out = exec(
+                &run(
+                    &mut n,
+                    json!({ "action": "flow_run", "name": "rt", "params": {}, "allowWrite": "all" }),
+                ),
+                &mut state,
+            )
+            .await;
+            assert_eq!(out["data"]["ok"], true, "{tier} {limit}: {out}");
+            assert_eq!(
+                fx.hits("POST /api/cart"),
+                before + usize::from(!mocked),
+                "{tier} tier, route limited to {limit}: {out}"
+            );
+            assert_success(
+                &exec(
+                    &run(&mut n, json!({ "action": "unroute", "url": "*/api/cart" })),
+                    &mut state,
+                )
+                .await,
+            );
+        }
+    }
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
