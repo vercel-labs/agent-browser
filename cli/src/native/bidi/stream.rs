@@ -387,10 +387,14 @@ mod tests {
         let (second, second_events, calls) = fake_session().await;
         std::mem::forget((first_events, second_events));
         let activity = Arc::new(IdleActivity::new());
-        let (server, slot) =
-            StreamServer::start_without_client(0, "firefox-relaunch".into(), true, activity.clone())
-                .await
-                .unwrap();
+        let (server, slot) = StreamServer::start_without_client(
+            0,
+            "firefox-relaunch".into(),
+            true,
+            activity.clone(),
+        )
+        .await
+        .unwrap();
         let server = Arc::new(server);
         let mut state = DaemonState::new_with_stream(
             crate::session_settings::Running::defaults(),

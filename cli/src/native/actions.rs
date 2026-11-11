@@ -1388,7 +1388,7 @@ impl DaemonState {
         let firefox_tabs_changed = bidi::network::drain(self).await;
         if let Some(ff) = self.firefox.as_mut() {
             ff.release_unused_user_contexts().await;
-            if ff.recover_active_context().await? {
+            if ff.recover_lost_events(&mut self.pending_dialog).await? {
                 bidi::daemon::reset_page(self);
             }
         }
