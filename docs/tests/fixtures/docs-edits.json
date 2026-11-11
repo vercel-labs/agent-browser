@@ -377,6 +377,12 @@
         "from": "Use compact snapshot format",
         "to": "Remove empty structural elements (no token budget)"
       }
+    ],
+    "/next": [
+      {
+        "from": "\"snapshot\", \"-i\", \"-c\"",
+        "to": "\"snapshot\", \"-i\""
+      }
     ]
   },
   "resources": {
