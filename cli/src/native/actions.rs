@@ -1352,7 +1352,7 @@ impl DaemonState {
         firefox::network::drain(self).await;
         if let Some(ff) = self.firefox.as_mut() {
             ff.release_unused_user_contexts().await;
-            if ff.recover_active_context().await? {
+            if ff.recover_lost_events(&mut self.pending_dialog).await? {
                 firefox::daemon::reset_page(self);
             }
         }

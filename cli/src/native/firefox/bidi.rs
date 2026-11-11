@@ -3,7 +3,7 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -25,6 +25,7 @@ pub struct BidiClient {
     sink: tokio::sync::Mutex<WsSink>,
     pending: Pending,
     buffered_events: Arc<Mutex<Vec<mpsc::Sender<Value>>>>,
+    pub(crate) lost_events: Arc<AtomicBool>,
     next_id: AtomicU64,
     pub(crate) reader: tokio::task::JoinHandle<()>,
 }
@@ -49,7 +50,12 @@ impl BidiClient {
         let (sink, mut stream) = ws.split();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let buffered_events = Arc::new(Mutex::new(Vec::<mpsc::Sender<Value>>::new()));
-        let (p, be) = (pending.clone(), buffered_events.clone());
+        let lost_events = Arc::new(AtomicBool::new(false));
+        let (p, be, lost) = (
+            pending.clone(),
+            buffered_events.clone(),
+            lost_events.clone(),
+        );
         let reader = tokio::spawn(async move {
             while let Some(Ok(msg)) = stream.next().await {
                 let Message::Text(text) = msg else { continue };
@@ -58,12 +64,16 @@ impl BidiClient {
                 };
                 match v["type"].as_str() {
                     Some("event") => {
-                        be.lock().unwrap().retain(|tx| {
-                            !matches!(
-                                tx.try_send(v.clone()),
-                                Err(mpsc::error::TrySendError::Closed(_))
-                            )
-                        });
+                        be.lock()
+                            .unwrap()
+                            .retain(|tx| match tx.try_send(v.clone()) {
+                                Ok(()) => true,
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    lost.store(true, Ordering::Relaxed);
+                                    true
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => false,
+                            });
                     }
                     Some(kind @ ("success" | "error")) => {
                         let Some(tx) = v["id"]
@@ -91,12 +101,20 @@ impl BidiClient {
             sink: tokio::sync::Mutex::new(sink),
             pending,
             buffered_events,
+            lost_events,
             next_id: AtomicU64::new(1),
             reader,
         })
     }
 
-    /// Queues events without blocking the reader; events past the 65,536-item capacity are dropped.
+    /// Whether a full queue dropped events since the last call. State that events keep current
+    /// has to be rebuilt after that.
+    pub fn take_event_loss(&self) -> bool {
+        self.lost_events.swap(false, Ordering::Relaxed)
+    }
+
+    /// Queues events without blocking the reader. Events past the 65,536-item capacity are
+    /// dropped and reported by `take_event_loss`.
     pub fn subscribe_buffered(&self) -> mpsc::Receiver<Value> {
         let (tx, rx) = mpsc::channel(BUFFERED_EVENT_CAPACITY);
         self.buffered_events.lock().unwrap().push(tx);
