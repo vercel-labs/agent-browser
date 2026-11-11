@@ -165,7 +165,8 @@ pub(crate) fn pointer_move_buttons(origin: &Origin, held: i32, wanted: i32) -> V
     pointer_source("mouse", actions)
 }
 
-/// Build the BiDi actions for a wheel scroll at `origin`.
+/// Build the BiDi actions for a wheel scroll at `origin`, rounding the
+/// position and deltas because Firefox accepts only integers for wheel scroll.
 pub(crate) fn pointer_wheel(origin: &Origin, delta_x: f64, delta_y: f64) -> Value {
     let (x, y, origin) = origin_json(origin);
     json!([{
@@ -173,10 +174,10 @@ pub(crate) fn pointer_wheel(origin: &Origin, delta_x: f64, delta_y: f64) -> Valu
         "id": "wheel",
         "actions": [{
             "type": "scroll",
-            "x": x,
-            "y": y,
-            "deltaX": delta_x,
-            "deltaY": delta_y,
+            "x": x.round() as i64,
+            "y": y.round() as i64,
+            "deltaX": delta_x.round() as i64,
+            "deltaY": delta_y.round() as i64,
             "origin": origin,
         }],
     }])

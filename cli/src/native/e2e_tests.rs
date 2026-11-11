@@ -16206,6 +16206,45 @@ async fn e2e_firefox_review_pointer_motion_and_wheel() {
         firefox_eval(&mut state, "wheels.at(-1)").await,
         json!([100, 100, "right"])
     );
+    firefox_open(&mut state, &fixture.url).await;
+    for _ in 0..100 {
+        if firefox_eval(&mut state, "document.readyState").await == json!("complete") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    firefox_eval(
+        &mut state,
+        "document.body.innerHTML = '<div style=\"height:4000px\">tall</div>'; window.scrollTo(0, 0); document.body.scrollHeight",
+    )
+    .await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"fractional-wheel", "action":"wheel", "x":100.5, "y":100.5, "deltaY":150.5}),
+        )
+        .await,
+    );
+    let mut scroll = firefox_eval(
+        &mut state,
+        "({ y: window.scrollY, height: document.body.scrollHeight })",
+    )
+    .await;
+    for _ in 0..100 {
+        if scroll["y"].as_f64().is_some_and(|scroll_y| scroll_y > 0.0) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        scroll = firefox_eval(
+            &mut state,
+            "({ y: window.scrollY, height: document.body.scrollHeight })",
+        )
+        .await;
+    }
+    assert!(
+        scroll["y"].as_f64().is_some_and(|scroll_y| scroll_y > 0.0),
+        "fractional wheel must scroll the page: {scroll}"
+    );
     firefox_close(&mut state).await;
 }
 

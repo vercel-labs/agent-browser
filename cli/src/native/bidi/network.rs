@@ -713,6 +713,9 @@ async fn request_body(state: &mut DaemonState, id: &str) {
     } else {
         body
     };
+    if body.is_empty() {
+        return;
+    }
     if har_wanted {
         if let Some(entry) = state
             .har_entries
@@ -723,7 +726,7 @@ async fn request_body(state: &mut DaemonState, id: &str) {
             entry.post_data = Some(body.clone());
         }
     }
-    if tracked_wanted && !body.is_empty() {
+    if tracked_wanted {
         if let Some(entry) = state
             .tracked_requests
             .iter_mut()
@@ -1944,6 +1947,43 @@ mod tests {
             serde_json::to_value(&state.tracked_requests[0]).unwrap()["postData"],
             json!("payload=tracked")
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_request_body_is_left_out_of_the_har() {
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(
+            |_| json!({"bytes": {"type": "string", "value": ""}}),
+        )
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.har_recording = true;
+        let request = json!({
+            "request": "r1",
+            "url": "http://example.com/probe",
+            "method": "POST",
+            "headers": [],
+            "bodySize": 0,
+            "initiatorType": "fetch",
+        });
+        let response = json!({"status": 200, "headers": [], "bodySize": 0});
+
+        apply_events(
+            &mut state,
+            vec![
+                json!({
+                    "method": "network.beforeRequestSent",
+                    "params": {"timestamp": 1000, "request": request},
+                }),
+                json!({
+                    "method": "network.responseCompleted",
+                    "params": {"timestamp": 2000, "request": request, "response": response},
+                }),
+            ],
+        )
+        .await;
+
+        assert_eq!(state.har_entries[0].post_data, None);
     }
 
     #[tokio::test]

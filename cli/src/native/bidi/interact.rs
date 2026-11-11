@@ -1408,9 +1408,9 @@ mod tests {
             wheel(&command, &mut state).await.unwrap();
             let request = requests.lock().unwrap().pop().unwrap();
             let scroll = &request["params"]["actions"][0]["actions"][0];
-            assert_eq!(scroll["x"], json!(expected.0));
-            assert_eq!(scroll["y"], json!(expected.1));
-            assert_eq!(scroll["deltaY"], json!(12.0));
+            assert_eq!(scroll["x"].as_f64(), Some(expected.0));
+            assert_eq!(scroll["y"].as_f64(), Some(expected.1));
+            assert_eq!(scroll["deltaY"].as_f64(), Some(12.0));
             assert_eq!((state.mouse_state.x, state.mouse_state.y), expected);
             assert_eq!(state.mouse_state.buttons, 1);
         }

@@ -5982,12 +5982,17 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
         ("userAgent", Key::UserAgent),
         ("colorScheme", Key::ColorScheme),
         ("downloadPath", Key::DownloadPath),
-        ("engine", Key::Engine),
         ("caCert", Key::CaCert),
     ] {
         if let Some(value) = string(field) {
             set(key, value);
         }
+    }
+    let settings_engine = Patch::from_wire(cmd.get("settings"))
+        .ok()
+        .and_then(|settings| settings.value(Key::Engine).cloned());
+    if let Some(engine) = string("engine").or(settings_engine) {
+        set(Key::Engine, engine);
     }
     for (field, key) in [
         ("ignoreHTTPSErrors", Key::IgnoreHttpsErrors),
