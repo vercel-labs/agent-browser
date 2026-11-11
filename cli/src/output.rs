@@ -1622,6 +1622,9 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                         path,
                         recording_fps_suffix(data)
                     );
+                    if let Some(warning) = data.get("warning").and_then(|v| v.as_str()) {
+                        println!("{} {}", color::warning_indicator(), warning);
+                    }
                     if let Some(contact_sheet) =
                         data.get("contactSheetPath").and_then(|v| v.as_str())
                     {
@@ -3478,6 +3481,11 @@ work); lower it for long sessions where file size matters more than motion.
 With --cursor, an inert overlay renders the pointer and page together so
 drags stay synchronized. It is hidden from accessibility snapshots and
 removed on stop. Screenshots taken while recording include the overlay.
+
+Frames come from Chrome's screencast, which captures at the window's real
+device scale. A scale set with `set viewport <w> <h> <scale>` is emulated, so
+those frames are scaled up and `record stop` warns. For full-density video,
+launch the browser with --args "--force-device-scale-factor=2".
 
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)

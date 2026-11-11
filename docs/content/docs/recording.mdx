@@ -52,6 +52,17 @@ Chrome recordings do not normally include the native pointer. Add `--cursor` for
 agent-browser record start ./walkthrough.webm --cursor
 ```
 
+## High-density video
+
+Frames come from Chrome's screencast, which captures at the window's real device scale. A scale set with `set viewport <w> <h> <scale>` is emulated: pages render at that density and screenshots have it, but the screencast still captures at the real scale, and the frames are scaled up to fill the video. When that happens, `record stop` says so and its JSON includes `deviceScaleFactor`, `captureScale` and `warning`.
+
+For full-density video, launch the browser with a real device scale:
+
+```bash
+agent-browser --args "--force-device-scale-factor=2" open https://example.com
+agent-browser record start ./sharp.webm
+```
+
 ## Contact sheets
 
 Add `--contact-sheet` for a timestamped PNG with highlighted changes.

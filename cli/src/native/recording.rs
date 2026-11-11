@@ -542,6 +542,13 @@ pub struct RecordingState {
     pub contact_sheet: bool,
     pub contact_sheet_threshold: f64,
     pub contact_sheet_path: Option<String>,
+    /// Device pixels per CSS pixel on the page when the take started, from its
+    /// full-density first frame.
+    pub device_scale: f64,
+    /// Device pixels per CSS pixel in the lowest-density screencast frame.
+    pub capture_scale: f64,
+    /// [`f64::to_bits`] of `capture_scale`, shared with the capture task.
+    pub shared_capture_scale: Option<Arc<AtomicU64>>,
 }
 
 impl RecordingState {
@@ -565,6 +572,9 @@ impl RecordingState {
             contact_sheet: false,
             contact_sheet_threshold: DEFAULT_CONTACT_SHEET_THRESHOLD,
             contact_sheet_path: None,
+            device_scale: 1.0,
+            capture_scale: f64::INFINITY,
+            shared_capture_scale: None,
         }
     }
 }
@@ -645,6 +655,8 @@ pub fn recording_start(
     state.frame_count = 0;
     state.captured_count = 0;
     state.contact_sheet_frame_count = 0;
+    state.device_scale = 1.0;
+    state.capture_scale = f64::INFINITY;
     state.cursor = options.cursor;
     if let Ok(mut cursor) = state.shared_cursor.lock() {
         *cursor = RecordingCursorHistory {
@@ -692,7 +704,60 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
         result["contactSheetFrames"] = json!(state.contact_sheet_frame_count);
         result["contactSheetThreshold"] = json!(state.contact_sheet_threshold);
     }
+    if let Some(warning) = capture_scale_warning(state.device_scale, state.capture_scale) {
+        result["deviceScaleFactor"] = json!(state.device_scale);
+        result["captureScale"] = json!(state.capture_scale);
+        result["warning"] = json!(warning);
+    }
     Ok(result)
+}
+
+/// Chrome's screencast captures at the window's real device scale, not one set
+/// with `set viewport <w> <h> <scale>`. The encoder then scales those frames up
+/// to the first frame's full-density size, so the file looks sharp by its
+/// dimensions but holds less detail. Say so, and how to get full density.
+fn capture_scale_warning(device_scale: f64, capture_scale: f64) -> Option<String> {
+    if !capture_scale.is_finite() || device_scale <= capture_scale * 1.05 {
+        return None;
+    }
+    let scale = |value: f64| {
+        let rounded = (value * 100.0).round() / 100.0;
+        if rounded.fract() == 0.0 {
+            format!("{}", rounded as i64)
+        } else {
+            format!("{}", rounded)
+        }
+    };
+    Some(format!(
+        "Frames were captured at {}x and scaled up to the page's {}x device scale, because Chrome's screencast ignores an emulated scale. For full-density video, launch the browser with --args \"--force-device-scale-factor={}\"",
+        scale(capture_scale),
+        scale(device_scale),
+        scale(device_scale)
+    ))
+}
+
+/// The width and height a PNG's IHDR chunk declares, without decoding it.
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 24 || &bytes[..8] != SIGNATURE || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some((width, height))
+}
+
+/// Device pixels per CSS pixel in an encoded frame, when both are known.
+pub fn frame_scale(image_data: &[u8], css_width: f64) -> Option<f64> {
+    let (width, _) = png_dimensions(image_data)?;
+    (css_width.is_finite() && css_width > 0.0).then(|| width as f64 / css_width)
+}
+
+/// Lower the shared capture scale to `scale` when it is lower.
+fn record_capture_scale(shared: &AtomicU64, scale: f64) {
+    let _ = shared.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+        (scale < f64::from_bits(bits)).then(|| scale.to_bits())
+    });
 }
 
 fn ffmpeg_command() -> tokio::process::Command {
@@ -1455,6 +1520,7 @@ pub fn spawn_recording_task(
     contact_sheet_path: Option<String>,
     contact_sheet_threshold: f64,
     shared_contact_sheet_count: Arc<AtomicU64>,
+    shared_capture_scale: Arc<AtomicU64>,
     cancel_rx: oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
     tokio::spawn(async move {
@@ -1533,6 +1599,7 @@ pub fn spawn_recording_task(
                     frame_tx,
                     contact_tx,
                     &shared_captured,
+                    &shared_capture_scale,
                     cancel_rx,
                 )
                 .await
@@ -1640,6 +1707,7 @@ pub async fn capture_initial_image(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn collect_frames(
     client: &CdpClient,
     capture_session: &str,
@@ -1647,6 +1715,7 @@ async fn collect_frames(
     frame_tx: mpsc::Sender<CapturedVideoFrame>,
     contact_tx: Option<std::sync::mpsc::SyncSender<CapturedVideoFrame>>,
     shared_captured: &AtomicU64,
+    shared_capture_scale: &AtomicU64,
     cancel_rx: oneshot::Receiver<()>,
 ) -> Result<(), String> {
     let mut cancel_rx = std::pin::pin!(cancel_rx);
@@ -1675,13 +1744,17 @@ async fn collect_frames(
                         let timestamp = metadata["timestamp"]
                             .as_f64()
                             .unwrap_or_else(cursor_timestamp);
+                        let device_width = metadata["deviceWidth"].as_f64().unwrap_or(0.0);
+                        if let Some(scale) = frame_scale(&bytes, device_width) {
+                            record_capture_scale(shared_capture_scale, scale);
+                        }
                         let frame = CapturedVideoFrame {
                             sequence,
                             image_data: Arc::new(bytes),
                             elapsed,
                             captured_at: tokio::time::Instant::now(),
                             timestamp,
-                            device_width: metadata["deviceWidth"].as_f64().unwrap_or(0.0),
+                            device_width,
                             device_height: metadata["deviceHeight"].as_f64().unwrap_or(0.0),
                         };
                         sequence += 1;
@@ -1969,6 +2042,7 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
     let counter = state.shared_frame_count.take();
     let captured = state.shared_captured_count.take();
     let contact_sheet = state.shared_contact_sheet_count.take();
+    let capture_scale = state.shared_capture_scale.take();
     let handle = state.capture_task.take();
 
     let result = if let Some(h) = handle {
@@ -1989,6 +2063,9 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
     }
     if let Some(c) = contact_sheet {
         state.contact_sheet_frame_count = c.load(Ordering::Relaxed);
+    }
+    if let Some(c) = capture_scale {
+        state.capture_scale = f64::from_bits(c.load(Ordering::Relaxed));
     }
     if let Ok(mut guard) = state.capture_session.lock() {
         *guard = None;
@@ -2994,6 +3071,62 @@ mod tests {
         let result = recording_stop(&mut state).unwrap();
         assert_eq!(result["frames"], 120);
         assert_eq!(result["fps"], 60);
+    }
+
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn test_frame_scale_reads_png_dimensions() {
+        assert_eq!(png_dimensions(&png_header(2560, 1600)), Some((2560, 1600)));
+        assert_eq!(frame_scale(&png_header(2560, 1600), 1280.0), Some(2.0));
+        assert_eq!(frame_scale(&png_header(1280, 800), 1280.0), Some(1.0));
+        assert_eq!(frame_scale(&png_header(1280, 800), 0.0), None);
+        assert_eq!(png_dimensions(b"not a png at all, just bytes"), None);
+    }
+
+    #[test]
+    fn test_capture_scale_keeps_the_lowest_frame() {
+        let shared = AtomicU64::new(f64::INFINITY.to_bits());
+        record_capture_scale(&shared, 2.0);
+        record_capture_scale(&shared, 1.0);
+        record_capture_scale(&shared, 2.0);
+        assert_eq!(f64::from_bits(shared.load(Ordering::Relaxed)), 1.0);
+    }
+
+    #[test]
+    fn test_recording_stop_warns_when_frames_are_scaled_up() {
+        let mut state = RecordingState::new();
+        recording_start(&mut state, "/tmp/test.webm", options(None)).unwrap();
+        state.frame_count = 30;
+        state.device_scale = 2.0;
+        state.capture_scale = 1.0;
+        let result = recording_stop(&mut state).unwrap();
+        assert_eq!(result["deviceScaleFactor"], 2.0);
+        assert_eq!(result["captureScale"], 1.0);
+        let warning = result["warning"].as_str().unwrap();
+        assert!(warning.contains("captured at 1x and scaled up to the page's 2x"));
+        assert!(warning.contains("--force-device-scale-factor=2"));
+    }
+
+    #[test]
+    fn test_recording_stop_is_quiet_at_full_density() {
+        for (device, capture) in [(2.0, 2.0), (1.0, 1.0), (2.0, f64::INFINITY)] {
+            let mut state = RecordingState::new();
+            recording_start(&mut state, "/tmp/test.webm", options(None)).unwrap();
+            state.frame_count = 30;
+            state.device_scale = device;
+            state.capture_scale = capture;
+            let result = recording_stop(&mut state).unwrap();
+            assert!(
+                result.get("warning").is_none(),
+                "{device}x captured at {capture}x"
+            );
+        }
     }
 
     #[test]

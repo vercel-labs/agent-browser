@@ -11,6 +11,7 @@ Capture browser automation as video for debugging, documentation, or verificatio
 - [Recording Commands](#recording-commands)
 - [Frame Rate](#frame-rate)
 - [Visible Cursor](#visible-cursor)
+- [High-Density Video](#high-density-video)
 - [Contact Sheets](#contact-sheets)
 - [Use Cases](#use-cases)
 - [Best Practices](#best-practices)
@@ -96,6 +97,15 @@ Chrome's screencast does not include the native pointer. Pass `--cursor` to add 
 
 ```bash
 agent-browser record start ./walkthrough.webm --cursor
+```
+
+## High-Density Video
+
+Frames come from Chrome's screencast, which captures at the window's real device scale. A scale set with `set viewport <w> <h> <scale>` is emulated, so recorded frames are scaled up to fill the video and hold less detail than a screenshot; `record stop` warns and reports `deviceScaleFactor` and `captureScale`. For full-density video, launch with a real device scale:
+
+```bash
+agent-browser --args "--force-device-scale-factor=2" open https://example.com
+agent-browser record start ./sharp.webm
 ```
 
 ## Contact Sheets
