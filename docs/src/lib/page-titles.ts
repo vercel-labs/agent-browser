@@ -32,6 +32,7 @@ export const PAGE_TITLES: Record<string, string> = {
   eve: "eve Extension",
   "native-mode": "Native Mode",
   "providers/agentcore": "AgentCore",
+  "providers/baizhi-cloud-browser": "Baizhi Cloud Browser",
   "providers/browser-use": "Browser Use",
   "providers/browserbase": "Browserbase",
   "providers/browserless": "Browserless",
