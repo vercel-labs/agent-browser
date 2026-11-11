@@ -22,6 +22,9 @@ for (const failure of ['HTTP 404', 'an interrupted response', 'an empty response
     const bootstrap = join(packageRoot, 'bootstrap.mjs');
     await mkdir(dirname(script), { recursive: true });
     await copyFile(postinstallPath, script);
+    for (const name of ['native.js', 'link-native.js']) {
+      await copyFile(join(dirname(postinstallPath), name), join(dirname(script), name));
+    }
     await writeFile(join(packageRoot, 'package.json'), '{"type":"module","version":"0.0.0"}');
     await writeFile(bootstrap, `
 import { createRequire, syncBuiltinESMExports } from 'node:module';
