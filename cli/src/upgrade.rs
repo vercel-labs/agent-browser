@@ -16,9 +16,14 @@ enum InstallMethod {
 }
 
 async fn fetch_latest_version() -> Result<String, String> {
-    let resp = reqwest::get(NPM_REGISTRY_URL)
-        .await
-        .map_err(|e| format!("Failed to fetch version info: {}", e))?;
+    let resp =
+        crate::tls::apply_to_reqwest(reqwest::Client::builder(), &crate::tls::process_options())?
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?
+            .get(NPM_REGISTRY_URL)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch version info: {}", e))?;
 
     let body: serde_json::Value = resp
         .json()

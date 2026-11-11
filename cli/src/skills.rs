@@ -34,7 +34,7 @@ const SKILL_DIRS: &[&str] = &["skills", "skill-data"];
 /// Resolution order:
 /// 1. AGENT_BROWSER_SKILLS_DIR env var (points directly at a single directory)
 /// 2. ../  relative to the executable (npm installs: binary is in bin/)
-/// 3. Walk up from the executable to find a project root with skills/
+/// 3. Walk up from the executable to find a project root with skill-data/core/SKILL.md
 ///    (dev builds where binary is in target/debug/ or target/release/)
 fn find_package_root() -> Option<PathBuf> {
     if let Ok(exe) = env::current_exe() {
@@ -42,14 +42,14 @@ fn find_package_root() -> Option<PathBuf> {
         if let Some(parent) = exe.parent() {
             // npm install layout: bin/agent-browser-* -> ../
             let candidate = parent.join("..");
-            if candidate.join("skills").is_dir() {
+            if candidate.join("skill-data/core/SKILL.md").is_file() {
                 return Some(candidate.canonicalize().unwrap_or(candidate));
             }
 
             // dev build layout: walk up from target/debug/ or target/release/
             let mut dir = parent;
             loop {
-                if dir.join("skills").is_dir() {
+                if dir.join("skill-data/core/SKILL.md").is_file() {
                     return Some(dir.to_path_buf());
                 }
                 match dir.parent() {
@@ -63,7 +63,7 @@ fn find_package_root() -> Option<PathBuf> {
     None
 }
 
-/// Collect all skill directories to search, respecting the env var override.
+/// Collect skill directories, falling back to `~/.agent-browser` when package discovery fails.
 fn find_skills_dirs() -> Vec<PathBuf> {
     // Env var override: single directory, used as-is
     if let Ok(dir) = env::var("AGENT_BROWSER_SKILLS_DIR") {
@@ -73,7 +73,9 @@ fn find_skills_dirs() -> Vec<PathBuf> {
         }
     }
 
-    let Some(root) = find_package_root() else {
+    let Some(root) = find_package_root()
+        .or_else(|| std::env::home_dir().map(|home| home.join(".agent-browser")))
+    else {
         return vec![];
     };
 
@@ -211,6 +213,107 @@ fn collect_supplementary_files(skill_dir: &Path) -> Vec<(String, String)> {
     files
 }
 
+/// Resolve a `--ref` value against a skill's supplementary files. Accepts the
+/// relative path (`references/commands.md`), the file name (`commands.md`), or
+/// the file stem (`commands`). Matching only against collected files keeps the
+/// lookup inside the skill directory.
+fn resolve_ref<'a>(
+    files: &'a [(String, String)],
+    wanted: &str,
+) -> Result<&'a (String, String), String> {
+    let wanted = wanted.trim_start_matches("./");
+    let matches: Vec<&(String, String)> = files
+        .iter()
+        .filter(|(path, _)| {
+            let file_name = path.rsplit('/').next().unwrap_or(path);
+            let stem = file_name.split('.').next().unwrap_or(file_name);
+            path == wanted || file_name == wanted || stem == wanted
+        })
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one),
+        [] => Err(format!("Reference not found: {}", wanted)),
+        many => Err(format!(
+            "Ambiguous reference {}: matches {}",
+            wanted,
+            many.iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn print_error(json_mode: bool, message: &str) {
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({ "success": false, "error": message }))
+                .unwrap_or_default()
+        );
+    } else {
+        eprintln!("{} {}", color::error_indicator(), message);
+    }
+}
+
+fn run_get_refs(skill: &SkillInfo, refs: &[String], json_mode: bool) {
+    let files = collect_supplementary_files(&skill.dir);
+    let mut selected = Vec::new();
+    for wanted in refs {
+        match resolve_ref(&files, wanted) {
+            Ok(file) => {
+                if !selected.contains(&file) {
+                    selected.push(file);
+                }
+            }
+            Err(message) => {
+                let available = if files.is_empty() {
+                    format!("{} has no references", skill.name)
+                } else {
+                    format!(
+                        "Available: {}",
+                        files
+                            .iter()
+                            .map(|(path, _)| path.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                print_error(json_mode, &format!("{}. {}", message, available));
+                exit(1);
+            }
+        }
+    }
+
+    if json_mode {
+        let files: Vec<serde_json::Value> = selected
+            .iter()
+            .map(|(path, content)| json!({ "path": path, "content": content }))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "success": true,
+                "data": [{ "name": skill.name, "files": files }],
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        for (i, (path, content)) in selected.iter().enumerate() {
+            if selected.len() > 1 {
+                if i > 0 {
+                    println!();
+                }
+                println!("--- {} ---\n", path);
+            }
+            print!("{}", content);
+            if !content.ends_with('\n') {
+                println!();
+            }
+        }
+    }
+}
+
 fn run_list(skills_dirs: &[PathBuf], json_mode: bool) {
     let skills: Vec<SkillInfo> = discover_skills(skills_dirs)
         .into_iter()
@@ -255,7 +358,14 @@ fn run_list(skills_dirs: &[PathBuf], json_mode: bool) {
     }
 }
 
-fn run_get(skills_dirs: &[PathBuf], names: &[String], get_all: bool, full: bool, json_mode: bool) {
+fn run_get(
+    skills_dirs: &[PathBuf],
+    names: &[String],
+    get_all: bool,
+    full: bool,
+    refs: &[String],
+    json_mode: bool,
+) {
     let all_skills = discover_skills(skills_dirs);
 
     let targets: Vec<&SkillInfo> = if get_all {
@@ -310,6 +420,18 @@ fn run_get(skills_dirs: &[PathBuf], names: &[String], get_all: bool, full: bool,
             );
         }
         exit(1);
+    }
+
+    if !refs.is_empty() {
+        if get_all || full || targets.len() != 1 {
+            print_error(
+                json_mode,
+                "--ref needs exactly one skill name and cannot be combined with --all or --full. Usage: agent-browser skills get <name> --ref <ref>",
+            );
+            exit(1);
+        }
+        run_get_refs(targets[0], refs, json_mode);
+        return;
     }
 
     if json_mode {
@@ -433,13 +555,13 @@ pub fn run_skills(args: &[String], json_mode: bool) {
                 "{}",
                 serde_json::to_string(&json!({
                     "success": false,
-                    "error": "Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+                    "error": "Skills directory not found. Install skills under ~/.agent-browser/ or set AGENT_BROWSER_SKILLS_DIR.",
                 }))
                 .unwrap_or_default()
             );
         } else {
             eprintln!(
-                "{} Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+                "{} Skills directory not found. Install skills under ~/.agent-browser/ or set AGENT_BROWSER_SKILLS_DIR.",
                 color::error_indicator()
             );
         }
@@ -451,14 +573,32 @@ pub fn run_skills(args: &[String], json_mode: bool) {
     match subcommand {
         None | Some("list") => run_list(&skills_dirs, json_mode),
         Some("get") => {
-            let names: Vec<String> = args[2..]
-                .iter()
-                .filter(|a| *a != "--full" && *a != "--all")
-                .cloned()
-                .collect();
-            let full = args[2..].iter().any(|a| a == "--full");
-            let get_all = args[2..].iter().any(|a| a == "--all");
-            run_get(&skills_dirs, &names, get_all, full, json_mode);
+            let mut names = Vec::new();
+            let mut refs = Vec::new();
+            let mut full = false;
+            let mut get_all = false;
+            let mut rest = args[2..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--full" => full = true,
+                    "--all" => get_all = true,
+                    "--ref" => match rest.next() {
+                        Some(value) => refs.push(value.clone()),
+                        None => {
+                            print_error(
+                                json_mode,
+                                "--ref needs a value. Usage: agent-browser skills get <name> --ref <ref>",
+                            );
+                            exit(1);
+                        }
+                    },
+                    other => match other.strip_prefix("--ref=") {
+                        Some(value) => refs.push(value.to_string()),
+                        None => names.push(arg.clone()),
+                    },
+                }
+            }
+            run_get(&skills_dirs, &names, get_all, full, &refs, json_mode);
         }
         Some("path") => {
             let name = args.get(2).map(|s| s.as_str());
@@ -618,5 +758,74 @@ mod tests {
         assert_eq!(files[0].0, "references/auth.md");
         assert_eq!(files[1].0, "references/commands.md");
         assert_eq!(files[2].0, "templates/example.sh");
+    }
+
+    #[test]
+    fn test_resolve_ref_accepts_path_file_name_and_stem() {
+        let files = vec![
+            (
+                "references/commands.md".to_string(),
+                "# Commands\n".to_string(),
+            ),
+            (
+                "templates/form-automation.sh".to_string(),
+                "#!/bin/bash\n".to_string(),
+            ),
+        ];
+        for wanted in [
+            "references/commands.md",
+            "./references/commands.md",
+            "commands.md",
+            "commands",
+        ] {
+            assert_eq!(
+                resolve_ref(&files, wanted).unwrap().0,
+                "references/commands.md"
+            );
+        }
+        assert_eq!(
+            resolve_ref(&files, "form-automation").unwrap().0,
+            "templates/form-automation.sh"
+        );
+    }
+
+    #[test]
+    fn test_resolve_ref_rejects_missing_ambiguous_and_outside_paths() {
+        let files = vec![
+            ("references/auth.md".to_string(), String::new()),
+            ("templates/auth.sh".to_string(), String::new()),
+        ];
+        assert!(resolve_ref(&files, "missing")
+            .unwrap_err()
+            .contains("not found"));
+        assert!(resolve_ref(&files, "auth")
+            .unwrap_err()
+            .contains("Ambiguous"));
+        assert!(resolve_ref(&files, "../SKILL.md").is_err());
+        assert!(resolve_ref(&files, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_bundled_core_skill_routes_every_reference_and_skill() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../skill-data");
+        let core = fs::read_to_string(root.join("core/SKILL.md")).unwrap();
+        for (path, _) in collect_supplementary_files(&root.join("core")) {
+            if path.starts_with("references/") {
+                assert!(
+                    core.contains(&format!("`{}`", path)),
+                    "core SKILL.md does not route to {}",
+                    path
+                );
+            }
+        }
+        for skill in discover_skills(&[root]) {
+            if skill.name != "core" && !skill.hidden {
+                assert!(
+                    core.contains(&format!("| `{}` |", skill.name)),
+                    "core SKILL.md does not route to the {} skill",
+                    skill.name
+                );
+            }
+        }
     }
 }

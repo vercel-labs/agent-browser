@@ -144,27 +144,33 @@ fn probe_from_value(value: &serde_json::Value) -> Probe {
 
 /// Capture selector and frame facts before an action can replace the element.
 /// Probe errors are capture warnings and never change browser action success.
-pub async fn capture_resolved_element(
-    client: &CdpClient,
-    top_session_id: &str,
-    resolved: &ResolvedElement,
-) -> ElementCapture {
-    let probe = probe_element_object(client, &resolved.session_id, &resolved.object_id).await;
-    let frame = match resolved.frame_id.as_deref() {
-        Some(frame_id) => Some(frame_index_path(client, top_session_id, frame_id).await),
-        None => None,
-    };
-    ElementCapture {
-        probe_failed: probe.is_err(),
-        probe: probe.ok(),
-        frame_probe_failed: frame.as_ref().is_some_and(Result::is_err),
-        frame: frame.and_then(Result::ok),
-        position: None,
-        scroll_delta: None,
-        scroll_position: None,
-        state_changed: None,
-        selected_values: None,
-    }
+///
+/// Boxed here, inside the callee, so the probe futures do not make each
+/// interaction future larger. Those futures sit in the stack frame of
+/// `execute_command`, which a debug-build test thread can overflow.
+pub fn capture_resolved_element<'a>(
+    client: &'a CdpClient,
+    top_session_id: &'a str,
+    resolved: &'a ResolvedElement,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ElementCapture> + Send + 'a>> {
+    Box::pin(async move {
+        let probe = probe_element_object(client, &resolved.session_id, &resolved.object_id).await;
+        let frame = match resolved.frame_id.as_deref() {
+            Some(frame_id) => Some(frame_index_path(client, top_session_id, frame_id).await),
+            None => None,
+        };
+        ElementCapture {
+            probe_failed: probe.is_err(),
+            probe: probe.ok(),
+            frame_probe_failed: frame.as_ref().is_some_and(Result::is_err),
+            frame: frame.and_then(Result::ok),
+            position: None,
+            scroll_delta: None,
+            scroll_position: None,
+            state_changed: None,
+            selected_values: None,
+        }
+    })
 }
 
 pub async fn probe_url(client: &CdpClient, session_id: &str) -> Result<String, String> {

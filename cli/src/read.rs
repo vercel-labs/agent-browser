@@ -49,6 +49,8 @@ pub struct ReadOptions {
     pub allowed_domains: Vec<String>,
     /// Additional allowlists inherited from daemon state. URLs must match every non-empty allowlist.
     pub enforced_allowed_domains: Vec<Vec<String>>,
+    /// Trust roots resolved by the CLI for this request.
+    pub trust: crate::tls::TrustOptions,
 }
 
 impl Default for ReadOptions {
@@ -63,6 +65,7 @@ impl Default for ReadOptions {
             headers: HashMap::new(),
             allowed_domains: Vec::new(),
             enforced_allowed_domains: Vec::new(),
+            trust: crate::tls::TrustOptions::default(),
         }
     }
 }
@@ -116,6 +119,11 @@ pub fn options_from_command(cmd: &Value) -> Result<ReadOptions, String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let trust = match cmd.get("tls") {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|e| format!("Invalid read TLS options: {e}"))?,
+        None => crate::tls::TrustOptions::default(),
+    };
 
     Ok(ReadOptions {
         raw: cmd.get("raw").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -136,6 +144,7 @@ pub fn options_from_command(cmd: &Value) -> Result<ReadOptions, String> {
         headers,
         allowed_domains,
         enforced_allowed_domains: Vec::new(),
+        trust,
     })
 }
 
@@ -200,7 +209,7 @@ pub async fn run_read(raw_url: &str, options: ReadOptions) -> Result<Value, Stri
             attempt.follow()
         }
     });
-    let client = Client::builder()
+    let client = crate::tls::apply_to_reqwest(Client::builder(), &options.trust)?
         .timeout(Duration::from_millis(options.timeout_ms))
         .redirect(redirect_policy)
         .build()

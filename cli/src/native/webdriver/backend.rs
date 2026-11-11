@@ -4,6 +4,8 @@ use serde_json::Value;
 /// Abstract backend for browser automation. CDP (Chromium) and WebDriver
 /// (Safari/iOS) share this interface so actions.rs can remain backend-agnostic
 /// in the future.
+// async_trait adds #[must_use] to methods returning an already must_use future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BrowserBackend: Send + Sync {
     async fn navigate(&self, url: &str) -> Result<(), String>;
@@ -46,6 +48,17 @@ pub struct WebDriverBackend {
 impl WebDriverBackend {
     pub fn new(client: super::client::WebDriverClient) -> Self {
         Self { client }
+    }
+
+    pub async fn is_connection_alive(&self) -> bool {
+        matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.client.get_window_handles(),
+            )
+            .await,
+            Ok(Ok(_))
+        )
     }
 }
 

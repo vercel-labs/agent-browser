@@ -20,6 +20,12 @@ use tokio_tungstenite::Connector;
 use super::types::{CdpCommand, CdpError, CdpEvent, CdpMessage};
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
+
+/// Responses whose caller wants the raw JSON text rather than a parsed
+/// `serde_json::Value`. The accessibility tree of a large page is several
+/// megabytes of JSON, and building a `Value` from it only to deserialize it
+/// again costs more than the command itself, so those callers parse once.
+type RawPendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<String>>>>;
 type WsTx = Arc<
     Mutex<
         futures_util::stream::SplitSink<
@@ -38,6 +44,12 @@ type PrivateSessions = Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<CdpEven
 /// Newer events are dropped once it is full; a screencast consumer that
 /// cannot keep up should lose frames, not stall the reader.
 const PRIVATE_SESSION_BUFFER: usize = 16;
+
+/// Lossless taps for events that must each get a reply (paused requests,
+/// auth challenges, targets waiting for the debugger). Unlike the bounded
+/// broadcast, a tap never drops an event when its reader falls behind.
+type MethodTaps =
+    Arc<std::sync::Mutex<Vec<(&'static [&'static str], mpsc::UnboundedSender<CdpEvent>)>>>;
 
 /// Interval between WebSocket ping frames sent to keep the connection alive
 /// through intermediate proxies (reverse proxies, load balancers, service meshes).
@@ -149,6 +161,34 @@ fn extract_command_id(msg: &str) -> Option<u64> {
     envelope.id.filter(|id| *id > 0)
 }
 
+/// Response envelope for [`CdpClient::send_command_typed_raw`]. Unknown fields,
+/// `sessionId` among them, are ignored.
+#[derive(Deserialize)]
+struct RawCommandResponse<T> {
+    result: Option<T>,
+    error: Option<CdpError>,
+}
+
+/// Read the command id from a CDP response without parsing the message.
+///
+/// Responses start with `{"id":<number>,`, so the id is available from the
+/// first bytes even when the payload is megabytes of JSON. Returns `None` for
+/// anything that is not shaped like a response envelope, which sends the
+/// message down the normal parsed path.
+fn leading_response_id(msg: &str) -> Option<u64> {
+    let rest = msg.strip_prefix("{\"id\":")?;
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if end == 0 || end > 20 {
+        return None;
+    }
+    if !matches!(rest.as_bytes().get(end), None | Some(b',') | Some(b'}')) {
+        return None;
+    }
+    rest[..end].parse::<u64>().ok().filter(|id| *id > 0)
+}
+
 pub struct CdpClient {
     ws_tx: WsTx,
     socket: socket2::Socket,
@@ -158,11 +198,13 @@ pub struct CdpClient {
     cancel_tx: watch::Sender<bool>,
     next_id: AtomicU64,
     pending: PendingMap,
+    raw_pending: RawPendingMap,
     event_tx: broadcast::Sender<CdpEvent>,
     raw_tx: broadcast::Sender<RawCdpMessage>,
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     keepalive_handle: Mutex<Option<JoinHandle<()>>>,
     private_sessions: PrivateSessions,
+    method_taps: MethodTaps,
 }
 
 /// Removes a pending entry if `send_command` is cancelled mid-await (e.g. an
@@ -171,6 +213,7 @@ pub struct CdpClient {
 /// it via `done`.
 struct PendingGuard {
     pending: PendingMap,
+    raw_pending: RawPendingMap,
     id: u64,
     done: bool,
 }
@@ -181,10 +224,12 @@ impl Drop for PendingGuard {
             return;
         }
         let pending = self.pending.clone();
+        let raw_pending = self.raw_pending.clone();
         let id = self.id;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 pending.lock().await.remove(&id);
+                raw_pending.lock().await.remove(&id);
             });
         }
     }
@@ -257,17 +302,21 @@ impl CdpClient {
         let ws_tx = Arc::new(Mutex::new(ws_tx));
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let raw_pending: RawPendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (event_tx, _) = broadcast::channel(4096);
         let (raw_tx, _) = broadcast::channel(4096);
         let closed = Arc::new(AtomicBool::new(false));
 
         let private_sessions: PrivateSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let method_taps: MethodTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let pending_clone = pending.clone();
+        let raw_pending_clone = raw_pending.clone();
         let event_tx_clone = event_tx.clone();
         let raw_tx_clone = raw_tx.clone();
         let closed_reader = closed.clone();
         let private_clone = private_sessions.clone();
+        let taps_clone = method_taps.clone();
 
         // Notify used to stop the keepalive task when the reader loop exits.
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
@@ -316,6 +365,17 @@ impl CdpClient {
                     });
                 }
 
+                // Responses registered for raw delivery skip the `Value` parse
+                // entirely: the caller deserializes the payload once, straight
+                // from this text (large accessibility trees).
+                if let Some(id) = leading_response_id(&msg) {
+                    let waiter = raw_pending_clone.lock().await.remove(&id);
+                    if let Some(tx) = waiter {
+                        let _ = tx.send(msg);
+                        continue;
+                    }
+                }
+
                 let parsed: CdpMessage = match serde_json::from_str(&msg) {
                     Ok(parsed) => parsed,
                     Err(_) => {
@@ -325,6 +385,13 @@ impl CdpClient {
                             Ok(parsed) => parsed,
                             Err(error) => {
                                 if let Some(id) = extract_command_id(candidate) {
+                                    // Hand the unparsable text to a raw waiter
+                                    // so it fails fast instead of timing out.
+                                    let raw_waiter = raw_pending_clone.lock().await.remove(&id);
+                                    if let Some(tx) = raw_waiter {
+                                        let _ = tx.send(candidate.to_string());
+                                        continue;
+                                    }
                                     let waiter = pending_clone.lock().await.remove(&id);
                                     if let Some(tx) = waiter {
                                         let _ = tx.send(CdpMessage {
@@ -351,6 +418,13 @@ impl CdpClient {
                 };
 
                 if let Some(id) = parsed.id {
+                    // Responses from servers that do not lead with the id still
+                    // reach a raw waiter, at the cost of the parse above.
+                    let raw_waiter = raw_pending_clone.lock().await.remove(&id);
+                    if let Some(tx) = raw_waiter {
+                        let _ = tx.send(msg);
+                        continue;
+                    }
                     // Response to a command
                     let mut pending = pending_clone.lock().await;
                     if let Some(tx) = pending.remove(&id) {
@@ -377,6 +451,12 @@ impl CdpClient {
                         }
                     });
                     if !routed {
+                        let mut taps = taps_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        taps.retain(|(methods, tx)| {
+                            !methods.contains(&event.method.as_str())
+                                || tx.send(event.clone()).is_ok()
+                        });
+                        drop(taps);
                         let _ = event_tx_clone.send(event);
                     }
                 }
@@ -387,6 +467,7 @@ impl CdpClient {
             // instead of waiting for the 30-second timeout.
             closed_reader.store(true, Ordering::SeqCst);
             pending_clone.lock().await.clear();
+            raw_pending_clone.lock().await.clear();
 
             // Stop the keepalive task because the connection is gone.
             let _ = reader_cancel_tx.send(true);
@@ -424,11 +505,13 @@ impl CdpClient {
             cancel_tx,
             next_id: AtomicU64::new(1),
             pending,
+            raw_pending,
             event_tx,
             raw_tx,
             reader_handle: Mutex::new(Some(reader_handle)),
             keepalive_handle: Mutex::new(Some(keepalive_handle)),
             private_sessions,
+            method_taps,
         })
     }
 
@@ -467,6 +550,7 @@ impl CdpClient {
         let _ = self.socket.shutdown(Shutdown::Both);
         Self::abort_task(&self.reader_handle).await;
         self.pending.lock().await.clear();
+        self.raw_pending.lock().await.clear();
         self.close_complete.store(true, Ordering::SeqCst);
     }
 
@@ -493,6 +577,7 @@ impl CdpClient {
         // Cleans up the pending entry if this future is cancelled mid-await (#1528).
         let mut guard = PendingGuard {
             pending: self.pending.clone(),
+            raw_pending: self.raw_pending.clone(),
             id,
             done: false,
         };
@@ -535,6 +620,21 @@ impl CdpClient {
 
     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Deliver every event whose method is in `methods` to the returned
+    /// receiver without loss. The events still reach the broadcast. Dropping
+    /// the receiver ends the tap on the next matching event.
+    pub fn subscribe_methods(
+        &self,
+        methods: &'static [&'static str],
+    ) -> mpsc::UnboundedReceiver<CdpEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.method_taps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((methods, tx));
+        rx
     }
 
     /// Deliver every event carrying `session_id` to the returned receiver
@@ -598,6 +698,91 @@ impl CdpClient {
         self.send_command(method, None, session_id).await
     }
 
+    /// Send a command and deserialize its `result` straight from the response
+    /// text, skipping the intermediate `serde_json::Value`.
+    ///
+    /// The reader hands the response over unparsed, so the payload is
+    /// traversed once instead of twice. Use this for commands whose responses
+    /// can be megabytes (the full accessibility tree of a large page).
+    pub async fn send_command_typed_raw<P: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &P,
+        session_id: Option<&str>,
+    ) -> Result<R, String> {
+        let params_value = serde_json::to_value(params)
+            .map_err(|e| format!("Failed to serialize params: {}", e))?;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let cmd = CdpCommand {
+            id,
+            method: method.to_string(),
+            params: Some(params_value),
+            session_id: session_id.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+        };
+        let json = serde_json::to_string(&cmd)
+            .map_err(|e| format!("Failed to serialize CDP command: {}", e))?;
+
+        let (tx, rx) = oneshot::channel();
+
+        // Cleans up the pending entry if this future is cancelled mid-await (#1528).
+        let mut guard = PendingGuard {
+            pending: self.pending.clone(),
+            raw_pending: self.raw_pending.clone(),
+            id,
+            done: false,
+        };
+
+        {
+            let mut ws_tx = self.ws_tx.lock().await;
+            self.ensure_open()?;
+            let mut raw_pending = self.raw_pending.lock().await;
+            raw_pending.insert(id, tx);
+            drop(raw_pending);
+            if let Err(error) = ws_tx.send(Message::Text(json)).await {
+                self.raw_pending.lock().await.remove(&id);
+                guard.done = true;
+                return Err(format!("Failed to send CDP command: {}", error));
+            }
+        }
+
+        let text = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+            Ok(Ok(text)) => {
+                guard.done = true;
+                text
+            }
+            Ok(Err(_)) => {
+                guard.done = true;
+                return Err("CDP response channel closed".to_string());
+            }
+            Err(_) => {
+                guard.done = true;
+                self.raw_pending.lock().await.remove(&id);
+                return Err(format!("CDP command timed out: {}", method));
+            }
+        };
+
+        let parse = |text: &str| -> Result<RawCommandResponse<R>, String> {
+            serde_json::from_str(text)
+                .map_err(|e| format!("Failed to deserialize CDP response for {}: {}", method, e))
+        };
+        // Chrome can emit lone surrogate escapes; repair them the same way the
+        // shared reader does and retry once.
+        let response = parse(&text).or_else(|error| match sanitize_lone_surrogates(&text) {
+            Some(repaired) => parse(&repaired),
+            None => Err(error),
+        })?;
+
+        if let Some(error) = response.error {
+            return Err(format!("CDP error ({}): {}", method, error));
+        }
+        response.result.ok_or_else(|| {
+            format!(
+                "Failed to deserialize CDP response for {}: missing result",
+                method
+            )
+        })
+    }
+
     /// Send a CDP command without waiting for its response.
     ///
     /// This is useful for best-effort commands where Chrome may not emit a
@@ -644,6 +829,13 @@ impl CdpClient {
     #[cfg(test)]
     pub(crate) async fn pending_len(&self) -> usize {
         self.pending.lock().await.len()
+    }
+
+    /// Test-only: count of in-flight raw commands still awaiting a response,
+    /// so a test can assert close, reader EOF and cancellation released them.
+    #[cfg(test)]
+    pub(crate) async fn raw_pending_len(&self) -> usize {
+        self.raw_pending.lock().await.len()
     }
 }
 
@@ -751,6 +943,105 @@ mod tests {
             None
         );
         assert_eq!(extract_command_id(r#"{"id":0,"result":{}}"#), None);
+    }
+
+    #[test]
+    fn reads_response_ids_without_parsing_the_payload() {
+        assert_eq!(
+            leading_response_id(r#"{"id":42,"result":{"nodes":[]}}"#),
+            Some(42)
+        );
+        assert_eq!(
+            leading_response_id(r#"{"id":42,"result":{"nodes":[]},"sessionId":"s1"}"#),
+            Some(42)
+        );
+        assert_eq!(leading_response_id(r#"{"id":42}"#), Some(42));
+        assert_eq!(leading_response_id(r#"{"result":{"id":42}}"#), None);
+        assert_eq!(
+            leading_response_id(r#"{"method":"Page.loadEventFired","params":{}}"#),
+            None
+        );
+        assert_eq!(leading_response_id(r#"{"id":0,"result":{}}"#), None);
+        assert_eq!(leading_response_id(r#"{"id":-1,"result":{}}"#), None);
+        assert_eq!(leading_response_id(r#"{"id":"42","result":{}}"#), None);
+        assert_eq!(leading_response_id(""), None);
+        assert_eq!(
+            leading_response_id(r#"{"id":12345678901234567890123,"result":{}}"#),
+            None
+        );
+    }
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct RawNodes {
+        nodes: Vec<u32>,
+    }
+
+    #[tokio::test]
+    async fn raw_command_parses_leading_id_responses_and_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(text).unwrap();
+                let id = request["id"].as_u64().unwrap();
+                let reply = match request["method"].as_str().unwrap() {
+                    "Raw.Ok" => format!(r#"{{"id":{id},"result":{{"nodes":[1,2,3]}}}}"#),
+                    "Raw.Error" => {
+                        format!(r#"{{"id":{id},"error":{{"code":-32000,"message":"boom"}}}}"#)
+                    }
+                    // A proxy that puts sessionId first still reaches the waiter.
+                    "Raw.LateId" => {
+                        format!(r#"{{"sessionId":"s1","id":{id},"result":{{"nodes":[4]}}}}"#)
+                    }
+                    "Raw.Repaired" => {
+                        format!(r#"{{"id":{id},"result":{{"nodes":[5],"name":"\ud800"}}}}"#)
+                    }
+                    _ => format!(r#"{{"id":{id},"result":{{}}}}"#),
+                };
+                ws.send(Message::Text(reply)).await.unwrap();
+            }
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+
+        let ok: RawNodes = client
+            .send_command_typed_raw("Raw.Ok", &json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            ok,
+            RawNodes {
+                nodes: vec![1, 2, 3]
+            }
+        );
+
+        let error = client
+            .send_command_typed_raw::<_, RawNodes>("Raw.Error", &json!({}), None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("boom"), "unexpected error: {error}");
+
+        let late: RawNodes = client
+            .send_command_typed_raw("Raw.LateId", &json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(late, RawNodes { nodes: vec![4] });
+
+        // A raw waiter whose payload needs surrogate repair still deserializes.
+        let repaired: RawNodes = client
+            .send_command_typed_raw("Raw.Repaired", &json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(repaired, RawNodes { nodes: vec![5] });
+
+        client.close().await;
+        server.abort();
     }
 
     #[tokio::test]
@@ -933,6 +1224,126 @@ mod tests {
             CONNECTION_CLOSED_ERROR
         );
 
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_releases_raw_pending_and_rejects_later_raw_commands() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (command_seen_tx, command_seen_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.next().await;
+            let _ = command_seen_tx.send(());
+            while ws.next().await.is_some() {}
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let command_client = client.clone();
+        let command = tokio::spawn(async move {
+            command_client
+                .send_command_typed_raw::<_, RawNodes>("Never.responds", &json!({}), None)
+                .await
+        });
+
+        command_seen_rx.await.unwrap();
+        assert_eq!(client.raw_pending_len().await, 1);
+        client.close().await;
+
+        let command_error = tokio::time::timeout(Duration::from_secs(1), command)
+            .await
+            .expect("raw command should be released")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(command_error, "CDP response channel closed");
+        assert_eq!(client.raw_pending_len().await, 0);
+
+        assert_eq!(
+            client
+                .send_command_typed_raw::<_, RawNodes>("Browser.getVersion", &json!({}), None)
+                .await
+                .unwrap_err(),
+            CONNECTION_CLOSED_ERROR
+        );
+        assert_eq!(client.raw_pending_len().await, 0);
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reader_eof_releases_raw_pending_commands() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.next().await;
+            // Drop the connection without answering the command.
+            drop(ws);
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let command_client = client.clone();
+        let command = tokio::spawn(async move {
+            command_client
+                .send_command_typed_raw::<_, RawNodes>("Never.responds", &json!({}), None)
+                .await
+        });
+
+        let command_error = tokio::time::timeout(Duration::from_secs(1), command)
+            .await
+            .expect("reader EOF should release the raw command")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(command_error, "CDP response channel closed");
+        assert_eq!(client.raw_pending_len().await, 0);
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_raw_command_leaves_no_pending_entry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (command_seen_tx, command_seen_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.next().await;
+            let _ = command_seen_tx.send(());
+            while ws.next().await.is_some() {}
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let params = json!({});
+        let mut command =
+            Box::pin(client.send_command_typed_raw::<_, RawNodes>("Never.responds", &params, None));
+
+        tokio::select! {
+            _ = command_seen_rx => {}
+            result = &mut command => panic!("raw command should not complete: {result:?}"),
+        }
+        assert_eq!(client.raw_pending_len().await, 1);
+
+        // Drop the future mid-await, as an outer timeout would. The guard
+        // clears the entry from a spawned task, so give it a moment to run.
+        drop(command);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.raw_pending_len().await != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled raw command should leave no pending entry");
+        assert_eq!(client.pending_len().await, 0);
+
+        client.close().await;
         server.await.unwrap();
     }
 
@@ -1193,6 +1604,53 @@ mod tests {
         );
 
         client.unsubscribe_session("S-REC");
+        drop(client);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn method_tap_keeps_every_event_when_the_broadcast_lags() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ready_rx.await.unwrap();
+            for i in 0..7000 {
+                let method = if i % 7 == 0 {
+                    "Fetch.requestPaused"
+                } else {
+                    "Network.dataReceived"
+                };
+                let msg = serde_json::json!({ "method": method, "params": { "n": i } });
+                ws.send(Message::Text(msg.to_string())).await.unwrap();
+            }
+            let _ = ws.next().await;
+        });
+
+        let client = CdpClient::connect(&format!("ws://127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let mut broadcast_rx = client.subscribe();
+        let mut tap = client.subscribe_methods(&["Fetch.requestPaused"]);
+        ready_tx.send(()).unwrap();
+
+        let wait = std::time::Duration::from_secs(5);
+        for expected in (0..7000).step_by(7) {
+            let event = tokio::time::timeout(wait, tap.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.method, "Fetch.requestPaused");
+            assert_eq!(event.params["n"], expected);
+        }
+        assert!(matches!(
+            broadcast_rx.recv().await,
+            Err(broadcast::error::RecvError::Lagged(_))
+        ));
+
         drop(client);
         server.abort();
     }
