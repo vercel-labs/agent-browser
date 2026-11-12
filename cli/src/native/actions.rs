@@ -17115,8 +17115,10 @@ mod tests {
 
     /// Fake CDP endpoint for the session setup tests. `Target.attachToTarget`
     /// attaches `attach_sid`. Commands to `S-GONE` are answered with that
-    /// session's detach, commands to `S-SILENT` are never answered, and
-    /// everything else succeeds. Returns the URL and the sessions resumed.
+    /// session's detach, commands to `S-SILENT` are never answered,
+    /// `Runtime.evaluate` in `S-THROWS` reports an exception whose text names
+    /// a missing session, and everything else succeeds. Returns the URL and
+    /// the sessions resumed.
     async fn spawn_session_setup_cdp_server(
         attach_sid: &'static str,
     ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -17139,6 +17141,20 @@ mod tests {
                 }
                 let reply = match session {
                     "S-SILENT" => continue,
+                    "S-THROWS" if command["method"] == "Runtime.evaluate" => json!({
+                        "id": command["id"],
+                        "result": {
+                            "result": { "type": "object", "subtype": "error" },
+                            "exceptionDetails": {
+                                "text": "Uncaught",
+                                "exception": {
+                                    "type": "object",
+                                    "subtype": "error",
+                                    "description": "Error: Session with given id not found."
+                                }
+                            }
+                        }
+                    }),
                     "S-GONE" => json!({
                         "method": "Target.detachedFromTarget",
                         "params": { "sessionId": "S-GONE", "targetId": "T-GONE" }
@@ -17319,6 +17335,88 @@ mod tests {
         .expect("each live session should be resumed");
         let resumed = resumed.lock().unwrap();
         assert!(resumed.iter().all(|sid| sid == "S-LIVE"), "{resumed:?}");
+    }
+
+    /// A live frame or page can throw from the injected domain filter with
+    /// any message, including Chrome's text for a missing session. That is a
+    /// failure to install the filter, not a detach, so the browser still
+    /// closes instead of leaving the target running without its controls.
+    #[tokio::test]
+    async fn page_thrown_detach_text_still_fails_network_controls_closed() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "iframe",
+                DrainedEvents {
+                    attached_iframe_sessions: vec![(
+                        "F-THROWS".to_string(),
+                        "S-THROWS".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-THROWS", "page"),
+                        "S-THROWS".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, resumed) = spawn_session_setup_cdp_server("S-THROWS").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: setup must not stall"));
+
+            let error = result.expect_err(name);
+            assert!(
+                error.starts_with("Failed to install browser network controls"),
+                "{name}: {error}"
+            );
+            assert!(state.browser.is_none(), "{name}: the browser must close");
+            assert!(
+                !resumed.lock().unwrap().contains(&"S-THROWS".to_string()),
+                "{name}: an uncontrolled target is not resumed"
+            );
+        }
+
+        let (url, resumed) = spawn_session_setup_cdp_server("S-THROWS").await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let filter = DomainFilter::new("example.com");
+        for target_type in ["iframe", "page"] {
+            let target = setup_test_target("T-THROWS", target_type);
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                setup_auto_attached_session(
+                    &client,
+                    "S-THROWS",
+                    Some(&target),
+                    false,
+                    Some(&filter),
+                    false,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("auto-attached {target_type}: setup must not stall"));
+            assert_eq!(
+                outcome,
+                AutoAttachedSetup::Failed,
+                "auto-attached {target_type}"
+            );
+        }
+        assert!(resumed.lock().unwrap().is_empty());
     }
 
     #[test]

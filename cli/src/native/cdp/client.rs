@@ -80,11 +80,41 @@ fn session_detached_message(session_id: &str) -> String {
     format!("{} {} detached", SESSION_DETACHED_PREFIX, session_id)
 }
 
+/// Chrome's protocol error for a command sent to a session it no longer has.
+const SESSION_NOT_FOUND_MESSAGE: &str = "Session with given id not found";
+
 /// Whether a command failed because its CDP session no longer exists: the
 /// session detached before or while the command was pending, or Chrome no
 /// longer knows the session id.
+///
+/// Only the whole error that `send_command` returns for such a command
+/// matches. Other errors can carry page-controlled text (for example the
+/// description of an exception thrown while a script was injected), and
+/// that text must not pass as a detach.
 pub fn is_session_detached_error(error: &str) -> bool {
-    error.contains(SESSION_DETACHED_PREFIX) || error.contains("Session with given id not found")
+    let Some((method, reason)) = error
+        .strip_prefix("CDP error (")
+        .and_then(|rest| rest.split_once("): "))
+    else {
+        return false;
+    };
+    if method.is_empty()
+        || !method
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+    {
+        return false;
+    }
+    if let Some(session_id) = reason
+        .strip_prefix(SESSION_DETACHED_PREFIX)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .and_then(|rest| rest.strip_suffix(" detached"))
+    {
+        return !session_id.is_empty() && !session_id.contains(char::is_whitespace);
+    }
+    reason
+        .strip_prefix(SESSION_NOT_FOUND_MESSAGE)
+        .is_some_and(|rest| rest.is_empty() || rest == ".")
 }
 
 type WsTx = Arc<
@@ -1580,6 +1610,40 @@ mod tests {
         assert!(!is_session_detached_error(
             "CDP command timed out: Page.enable"
         ));
+    }
+
+    #[test]
+    fn page_controlled_text_is_not_a_detach() {
+        // The description of an exception a page throws while the domain
+        // filter is injected ends up in the error, so a live frame can put
+        // any text there. It must still count as a failure, not a detach.
+        for thrown in [
+            "Error: Session with given id not found".to_string(),
+            format!("Error: {}", session_detached_message("S")),
+            format!(
+                "Error: CDP error (Page.enable): {}",
+                session_detached_message("S")
+            ),
+            "Error: CDP error (Page.enable): Session with given id not found.".to_string(),
+        ] {
+            let error = format!(
+                "Failed to apply domain filter to the current execution context: {}",
+                thrown
+            );
+            assert!(!is_session_detached_error(&error), "{error}");
+        }
+
+        // Extra text after the reason is not one of the client's or
+        // Chrome's detach errors either.
+        for error in [
+            "CDP error (Runtime.evaluate): Session with given id not found. Error: x",
+            "CDP error (Runtime.evaluate): Target closed: CDP session S detached: x",
+            "CDP error (Runtime.evaluate): Target closed: CDP session  detached",
+            "CDP error (): Session with given id not found.",
+            "CDP error (Page.enable) x: Session with given id not found.",
+        ] {
+            assert!(!is_session_detached_error(error), "{error}");
+        }
     }
 
     #[tokio::test]
