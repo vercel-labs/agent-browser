@@ -302,6 +302,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_HEADED</code></td><td>Show browser window instead of running headless (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_WEBGPU</code></td><td>Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_NO_XVFB</code></td><td>Disable automatic Xvfb virtual display for headed mode on displayless Linux hosts (<code>1</code> to disable).</td><td>(auto-Xvfb enabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_KEEP_SANDBOX</code></td><td>Keep the Chrome sandbox in containers, CI and as root instead of auto-adding <code>--no-sandbox</code>, for deployments that provide a working sandbox (<code>1</code> to enable).</td><td>(auto-disable in containers)</td></tr>
     <tr><td><code>AGENT_BROWSER_NO_VERSION_CHECK</code></td><td>Skip the outdated Chrome check, which fetches the Chrome Releases blog once per browser version in each session (<code>1</code> to disable).</td><td>(check enabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CLEAR_CA_CERT</code></td><td>Clear CA trust retained by the running browser session.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_USE_SYSTEM_CA</code></td><td>Use the operating system trust store for the CLI's own HTTPS requests (<code>1</code> to enable).</td><td>(disabled)</td></tr>
