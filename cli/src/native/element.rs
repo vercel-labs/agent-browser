@@ -343,7 +343,8 @@ async fn resolve_center_in_same_process_frame(
             const point = await clickPoint(el, doc);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(doc, el, point.lx, point.ly) }};
+            const topDoc = (point.view && point.view.document) || doc;
+            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(doc, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
         }}"#,
     );
     let result = client
@@ -611,7 +612,8 @@ async fn node_click_point(
             const point = await clickPoint(this, doc);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) }};
+            const topDoc = (point.view && point.view.document) || doc;
+            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
         }}"#,
     );
     let result = client
@@ -968,8 +970,11 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     let hit = d.elementFromPoint(lx, ly);
     while (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && hit.contentDocument && hit !== el) {
         const r = hit.getBoundingClientRect();
-        lx -= r.x + hit.clientLeft;
-        ly -= r.y + hit.clientTop;
+        const style = hit.ownerDocument.defaultView.getComputedStyle(hit);
+        const scaleX = r.width / (hit.offsetWidth || r.width);
+        const scaleY = r.height / (hit.offsetHeight || r.height);
+        lx = (lx - r.x - (parseFloat(style.borderLeftWidth) || 0) * scaleX) / scaleX;
+        ly = (ly - r.y - (parseFloat(style.borderTopWidth) || 0) * scaleY) / scaleY;
         d = hit.contentDocument;
         hit = d.elementFromPoint(lx, ly);
     }
@@ -996,21 +1001,33 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
 const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
     const measure = () => {
         const r = el.getBoundingClientRect();
-        let x = r.x + r.width / 2;
-        let y = r.y + r.height / 2;
+        const lx = r.x + r.width / 2;
+        const ly = r.y + r.height / 2;
+        let x = lx;
+        let y = ly;
+        const own = doc.defaultView || window;
+        let reachable = lx >= 0 && ly >= 0 && lx < own.innerWidth && ly < own.innerHeight;
         const frames = [];
-        let win = doc.defaultView;
+        let win = own;
         while (win && win.frameElement) {
             const fe = win.frameElement;
             const frameRect = fe.getBoundingClientRect();
-            x = frameRect.x + fe.clientLeft + x * (frameRect.width / (win.innerWidth || 1));
-            y = frameRect.y + fe.clientTop + y * (frameRect.height / (win.innerHeight || 1));
+            const style = win.getComputedStyle(fe);
+            const scaleX = frameRect.width / (fe.offsetWidth || frameRect.width);
+            const scaleY = frameRect.height / (fe.offsetHeight || frameRect.height);
+            const borderLeft = (parseFloat(style.borderLeftWidth) || 0) * scaleX;
+            const borderTop = (parseFloat(style.borderTopWidth) || 0) * scaleY;
+            x = frameRect.x + borderLeft + x * ((fe.clientWidth || win.innerWidth) * scaleX / (win.innerWidth || 1));
+            y = frameRect.y + borderTop + y * ((fe.clientHeight || win.innerHeight) * scaleY / (win.innerHeight || 1));
+            const parentWin = win.parent;
+            reachable = reachable && x >= 0 && y >= 0 && x < parentWin.innerWidth && y < parentWin.innerHeight;
             frames.push(fe);
-            win = win.parent;
+            win = parentWin;
         }
-        return { x: x, y: y, lx: r.x + r.width / 2, ly: r.y + r.height / 2, frames: frames, view: (win && win.document.defaultView) || window, box: r.width > 0 || r.height > 0 };
+        const view = win || own;
+        reachable = reachable && x >= 0 && y >= 0 && x < view.innerWidth && y < view.innerHeight;
+        return { x: x, y: y, lx: lx, ly: ly, frames: frames, view: view, inView: reachable, box: r.width > 0 || r.height > 0 };
     };
-    const inside = (m) => m.x >= 0 && m.y >= 0 && m.x < m.view.innerWidth && m.y < m.view.innerHeight;
     const settle = async (m) => {
         for (let i = 0; i < 5; i++) {
             await new Promise((resolve) => {
@@ -1030,12 +1047,12 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
         const next = measure();
         m = next.x !== m.x || next.y !== m.y ? await settle(next) : next;
     }
-    for (let scrolls = 0; scrolls < 2 && m.box && !inside(m); scrolls++) {
+    for (let scrolls = 0; scrolls < 2 && m.box && !m.inView; scrolls++) {
         el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         for (const frame of [...m.frames].reverse()) frame.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         m = await settle(measure());
     }
-    return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, inView: inside(m) };
+    return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView };
 })"#;
 
 /// Returns why a click at (x, y) cannot reach `el`, or null when it can.

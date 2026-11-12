@@ -6251,6 +6251,8 @@ async fn e2e_click_rejects_unreachable_elements() {
                 <button id="clipped" onclick="document.getElementById('result').textContent = 'clipped'">Clipped</button>
             </div>
             <iframe id="scaled" style="position:absolute;top:400px;left:300px;width:400px;height:300px;transform:scale(0.5);transform-origin:0 0"></iframe>
+            <button id="outside-parent" style="position:absolute;left:120px;top:600px;width:120px;height:50px" onclick="document.getElementById('result').textContent = 'parent'">Parent</button>
+            <iframe id="wild" style="position:absolute;left:200px;top:600px;width:200px;height:150px;border:0"></iframe>
             <label><input id="hidden-check" type="checkbox" style="display:none"> Accept</label>
             <svg width="300" height="100"><line id="flat-line" x1="20" y1="50" x2="280" y2="50" stroke="black" stroke-width="8" onclick="document.getElementById('result').textContent = 'line'"/></svg>
             <div id="result">idle</div>
@@ -6262,6 +6264,7 @@ async fn e2e_click_rejects_unreachable_elements() {
                     requestAnimationFrame(() => { document.getElementById('moving').style.top = '2700px'; });
                 });
                 document.getElementById('scaled').srcdoc = "<button id='inner' style='margin:100px' onclick=\"document.getElementById('r').textContent='scaled'\">Inner</button><div id='r'>idle</div>";
+                document.getElementById('wild').srcdoc = "<button id='out' style='position:fixed;left:-100px;top:10px' onclick=\"parent.document.getElementById('result').textContent='child'\">Out</button>";
             </script>
         </body>
         </html>
@@ -6420,6 +6423,39 @@ async fn e2e_click_rejects_unreachable_elements() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["text"], "scaled");
+
+    let resp = execute_command(
+        &json!({ "id": "15", "action": "frame", "selector": "#wild" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snap = execute_command(&json!({ "id": "16", "action": "snapshot" }), &mut state).await;
+    assert_success(&snap);
+    let out_ref = get_data(&snap)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["name"] == "Out")
+        .unwrap()
+        .0
+        .clone();
+    let resp = execute_command(
+        &json!({ "id": "17", "action": "click", "selector": format!("@{out_ref}") }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "a ref outside its frame must not reach the parent page: {resp}"
+    );
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside the viewport"),
+        "{resp}"
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
