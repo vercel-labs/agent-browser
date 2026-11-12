@@ -1,5 +1,5 @@
 import { MobileDocsBar } from '@vercel/geistdocs/mobile-docs-bar';
-import { createDocsPage } from '@vercel/geistdocs/pages/docs';
+import { createDocsPage, resolvePageMarkdownUrl } from '@vercel/geistdocs/pages/docs';
 import { notFound } from 'next/navigation';
 import { isSafePathSegments } from '@/lib/docs-source';
 import { config } from '@/lib/geistdocs/config';
@@ -26,6 +26,9 @@ async function validate(params: PageProps['params']) {
 const docsPage = createDocsPage({
   config,
   source: geistdocsSource,
+  // The introduction is served at `/introduction`, not the root, so its Markdown is `/introduction.md` rather than `/introduction/index.md`.
+  getMarkdownUrl: ({ pageUrl, publicPageUrl }) =>
+    resolvePageMarkdownUrl({ basePath: config.basePath, isRootMountedPage: false, pageUrl, publicPageUrl }),
   renderTop: ({ data }) => (
     <>
       <span id={legacyHeadingId(data.title)} />
