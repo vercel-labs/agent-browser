@@ -5712,6 +5712,54 @@ worker.onerror = () => {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_diff_screenshot_reports_only_written_artifacts() {
+    let mut state = DaemonState::new();
+    let launch = execute_command(
+        &json!({ "id": "launch", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch);
+
+    let directory = tempfile::tempdir().unwrap();
+    let baseline = directory.path().join("before.png");
+    let output = directory.path().join("diff.png");
+    let diff = json!({
+        "id": "diff", "action": "diff_screenshot",
+        "baseline": baseline, "output": output,
+    });
+    let viewport = execute_command(
+        &json!({ "id": "viewport", "action": "viewport", "width": 240, "height": 160 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&viewport);
+
+    let write_baseline = |width, height| {
+        image::RgbaImage::from_pixel(width, height, image::Rgba([255, 0, 255, 255]))
+            .save(&baseline)
+            .unwrap();
+    };
+    write_baseline(240, 160);
+    let result = execute_command(&diff, &mut state).await;
+    assert_success(&result);
+    assert_eq!(get_data(&result)["diffPath"], json!(output));
+    let previous = std::fs::read(&output).unwrap();
+
+    write_baseline(1, 1);
+    let result = execute_command(&diff, &mut state).await;
+    assert_success(&result);
+    assert_eq!(
+        get_data(&result)["dimensionMismatch"]["expected"]["width"],
+        1
+    );
+    assert_eq!(get_data(&result)["diffPath"], Value::Null);
+    assert_eq!(std::fs::read(&output).unwrap(), previous);
+    close_current_browser(&mut state).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_diff_snapshot() {
     let mut state = DaemonState::new();
 

@@ -599,6 +599,10 @@ agent-browser profiler start              # Start Chrome DevTools profiling
 agent-browser profiler stop trace.json    # Stop and save profile
 ```
 
+## Screenshot diff
+
+Use `agent-browser diff screenshot --baseline before.png --output diff.png` to compare the current page against a baseline and save a diff image. In JSON, use `diffPath` as the artifact path only when it contains a string. A dimension mismatch reports both sizes and produces no image.
+
 ## React / Web Vitals
 
 Requires `--enable react-devtools` at launch for the `react ...` commands. `vitals` and `pushstate` are framework-agnostic.

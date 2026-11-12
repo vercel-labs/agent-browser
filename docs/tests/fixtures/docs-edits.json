@@ -1,5 +1,19 @@
 {
   "pages": {
+    "/diffing": [
+      {
+        "from": "Path for the generated diff image (default: temp dir)",
+        "to": "Optional path for the diff image"
+      },
+      {
+        "from": "Reports the diff image path, number of different pixels, and mismatch percentage. The diff image shows unchanged pixels dimmed with changed pixels in red.",
+        "to": "Reports the number of different pixels and the mismatch percentage. The diff image shows unchanged pixels dimmed and changed pixels in red."
+      },
+      {
+        "from": "If the baseline and current images have different dimensions, the command reports a dimension mismatch instead of attempting pixel comparison.",
+        "to": "If the image dimensions differ, the command reports both sizes and skips pixel comparison."
+      }
+    ],
     "/commands": [
       {
         "from": "--auto-connect           # Auto-discover and connect to running Chrome",

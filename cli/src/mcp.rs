@@ -1761,7 +1761,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DIFF_SCREENSHOT,
             "Diff screenshot",
-            "Diff screenshot against a baseline image.",
+            "Compare against a baseline image. The response includes a diff image path only when this comparison writes an image.",
             json!({ "baseline": { "type": "string" }, "output": { "type": "string" }, "threshold": number_schema(), "selector": { "type": "string" }, "fullPage": { "type": "boolean" } }),
             &[],
         ),
