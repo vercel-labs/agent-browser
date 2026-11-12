@@ -1,0 +1,29 @@
+{
+  "name": "@agent-browser/cli-darwin-arm64",
+  "version": "0.43.0",
+  "description": "The darwin-arm64 native binary for agent-browser",
+  "files": [
+    "bin/agent-browser",
+    "bin/agent-browser-pip-darwin"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "preferUnplugged": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/agent-browser",
+    "directory": "packages/@agent-browser/cli-darwin-arm64"
+  },
+  "bugs": {
+    "url": "https://github.com/vercel-labs/agent-browser/issues"
+  },
+  "homepage": "https://agent-browser.dev",
+  "publishConfig": {
+    "access": "public"
+  }
+}

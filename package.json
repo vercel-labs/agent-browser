@@ -1,6 +1,6 @@
 {
   "name": "agent-browser",
-  "version": "0.41.2",
+  "version": "0.43.0",
   "description": "Browser automation CLI for AI agents",
   "type": "module",
   "packageManager": "pnpm@11.1.3",
@@ -8,7 +8,7 @@
     "node": ">=22.0.0"
   },
   "files": [
-    "bin",
+    "bin/agent-browser.js",
     "scripts",
     "skill-data",
     "skills",
@@ -53,5 +53,14 @@
     "url": "https://github.com/vercel-labs/agent-browser/issues"
   },
   "homepage": "https://agent-browser.dev",
+  "optionalDependencies": {
+    "@agent-browser/cli-darwin-arm64": "workspace:*",
+    "@agent-browser/cli-darwin-x64": "workspace:*",
+    "@agent-browser/cli-linux-x64-gnu": "workspace:*",
+    "@agent-browser/cli-linux-arm64-gnu": "workspace:*",
+    "@agent-browser/cli-linux-x64-musl": "workspace:*",
+    "@agent-browser/cli-linux-arm64-musl": "workspace:*",
+    "@agent-browser/cli-win32-x64-msvc": "workspace:*"
+  },
   "devDependencies": {}
 }
