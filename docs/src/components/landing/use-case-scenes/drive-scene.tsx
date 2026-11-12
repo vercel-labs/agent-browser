@@ -47,6 +47,10 @@ const poster: State = { ...fresh, email: EMAIL, team: 'Engineering', ticked: 'En
  *  filled, Email empty, Team on Marketing), straight into typing. Not `reset`:
  *  its clearing beat hides the placeholders, so they would blink. */
 const setup = { at: 'email', state: fresh };
+/** Reduced motion's still: the payoff the tab hands off on, the form filled
+ *  and Saved confirmed, the hand resting beside Save (not over it, so no
+ *  hover shade). Static: the label roll only animates while `live`. */
+const still: State = { ...poster, over: false, saved: true };
 
 /** Right of where the typed address ends, so the I-beam never covers it */
 const EMAIL_AT = { at: 'email', x: .7, y: .5 };
@@ -156,7 +160,7 @@ export function DriveScene() {
   // (beside Save), so its first move is the same reach up into Email
   const restAt = playback.initial === fresh ? ASIDE_AT : SAVE_AT;
   return <SceneFrame kind="drive" onPointerEnter={onPointerEnter} caption="In a short form with Chris Tate's name already filled in, an agent types chris@acme.com into Email, moves Chris from the Marketing team to Engineering, then presses Save, which confirms Saved.">
-    <Stage key={run} {...SCENE_SIZE} {...playback} poster={poster} theme="light" className="look-vercel ab-drive" cursor={{ at: restAt, style: 'arrow', still: true, idle: false }}>
+    <Stage key={run} {...SCENE_SIZE} {...playback} poster={still} theme="light" className="look-vercel ab-drive" cursor={{ at: restAt, style: 'arrow', still: true, idle: false }}>
       {s => <>
         <div className="ab-drive-form" data-clearing={s.clearing || undefined}>
           <Field value={NAME} placeholder="Name" className="ab-drive-name" />

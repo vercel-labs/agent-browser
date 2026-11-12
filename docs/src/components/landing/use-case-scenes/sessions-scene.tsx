@@ -246,6 +246,10 @@ const LENGTH = PAYOFF + 1200;
 /** Most people see only this: Lil Pix half-way through its first pull, the
  * held edge lit, all three agents on the card. */
 const POSTER = 700;
+/** Reduced motion's still: beat 4's tug, Lil Pix and Gemini both on the lit
+ * vertical edge with Claude in its own window, so all three agents read as
+ * separate and two visibly contest the same space. */
+const STILL: State = { time: tug + 850 };
 
 /** Idle sway for a parked agent: small, slow and in each one's own rhythm,
  * so it breathes rather than jitters. */
@@ -430,7 +434,7 @@ function Desktop({ time, layout }: { time: number; layout: Layout }) {
 export function SessionsScene() {
   const { onPointerEnter, run, ...playback } = useScenePlayback({ script, poster, setup });
   return <SceneFrame kind="sessions" onPointerEnter={onPointerEnter} caption="Three windows, one agent in each. Lil Pix pulls its window down into Claude's and Claude pulls the edge back up. Gemini pulls the shared edge left into both, Lil Pix grabs it from the other side, and after a short tug Gemini lets go and Lil Pix takes the space back.">
-    <Stage key={run} {...SCENE_SIZE} {...playback} poster={poster} theme="light" unframed className="look-vercel ab-sessions">
+    <Stage key={run} {...SCENE_SIZE} {...playback} poster={STILL} theme="light" unframed className="look-vercel ab-sessions">
       {(st, _rect, layout) => <Desktop time={st.time} layout={layout} />}
     </Stage>
   </SceneFrame>;

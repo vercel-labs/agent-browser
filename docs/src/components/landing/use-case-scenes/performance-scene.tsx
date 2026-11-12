@@ -67,6 +67,9 @@ const initial: State = { shown: 0, first: 0 };
 const POSTER_LINES = LINES.findIndex((line) => line.kind === 'key') + 1;
 const poster: State = { shown: POSTER_LINES, first: firstFor(POSTER_LINES) };
 /** A cued tab opens at the story's start: the request, an empty terminal */
+/** Reduced motion's still: the report written in full and scrolled as the
+ * tab hands off on it, ending on the outcome (LCP down after the fix). */
+const STILL: State = { shown: LINES.length, first: firstFor(LINES.length) };
 const SETUP = { at: 'reset', state: initial };
 
 /** Writes lines `from` to `to`. With `mark`, the last line is marked as it
@@ -111,7 +114,7 @@ export function PerformanceScene() {
 
       caption="A chat input holds the request: Measure and improve perf plz. In a terminal below, the agent measures Web Vitals with agent-browser, profiles a reload, finds that the hero image blocks LCP, preloads it, and measures again: LCP drops from 2410ms to 980ms."
     >
-      <Stage key={run} {...SCENE_SIZE} {...playback} poster={poster} theme="light" className="look-vercel ab-performance">
+      <Stage key={run} {...SCENE_SIZE} {...playback} poster={STILL} theme="light" className="look-vercel ab-performance">
         {s => <>
           <Field className="ab-perf-input" placeholder="Ask anything" value={REQUEST} />
           <div className="ab-perf-term">

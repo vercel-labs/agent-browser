@@ -181,6 +181,13 @@ const setup = { at: 'select', state: initial };
  * middle, 6 below the paragraph's selection corner (the paragraph is 4 below
  * the tile's top and 38 tall, its marquee PAD outside, on an 80-tall tile). */
 const RESET_AT = { at: 'tile', x: 0.5, y: (4 + 38 + PAD + 6) / TILE.h };
+/** The paragraph's captured region: its lines (84 by 38, fixed bars) with the
+ * marquee's PAD around them, as the second drag draws it. */
+const PARA_REGION = { w: 84 + PAD * 2, h: 38 + PAD * 2 };
+/** Reduced motion's still: both captures taken, the copies fanned under the
+ * hand where the drift leaves it (RESET_AT), the marquee gone. The frame the
+ * tab hands off on, with nothing mid-flash. */
+const still: State = { ...initial, chart: resting(BACK, TILE), para: resting(FRONT, PARA_REGION) };
 /** Where the poster leaves it: on the first selection's far corner. */
 const POSTER_AT = { at: 'tile', x: 1 + PAD / TILE.w, y: 1 + PAD / TILE.h };
 
@@ -189,7 +196,7 @@ export function RecordingScene() {
   // Skipped beats never move the hand, so it opens where that state leaves it
   const cursorAt = playback.initial === initial ? RESET_AT : POSTER_AT;
   return <SceneFrame kind="verify" onPointerEnter={onPointerEnter} caption="An agent draws dashed boxes around a chart and then a paragraph on an abstract page, capturing each with a brief blue flash. The screenshots stack beneath its cursor.">
-    <Stage key={run} {...SCENE_SIZE} {...playback} poster={poster} theme="light" unframed className="look-vercel ab-recording" cursor={{ at: cursorAt, style: 'arrow', still: true, idle: false }}>
+    <Stage key={run} {...SCENE_SIZE} {...playback} poster={still} theme="light" unframed className="look-vercel ab-recording" cursor={{ at: cursorAt, style: 'arrow', still: true, idle: false }}>
       {(s, rect) => {
         const tile = rect('tile');
         let box = s.box;

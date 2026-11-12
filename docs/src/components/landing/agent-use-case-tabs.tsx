@@ -159,6 +159,8 @@ export function AgentUseCaseTabs({ heading, items }: AgentUseCasesProps) {
   const holdMs = useRef(HOLD_MS);
   const readDone = useRef(false);
   const holdDone = useRef(false);
+  /** How many times the selected scene has started this showing. */
+  const runs = useRef(0);
   const visual = useRef<HTMLDivElement>(null);
 
   const clearTimers = useCallback(() => {
@@ -205,6 +207,7 @@ export function AgentUseCaseTabs({ heading, items }: AgentUseCasesProps) {
   // A tab opening (by click, key or auto-advance) starts its reading clock
   useEffect(() => {
     selectedRef.current = selected;
+    runs.current = 0;
     finished.current = false;
     handed.current = false;
     holdDone.current = false;
@@ -236,15 +239,25 @@ export function AgentUseCaseTabs({ heading, items }: AgentUseCasesProps) {
   }, [handOff]);
 
   // The Stage restarts a scene on its own when its layout or the motion
-  // preference changes: its handoff is due again, from the new run
+  // The Stage runs a scene again on its own when its layout or the motion
+  // preference changes (leaving reduced motion replays it from its start), or
+  // when it comes back into view unfinished. Every run after the first is a
+  // fresh showing: its handoff is due again, from the new run, and its reading
+  // clock starts over. A finished scene too, or its replay would hand off into
+  // a tab that already counts as handed off and never move on. The first run
+  // keeps the clock the tab opened with, so normal timing is unchanged.
   const onStart = useCallback((index: number) => {
-    if (index !== selectedRef.current || !handed.current || finished.current) return;
+    if (index !== selectedRef.current) return;
+    runs.current += 1;
+    if (runs.current === 1) return;
+    finished.current = false;
     handed.current = false;
     holdDone.current = false;
     waiting.current = false;
     window.clearTimeout(holdTimer.current);
     visual.current?.removeAttribute('data-handoff');
-  }, []);
+    if (onScreen.current) startRead();
+  }, [startRead]);
 
   // Every mark the scene passes, on the slot, for rehearsal logs
   const onMark = useCallback((index: number, name: string, skipped: boolean) => {
