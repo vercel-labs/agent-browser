@@ -33,7 +33,7 @@ keys! {
     Engine, Headed, Profile, Args, ExecutablePath, Extensions, Proxy, ProxyBypass,
     ProxyUsername, ProxyPassword, UserAgent, IgnoreHttpsErrors, AllowFileAccess,
     HideScrollbars, Webgpu, Webmcp, NoXvfb, CaCert, ClearCaCert, InitScripts, Enable,
-    Plugins, StorageState, ColorScheme, DownloadPath,
+    Plugins, StorageState, ColorScheme, DownloadPath, Capture,
     // Security.
     AllowedDomains, ActionPolicy, ConfirmActions,
     // Lifetimes and per-session behaviour.
@@ -176,6 +176,9 @@ fn read_cdp_headers(f: &Flags) -> Option<Requested> {
     string(&f.cdp_headers)
 }
 fn read_auto_connect(f: &Flags) -> Option<Requested> {
+    if f.no_auto_connect {
+        return Some(Requested::Default);
+    }
     on(f.auto_connect)
 }
 fn read_provider(f: &Flags) -> Option<Requested> {
@@ -280,6 +283,11 @@ fn read_color_scheme(f: &Flags) -> Option<Requested> {
 }
 fn read_download_path(f: &Flags) -> Option<Requested> {
     string(&f.download_path)
+}
+fn read_capture(f: &Flags) -> Option<Requested> {
+    f.capture
+        .as_ref()
+        .map(|modes| Requested::Set(Value::from(modes.clone())))
 }
 fn read_allowed_domains(f: &Flags) -> Option<Requested> {
     f.allowed_domains
@@ -622,6 +630,16 @@ pub static SPECS: &[Spec] = &[
         false,
         Str,
         read_download_path
+    ),
+    row!(
+        Capture,
+        "capture",
+        "--capture",
+        Launch,
+        Memory,
+        false,
+        StrList,
+        read_capture
     ),
     row!(
         AllowedDomains,

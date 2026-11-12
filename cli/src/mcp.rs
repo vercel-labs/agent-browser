@@ -155,6 +155,10 @@ const TOOL_STREAM_ENABLE: &str = "agent_browser_stream_enable";
 const TOOL_STREAM_DISABLE: &str = "agent_browser_stream_disable";
 const TOOL_STREAM_STATUS: &str = "agent_browser_stream_status";
 const TOOL_WEBMCP_LIST: &str = "agent_browser_webmcp_list";
+const TOOL_FLOW_STEPS: &str = "agent_browser_flow_steps";
+const TOOL_FLOW_SAVE: &str = "agent_browser_flow_save";
+const TOOL_FLOW_RUN: &str = "agent_browser_flow_run";
+const TOOL_FLOW_LIST: &str = "agent_browser_flow_list";
 const TOOL_WEBMCP_INVOKE: &str = "agent_browser_webmcp_invoke";
 const TOOL_WEBMCP_RESULT: &str = "agent_browser_webmcp_result";
 const TOOL_WEBMCP_CANCEL: &str = "agent_browser_webmcp_cancel";
@@ -340,6 +344,10 @@ impl Default for McpConfig {
 const CORE_PROFILE_TOOLS: &[&str] = &[
     TOOL_TOOLS_PROFILES,
     TOOL_OPEN,
+    TOOL_FLOW_LIST,
+    TOOL_FLOW_RUN,
+    TOOL_FLOW_STEPS,
+    TOOL_FLOW_SAVE,
     TOOL_READ,
     TOOL_SNAPSHOT,
     TOOL_BACK,
@@ -766,7 +774,7 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
             "version": env!("CARGO_PKG_VERSION")
         },
         "instructions": format!(
-            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. Use agent_browser_tools_profiles to see available startup profiles. {}",
+            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. When a navigation result lists saved flows that match the task, call agent_browser_flow_run instead of driving the page. Use agent_browser_tools_profiles to see available startup profiles. {}",
             config.profile_names().join(", "),
             SHARED_ARGUMENTS_INSTRUCTIONS
         )
@@ -842,7 +850,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
+            "Launch the browser and optionally navigate to a URL. On macOS, installed browsers are searched in /Applications, then ~/Applications. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
@@ -850,6 +858,51 @@ fn tools() -> Vec<Value> {
                 ,"webmcp": { "type": "boolean", "description": "Enable experimental WebMCP support. Defaults to true for locally launched Chrome; set false to pass --no-webmcp." }
             }),
             &[],
+        ),
+        tool(
+            TOOL_FLOW_LIST,
+            "List saved flows",
+            "Experimental. List tasks saved with flow save, with their params and whether their last run verified.",
+            json!({ "origin": { "type": "string", "description": "Only flows for this host's site." } }),
+            &[],
+        ),
+        tool(
+            TOOL_FLOW_RUN,
+            "Run saved flow",
+            "Experimental. Run a saved task by sending its requests directly, falling back to the page, then to a replay of the recorded commands. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
+            json!({
+                "name": { "type": "string" },
+                "params": { "type": "object", "additionalProperties": { "type": "string" } },
+                "where": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Keep list items whose field contains the value, case-insensitive." },
+                "fields": { "type": "string", "description": "Comma-separated fields to return per item, dotted paths allowed." },
+                "limit": { "type": "integer", "minimum": 1 },
+                "origin": { "type": "string" },
+                "allowWrite": { "type": "string", "description": "Writes the run may send without asking: `all`, or comma-separated write ids from flow save. Any other write needs confirmation." },
+                "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds the whole run may take, across every tier." }
+            }),
+            &["name"],
+        ),
+        tool(
+            TOOL_FLOW_STEPS,
+            "List captured steps",
+            "Experimental. List the steps a session opened with capture flow has recorded: number, command, URL, tagged request count, and whether it succeeded. Use the numbers with flow save from and to.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            TOOL_FLOW_SAVE,
+            "Save flow",
+            "Experimental. Save recorded steps as a flow so later runs can skip the browser. The session must be opened with capture flow. By default the flow starts at the last navigation after the previous save. params maps a param name to the value you typed, so later runs can change it.",
+            json!({
+                "name": { "type": "string" },
+                "from": { "type": "integer", "minimum": 1, "description": "First step number; defaults to the last navigation after the previous save." },
+                "to": { "type": "integer", "minimum": 1, "description": "Last step; defaults to the latest." },
+                "description": { "type": "string", "description": "One line saying what the flow does." },
+                "params": { "type": "object", "additionalProperties": { "type": "string" } },
+                "output": { "type": "string", "description": "Request id whose response the flow returns." },
+                "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds to wait for requests the last step started that have no response yet." }
+            }),
+            &["name"],
         ),
         tool(
             TOOL_WEBMCP_LIST,
@@ -1724,7 +1777,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_BATCH,
             "Batch",
-            "Run multiple commands sequentially. Unknown commands and subcommands return errors. A batch containing only get cdp-url commands never launches a browser.",
+            "Run multiple commands sequentially. Unknown commands and subcommands return errors. Set global flags on the batch invocation or MCP server. Command arguments can contain flag-like text. A batch containing only get cdp-url commands never launches a browser.",
             json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" }, "omitCommand": { "type": "boolean", "description": "Replace only command arrays with a stable zero-based input index. Does not make output safe for secrets: errors and response data are unchanged; type echoes typed text, and get value/eval may return input values." } }),
             &["commands"],
         ),
@@ -2055,6 +2108,7 @@ const SHARED_ARGUMENTS: &[&str] = &[
     "restoreCheckText",
     "restoreCheckFn",
     "allowedDomains",
+    "capture",
     "caCert",
     "useSystemCa",
     "clearCaCert",
@@ -2091,6 +2145,7 @@ fn advertised_shared_arguments(name: &str) -> Vec<&'static str> {
     let launches = LAUNCH_TOOLS.contains(&name);
     if launches {
         keys.push("restore");
+        keys.push("capture");
         keys.push("relaunch");
     }
     if launches || name == TOOL_READ {
@@ -2118,6 +2173,11 @@ fn shared_property(key: &str) -> Value {
             "items": { "type": "string" },
             "description": "Restrict browser and read traffic to these domain patterns."
         }),
+        "capture" => json!({
+            "type": "array",
+            "items": { "type": "string", "enum": ["flow"] },
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. On a running session without capture it relaunches the browser with capture on."
+        }),
         "relaunch" => json!({
             "type": "boolean",
             "description": "Relaunch the session's browser even when no setting changed (--relaunch)."
@@ -2137,7 +2197,7 @@ fn shared_property(key: &str) -> Value {
     }
 }
 
-const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool accepts these optional arguments even when its schema does not list them: session (isolated browser session name), restore (true or a key; restores and auto-saves browser state when the call launches the browser), allowedDomains (domain patterns that restrict browser and read traffic when the call launches the browser; also disables RTCPeerConnection in Chromium sessions, and is rejected when the server environment or config already sets allowed domains), extraArgs (extra CLI arguments such as --engine; global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config, are rejected, so set those in the MCP server environment or config), timeoutMs (positive integer, maximum milliseconds to wait for the tool call), namespace (isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (conditions restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), idleTimeout (such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown), and relaunch (boolean, relaunch the session's browser even when no setting changed).";
+const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool accepts these optional arguments even when its schema does not list them: session (isolated browser session name), restore (true or a key; restores and auto-saves browser state when the call launches the browser), allowedDomains (domain patterns that restrict browser and read traffic when the call launches the browser; also disables RTCPeerConnection in Chromium sessions, and is rejected when the server environment or config already sets allowed domains), capture (set to flow to record the session so flow steps and flow save can turn it into a reusable flow, when the call launches the browser), extraArgs (extra CLI arguments such as --engine; global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config, are rejected, so set those in the MCP server environment or config), timeoutMs (positive integer, maximum milliseconds to wait for the tool call), namespace (isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (conditions restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), idleTimeout (such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown), and relaunch (boolean, relaunch the session's browser even when no setting changed).";
 
 /// Levenshtein distance, for suggesting a close argument name.
 fn edit_distance(a: &str, b: &str) -> usize {
@@ -2228,6 +2288,8 @@ fn is_read_only_tool(name: &str) -> bool {
             | TOOL_VITALS
             | TOOL_STREAM_STATUS
             | TOOL_WEBMCP_LIST
+            | TOOL_FLOW_LIST
+            | TOOL_FLOW_STEPS
             | TOOL_WEBMCP_RESULT
             | TOOL_SESSION
             | TOOL_SESSION_LIST
@@ -2536,6 +2598,10 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_STREAM_DISABLE => call_literal(arguments, &["stream", "disable"]),
         TOOL_STREAM_STATUS => call_literal(arguments, &["stream", "status"]),
         TOOL_WEBMCP_LIST => call_cli_tool(arguments, webmcp_list_args(arguments)?, None),
+        TOOL_FLOW_LIST => call_cli_tool(arguments, flow_args(arguments, "list")?, None),
+        TOOL_FLOW_RUN => call_cli_tool(arguments, flow_args(arguments, "run")?, None),
+        TOOL_FLOW_STEPS => call_cli_tool(arguments, flow_args(arguments, "steps")?, None),
+        TOOL_FLOW_SAVE => call_cli_tool(arguments, flow_args(arguments, "save")?, None),
         TOOL_WEBMCP_INVOKE => call_webmcp_invoke(arguments),
         TOOL_WEBMCP_RESULT => call_webmcp_result(arguments),
         TOOL_WEBMCP_CANCEL => call_one_string(arguments, "webmcp cancel", "invocationId"),
@@ -2855,6 +2921,56 @@ fn open_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
 fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
     let args = open_args(arguments)?;
     call_cli_tool(arguments, args, None)
+}
+
+fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["flow".to_string(), sub.to_string()];
+    if matches!(sub, "run" | "save") {
+        args.push(required_string(arguments, "name")?);
+    }
+    let pairs = |key: &str, flag: &str, args: &mut Vec<String>| -> Result<(), ProtocolError> {
+        if let Some(map) = arguments.get(key) {
+            let map = map.as_object().ok_or_else(|| {
+                ProtocolError::invalid_params(format!("{} must be an object", key))
+            })?;
+            for (k, v) in map {
+                let v = v.as_str().ok_or_else(|| {
+                    ProtocolError::invalid_params(format!("{}.{} must be a string", key, k))
+                })?;
+                args.push(flag.to_string());
+                args.push(format!("{}={}", k, v));
+            }
+        }
+        Ok(())
+    };
+    pairs("params", "--param", &mut args)?;
+    pairs("where", "--where", &mut args)?;
+    for (key, flag) in [
+        ("fields", "--fields"),
+        ("origin", "--origin"),
+        ("output", "--output"),
+        ("description", "--description"),
+    ] {
+        if let Some(v) = optional_string(arguments, key)? {
+            args.push(flag.to_string());
+            args.push(v);
+        }
+    }
+    if let Some(limit) = arguments.get("limit").and_then(Value::as_u64) {
+        args.push("--limit".to_string());
+        args.push(limit.to_string());
+    }
+    for (key, flag) in [("from", "--from"), ("to", "--to"), ("timeout", "--timeout")] {
+        if let Some(n) = arguments.get(key).and_then(Value::as_u64) {
+            args.push(flag.to_string());
+            args.push(n.to_string());
+        }
+    }
+    if let Some(allow) = optional_string(arguments, "allowWrite")? {
+        args.push("--allow-write".to_string());
+        args.push(allow);
+    }
+    Ok(args)
 }
 
 fn webmcp_list_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
@@ -4258,6 +4374,12 @@ fn append_common_global_args(
             args.push(domains.join(","));
         }
     }
+    if let Some(modes) = optional_string_array(arguments, "capture")? {
+        if !modes.is_empty() {
+            args.push("--capture".to_string());
+            args.push(modes.join(","));
+        }
+    }
     let ca_cert = optional_string(arguments, "caCert")?;
     let clear_ca_cert = optional_bool(arguments, "clearCaCert")?.unwrap_or(false);
     if ca_cert.is_some() && clear_ca_cert {
@@ -4441,6 +4563,14 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
             // Render changed summaries once, through the same untrusted formatter as
             // CLI text, including when the primary result falls back to JSON.
             let mut primary = value.clone();
+            // Before the WebMCP context is taken out: the hint ranks flows after
+            // the page's declared tools.
+            let flow_hint = primary.get_mut("data").and_then(|data| {
+                data.get("url")?;
+                let hint = crate::output::format_flow_hint(data);
+                data.as_object_mut().map(|d| d.remove("flows"));
+                hint
+            });
             let contexts: Vec<String> = if let Some(results) = primary.as_array_mut() {
                 // Batch commands store each response's data under `result`.
                 results
@@ -4458,6 +4588,7 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
                     .into_iter()
                     .collect()
             };
+
             let mut text = response_text(&primary).unwrap_or_else(|| {
                 serde_json::to_string_pretty(&primary).unwrap_or_else(|_| stdout.trim().to_string())
             });
@@ -4467,7 +4598,7 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
                 text.push_str("\n\nwarning: ");
                 text.push_str(warning);
             }
-            for context in contexts {
+            for context in contexts.into_iter().chain(flow_hint) {
                 text.push_str("\n\n");
                 text.push_str(&context);
             }
@@ -4528,6 +4659,18 @@ fn response_text(value: &Value) -> Option<String> {
                     .is_some()
             {
                 return Some(crate::output::format_a11y_text(data));
+            }
+            if data.get("verified").is_some() && data.get("steps").is_some() {
+                return crate::output::format_flow_text(Some("flow_run"), data);
+            }
+            if data.get("lastSave").is_some() && data.get("steps").is_some() {
+                return crate::output::format_flow_text(Some("flow_steps"), data);
+            }
+            if data.get("gaps").is_some() && data.get("requests").is_some() {
+                return crate::output::format_flow_text(Some("flow_save"), data);
+            }
+            if data.get("flows").is_some() && data.get("url").is_none() {
+                return crate::output::format_flow_text(Some("flow_list"), data);
             }
             if let Some(skipped) = data
                 .get("skippedOrigins")
@@ -4617,6 +4760,51 @@ mod tests {
             text.contains("page_wedged: the active tab was replaced"),
             "{text}"
         );
+    }
+
+    /// Every argument a flow tool declares reaches the daemon command: the
+    /// MCP schema, `flow_args` and the CLI parser cannot drift apart.
+    #[test]
+    fn every_flow_tool_argument_reaches_the_command() {
+        let cases = [
+            (TOOL_FLOW_RUN, "run", "flow_run"),
+            (TOOL_FLOW_SAVE, "save", "flow_save"),
+        ];
+        for (tool_name, sub, action) in cases {
+            let tool = tools()
+                .into_iter()
+                .find(|t| t["name"] == tool_name)
+                .unwrap();
+            let props = tool["inputSchema"]["properties"]
+                .as_object()
+                .unwrap()
+                .clone();
+            let shared = advertised_shared_arguments(tool_name);
+            let mut arguments = serde_json::Map::new();
+            for (key, prop) in &props {
+                if shared.contains(&key.as_str()) {
+                    continue;
+                }
+                let value = match (key.as_str(), prop["type"].as_str()) {
+                    ("allowWrite", _) => json!("all"),
+                    (_, Some("integer")) => json!(7),
+                    (_, Some("object")) => json!({ "k": "v" }),
+                    _ => json!("x"),
+                };
+                arguments.insert(key.clone(), value);
+            }
+            let arguments = Value::Object(arguments);
+            let args = flow_args(&arguments, sub).unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["action"], action);
+            for key in arguments.as_object().unwrap().keys() {
+                assert!(
+                    !command[key.as_str()].is_null(),
+                    "{tool_name}: `{key}` is declared but the command has no `{key}`: {command}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5698,6 +5886,41 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["--allowed-domains", "example.com,*.example.org"]);
+    }
+
+    #[test]
+    fn common_global_args_include_capture() {
+        let mut args = Vec::new();
+        append_common_global_args(&mut args, &json!({ "capture": ["flow"] }), None).unwrap();
+        assert_eq!(args, vec!["--capture", "flow"]);
+        let mut args = Vec::new();
+        assert!(append_common_global_args(&mut args, &json!({ "capture": [] }), None).is_err());
+    }
+
+    #[test]
+    fn flow_tools_map_to_the_cli_flow_commands() {
+        assert_eq!(
+            flow_args(&json!({}), "steps").unwrap(),
+            vec!["flow", "steps"]
+        );
+        assert_eq!(
+            flow_args(
+                &json!({ "name": "cart", "from": 3, "to": 7, "description": "Adds", "params": { "q": "x" } }),
+                "save"
+            )
+            .unwrap(),
+            vec![
+                "flow", "save", "cart", "--param", "q=x", "--description", "Adds",
+                "--from", "3", "--to", "7"
+            ]
+        );
+        assert!(flow_args(&json!({}), "save").is_err());
+        let names: Vec<String> = tools()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(String::from))
+            .collect();
+        assert!(names.contains(&TOOL_FLOW_STEPS.to_string()));
+        assert!(!names.iter().any(|n| n == "agent_browser_flow_start"));
     }
 
     #[test]

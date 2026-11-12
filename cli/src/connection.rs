@@ -44,6 +44,9 @@ pub struct Response {
     pub code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Step number under which a `--capture flow` session recorded the command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded: Option<Value>,
 }
 
 #[allow(dead_code)]
@@ -513,6 +516,52 @@ pub struct DaemonOptions<'a> {
     pub plugins: Option<&'a str>,
 }
 
+impl DaemonOptions<'static> {
+    /// No option set: what a daemon started only to close its session needs.
+    pub fn bare() -> Self {
+        DaemonOptions {
+            headed: false,
+            debug: false,
+            executable_path: None,
+            extensions: &[],
+            init_scripts: &[],
+            enable: &[],
+            args: None,
+            user_agent: None,
+            proxy: None,
+            proxy_bypass: None,
+            proxy_username: None,
+            proxy_password: None,
+            ignore_https_errors: false,
+            allow_file_access: false,
+            hide_scrollbars: true,
+            webgpu: false,
+            profile: None,
+            state: None,
+            provider: None,
+            device: None,
+            session_name: None,
+            restore_save: None,
+            restore_check_url: None,
+            restore_check_text: None,
+            restore_check_fn: None,
+            download_path: None,
+            allowed_domains: None,
+            action_policy: None,
+            confirm_actions: None,
+            engine: None,
+            auto_connect: false,
+            pin_tab: false,
+            idle_timeout: None,
+            default_timeout: None,
+            cdp: None,
+            cdp_headers: None,
+            no_auto_dialog: false,
+            plugins: None,
+        }
+    }
+}
+
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     cmd.env("AGENT_BROWSER_DAEMON", "1")
         .env("AGENT_BROWSER_SESSION", session);
@@ -890,6 +939,12 @@ fn stop_existing_daemon_for_restart(session: &str) {
     if !request_graceful_daemon_shutdown(session) {
         kill_stale_daemon(session);
     }
+}
+
+/// Stops a session's daemon without a `close`, so the session's stored
+/// settings stay, the same way a restart stops it.
+pub fn stop_daemon(session: &str) {
+    stop_existing_daemon_for_restart(session);
 }
 
 /// Marks this process's stdout and stderr non-inheritable so a detached child cannot hold a reader's pipes open.

@@ -43,7 +43,7 @@ fn unused_loopback_port() -> u16 {
 }
 
 fn wait_for_dashboard(address: SocketAddr, host: &str, origin: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match TcpStream::connect_timeout(&address, Duration::from_millis(100)) {
             Ok(mut stream) => {

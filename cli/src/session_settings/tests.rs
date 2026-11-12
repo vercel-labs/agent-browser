@@ -69,6 +69,7 @@ pub(crate) fn full_flags() -> Flags {
     f.restore_check_fn = Some("() => true".to_string());
     f.color_scheme = Some("dark".to_string());
     f.download_path = Some("/downloads".to_string());
+    f.capture = Some(vec!["flow".to_string()]);
     f.allowed_domains = Some(vec!["a.test".to_string(), "*.b.test".to_string()]);
     f.action_policy = Some("/policy.json".to_string());
     f.confirm_actions = Some("click,fill".to_string());
@@ -217,6 +218,7 @@ fn patch_carries_every_daemon_options_field() {
     assert_eq!(set(&p, Key::RestoreCheckText), json!("Welcome")); // restore_check_text
     assert_eq!(set(&p, Key::RestoreCheckFn), json!("() => true")); // restore_check_fn
     assert_eq!(set(&p, Key::DownloadPath), json!("/downloads")); // download_path
+    assert_eq!(set(&p, Key::Capture), json!(["flow"])); // capture
     assert_eq!(set(&p, Key::AllowedDomains), json!(["a.test", "*.b.test"])); // allowed_domains
     assert_eq!(set(&p, Key::ActionPolicy), json!("/policy.json")); // action_policy
     assert_eq!(set(&p, Key::ConfirmActions), json!("click,fill")); // confirm_actions
@@ -308,6 +310,24 @@ fn obscura_clears_an_unset_proxy_bypass() {
     );
     f.engine = Some("chrome".to_string());
     assert_eq!(Patch::from_flags(&f).get(Key::ProxyBypass), None);
+}
+
+#[test]
+fn no_auto_connect_resets_the_connection_and_beats_env_and_config() {
+    let mut f = blank_flags();
+    f.auto_connect = true;
+    assert_eq!(set(&Patch::from_flags(&f), Key::AutoConnect), json!(true));
+
+    // An env or config `auto_connect` is already folded into the flag.
+    f.no_auto_connect = true;
+    f.auto_connect = false;
+    assert_eq!(
+        Patch::from_flags(&f).get(Key::AutoConnect),
+        Some(&Requested::Default)
+    );
+
+    f.no_auto_connect = false;
+    assert_eq!(Patch::from_flags(&f).get(Key::AutoConnect), None);
 }
 
 #[test]
@@ -538,34 +558,60 @@ fn boolean_spellings_match_each_variable() {
     assert!(seeded(&[("AGENT_BROWSER_HIDE_SCROLLBARS", "anything")]).hide_scrollbars());
 }
 
+/// A seeded `Running` with the given connection keys set directly.
+fn connected(pairs: &[(Key, Value)]) -> Running {
+    let mut r = seeded(&[]);
+    for (key, value) in pairs {
+        r.set(*key, value.clone());
+    }
+    r
+}
+
+#[test]
+fn connection_keys_are_not_seeded_from_the_environment() {
+    let r = seeded(&[
+        ("AGENT_BROWSER_CDP", "9222"),
+        ("AGENT_BROWSER_CDP_HEADERS", r#"{"A":"b"}"#),
+        ("AGENT_BROWSER_AUTO_CONNECT", "1"),
+        ("AGENT_BROWSER_PROVIDER", "kernel"),
+    ]);
+    assert_eq!(r.connection(), Connection::Local);
+    assert_eq!(r.cdp_headers(), None);
+    assert_eq!(r.provider(), None);
+}
+
+#[test]
+fn device_is_still_seeded_from_the_environment() {
+    let r = seeded(&[("AGENT_BROWSER_IOS_DEVICE", "iPhone 15")]);
+    assert_eq!(
+        r.get(Key::Device).and_then(Value::as_str),
+        Some("iPhone 15")
+    );
+}
+
 #[test]
 fn connection_view_follows_precedence() {
     assert_eq!(
-        seeded(&[("AGENT_BROWSER_CDP", "9222")]).connection(),
+        connected(&[(Key::Cdp, json!("9222"))]).connection(),
         Connection::Cdp("9222".into())
     );
     assert_eq!(
-        seeded(&[("AGENT_BROWSER_AUTO_CONNECT", "0")]).connection(),
-        Connection::AutoConnect,
-        "presence alone turns auto-connect on"
-    );
-    assert_eq!(
-        seeded(&[("AGENT_BROWSER_PROVIDER", "kernel")]).connection(),
+        connected(&[(Key::Provider, json!("kernel"))]).connection(),
         Connection::Provider("kernel".into())
     );
     assert_eq!(
-        seeded(&[
-            ("AGENT_BROWSER_PROVIDER", "kernel"),
-            ("AGENT_BROWSER_AUTO_CONNECT", "1"),
-            ("AGENT_BROWSER_CDP", "9222"),
+        connected(&[
+            (Key::Provider, json!("kernel")),
+            (Key::AutoConnect, json!(true)),
+            (Key::Cdp, json!("9222")),
         ])
         .connection(),
         Connection::Cdp("9222".into())
     );
     assert_eq!(
-        seeded(&[
-            ("AGENT_BROWSER_PROVIDER", "kernel"),
-            ("AGENT_BROWSER_AUTO_CONNECT", "1"),
+        connected(&[
+            (Key::Provider, json!("kernel")),
+            (Key::AutoConnect, json!(true)),
         ])
         .connection(),
         Connection::AutoConnect
@@ -659,10 +705,7 @@ fn headed_for_plugin_providers_accepts_any_value_but_off_spellings() {
 
 #[test]
 fn provider_view_ignores_connection_precedence() {
-    let r = seeded(&[
-        ("AGENT_BROWSER_PROVIDER", "kernel"),
-        ("AGENT_BROWSER_CDP", "9222"),
-    ]);
+    let r = connected(&[(Key::Provider, json!("kernel")), (Key::Cdp, json!("9222"))]);
     assert_eq!(r.provider().as_deref(), Some("kernel"));
     assert_eq!(r.connection(), Connection::Cdp("9222".into()));
 }
@@ -725,7 +768,7 @@ fn extensions_file_keeps_the_trimmed_original_value() {
 fn cdp_headers_view_is_the_raw_value() {
     let raw = r#"{"Authorization":"Bearer x"}"#;
     assert_eq!(
-        seeded(&[("AGENT_BROWSER_CDP_HEADERS", raw)])
+        connected(&[(Key::CdpHeaders, json!(raw))])
             .cdp_headers()
             .as_deref(),
         Some(raw)
@@ -809,6 +852,26 @@ fn changed_keys(plan: &super::plan::Plan) -> Vec<Key> {
 }
 
 #[test]
+fn headers_sent_with_a_provider_or_auto_connect_are_free_on_the_next_command() {
+    // Env or config `cdpHeaders` ride on every command, whatever the target.
+    for target in [
+        is(Key::Provider, json!("browserbox")),
+        is(Key::AutoConnect, json!(true)),
+    ] {
+        let patch = patch_of(&[target.clone(), is(Key::CdpHeaders, json!(r#"{"A":"b"}"#))]);
+        let first = connected(&[]).plan(&patch);
+        assert!(first.relaunch, "{:?}", target.0);
+        let second = first.next.plan(&patch);
+        assert!(
+            second.changes.is_empty() && !second.relaunch,
+            "{:?}: {:?}",
+            target.0,
+            second.changes.iter().map(|c| c.key).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
 fn plan_table_running_by_patch() {
     struct Case {
         name: &'static str,
@@ -878,6 +941,30 @@ fn plan_table_running_by_patch() {
             patch: vec![(Key::ProxyBypass, Requested::Default)],
             changed: vec![Key::ProxyBypass],
             relaunch: true,
+        },
+        Case {
+            name: "an auto-connect reset of an attached session relaunches locally",
+            running: vec![(Key::AutoConnect, json!(true))],
+            patch: vec![(Key::AutoConnect, Requested::Default)],
+            changed: vec![Key::AutoConnect],
+            relaunch: true,
+        },
+        Case {
+            name: "a reset of a key another target already displaced is reported once",
+            running: vec![(Key::AutoConnect, json!(true))],
+            patch: vec![
+                is(Key::Cdp, json!("9447")),
+                (Key::AutoConnect, Requested::Default),
+            ],
+            changed: vec![Key::Cdp, Key::AutoConnect],
+            relaunch: true,
+        },
+        Case {
+            name: "an auto-connect reset of a local session is free",
+            running: vec![],
+            patch: vec![(Key::AutoConnect, Requested::Default)],
+            changed: vec![],
+            relaunch: false,
         },
         Case {
             name: "an explicit reset of an unset value is free",

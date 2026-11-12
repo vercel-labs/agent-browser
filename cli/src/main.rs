@@ -241,6 +241,10 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
         return Some("Cannot use --cdp and -p/--provider together");
     }
 
+    if flags.cli_auto_connect && flags.no_auto_connect {
+        return Some("Cannot use --auto-connect and --no-auto-connect together");
+    }
+
     if flags.auto_connect && flags.cdp.is_some() {
         return Some("Cannot use --auto-connect and --cdp together");
     }
@@ -1236,16 +1240,72 @@ fn run_dashboard_stop(json_mode: bool) {
     }
 }
 
+/// Forgets what a session keeps once it is closed: its saved TLS selection and
+/// its stored security settings. Called only after the daemon confirmed the
+/// close, so a close that policy denied or a confirmation parked leaves the
+/// session contained.
+fn clear_closed_session(session: &str) {
+    tls::clear_session(session);
+    if let Err(e) = session_settings::clear_file(session) {
+        eprintln!("{} {}", color::warning_indicator(), e);
+    }
+}
+
+/// What `close` forgets before it is sent. The stored security settings stay:
+/// the daemon that handles the close (a running one, or one `close` starts)
+/// enforces them, so a policy that denies `close` still applies, and drops
+/// them itself once the close succeeds.
+fn forget_before_close(session: &str) {
+    tls::clear_session(session);
+}
+
+/// Starts or reuses the session's daemon. A `close` whose daemon refuses to
+/// start because of the stored settings file clears that file and tries once
+/// more, so a corrupt file can always be cleared with `close`.
+fn ensure_daemon_for(
+    session: &str,
+    opts: &DaemonOptions,
+    is_close: bool,
+) -> Result<connection::DaemonResult, String> {
+    match ensure_daemon(session, opts) {
+        Err(e) if is_close && session_settings::is_refusal(&e) => {
+            session_settings::clear_file(session)?;
+            ensure_daemon(session, opts)
+        }
+        other => other,
+    }
+}
+
+/// Whether a response says the browser was closed, as opposed to denied,
+/// parked for confirmation or failed.
+fn close_completed(resp: &connection::Response) -> bool {
+    resp.success
+        && resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("closed"))
+            .and_then(|v| v.as_bool())
+            == Some(true)
+}
+
 fn run_close_all(flags: &Flags) {
     // walk_daemons auto-cleans stale .pid / .sock / .stream sidecar files and
     // separates out the standalone dashboard. We only want to send `close` to
     // real session daemons; the dashboard has its own `dashboard stop`.
     let inventory = walk_daemons();
-    let sessions: Vec<(String, u32)> = inventory
+    let mut sessions: Vec<(String, Option<u32>)> = inventory
         .sessions
         .iter()
-        .map(|s| (s.name.clone(), s.pid))
+        .map(|s| (s.name.clone(), Some(s.pid)))
         .collect();
+
+    // Sessions whose daemon is gone still hold stored security settings that
+    // govern them. They are closed like the others: a daemon starts with those
+    // settings, so a policy denying `close` still applies.
+    let orphans = session_settings::orphan_sessions(&get_socket_dir(), |session| {
+        sessions.iter().any(|(name, _)| name == session) || connection::daemon_ready(session)
+    });
+    sessions.extend(orphans.into_iter().map(|name| (name, None)));
 
     if sessions.is_empty() {
         if flags.json {
@@ -1263,6 +1323,12 @@ fn run_close_all(flags: &Flags) {
     let mut failed: Vec<(String, String)> = Vec::new();
 
     for (session, pid) in &sessions {
+        if pid.is_none() {
+            if let Err(e) = ensure_daemon_for(session, &DaemonOptions::bare(), true) {
+                failed.push((session.clone(), e));
+                continue;
+            }
+        }
         let cmd = json!({ "id": gen_id(), "action": "close" });
         // A close whose response was lost leaves the daemon in an unknown
         // state; force-kill it like an unreachable one.
@@ -1274,18 +1340,47 @@ fn run_close_all(flags: &Flags) {
             }
         });
         match result {
-            Ok(resp) if resp.success => {
-                tls::clear_session(session);
+            Ok(resp) if close_completed(&resp) => {
+                clear_closed_session(session);
                 closed.push(session.clone());
             }
             Ok(resp) => {
-                let err = resp.error.unwrap_or_else(|| "Unknown error".to_string());
+                // Denied, waiting for confirmation or failed: still running.
+                let waiting = resp
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("confirmation_required"))
+                    .and_then(|v| v.as_bool())
+                    == Some(true);
+                let mut err = match (resp.error, waiting) {
+                    (Some(err), _) => err,
+                    (None, true) => "close is waiting for confirmation".to_string(),
+                    (None, false) => "Unknown error".to_string(),
+                };
+                if pid.is_none() {
+                    // The daemon was started only to close this session; stop
+                    // it so the session is left as it was found, with its
+                    // stored settings. A parked confirmation goes with it.
+                    connection::stop_daemon(session);
+                    if waiting {
+                        err = format!(
+                            "close needs confirmation; run `agent-browser --session {s} close`, then `agent-browser --session {s} confirm <id>` with the id it prints",
+                            s = session
+                        );
+                    }
+                }
                 failed.push((session.clone(), err));
+            }
+            Err(e) if pid.is_none() => {
+                // A daemon started only to close this session did not answer.
+                connection::stop_daemon(session);
+                failed.push((session.clone(), e));
             }
             Err(_) => {
                 // Daemon is unreachable despite its process existing.
                 // Force-kill the process and clean up stale files so future
                 // sessions are not poisoned.
+                let pid = &pid.unwrap_or_default();
                 if is_agent_browser_process(*pid) {
                     #[cfg(unix)]
                     unsafe {
@@ -1301,6 +1396,7 @@ fn run_close_all(flags: &Flags) {
                     }
                 }
                 cleanup_stale_files(session);
+                clear_closed_session(session);
                 closed.push(session.clone());
             }
         }
@@ -1602,7 +1698,7 @@ fn main() {
     }
     match cmd.get("action").and_then(|v| v.as_str()) {
         Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
-        Some("close") => tls::clear_session(&flags.session),
+        Some("close") => forget_before_close(&flags.session),
         _ => {}
     }
     // Handle --password-stdin for auth save
@@ -1684,6 +1780,7 @@ fn main() {
                 error: None,
                 code: None,
                 warning: None,
+                recorded: None,
             },
             Err(e) => connection::Response {
                 success: false,
@@ -1691,6 +1788,7 @@ fn main() {
                 error: Some(e),
                 code: None,
                 warning: None,
+                recorded: None,
             },
         };
         let output_opts = OutputOptions::from_flags(&flags);
@@ -1787,7 +1885,8 @@ fn main() {
         plugins: Some(plugin_registry_json.as_str()),
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
+    let is_close = cmd.get("action").and_then(|v| v.as_str()) == Some("close");
+    let daemon_result = match ensure_daemon_for(&flags.session, &daemon_opts, is_close) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -1865,6 +1964,9 @@ fn main() {
             let success = resp.success;
             // Extract action for context-specific output handling
             let action = cmd.get("action").and_then(|v| v.as_str());
+            if action == Some("close") && close_completed(&resp) {
+                clear_closed_session(&flags.session);
+            }
             print_response_with_opts(&resp, action, &output_opts);
             if !success {
                 exit(1);
@@ -1962,7 +2064,7 @@ fn run_batch(
             continue;
         }
 
-        let mut parsed = match parse_command(cmd_args, flags) {
+        let mut parsed = match commands::parse_batch_command(cmd_args, flags) {
             Ok(mut c) => {
                 if flags.default_timeout.is_none() {
                     commands::inherit_wait_timeout(
@@ -2018,6 +2120,9 @@ fn run_batch(
 
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
+                if action.as_deref() == Some("close") && close_completed(&resp) {
+                    clear_closed_session(&flags.session);
+                }
                 relaunch_applied |= response_applied_relaunch(&resp);
                 if flags.json {
                     let mut result = batch_result_identity(i, cmd_args, omit_command);
@@ -2487,6 +2592,7 @@ mod tests {
         flags.download_path = None;
         flags.engine = None;
         flags.allowed_domains = None;
+        flags.capture = None;
         flags.init_scripts.clear();
         flags.enable.clear();
         flags.extensions.clear();
@@ -2711,6 +2817,21 @@ mod tests {
     }
 
     #[test]
+    fn test_incompatible_launch_mode_error_rejects_no_auto_connect_with_auto_connect() {
+        let mut flags = launch_mode_flags(true, false, false, false);
+        flags.cli_auto_connect = true;
+        flags.no_auto_connect = true;
+        assert_eq!(
+            incompatible_launch_mode_error(&flags),
+            Some("Cannot use --auto-connect and --no-auto-connect together")
+        );
+
+        let mut reset = launch_mode_flags(false, false, false, false);
+        reset.no_auto_connect = true;
+        assert_eq!(incompatible_launch_mode_error(&reset), None);
+    }
+
+    #[test]
     fn test_incompatible_launch_mode_error_rejects_webgpu_attach_modes() {
         let with_webgpu = |mut flags: Flags| {
             flags.webgpu = true;
@@ -2869,6 +2990,7 @@ mod tests {
             })),
             error: None,
             warning: None,
+            recorded: None,
         };
 
         let prompt = confirmation_prompt_from_response(&resp).unwrap();

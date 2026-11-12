@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead};
 
 use crate::color;
-use crate::flags::Flags;
+use crate::flags::{is_global_flag, Flags};
 use crate::validation::{is_valid_session_name, session_name_error};
 
 /// Error type for command parsing with contextual information
@@ -176,6 +176,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "plugins"
             | "chat"
             | "webmcp"
+            | "flow"
     )
 }
 
@@ -345,7 +346,20 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
 /// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
-    let mut result = parse_command_inner(args, flags)?;
+    parse_command_with_batch_scope(args, flags, false)
+}
+
+/// Parses a batch item and rejects global flags that belong on the outer invocation.
+pub fn parse_batch_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+    parse_command_with_batch_scope(args, flags, true)
+}
+
+fn parse_command_with_batch_scope(
+    args: &[String],
+    flags: &Flags,
+    batch_item: bool,
+) -> Result<Value, ParseError> {
+    let mut result = parse_command_inner(args, flags, batch_item)?;
 
     // Inject AGENT_BROWSER_DEFAULT_TIMEOUT into any wait-family command that
     // doesn't already carry an explicit timeout. Centralised here so that new
@@ -355,7 +369,20 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     Ok(result)
 }
 
-/// Stamps `timeout` on a wait-family command that has none.
+fn reject_batch_global_flag(batch_item: bool, arg: &str) -> Result<(), ParseError> {
+    if batch_item && is_global_flag(arg) {
+        Err(ParseError::InvalidValue {
+            message: "Pass global flags on the outer batch invocation, not inside a batch item."
+                .to_string(),
+            usage: "[global flags] batch <commands...>",
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Stamps `timeout` on a wait-family command, `flow_save` or `flow_run` that
+/// has none, so the client read timeout follows it.
 pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     let Some(timeout) = timeout else {
         return;
@@ -363,13 +390,19 @@ pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     let is_wait = cmd
         .get("action")
         .and_then(Value::as_str)
-        .is_some_and(|action| action.starts_with("wait"));
+        .is_some_and(|action| {
+            action.starts_with("wait") || action == "flow_save" || action == "flow_run"
+        });
     if is_wait && cmd.get("timeout").is_none() {
         cmd["timeout"] = json!(timeout);
     }
 }
 
-fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+fn parse_command_inner(
+    args: &[String],
+    flags: &Flags,
+    batch_item: bool,
+) -> Result<Value, ParseError> {
     if args.is_empty() {
         return Err(ParseError::MissingArguments {
             context: "".to_string(),
@@ -377,6 +410,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         });
     }
 
+    reject_batch_global_flag(batch_item, &args[0])?;
     let cmd = args[0].as_str();
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let id = gen_id();
@@ -392,6 +426,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Navigation ===
         // Maps to "navigate" action in protocol; reflected in ACTION_CATEGORIES in action-policy.ts
         "open" | "goto" | "navigate" => {
+            for arg in &rest {
+                reject_batch_global_flag(batch_item, arg)?;
+            }
             // `open` without a URL launches the browser but stays on
             // about:blank. Lets agents set up routes, cookies, or init
             // scripts before the first real navigation (see `batch`).
@@ -438,6 +475,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "reload" => Ok(json!({ "id": id, "action": "reload" })),
         "read" => parse_read(&rest, &id, flags),
         "webmcp" => parse_webmcp(&rest, &id),
+        "flow" => parse_flow(&rest, &id),
 
         // === Core Actions ===
         "click" => {
@@ -909,7 +947,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         if_changed = true;
                         i += 1;
                     }
-                    arg => positional.push(arg),
+                    arg => {
+                        reject_batch_global_flag(batch_item, arg)?;
+                        positional.push(arg);
+                    }
                 }
                 i += 1;
             }
@@ -1035,7 +1076,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "--viewport" => {
                         obj.insert("viewport".to_string(), json!(true));
                     }
-                    _ => {}
+                    _ => reject_batch_global_flag(batch_item, rest[i])?,
                 }
                 i += 1;
             }
@@ -2107,6 +2148,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Core Web Vitals + hydration ===
         "vitals" | "web-vitals" => {
+            for arg in &rest {
+                reject_batch_global_flag(batch_item, arg)?;
+            }
             let mut cmd = json!({ "id": id, "action": "vitals" });
             let json_out = rest.contains(&"--json");
             if json_out {
@@ -2197,6 +2241,191 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
+        }),
+    }
+}
+
+/// Parse `flow <steps|save|run|list>`: save a task captured with `--capture flow`, run it by sending its requests directly, from the page, or by replaying the recorded commands.
+fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const VALID: &[&str] = &["steps", "save", "run", "list"];
+    const USAGE: &str = "flow <steps [--json]|save <name> [--from <seq>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]|run <name> [--param k=v]... [--origin <host>] [--allow-write <all|id,...>]|list [--origin <host>]>";
+
+    fn params(args: &[&str], usage: &'static str) -> Result<Value, ParseError> {
+        let mut out = serde_json::Map::new();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--param" {
+                let pair = args
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "flow --param".to_string(),
+                        usage,
+                    })?;
+                let (k, v) = pair
+                    .split_once('=')
+                    .ok_or_else(|| ParseError::InvalidValue {
+                        message: format!("Invalid --param '{}': expected name=value", pair),
+                        usage,
+                    })?;
+                out.insert(k.to_string(), json!(v));
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        Ok(Value::Object(out))
+    }
+
+    fn flag_value<'a>(args: &[&'a str], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|a| *a == flag)
+            .and_then(|i| args.get(i + 1).copied())
+    }
+
+    /// `--timeout <ms>`, which `flow save` and `flow run` both take.
+    fn timeout_flag(
+        args: &[&str],
+        cmd: &mut Value,
+        context: &str,
+        usage: &'static str,
+    ) -> Result<(), ParseError> {
+        if !args.contains(&"--timeout") {
+            return Ok(());
+        }
+        let raw = flag_value(args, "--timeout").ok_or_else(|| ParseError::MissingArguments {
+            context: context.to_string(),
+            usage,
+        })?;
+        let n: u64 = raw.parse().map_err(|_| ParseError::InvalidValue {
+            message: format!("Invalid --timeout '{}': expected a number in ms", raw),
+            usage,
+        })?;
+        cmd["timeout"] = json!(n);
+        Ok(())
+    }
+
+    match rest.first().copied() {
+        Some("steps") => Ok(json!({ "id": id, "action": "flow_steps" })),
+        Some("save") => {
+            const SAVE_USAGE: &str = "flow save <name> [--from <seq>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>] [--timeout <ms>]";
+            let name = rest
+                .get(1)
+                .filter(|n| !n.starts_with("--"))
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "flow save".to_string(),
+                    usage: SAVE_USAGE,
+                })?;
+            let mut cmd = json!({
+                "id": id,
+                "action": "flow_save",
+                "name": name,
+                "params": params(&rest[2..], SAVE_USAGE)?,
+            });
+            if let Some(output) = flag_value(rest, "--output") {
+                cmd["output"] = json!(output);
+            }
+            if let Some(from) = flag_value(rest, "--from") {
+                let n: u64 = from.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --from '{}': expected a step number", from),
+                    usage: SAVE_USAGE,
+                })?;
+                cmd["from"] = json!(n);
+            }
+            if let Some(to) = flag_value(rest, "--to") {
+                let n: u64 = to.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --to '{}': expected a step number", to),
+                    usage: SAVE_USAGE,
+                })?;
+                cmd["to"] = json!(n);
+            }
+            if let Some(description) = flag_value(rest, "--description") {
+                cmd["description"] = json!(description);
+            }
+            timeout_flag(rest, &mut cmd, "flow save --timeout", SAVE_USAGE)?;
+            Ok(cmd)
+        }
+        Some("run") => {
+            let name = rest
+                .get(1)
+                .filter(|n| !n.starts_with("--"))
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "flow run".to_string(),
+                    usage:
+                        "flow run <name> [--param name=value]... [--origin <host>] [--allow-write <all|id,...>] [--timeout <ms>]",
+                })?;
+            let mut cmd = json!({
+                "id": id,
+                "action": "flow_run",
+                "name": name,
+                "params": params(&rest[2..], "flow run <name> [--param name=value]...")?,
+            });
+            if let Some(pos) = rest.iter().position(|a| *a == "--allow-write") {
+                let usage = "flow run <name> --allow-write <all|id,id,...>";
+                let value = rest
+                    .get(pos + 1)
+                    .filter(|v| !v.starts_with("--"))
+                    .ok_or_else(|| ParseError::InvalidValue {
+                        message: "--allow-write takes `all` or comma-separated write ids; `flow save` lists them".to_string(),
+                        usage,
+                    })?;
+                cmd["allowWrite"] = json!(value);
+            }
+            if let Some(origin) = flag_value(rest, "--origin") {
+                cmd["origin"] = json!(origin);
+            }
+            let mut filters = serde_json::Map::new();
+            for (i, a) in rest.iter().enumerate() {
+                if *a == "--where" {
+                    let pair = rest
+                        .get(i + 1)
+                        .ok_or_else(|| ParseError::MissingArguments {
+                            context: "flow run --where".to_string(),
+                            usage: "flow run <name> --where field=value",
+                        })?;
+                    let (k, v) = pair
+                        .split_once('=')
+                        .ok_or_else(|| ParseError::InvalidValue {
+                            message: format!("Invalid --where '{}': expected field=value", pair),
+                            usage: "flow run <name> --where field=value",
+                        })?;
+                    filters.insert(k.to_string(), json!(v));
+                }
+            }
+            if !filters.is_empty() {
+                cmd["where"] = Value::Object(filters);
+            }
+            if let Some(fields) = flag_value(rest, "--fields") {
+                cmd["fields"] = json!(fields);
+            }
+            if let Some(limit) = flag_value(rest, "--limit") {
+                let n: u64 = limit.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --limit '{}'", limit),
+                    usage: "flow run <name> --limit <n>",
+                })?;
+                cmd["limit"] = json!(n);
+            }
+            timeout_flag(
+                rest,
+                &mut cmd,
+                "flow run --timeout",
+                "flow run <name> --timeout <ms>",
+            )?;
+            Ok(cmd)
+        }
+        Some("list") => {
+            let mut cmd = json!({ "id": id, "action": "flow_list" });
+            if let Some(origin) = flag_value(rest, "--origin") {
+                cmd["origin"] = json!(origin);
+            }
+            Ok(cmd)
+        }
+        Some(sub) => Err(ParseError::UnknownSubcommand {
+            subcommand: sub.to_string(),
+            valid_options: VALID,
+        }),
+        None => Err(ParseError::MissingArguments {
+            context: "flow".to_string(),
+            usage: USAGE,
         }),
     }
 }
@@ -3789,6 +4018,8 @@ mod tests {
             cli_headed: false,
             cli_webgpu: false,
             cli_no_webmcp: false,
+            cli_auto_connect: false,
+            no_auto_connect: false,
             cli_restore: false,
             cli_pin_tab: false,
             cli_input_mode: false,
@@ -3798,6 +4029,7 @@ mod tests {
             content_boundaries: false,
             max_output: None,
             allowed_domains: None,
+            capture: None,
             action_policy: None,
             confirm_actions: None,
             confirm_interactive: false,
@@ -4484,6 +4716,64 @@ mod tests {
         assert_eq!(cmd["raw"], true);
         assert_eq!(cmd["requireMd"], true);
         assert_eq!(cmd["timeout"], 2500);
+    }
+
+    #[test]
+    fn flow_save_takes_a_name_and_a_range() {
+        let cmd = parse_flow(
+            &[
+                "save",
+                "cart",
+                "--from",
+                "3",
+                "--to",
+                "7",
+                "--param",
+                "q=x",
+                "--description",
+                "Adds",
+            ],
+            "1",
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "flow_save");
+        assert_eq!(cmd["name"], "cart");
+        assert_eq!(cmd["from"], 3);
+        assert_eq!(cmd["to"], 7);
+        assert_eq!(cmd["params"]["q"], "x");
+        assert_eq!(cmd["description"], "Adds");
+        assert!(parse_flow(&["save"], "1").is_err());
+        assert!(parse_flow(&["save", "--from", "1"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--from", "open"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--to", "x"], "1").is_err());
+        let cmd = parse_flow(&["save", "a", "--timeout", "1500"], "1").unwrap();
+        assert_eq!(cmd["timeout"], 1500);
+        assert!(parse_flow(&["save", "a", "--timeout", "soon"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--timeout"], "1").is_err());
+    }
+
+    #[test]
+    fn flow_run_allow_write_takes_all_or_ids() {
+        let cmd = parse_flow(&["run", "cart", "--allow-write", "all"], "1").unwrap();
+        assert_eq!(cmd["allowWrite"], "all");
+        let cmd = parse_flow(
+            &["run", "cart", "--allow-write", "s1r1,s2w1", "--limit", "2"],
+            "1",
+        )
+        .unwrap();
+        assert_eq!(cmd["allowWrite"], "s1r1,s2w1");
+        assert!(parse_flow(&["run", "cart"], "1")
+            .unwrap()
+            .get("allowWrite")
+            .is_none());
+        assert!(parse_flow(&["run", "cart", "--allow-write"], "1").is_err());
+        assert!(parse_flow(&["run", "cart", "--allow-write", "--limit", "2"], "1").is_err());
+    }
+
+    #[test]
+    fn flow_start_is_gone_and_steps_parses() {
+        assert!(parse_flow(&["start", "x"], "1").is_err());
+        assert_eq!(parse_flow(&["steps"], "1").unwrap()["action"], "flow_steps");
     }
 
     #[test]
@@ -6164,6 +6454,26 @@ mod tests {
     }
 
     #[test]
+    fn test_flow_save_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(40000);
+        let cmd = parse_command(&args("flow save stoves"), &flags).unwrap();
+        assert_eq!(cmd["action"], "flow_save");
+        assert_eq!(cmd["timeout"], 40000);
+        let none = parse_command(&args("flow save stoves"), &default_flags()).unwrap();
+        assert!(none.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_flow_run_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(40000);
+        let cmd = parse_command(&args("flow run stoves"), &flags).unwrap();
+        assert_eq!(cmd["action"], "flow_run");
+        assert_eq!(cmd["timeout"], 40000);
+        let none = parse_command(&args("flow run stoves"), &default_flags()).unwrap();
+        assert!(none.get("timeout").is_none());
+    }
+
+    #[test]
     fn test_wait_selector_inherits_default_timeout() {
         let flags = flags_with_default_timeout(3000);
         let cmd = parse_command(&args("wait #element"), &flags).unwrap();
@@ -7175,5 +7485,32 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_batch_items_reject_global_flags_and_keep_literal_text() {
+        for item in [
+            "--session other open https://example.com",
+            "goto --init-script probe.js",
+            "screenshot --init-script probe.js",
+            "snapshot --init-script probe.js",
+            "vitals --init-script probe.js",
+        ] {
+            let err = parse_batch_command(&args(item), &default_flags()).unwrap_err();
+            assert!(
+                matches!(&err, ParseError::InvalidValue { message, .. } if message.contains("outer batch invocation")),
+                "{item}: {err:?}"
+            );
+        }
+        for item in [
+            "fill #field --json",
+            "type #field --clear",
+            "vitals https://example.com",
+        ] {
+            assert!(
+                parse_batch_command(&args(item), &default_flags()).is_ok(),
+                "{item}"
+            );
+        }
     }
 }

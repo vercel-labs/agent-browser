@@ -190,7 +190,7 @@ impl Running {
                     });
                     next.assign(key, value.clone());
                     if CONNECTION_KEYS.contains(&key) {
-                        displace_other_targets(&mut next, key, &mut changes);
+                        displace_other_targets(&mut next, patch, key, &mut changes);
                     }
                     // Headers belong to the endpoint they were set for.
                     if key == Key::Cdp {
@@ -213,9 +213,12 @@ impl Running {
                     }
                 }
                 Requested::Default => {
-                    let Some(current) = self.get(key) else {
+                    // Read `next`: a target set earlier in this patch may have
+                    // displaced the key already, and that change is recorded.
+                    let Some(current) = next.get(key).cloned() else {
                         continue;
                     };
+                    let current = &current;
                     if default_value(key).as_ref() == Some(current) {
                         continue;
                     }
@@ -306,13 +309,15 @@ fn displace(next: &mut Running, patch: &Patch, keys: &[Key], changes: &mut Vec<C
     }
 }
 
-fn displace_other_targets(next: &mut Running, set: Key, changes: &mut Vec<Change>) {
+fn displace_other_targets(next: &mut Running, patch: &Patch, set: Key, changes: &mut Vec<Change>) {
     let mut displaced: Vec<Key> = CONNECTION_KEYS
         .iter()
         .copied()
         .filter(|other| *other != set)
         .collect();
-    if set != Key::Cdp {
+    // Headers the same command sends (env or config `cdpHeaders`) stay, or
+    // every later command would see them as new and relaunch.
+    if set != Key::Cdp && patch.get(Key::CdpHeaders).is_none() {
         displaced.push(Key::CdpHeaders);
     }
     for other in displaced {

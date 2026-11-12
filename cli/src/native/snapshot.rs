@@ -463,8 +463,10 @@ pub async fn take_snapshot(
             .send_command_no_params("Accessibility.enable", Some(effective_session_id))
             .await;
     }
+    // The full tree of a large page runs to megabytes, so the response is
+    // parsed once, straight from its text, instead of through a Value.
     let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed(
+        .send_command_typed_raw(
             "Accessibility.getFullAXTree",
             &ax_params,
             Some(effective_session_id),
@@ -1706,23 +1708,28 @@ fn compact_tree(tree: &str, interactive: bool) -> String {
     }
 
     let mut keep = vec![false; lines.len()];
+    // Index and indent of the open ancestors, outermost first. Keeping them in
+    // a stack lets a kept line mark its ancestors once instead of walking back
+    // over every earlier line, which made compact mode quadratic on big tables.
+    let mut ancestors: Vec<(usize, usize)> = Vec::new();
 
     for (i, line) in lines.iter().enumerate() {
+        let indent = count_indent(line);
+        while let Some(&(_, ancestor_indent)) = ancestors.last() {
+            if ancestor_indent < indent {
+                break;
+            }
+            ancestors.pop();
+        }
+
         if line.contains("ref=") || line.contains(": ") || (!interactive && line.contains(" \"")) {
             keep[i] = true;
-            // Mark ancestors
-            let mut my_indent = count_indent(line);
-            for j in (0..i).rev() {
-                let ancestor_indent = count_indent(lines[j]);
-                if ancestor_indent < my_indent {
-                    keep[j] = true;
-                    my_indent = ancestor_indent;
-                    if ancestor_indent == 0 {
-                        break;
-                    }
-                }
+            for &(ancestor, _) in &ancestors {
+                keep[ancestor] = true;
             }
         }
+
+        ancestors.push((i, indent));
     }
 
     let result: Vec<&str> = lines
@@ -1935,6 +1942,81 @@ mod tests {
     fn test_compact_tree_empty_interactive() {
         let result = compact_tree("- generic\n", true);
         assert_eq!(result, "(no interactive elements)");
+    }
+
+    /// The original ancestor walk, kept as the reference the stack in
+    /// `compact_tree` has to reproduce exactly.
+    fn compact_tree_reference(tree: &str, interactive: bool) -> String {
+        let lines: Vec<&str> = tree.lines().collect();
+        let mut keep = vec![false; lines.len()];
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains("ref=")
+                || line.contains(": ")
+                || (!interactive && line.contains(" \""))
+            {
+                keep[i] = true;
+                let mut my_indent = count_indent(line);
+                for j in (0..i).rev() {
+                    let ancestor_indent = count_indent(lines[j]);
+                    if ancestor_indent < my_indent {
+                        keep[j] = true;
+                        my_indent = ancestor_indent;
+                        if ancestor_indent == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let output = lines
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| keep[*i])
+            .map(|(_, line)| *line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if output.trim().is_empty() && interactive {
+            return "(no interactive elements)".to_string();
+        }
+        output
+    }
+
+    #[test]
+    fn test_compact_tree_matches_reference_on_generated_trees() {
+        // Successive rounds shuffle indents, empty branches and kept lines so
+        // the stack path is compared against the ancestor walk on many shapes.
+        let lines = [
+            "- root",
+            "  - empty-section",
+            "    - empty-paragraph",
+            "  - section",
+            "    - paragraph",
+            "      - StaticText \"Saved\"",
+            "      - text: Hello",
+            "        - deeper",
+            "  - button \"Save\" [ref=e1]",
+            "    - StaticText \"Save\"",
+            "- other-root",
+            "",
+            "      - jump",
+            "        - jump-deeper",
+            "          - checkbox [checked=false, ref=e2]",
+            "- trailing",
+        ];
+        for len in 0..=lines.len() {
+            for rotation in 0..4 {
+                let mut rotated: Vec<&str> = lines[..len].to_vec();
+                rotated.rotate_left(rotation % len.max(1));
+                let tree = format!("{}\n", rotated.join("\n"));
+                for interactive in [false, true] {
+                    assert_eq!(
+                        compact_tree(&tree, interactive),
+                        compact_tree_reference(&tree, interactive),
+                        "tree: {tree:?}, interactive: {interactive}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
