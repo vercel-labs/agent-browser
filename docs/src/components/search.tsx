@@ -48,6 +48,8 @@ export function Search() {
     if (open) {
       setTimeout(() => inputRef.current?.focus(), 0);
     } else {
+      // ESLint's React Compiler rule skipped this component; follow-up: derive this state.
+      // oxlint-disable-next-line react/set-state-in-effect
       setQuery("");
       setResults([]);
     }
@@ -56,6 +58,8 @@ export function Search() {
   useEffect(() => {
     const q = query.trim();
     if (!q) {
+      // ESLint's React Compiler rule skipped this component; follow-up: derive this state.
+      // oxlint-disable-next-line react/set-state-in-effect
       setResults([]);
       setLoading(false);
       return;
@@ -91,10 +95,16 @@ export function Search() {
   }, [query]);
 
   useEffect(() => {
+    // ESLint's React Compiler rule skipped this component; follow-up: derive this state.
+    // oxlint-disable-next-line react/set-state-in-effect
     setActiveIndex(0);
   }, [results]);
 
   function handleKeyDown(e: React.KeyboardEvent) {
+    // Ignore keys that confirm an IME composition (e.g. Enter selecting a candidate).
+    if (e.nativeEvent.isComposing || e.keyCode === 229) {
+      return;
+    }
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActiveIndex((i) => Math.min(i + 1, results.length - 1));
@@ -186,12 +196,14 @@ export function Search() {
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Search docs..."
+              aria-label="Search docs"
               className="flex-1 bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground"
             />
             {query && (
               <button
                 onClick={() => setQuery("")}
                 className="text-muted-foreground hover:text-foreground"
+                aria-label="Clear search"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"

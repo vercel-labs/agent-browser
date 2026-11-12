@@ -223,7 +223,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run multiple commands sequentially. Unknown commands and subcommands return errors. A batch containing only get cdp-url commands never launches a browser.",
+      "description": "Run multiple commands sequentially. Unknown commands and subcommands return errors. Set global flags on the batch invocation or MCP server. Command arguments can contain flag-like text. A batch containing only get cdp-url commands never launches a browser.",
       "inputSchema": {
         "properties": {
           "bail": {
@@ -1277,6 +1277,168 @@
     {
       "annotations": {
         "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Experimental. List tasks saved with flow save, with their params and whether their last run verified.",
+      "inputSchema": {
+        "properties": {
+          "origin": {
+            "description": "Only flows for this host's site.",
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_flow_list",
+      "profiles": [
+        "core"
+      ],
+      "title": "List saved flows"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Experimental. Run a saved task by sending its requests directly, falling back to the page, then to a replay of the recorded commands. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
+      "inputSchema": {
+        "properties": {
+          "allowWrite": {
+            "description": "Writes the run may send without asking: `all`, or comma-separated write ids from flow save. Any other write needs confirmation.",
+            "type": "string"
+          },
+          "fields": {
+            "description": "Comma-separated fields to return per item, dotted paths allowed.",
+            "type": "string"
+          },
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "timeout": {
+            "description": "Milliseconds the whole run may take, across every tier.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "where": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Keep list items whose field contains the value, case-insensitive.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_flow_run",
+      "profiles": [
+        "core"
+      ],
+      "title": "Run saved flow"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Experimental. Save recorded steps as a flow so later runs can skip the browser. The session must be opened with capture flow. By default the flow starts at the last navigation after the previous save. params maps a param name to the value you typed, so later runs can change it.",
+      "inputSchema": {
+        "properties": {
+          "description": {
+            "description": "One line saying what the flow does.",
+            "type": "string"
+          },
+          "from": {
+            "description": "First step number; defaults to the last navigation after the previous save.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "output": {
+            "description": "Request id whose response the flow returns.",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "timeout": {
+            "description": "Milliseconds to wait for requests the last step started that have no response yet.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "to": {
+            "description": "Last step; defaults to the latest.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_flow_save",
+      "profiles": [
+        "core"
+      ],
+      "title": "Save flow"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Experimental. List the steps a session opened with capture flow has recorded: number, command, URL, tagged request count, and whether it succeeded. Use the numbers with flow save from and to.",
+      "inputSchema": {
+        "properties": {
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_flow_steps",
+      "profiles": [
+        "core"
+      ],
+      "title": "List captured steps"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
         "readOnlyHint": false
       },
       "description": "Focus an element.",
@@ -2241,12 +2403,22 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Launch the browser and optionally navigate to a URL. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
+      "description": "Launch the browser and optionally navigate to a URL. On macOS, installed browsers are searched in /Applications, then ~/Applications. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
       "inputSchema": {
         "properties": {
           "allowedDomains": {
             "description": "Restrict browser and read traffic to these domain patterns.",
             "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. On a running session without capture it relaunches the browser with capture on.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
               "type": "string"
             },
             "type": "array"
@@ -2260,6 +2432,10 @@
           },
           "headed": {
             "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults.",
+            "type": "boolean"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
             "type": "boolean"
           },
           "restore": {
@@ -3549,7 +3725,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
+      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref.",
       "inputSchema": {
         "properties": {
           "compact": {
@@ -4056,6 +4232,16 @@
             },
             "type": "array"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a reusable flow. On a running session without capture it relaunches the browser with capture on.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "extraArgs": {
             "description": "Extra CLI arguments for this command, such as --engine. Flags that change network, file, policy, or host access are rejected.",
             "items": {
@@ -4067,6 +4253,10 @@
             "description": "Starts with an ASCII letter, then ASCII letters, digits, `-`, or `_`; `t<N>` and `T<N>` forms are reserved for tab IDs.",
             "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key.",
