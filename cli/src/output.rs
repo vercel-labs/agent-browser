@@ -4226,7 +4226,7 @@ combine profiles with commas, such as --tools core,network,react.
 
 Tool profiles:
   core       Default. Navigation, snapshots, interaction, waits, reads,
-             screenshots, JavaScript eval, close, tab basics, and profile discovery
+             screenshots, JavaScript eval, dialogs, close, tab basics, and profile discovery
   network    Network routes, request inspection, HAR, headers, credentials, offline
   state      Cookies, storage, auth, saved state, sessions, profiles, skills
   debug      Console/errors, tracing, profiling, recording, accessibility audits,
