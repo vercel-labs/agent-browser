@@ -89,16 +89,19 @@ export function AgentHero({ description }: { description: string }) {
                     <span className="inline-grid align-baseline">
                       {PRODUCTS.map((product, index) => {
                         const active = product === selected;
+                        // The inactive word only reserves width: it is drawn by
+                        // CSS, so the heading's text stays the active headline.
                         return (
                           <span
                             key={product}
                             aria-hidden={active ? undefined : true}
+                            data-word={active ? undefined : headlineParts.words[index]}
                             className={cn(
                               'col-start-1 row-start-1 whitespace-nowrap',
-                              !active && 'invisible'
+                              !active && 'invisible before:content-[attr(data-word)]'
                             )}
                           >
-                            {headlineParts.words[index]}
+                            {active ? headlineParts.words[index] : null}
                           </span>
                         );
                       })}
@@ -113,9 +116,13 @@ export function AgentHero({ description }: { description: string }) {
                         <span
                           key={product}
                           aria-hidden={active ? undefined : true}
-                          className={cn('col-start-1 row-start-1', !active && 'invisible')}
+                          data-word={active ? undefined : products[product].headline}
+                          className={cn(
+                            'col-start-1 row-start-1',
+                            !active && 'invisible before:content-[attr(data-word)]'
+                          )}
                         >
-                          {products[product].headline}
+                          {active ? products[product].headline : null}
                         </span>
                       );
                     })}
