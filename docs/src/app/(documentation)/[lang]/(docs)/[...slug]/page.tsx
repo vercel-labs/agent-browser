@@ -28,7 +28,7 @@ const docsPage = createDocsPage({
   source: geistdocsSource,
   // The introduction is served at `/introduction`, not the root, so its Markdown is `/introduction.md` rather than `/introduction/index.md`.
   getMarkdownUrl: ({ pageUrl, publicPageUrl }) =>
-    resolvePageMarkdownUrl({ basePath: config.basePath, isRootMountedPage: false, pageUrl, publicPageUrl }),
+    resolvePageMarkdownUrl({ isRootMountedPage: false, pageUrl, publicPageUrl }),
   renderTop: ({ data }) => (
     <>
       <span id={legacyHeadingId(data.title)} />
