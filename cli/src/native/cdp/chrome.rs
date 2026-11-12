@@ -743,14 +743,13 @@ fn sweep_stale_temp_profiles(root: &Path, min_age: Duration) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    entries
+    let _ = entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| classify_temp_profile(path, min_age) == TempProfileState::Stale)
+        .filter(|path| std::fs::remove_dir_all(path).is_ok())
         .take(STALE_PROFILE_MAX_PER_SWEEP)
-        .for_each(|path| {
-            let _ = std::fs::remove_dir_all(path);
-        });
+        .count();
 }
 
 /// Decides the state of one temp directory entry from its name, type, age,
