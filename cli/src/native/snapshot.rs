@@ -204,6 +204,7 @@ struct TreeNode {
     depth: usize,
     cursor_info: Option<CursorElementInfo>,
     url: Option<String>,
+    hint: Option<String>,
 }
 
 impl TreeNode {
@@ -227,6 +228,7 @@ impl TreeNode {
             depth: 0,
             cursor_info: None,
             url: None,
+            hint: None,
         }
     }
 
@@ -249,6 +251,21 @@ impl TreeNode {
         self.depth = 0;
         self.cursor_info = None;
     }
+
+    /// The name an interactive snapshot prints: the accessible name, or the cursor-interactive text when that is empty.
+    fn label(&self) -> &str {
+        match &self.cursor_info {
+            Some(cursor_info) if self.name.is_empty() => &cursor_info.text,
+            _ => &self.name,
+        }
+    }
+}
+
+/// How a ref's printed role and label identify it among the refs of one snapshot.
+enum LabelState {
+    Unique,
+    Shared,
+    Empty,
 }
 
 /// The type of a hidden form input found inside a cursor-interactive element.
@@ -566,72 +583,51 @@ pub async fn take_snapshot(
 
     ref_map.set_next_ref_num(next_ref);
 
+    let mut label_counts: HashMap<(&str, &str), usize> = HashMap::new();
+    for &(idx, _) in &nodes_with_refs {
+        let node = &tree_nodes[idx];
+        *label_counts
+            .entry((node.role.as_str(), node.label()))
+            .or_default() += 1;
+    }
+    let hint_nodes: Vec<(usize, i64)> = nodes_with_refs
+        .iter()
+        .filter_map(|&(idx, _)| {
+            let node = &tree_nodes[idx];
+            let is_control = node.cursor_info.is_some()
+                || (INTERACTIVE_ROLES.contains(&node.role.as_str()) && node.role != "Iframe");
+            let state = match (
+                node.label(),
+                label_counts[&(node.role.as_str(), node.label())],
+            ) {
+                ("", _) => LabelState::Empty,
+                (_, 1) => LabelState::Unique,
+                _ => LabelState::Shared,
+            };
+            let needs_hint = match state {
+                LabelState::Unique => false,
+                LabelState::Shared | LabelState::Empty => true,
+            };
+            node.backend_node_id
+                .filter(|_| is_control && needs_hint)
+                .map(|bid| (idx, bid))
+        })
+        .collect();
+    for (idx, hint) in call_on_nodes(client, effective_session_id, &hint_nodes, HINT_FUNCTION).await
+    {
+        tree_nodes[idx].hint = Some(hint);
+    }
+
     if options.urls {
         let link_nodes: Vec<(usize, i64)> = tree_nodes
             .iter()
             .enumerate()
-            .filter(|(_, n)| n.role == "link" && n.has_ref && n.backend_node_id.is_some())
+            .filter(|(_, n)| n.role == "link" && n.has_ref)
             .filter_map(|(i, n)| n.backend_node_id.map(|bid| (i, bid)))
             .collect();
-
-        if !link_nodes.is_empty() {
-            // CDP has no batch resolve API, so we parallelize individual calls.
-            // Phase 1: resolve all backend node IDs to JS object IDs in parallel.
-            let resolve_futs = link_nodes.iter().map(|&(idx, bid)| async move {
-                let resolved = client
-                    .send_command(
-                        "DOM.resolveNode",
-                        Some(serde_json::json!({ "backendNodeId": bid })),
-                        Some(session_id),
-                    )
-                    .await;
-                let obj_id = resolved.ok().and_then(|r| {
-                    r.get("object")
-                        .and_then(|o| o.get("objectId"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                });
-                (idx, obj_id)
-            });
-            let resolved: Vec<(usize, Option<String>)> =
-                futures_util::future::join_all(resolve_futs).await;
-
-            // Phase 2: fetch hrefs for all resolved objects in parallel.
-            let href_futs: Vec<_> = resolved
-                .iter()
-                .filter_map(|(idx, obj_id)| {
-                    let oid = obj_id.as_ref()?;
-                    Some(async move {
-                        let result = client
-                            .send_command(
-                                "Runtime.callFunctionOn",
-                                Some(serde_json::json!({
-                                    "objectId": oid,
-                                    "functionDeclaration": "function() { return this.href || ''; }",
-                                    "returnByValue": true,
-                                })),
-                                Some(session_id),
-                            )
-                            .await;
-                        let href = result.ok().and_then(|r| {
-                            r.get("result")
-                                .and_then(|r| r.get("value"))
-                                .and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty())
-                                .map(|s| s.to_string())
-                        });
-                        (*idx, href)
-                    })
-                })
-                .collect();
-            let hrefs: Vec<(usize, Option<String>)> =
-                futures_util::future::join_all(href_futs).await;
-
-            for (idx, href) in hrefs {
-                if let Some(url) = href {
-                    tree_nodes[idx].url = Some(url);
-                }
-            }
+        let href = "function() { return this.href || ''; }";
+        for (idx, url) in call_on_nodes(client, effective_session_id, &link_nodes, href).await {
+            tree_nodes[idx].url = Some(url);
         }
     }
 
@@ -723,6 +719,63 @@ pub async fn take_snapshot(
     }
 
     Ok(trimmed)
+}
+
+/// Describes a control from its icon, image file, stable attribute, and nearest row.
+const HINT_FUNCTION: &str = r#"function() {
+    const tail = (s, sep) => (s || '').split(sep).pop();
+    const use = this.querySelector('svg use');
+    const svg = this.querySelector('svg[id], svg[data-icon]');
+    const mark = this.querySelector('svg[class], i[class]');
+    const img = this.querySelector('img[src]:not([src^="data:"])');
+    const icon = use ? tail(use.getAttribute('href') || use.getAttribute('xlink:href'), '#')
+        : svg ? svg.id || svg.dataset.icon
+        : mark ? mark.getAttribute('class').split(/\s+/).filter((c) => /^(lucide|fa|bi|mdi|ri|ti|icon)-/.test(c)).join(' ')
+        : '';
+    const file = img ? tail(img.getAttribute('src').split(/[?#]/)[0], '/').replace(/\.\w+$/, '') : '';
+    const key = ['data-testid', 'name', 'id'].find((k) => /^(?!.*\d{3})[a-z][\w-]*$/i.test(this.getAttribute(k) || ''));
+    const row = this.closest('tr, li, article, [role=row], [role=listitem]');
+    const near = row ? row.innerText.replace(this.innerText, '').replace(/\s+/g, ' ').trim() : '';
+    return [icon && 'icon:' + icon, file && 'img:' + file, key && key + ':' + this.getAttribute(key), near && 'in:' + near]
+        .filter(Boolean).map((s) => s.slice(0, 48)).join('; ');
+}"#;
+
+/// Calls `function` on each DOM node in parallel and returns the non-empty strings it produced.
+async fn call_on_nodes(
+    client: &CdpClient,
+    session_id: &str,
+    nodes: &[(usize, i64)],
+    function: &str,
+) -> Vec<(usize, String)> {
+    let calls = nodes.iter().map(|&(idx, bid)| async move {
+        let node = client
+            .send_command(
+                "DOM.resolveNode",
+                Some(serde_json::json!({ "backendNodeId": bid })),
+                Some(session_id),
+            )
+            .await
+            .ok()?;
+        let result = client
+            .send_command(
+                "Runtime.callFunctionOn",
+                Some(serde_json::json!({
+                    "objectId": node["object"]["objectId"],
+                    "functionDeclaration": function,
+                    "returnByValue": true,
+                })),
+                Some(session_id),
+            )
+            .await
+            .ok()?;
+        let value = result["result"]["value"].as_str()?;
+        (!value.is_empty()).then(|| (idx, value.to_string()))
+    });
+    futures_util::future::join_all(calls)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Resolve the child frame ID for an iframe element given its backendNodeId.
@@ -1123,6 +1176,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             depth: 0,
             cursor_info: None,
             url: None,
+            hint: None,
         });
         id_to_idx.insert(node.node_id.clone(), i);
     }
@@ -1270,16 +1324,10 @@ fn render_tree(
     let mut line = format!("{}- {}", prefix, role);
 
     // Use ARIA name if available, only fall back to cursor-interactive textContent in interactive mode since their visible text in child nodes is filtered out
-    let unescaped_display_name = if !node.name.is_empty() {
-        &node.name
-    } else if options.interactive {
-        if let Some(ref ci) = node.cursor_info {
-            &ci.text
-        } else {
-            &node.name
-        }
+    let unescaped_display_name = if options.interactive {
+        node.label()
     } else {
-        &node.name
+        node.name.as_str()
     };
     if !unescaped_display_name.is_empty() {
         if let Ok(display_name) =
@@ -1327,6 +1375,10 @@ fn render_tree(
 
     if !attrs.is_empty() {
         line.push_str(&format!(" [{}]", attrs.join(", ")));
+    }
+
+    if let Some(ref hint) = node.hint {
+        line.push_str(&format!(" hint={:?}", hint));
     }
 
     // Add cursor-interactive kind & hints

@@ -2758,6 +2758,10 @@ Compact snapshots keep visible text, status text, and their direct ancestors.
 Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
 interactive to false to retain visible text and status text.
 
+Hints:
+Controls with an empty or duplicated accessible name print hint="..." after
+the ref, read from the icon, image file, data-testid/name/id, and nearest row.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
