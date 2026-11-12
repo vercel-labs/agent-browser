@@ -3479,6 +3479,12 @@ With --cursor, an inert overlay renders the pointer and page together so
 drags stay synchronized. It is hidden from accessibility snapshots and
 removed on stop. Screenshots taken while recording include the overlay.
 
+Frames come from Chrome's screencast, which captures at the window's real
+device scale. When the page's scale is emulated (`set viewport <w> <h> 2`),
+recording switches to full-density screenshots, which can capture fewer frames
+on busy pages; `record stop` reports "capture": "screenshots". Launching with
+--args "--force-device-scale-factor=2" keeps the screencast at full density.
+
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)
   stop                   Stop recording and save video
