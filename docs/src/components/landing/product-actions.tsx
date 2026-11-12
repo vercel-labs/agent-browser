@@ -164,7 +164,7 @@ export function ProductActions({
       />
       {showDocsLink && (
         <ActionButton Component="a" variant="secondary" href={product.docsHref}>
-          Read the docs and get set up
+          Read the docs
         </ActionButton>
       )}
     </div>

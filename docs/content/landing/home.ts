@@ -13,12 +13,12 @@ const home = {
     "browser": {
       "headline": "Browser automation built for any agent",
       "docsHref": "/introduction",
-      "prompt": "Read the agent-browser docs: https://agent-browser.dev/introduction"
+      "prompt": "Set up agent-browser for yourself by reading the docs at https://agent-browser.dev/introduction."
     },
     "desktop": {
       "headline": "Desktop automation built for any agent",
       "docsHref": "https://agent-browser.dev/desktop",
-      "prompt": "Read the agent-desktop docs: https://agent-browser.dev/desktop"
+      "prompt": "Set up agent-desktop for yourself by reading the docs at https://agent-browser.dev/desktop."
     }
   },
   "useCases": {
