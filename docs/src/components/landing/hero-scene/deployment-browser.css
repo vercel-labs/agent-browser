@@ -59,8 +59,8 @@
   & .ab-headline { font: 450 30px/1 var(--ss-font); letter-spacing: -.06em; color: var(--ds-gray-1000, #171717); white-space: nowrap; }
   & .ab-mock-actions { display: flex; gap: 8px; margin-top: 20px; }
   & .ab-mock-actions > * { display: block; height: 28px; border-radius: 999px; }
-  & .ab-mock-primary { width: 92px; background: var(--ds-gray-500); }
-  & .ab-mock-secondary { width: 72px; box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-500); }
+  & .ab-mock-primary { width: 92px; background: var(--ds-gray-300); }
+  & .ab-mock-secondary { width: 72px; box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400); }
   & .ab-home { left: 250px; top: 200px; }
 
   /* A screenshot: the headline region in a frame of the page's color, so

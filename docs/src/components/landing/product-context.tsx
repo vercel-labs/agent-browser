@@ -1,8 +1,10 @@
 'use client';
 
 import { createContext, useContext, useState, type ReactNode } from 'react';
+import { cn } from '@/lib/utils';
 
 export type Product = 'browser' | 'desktop';
+export const PRODUCTS: Product[] = ['browser', 'desktop'];
 export type ProductContent = {
   headline: string;
   prompt: string;
@@ -56,8 +58,19 @@ export function useProduct() {
 export function ProductWordmark() {
   const selected = useContext(ProductContext)?.selected ?? 'browser';
   return (
-    <span className="font-[family-name:var(--font-geist-pixel-square)] text-lg leading-none tracking-tight">
-      agent-{selected}
+    <span className="inline-grid font-[family-name:var(--font-geist-pixel-square)] text-lg leading-none tracking-tight">
+      {PRODUCTS.map((product) => {
+        const active = product === selected;
+        return (
+          <span
+            key={product}
+            aria-hidden={active ? undefined : true}
+            className={cn('col-start-1 row-start-1 whitespace-nowrap', !active && 'invisible')}
+          >
+            agent-{product}
+          </span>
+        );
+      })}
     </span>
   );
 }

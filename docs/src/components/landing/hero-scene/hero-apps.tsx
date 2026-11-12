@@ -38,7 +38,7 @@ export const ATTACH_SCALE: Record<Layout, number> = { wide: .468, compact: .47 }
 function Hero({ fixed }: { fixed: boolean }) {
   return (
     <div className="ab-mock-hero">
-      <div className="ab-headline">Build {(fixed ? FIXED : TYPO)[0]}<br />{(fixed ? FIXED : TYPO)[1]}, faster</div>
+      <div className="ab-headline">Build better<br />{(fixed ? FIXED : TYPO)[0]}, {(fixed ? FIXED : TYPO)[1]}</div>
       <span className="ab-mock-actions"><span className="ab-mock-primary" /><span className="ab-mock-secondary" /></span>
     </div>
   );

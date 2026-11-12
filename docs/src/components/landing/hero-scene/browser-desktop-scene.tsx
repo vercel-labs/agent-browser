@@ -37,6 +37,12 @@ const designSize = (layout: Layout) => layout === 'wide'
 
 /** Browser scope's zoom is the canvas over the crop (2.16 wide, 3.08 compact); the cap only guards. */
 const CAMERA_MAX = 3.2;
+/** The camera's move between scopes (HeroCamera's transition, its travel curve). */
+const CAMERA_MS = 1100;
+/** Entering Desktop, the wallpaper holds until the zoom-out is this far along:
+ * 900 of 1100ms, about 98% of the way on the travel curve, so it is still
+ * while the frame moves and the series only takes over as the camera settles. */
+const WALL_GATE = 900;
 /** Cursors render at true screen pixels: their CSS size is --ss-unscale (the
  * stage's measured fit, inverted) over the camera's zoom. These are only the
  * usual fits' inverses, used to keep labels inside the frame. */
@@ -76,11 +82,11 @@ export function BrowserDesktopScene({ desktop }: { desktop: boolean }) {
 
   return (
     <figure ref={host} className="ab-hero-demo" data-hero-scene data-ready={ready || undefined} data-scope={desktop ? 'desktop' : 'browser'}>
-      <figcaption className="ab-scene-description">An agent notices a bug and proves the fix: on the production site, open in the browser, the headline reads Build bdtter prpducts, faster, and the agent screenshots the hero. It opens the Preview deployment of the fix in a new tab, where the headline reads Build better products, faster, and screenshots that too. Carrying both, it opens the pull request, Fix typos in hero heading #128, and pastes them into the description side by side as Before and After, then closes the pull request and the preview, back on production. Desktop reveals three more agents: Gemini selects three loose files and drags them to the Trash, OpenAI opens Photos from the dock, deletes three photos and closes it, and Claude zooms out on a map and pans around.</figcaption>
+      <figcaption className="ab-scene-description">An agent notices a bug and proves the fix: on the production site, open in the browser, the headline reads Build better prpducts, fadter, and the agent screenshots the hero. It opens the Preview deployment of the fix in a new tab, where the headline reads Build better products, faster, and screenshots that too. Carrying both, it opens the pull request, Fix typos in hero heading #128, and pastes them into the description side by side as Before and After, then closes the pull request and the preview, back on production. Desktop reveals three more agents: Gemini selects three loose files and drags them to the Trash, OpenAI opens Photos from the dock, deletes three photos and closes it, and Claude zooms out on a map and pans around.</figcaption>
       <div aria-hidden="true">
         <Stage {...STAGE_SIZE} fill initial={HERO_INITIAL} poster={HERO_STILL} script={playback.script} play="loop" theme="light" fidelity="standard" className="ab-scene look-vercel">
           {(s, _rect, layout) => (
-            <HeroCamera focus={desktop ? null : FOCUS[layout]} size={designSize(layout)} max={CAMERA_MAX} duration={1100} animate={ready}>
+            <HeroCamera focus={desktop ? null : FOCUS[layout]} size={designSize(layout)} max={CAMERA_MAX} duration={CAMERA_MS} animate={ready}>
               <HeroWorld time={reduced ? playback.time : s.time} loop={reduced ? 0 : s.loop} layout={layout} desktop={desktop} playing={playback.playing} />
             </HeroCamera>
           )}
@@ -138,23 +144,46 @@ function HeroWorld({ time, loop = 0, layout, desktop, playing }: { time: number;
   }, [layout]);
   const frame = heroFrame(time);
   const desktopState = desktopFrame(time, loop);
-  // The wallpaper only changes where it can be seen: in browser scope it holds
-  // the last one shown; entering desktop scope re-bases the series to carry on
-  // from it (no jump as the camera opens), and only clicks seen there advance it.
-  // React's "adjust state when a prop changes": on a scope change, set the new
-  // offset or frozen wallpaper during render (guarded, so it settles at once).
+  // The wallpaper only changes where it can be seen. In browser scope it holds
+  // the last one shown. Choosing Desktop keeps holding it through the camera's
+  // zoom-out, and only once that is almost done (WALL_GATE) does the series take
+  // over, re-based so it carries on from the held wallpaper: nothing that
+  // happened off camera or mid-zoom catches up, and the next change is a Photos
+  // click the viewer sees. A fade already under way when the gate opens (a
+  // click made mid-zoom) is pinned to the held wallpaper until the next click.
+  // React's "adjust state when a prop changes": scope changes and the gate's
+  // opening set the new state during render (guarded, so it settles at once).
   const absolute = desktopState.wall;
-  const [wallState, setWallState] = useState({ desktop, offset: 0, frozen: 0 });
+  /** The wallpaper the series is showing or heading to. */
+  const heading = absolute.mix > 0 ? absolute.next : absolute.base;
+  const [wallState, setWallState] = useState({ desktop, open: desktop, offset: 0, frozen: 0, pin: null as number | null });
+  const [gateDue, setGateDue] = useState(desktop);
   let wallTrack = wallState;
   if (desktop !== wallState.desktop) {
-    wallTrack = desktop
-      ? { desktop, offset: absolute.base - wallState.frozen, frozen: wallState.frozen }
-      : { desktop, offset: wallState.offset, frozen: (absolute.mix > .5 ? absolute.next : absolute.base) - wallState.offset };
+    // Leaving Desktop freezes what was on screen; entering it waits for the gate
+    const shown = wallState.open && !(wallState.pin !== null && absolute.base === wallState.pin)
+      ? (absolute.mix > .5 ? absolute.next : absolute.base) - wallState.offset
+      : wallState.frozen;
+    wallTrack = { desktop, open: false, offset: wallState.offset, frozen: shown, pin: null };
+    setWallState(wallTrack);
+    setGateDue(false);
+  } else if (desktop && !wallState.open && gateDue) {
+    wallTrack = { ...wallState, open: true, offset: heading - wallState.frozen, pin: absolute.mix > 0 ? absolute.base : null };
     setWallState(wallTrack);
   }
-  const wall = desktop
+  useEffect(() => {
+    if (!desktop) return;
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const timer = window.setTimeout(() => setGateDue(true), reduce ? 0 : WALL_GATE);
+    return () => window.clearTimeout(timer);
+  }, [desktop]);
+  const pinned = wallTrack.pin !== null && absolute.base === wallTrack.pin;
+  const wall = desktop && wallTrack.open && !pinned
     ? { base: absolute.base - wallTrack.offset, next: absolute.next - wallTrack.offset, mix: absolute.mix }
     : { base: wallTrack.frozen, next: wallTrack.frozen, mix: 0 };
+  // Photos' thumbnails follow the same re-basing; until the gate opens they use
+  // the offset it will set, so they don't reshuffle when it does
+  const photoOffset = !desktop ? 0 : wallTrack.open ? wallTrack.offset : heading - wallTrack.frozen;
   // Targets are re-measured when the scene changes, except from the tab closes
   // to the loop's end: a closing tab shrinks and production's tab widens again,
   // either of which would move a × under the cursor mid-move. Keep the
@@ -255,7 +284,7 @@ function HeroWorld({ time, loop = 0, layout, desktop, playing }: { time: number;
       {/* macOS menu bar: the Apple logo, then File, Edit, View; the right side left empty */}
       <div className="ab-menu"><LogoApple size={18} /><span>File</span><span>Edit</span><span>View</span></div>
       <BrowserWindow frame={frame} layout={layout} />
-      <DesktopApps time={time} loop={loop} wallOffset={desktop ? wallTrack.offset : 0} targets={targets} />
+      <DesktopApps time={time} loop={loop} wallOffset={photoOffset} targets={targets} />
       {/* The flash fills the marquee's own box and corners, as on the screenshot card */}
       {region && frame.flash > 0 && <div className="ab-shot-flash" style={{ left: region.x - SHOT_GAP, top: region.y - SHOT_GAP, width: region.width + SHOT_GAP * 2, height: region.height + SHOT_GAP * 2, borderRadius: SELECTION_RADIUS, opacity: frame.flash }} />}
       {capture && <div className="ab-capture" style={{ opacity: frame.marqueeAlpha }}>

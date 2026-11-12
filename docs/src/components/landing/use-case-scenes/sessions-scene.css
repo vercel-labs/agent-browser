@@ -81,8 +81,9 @@
     color: var(--ds-background-100, #fff);
     transform: translate(var(--lx, 12px), var(--ly, 16px));
   }
-  /* The avatar and its mark squeeze together, about the disc's centre, set
-     every frame from the effort; the arrow stays rigid */
+  /* The avatar: the disc stretches with effort about its centre, the mark
+     only shifts and scales uniformly, both set every frame from the effort;
+     the arrow stays rigid */
   & .ab-peer-squash {
     position: absolute;
     inset: 0;
@@ -97,5 +98,10 @@
     background: var(--peer-color);
     box-shadow: var(--ds-shadow-small, 0 2px 2px rgba(0, 0, 0, .04));
   }
-  & .ab-peer-squash > :not(.ab-peer-disc) { position: relative; }
+  & .ab-peer-mark {
+    position: relative;
+    display: grid;
+    place-items: center;
+    transform-origin: 50% 50%;
+  }
 }

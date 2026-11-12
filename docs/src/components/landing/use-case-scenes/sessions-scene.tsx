@@ -185,6 +185,25 @@ function hold(who: Who, edge: Edge, t0: number, t1: number) {
 }
 const effort = (who: Who, ...keys: Curve) => EFFORT[who].push(...keys);
 
+/** Letting go: the disc springs back to round from the stretch it held, with
+ * no velocity at the start, one small overshoot past round and settled in
+ * about 0.4s. Its period and decay, ms. */
+const RELEASE = { period: 360, decay: 110, span: 600 };
+/** How strained an agent's avatar is at `time`: its effort, except through a
+ * release (a fall to 0 from a real hold), where it is a damped spring instead,
+ * so it dips just past round (negative) and settles. Pure in the playhead. */
+function strainAt(who: Who, time: number) {
+  const keys = EFFORT[who];
+  for (let i = 1; i < keys.length; i++) {
+    const [t0, peak] = keys[i - 1];
+    if (keys[i][1] !== 0 || peak < 0.2) continue;
+    const u = time - t0;
+    if (u < 0 || u > RELEASE.span) continue;
+    return peak * Math.exp(-u / RELEASE.decay) * Math.cos((2 * Math.PI * u) / RELEASE.period);
+  }
+  return Math.max(0, curve(keys, time));
+}
+
 // 1  Lil Pix, on the edge from the start, takes hold and pulls its bottom
 //    edge down into Claude's.
 Y.push([1300, 28]);
@@ -336,9 +355,10 @@ function stretch(deg: number, along: number, across: number): Mat {
 }
 
 /** An agent: the arrow, rigid, turned to its heading about the tip, and the
- * avatar straight behind it. Only the avatar and its mark deform with effort,
- * on the pull axis (SQUEEZE_AXIS), about the disc's centre, kept on the
- * arrow, and lean back from the edge (STRAIN_LEAN). True screen pixels whatever the card's fit. */
+ * avatar straight behind it. Only the disc deforms with effort, on the pull
+ * axis (SQUEEZE_AXIS), about its centre, kept on the arrow; the mark inside
+ * keeps its aspect and only scales down a little, uniformly. Both lean back
+ * from the edge (STRAIN_LEAN) and spring back to round on release. True screen pixels whatever the card's fit. */
 function Agent({ who, at, a, sq, axis }: { who: Who; at: XY; a: number; sq: number; axis: number }) {
   const rad = (a * Math.PI) / 180;
   const cx = -Math.cos(rad) * REACH;
@@ -357,7 +377,11 @@ function Agent({ who, at, a, sq, axis }: { who: Who; at: XY; a: number; sq: numb
   const lean = STRAIN_LEAN * Math.min(1, sq);
   const dx = Math.cos(rad) * toward + back * ux * lean;
   const dy = Math.sin(rad) * toward + back * uy * lean;
-  const squash = `matrix(${m.map(v => v.toFixed(4)).join(', ')}, ${dx.toFixed(2)}, ${dy.toFixed(2)})`;
+  // Only the disc deforms; the mark rides the same offset and keeps its
+  // shape, shrinking a touch, uniformly, while the disc is drawn thin
+  const disc = `matrix(${m.map(v => v.toFixed(4)).join(', ')}, ${dx.toFixed(2)}, ${dy.toFixed(2)})`;
+  const fit = 1 - 0.07 * Math.min(1.15, Math.max(0, sq));
+  const mark = `translate(${dx.toFixed(2)}px, ${dy.toFixed(2)}px) scale(${fit.toFixed(4)})`;
   return (
     <span className="ab-peer" data-peer={who} style={{ transform: `translate(${at.x.toFixed(2)}px, ${at.y.toFixed(2)}px)` }}>
       <span className="ab-peer-body">
@@ -365,9 +389,11 @@ function Agent({ who, at, a, sq, axis }: { who: Who; at: XY; a: number; sq: numb
           <VercelArrow className="ab-peer-arrow" />
         </span>
         <span className="ab-peer-tile" style={{ '--lx': `${(cx - DISC).toFixed(2)}px`, '--ly': `${(cy - DISC).toFixed(2)}px` } as CSSProperties}>
-          <span className="ab-peer-squash" style={{ transform: squash }}>
-            <span className="ab-peer-disc" />
-            <BrandMark name={who} size={MARK[who]} />
+          <span className="ab-peer-squash">
+            <span className="ab-peer-disc" style={{ transform: disc }} />
+            <span className="ab-peer-mark" style={{ transform: mark }}>
+              <BrandMark name={who} size={MARK[who]} />
+            </span>
           </span>
         </span>
       </span>
@@ -395,7 +421,7 @@ function Desktop({ time, layout }: { time: number; layout: Layout }) {
     {CAST.map(who => {
       const { at, a } = actorAt(who, time, layout);
       return <div key={who} className="ab-sessions-actor">
-        <Agent who={who} at={at} a={a} sq={Math.max(0, curve(EFFORT[who], time))} axis={axisAt(who, time)} />
+        <Agent who={who} at={at} a={a} sq={strainAt(who, time)} axis={axisAt(who, time)} />
       </div>;
     })}
   </>;

@@ -43,12 +43,12 @@
   }
   /* The wallpapers' six lightness tones (wallpapers.ts), darkest to lightest:
      pale grays, a little ink in white. Dark mode sets its own below. */
-  --ab-wall-0: color-mix(in oklab, var(--ds-gray-1000) 22%, var(--ds-background-100));
-  --ab-wall-1: color-mix(in oklab, var(--ds-gray-1000) 17%, var(--ds-background-100));
-  --ab-wall-2: color-mix(in oklab, var(--ds-gray-1000) 13%, var(--ds-background-100));
-  --ab-wall-3: color-mix(in oklab, var(--ds-gray-1000) 9%, var(--ds-background-100));
-  --ab-wall-4: color-mix(in oklab, var(--ds-gray-1000) 5%, var(--ds-background-100));
-  --ab-wall-5: color-mix(in oklab, var(--ds-gray-1000) 2%, var(--ds-background-100));
+  --ab-wall-0: color-mix(in oklab, var(--ds-gray-1000) 13%, var(--ds-background-100));
+  --ab-wall-1: color-mix(in oklab, var(--ds-gray-1000) 10%, var(--ds-background-100));
+  --ab-wall-2: color-mix(in oklab, var(--ds-gray-1000) 7.5%, var(--ds-background-100));
+  --ab-wall-3: color-mix(in oklab, var(--ds-gray-1000) 5%, var(--ds-background-100));
+  --ab-wall-4: color-mix(in oklab, var(--ds-gray-1000) 3%, var(--ds-background-100));
+  --ab-wall-5: color-mix(in oklab, var(--ds-gray-1000) 1.5%, var(--ds-background-100));
   /* The wallpaper's base, shared with the Photos thumbnails that set it */
   --ab-wall-base: var(--ab-wall-3);
   /* The wallpapers are gradients of the theme's own grays (wallpapers.ts): no filter */
