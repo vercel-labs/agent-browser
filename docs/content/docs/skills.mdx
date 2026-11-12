@@ -78,6 +78,7 @@ This design solves the version drift problem: the installed SKILL.md rarely chan
 - **vercel-sandbox**: Run agent-browser + headless Chrome inside ephemeral Vercel Sandbox microVMs.
 - **protected-vercel-deployments**: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens.
 - **webmcp-gen**: Build and validate experimental WebMCP tools for an existing page, including `webmcp.init.js` and deterministic checks.
+- **modern-web-guidance**: Apply Chrome's [Modern Web Guidance](/modern-web-guidance) to UI code, then check the built page for layout shift, reduced motion, color scheme, and dialog focus, and report each rule with its evidence.
 - **agentcore**: Run agent-browser on AWS Bedrock AgentCore cloud browsers.
 
 Use `agent-browser skills list` to see all available skills, then `agent-browser skills get <name>` to load one. Start with `agent-browser skills get core`. It routes to its references when a task needs more detail, and `--full` prints all of them at once.
