@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::net::Shutdown;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,13 +19,104 @@ use tokio_tungstenite::Connector;
 
 use super::types::{CdpCommand, CdpError, CdpEvent, CdpMessage};
 
-type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
+/// A command awaiting its response, with the session it was sent to so the
+/// reader can fail it as soon as that session detaches (#1991).
+struct PendingCommand<T> {
+    session_id: Option<String>,
+    tx: oneshot::Sender<T>,
+}
+
+type PendingMap = Arc<Mutex<HashMap<u64, PendingCommand<CdpMessage>>>>;
 
 /// Responses whose caller wants the raw JSON text rather than a parsed
 /// `serde_json::Value`. The accessibility tree of a large page is several
 /// megabytes of JSON, and building a `Value` from it only to deserialize it
 /// again costs more than the command itself, so those callers parse once.
-type RawPendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<String>>>>;
+type RawPendingMap = Arc<Mutex<HashMap<u64, PendingCommand<String>>>>;
+
+/// Detached sessions remembered so a later command to one fails at once.
+/// A page that keeps replacing a cross-site iframe detaches thousands of
+/// sessions, so the oldest are forgotten past this count.
+const DETACHED_SESSION_LIMIT: usize = 1024;
+
+/// Sessions Chrome reported with `Target.detachedFromTarget`. Chrome does
+/// not answer a command sent to a detached session, so without this a
+/// command sent after the detach waits out the whole command timeout.
+#[derive(Default)]
+struct DetachedSessions {
+    ids: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl DetachedSessions {
+    fn insert(&mut self, session_id: &str) {
+        if !self.ids.insert(session_id.to_string()) {
+            return;
+        }
+        self.order.push_back(session_id.to_string());
+        if self.order.len() > DETACHED_SESSION_LIMIT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.ids.remove(&oldest);
+            }
+        }
+    }
+
+    fn remove(&mut self, session_id: &str) {
+        if self.ids.remove(session_id) {
+            self.order.retain(|known| known != session_id);
+        }
+    }
+
+    fn contains(&self, session_id: &str) -> bool {
+        self.ids.contains(session_id)
+    }
+}
+
+type DetachedSessionSet = Arc<std::sync::Mutex<DetachedSessions>>;
+
+const SESSION_DETACHED_PREFIX: &str = "Target closed: CDP session";
+
+fn session_detached_message(session_id: &str) -> String {
+    format!("{} {} detached", SESSION_DETACHED_PREFIX, session_id)
+}
+
+/// Chrome's protocol error for a command sent to a session it no longer has.
+const SESSION_NOT_FOUND_MESSAGE: &str = "Session with given id not found";
+
+/// Whether a command failed because its CDP session no longer exists: the
+/// session detached before or while the command was pending, or Chrome no
+/// longer knows the session id.
+///
+/// Only the whole error that `send_command` returns for such a command
+/// matches. Other errors can carry page-controlled text (for example the
+/// description of an exception thrown while a script was injected), and
+/// that text must not pass as a detach.
+pub fn is_session_detached_error(error: &str) -> bool {
+    let Some((method, reason)) = error
+        .strip_prefix("CDP error (")
+        .and_then(|rest| rest.split_once("): "))
+    else {
+        return false;
+    };
+    if method.is_empty()
+        || !method
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+    {
+        return false;
+    }
+    if let Some(session_id) = reason
+        .strip_prefix(SESSION_DETACHED_PREFIX)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .and_then(|rest| rest.strip_suffix(" detached"))
+    {
+        return !session_id.is_empty() && !session_id.contains(char::is_whitespace);
+    }
+    reason
+        .strip_prefix(SESSION_NOT_FOUND_MESSAGE)
+        .is_some_and(|rest| rest.is_empty() || rest == ".")
+}
+
 type WsTx = Arc<
     Mutex<
         futures_util::stream::SplitSink<
@@ -189,6 +280,61 @@ fn leading_response_id(msg: &str) -> Option<u64> {
     rest[..end].parse::<u64>().ok().filter(|id| *id > 0)
 }
 
+/// Mark `session_id` detached and fail every command still waiting on it.
+/// Both pending maps stay locked while the session is marked, and senders
+/// check the mark under the same lock before registering, so a command is
+/// either failed here or refused at send time; it never waits out the
+/// timeout in between.
+async fn release_detached_session(
+    pending: &PendingMap,
+    raw_pending: &RawPendingMap,
+    detached: &DetachedSessionSet,
+    session_id: &str,
+) {
+    let mut pending = pending.lock().await;
+    let mut raw_pending = raw_pending.lock().await;
+    detached
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(session_id);
+
+    let message = session_detached_message(session_id);
+    let ids: Vec<u64> = pending
+        .iter()
+        .filter(|(_, command)| command.session_id.as_deref() == Some(session_id))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in ids {
+        if let Some(command) = pending.remove(&id) {
+            let _ = command.tx.send(CdpMessage {
+                id: Some(id),
+                result: None,
+                error: Some(CdpError {
+                    code: None,
+                    message: message.clone(),
+                    data: None,
+                }),
+                method: None,
+                params: None,
+                session_id: Some(session_id.to_string()),
+            });
+        }
+    }
+
+    let raw_ids: Vec<u64> = raw_pending
+        .iter()
+        .filter(|(_, command)| command.session_id.as_deref() == Some(session_id))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in raw_ids {
+        if let Some(command) = raw_pending.remove(&id) {
+            let _ = command
+                .tx
+                .send(serde_json::json!({ "id": id, "error": { "message": message } }).to_string());
+        }
+    }
+}
+
 pub struct CdpClient {
     ws_tx: WsTx,
     socket: socket2::Socket,
@@ -205,6 +351,7 @@ pub struct CdpClient {
     keepalive_handle: Mutex<Option<JoinHandle<()>>>,
     private_sessions: PrivateSessions,
     method_taps: MethodTaps,
+    detached_sessions: DetachedSessionSet,
 }
 
 /// Removes a pending entry if `send_command` is cancelled mid-await (e.g. an
@@ -303,6 +450,7 @@ impl CdpClient {
 
         let private_sessions: PrivateSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let method_taps: MethodTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let detached_sessions: DetachedSessionSet = Arc::default();
 
         let pending_clone = pending.clone();
         let raw_pending_clone = raw_pending.clone();
@@ -311,6 +459,7 @@ impl CdpClient {
         let closed_reader = closed.clone();
         let private_clone = private_sessions.clone();
         let taps_clone = method_taps.clone();
+        let detached_clone = detached_sessions.clone();
 
         // Notify used to stop the keepalive task when the reader loop exits.
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
@@ -364,8 +513,8 @@ impl CdpClient {
                 // from this text (large accessibility trees).
                 if let Some(id) = leading_response_id(&msg) {
                     let waiter = raw_pending_clone.lock().await.remove(&id);
-                    if let Some(tx) = waiter {
-                        let _ = tx.send(msg);
+                    if let Some(waiter) = waiter {
+                        let _ = waiter.tx.send(msg);
                         continue;
                     }
                 }
@@ -382,13 +531,13 @@ impl CdpClient {
                                     // Hand the unparsable text to a raw waiter
                                     // so it fails fast instead of timing out.
                                     let raw_waiter = raw_pending_clone.lock().await.remove(&id);
-                                    if let Some(tx) = raw_waiter {
-                                        let _ = tx.send(candidate.to_string());
+                                    if let Some(waiter) = raw_waiter {
+                                        let _ = waiter.tx.send(candidate.to_string());
                                         continue;
                                     }
                                     let waiter = pending_clone.lock().await.remove(&id);
-                                    if let Some(tx) = waiter {
-                                        let _ = tx.send(CdpMessage {
+                                    if let Some(waiter) = waiter {
+                                        let _ = waiter.tx.send(CdpMessage {
                                             id: Some(id),
                                             result: None,
                                             error: Some(CdpError {
@@ -415,14 +564,14 @@ impl CdpClient {
                     // Responses from servers that do not lead with the id still
                     // reach a raw waiter, at the cost of the parse above.
                     let raw_waiter = raw_pending_clone.lock().await.remove(&id);
-                    if let Some(tx) = raw_waiter {
-                        let _ = tx.send(msg);
+                    if let Some(waiter) = raw_waiter {
+                        let _ = waiter.tx.send(msg);
                         continue;
                     }
                     // Response to a command
                     let mut pending = pending_clone.lock().await;
-                    if let Some(tx) = pending.remove(&id) {
-                        let _ = tx.send(parsed);
+                    if let Some(waiter) = pending.remove(&id) {
+                        let _ = waiter.tx.send(parsed);
                     }
                 } else if let Some(ref method) = parsed.method {
                     // Event
@@ -431,6 +580,28 @@ impl CdpClient {
                         params: parsed.params.clone().unwrap_or(Value::Null),
                         session_id: parsed.session_id.clone(),
                     };
+                    // Chrome never answers a command to a detached session.
+                    // Settle the session before subscribers see the event, so
+                    // a handler reacting to it cannot send into the gap.
+                    let target_session = event.params.get("sessionId").and_then(Value::as_str);
+                    match (event.method.as_str(), target_session) {
+                        ("Target.detachedFromTarget", Some(sid)) => {
+                            release_detached_session(
+                                &pending_clone,
+                                &raw_pending_clone,
+                                &detached_clone,
+                                sid,
+                            )
+                            .await;
+                        }
+                        ("Target.attachedToTarget", Some(sid)) => {
+                            detached_clone
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(sid);
+                        }
+                        _ => {}
+                    }
                     let routed = event.session_id.as_deref().is_some_and(|sid| {
                         let mut routes = private_clone.lock().unwrap_or_else(|e| e.into_inner());
                         match routes.get(sid) {
@@ -506,7 +677,35 @@ impl CdpClient {
             keepalive_handle: Mutex::new(Some(keepalive_handle)),
             private_sessions,
             method_taps,
+            detached_sessions,
         })
+    }
+
+    /// Refuse a command to a session Chrome already reported detached.
+    /// Callers hold the pending map that the command registers in, which
+    /// orders this check against [`release_detached_session`].
+    fn ensure_session_attached(
+        &self,
+        method: &str,
+        session_id: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(session_id) = session_id else {
+            return Ok(());
+        };
+        let detached = self
+            .detached_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(session_id);
+        if detached {
+            Err(format!(
+                "CDP error ({}): {}",
+                method,
+                session_detached_message(session_id)
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     fn ensure_open(&self) -> Result<(), String> {
@@ -580,7 +779,17 @@ impl CdpClient {
             let mut ws_tx = self.ws_tx.lock().await;
             self.ensure_open()?;
             let mut pending = self.pending.lock().await;
-            pending.insert(id, tx);
+            if let Err(error) = self.ensure_session_attached(method, cmd.session_id.as_deref()) {
+                guard.done = true;
+                return Err(error);
+            }
+            pending.insert(
+                id,
+                PendingCommand {
+                    session_id: cmd.session_id.clone(),
+                    tx,
+                },
+            );
             drop(pending);
             if let Err(error) = ws_tx.send(Message::Text(json)).await {
                 self.pending.lock().await.remove(&id);
@@ -730,7 +939,17 @@ impl CdpClient {
             let mut ws_tx = self.ws_tx.lock().await;
             self.ensure_open()?;
             let mut raw_pending = self.raw_pending.lock().await;
-            raw_pending.insert(id, tx);
+            if let Err(error) = self.ensure_session_attached(method, cmd.session_id.as_deref()) {
+                guard.done = true;
+                return Err(error);
+            }
+            raw_pending.insert(
+                id,
+                PendingCommand {
+                    session_id: cmd.session_id.clone(),
+                    tx,
+                },
+            );
             drop(raw_pending);
             if let Err(error) = ws_tx.send(Message::Text(json)).await {
                 self.raw_pending.lock().await.remove(&id);
@@ -1158,6 +1377,273 @@ mod tests {
 
         client.close().await;
         server.await.unwrap();
+    }
+
+    /// A command pending on a session that detaches fails at once (#1991),
+    /// for both response paths, while another session's command still gets
+    /// its answer.
+    #[tokio::test]
+    async fn detach_fails_only_that_sessions_pending_commands() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut commands = Vec::new();
+            for _ in 0..3 {
+                let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                commands.push(serde_json::from_str::<Value>(&text).unwrap());
+            }
+            // Chrome detaches the frame session and never answers its
+            // commands.
+            ws.send(Message::Text(
+                json!({
+                    "method": "Target.detachedFromTarget",
+                    "params": { "sessionId": "S-FRAME", "targetId": "F" },
+                    "sessionId": "S-PAGE"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let page = commands
+                .iter()
+                .find(|command| command["sessionId"] == "S-PAGE")
+                .unwrap();
+            ws.send(Message::Text(
+                json!({"id": page["id"], "result": {"value": "page"}}).to_string(),
+            ))
+            .await
+            .unwrap();
+            while ws.next().await.is_some() {}
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let frame = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_command_no_params("Page.enable", Some("S-FRAME"))
+                    .await
+            })
+        };
+        let frame_raw = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_command_typed_raw::<_, RawNodes>(
+                        "Accessibility.getFullAXTree",
+                        &json!({}),
+                        Some("S-FRAME"),
+                    )
+                    .await
+            })
+        };
+        let page = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_command_no_params("Runtime.evaluate", Some("S-PAGE"))
+                    .await
+            })
+        };
+
+        let wait = Duration::from_secs(2);
+        let error = tokio::time::timeout(wait, frame)
+            .await
+            .expect("a detached session's command should fail at once")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "CDP error (Page.enable): Target closed: CDP session S-FRAME detached"
+        );
+        assert!(is_session_detached_error(&error));
+        let raw_error = tokio::time::timeout(wait, frame_raw)
+            .await
+            .expect("a detached session's raw command should fail at once")
+            .unwrap()
+            .unwrap_err();
+        assert!(is_session_detached_error(&raw_error), "{raw_error}");
+        let result = tokio::time::timeout(wait, page)
+            .await
+            .expect("the page session's command should still be answered")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["value"], "page");
+        assert_eq!(client.pending_len().await, 0);
+        assert_eq!(client.raw_pending_len().await, 0);
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    /// A command to a session whose detach was already read fails without
+    /// being sent, since Chrome would never answer it. A session id that is
+    /// attached again accepts commands again.
+    #[tokio::test]
+    async fn command_to_an_already_detached_session_fails_at_send_time() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (reattach_tx, reattach_rx) = oneshot::channel::<()>();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Text(
+                json!({
+                    "method": "Target.detachedFromTarget",
+                    "params": { "sessionId": "S-GONE", "targetId": "F" }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            reattach_rx.await.unwrap();
+            ws.send(Message::Text(
+                json!({
+                    "method": "Target.attachedToTarget",
+                    "params": {
+                        "sessionId": "S-GONE",
+                        "targetInfo": { "targetId": "F", "type": "iframe" },
+                        "waitingForDebugger": true
+                    }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            // The first command to reach the socket must be the one sent
+            // after the reattach.
+            let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            let command: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(command["method"], "Runtime.enable");
+            assert_eq!(command["sessionId"], "S-GONE");
+            ws.send(Message::Text(
+                json!({"id": command["id"], "result": {}}).to_string(),
+            ))
+            .await
+            .unwrap();
+            while ws.next().await.is_some() {}
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut events = client.subscribe();
+        let detach = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(detach.method, "Target.detachedFromTarget");
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.send_command_no_params("Page.enable", Some("S-GONE")),
+        )
+        .await
+        .expect("a command to a detached session should not wait")
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "CDP error (Page.enable): Target closed: CDP session S-GONE detached"
+        );
+        let raw_error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.send_command_typed_raw::<_, RawNodes>(
+                "Accessibility.getFullAXTree",
+                &json!({}),
+                Some("S-GONE"),
+            ),
+        )
+        .await
+        .expect("a raw command to a detached session should not wait")
+        .unwrap_err();
+        assert!(is_session_detached_error(&raw_error), "{raw_error}");
+        assert_eq!(client.pending_len().await, 0);
+        assert_eq!(client.raw_pending_len().await, 0);
+
+        reattach_tx.send(()).unwrap();
+        let attach = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(attach.method, "Target.attachedToTarget");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            client.send_command_no_params("Runtime.enable", Some("S-GONE")),
+        )
+        .await
+        .expect("a reattached session should be answered")
+        .unwrap();
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn detached_sessions_forget_the_oldest_past_the_limit() {
+        let mut detached = DetachedSessions::default();
+        for index in 0..=DETACHED_SESSION_LIMIT {
+            detached.insert(&format!("S-{index}"));
+        }
+        detached.insert("S-1");
+        assert!(!detached.contains("S-0"));
+        assert!(detached.contains("S-1"));
+        assert!(detached.contains(&format!("S-{DETACHED_SESSION_LIMIT}")));
+        assert_eq!(detached.ids.len(), DETACHED_SESSION_LIMIT);
+        assert_eq!(detached.order.len(), DETACHED_SESSION_LIMIT);
+
+        detached.remove("S-1");
+        assert!(!detached.contains("S-1"));
+        assert_eq!(detached.order.len(), DETACHED_SESSION_LIMIT - 1);
+    }
+
+    #[test]
+    fn recognizes_errors_for_sessions_that_no_longer_exist() {
+        assert!(is_session_detached_error(&format!(
+            "CDP error (Page.enable): {}",
+            session_detached_message("S")
+        )));
+        assert!(is_session_detached_error(
+            "CDP error (Page.enable): Session with given id not found."
+        ));
+        assert!(!is_session_detached_error(
+            "CDP command timed out: Page.enable"
+        ));
+    }
+
+    #[test]
+    fn page_controlled_text_is_not_a_detach() {
+        // The description of an exception a page throws while the domain
+        // filter is injected ends up in the error, so a live frame can put
+        // any text there. It must still count as a failure, not a detach.
+        for thrown in [
+            "Error: Session with given id not found".to_string(),
+            format!("Error: {}", session_detached_message("S")),
+            format!(
+                "Error: CDP error (Page.enable): {}",
+                session_detached_message("S")
+            ),
+            "Error: CDP error (Page.enable): Session with given id not found.".to_string(),
+        ] {
+            let error = format!(
+                "Failed to apply domain filter to the current execution context: {}",
+                thrown
+            );
+            assert!(!is_session_detached_error(&error), "{error}");
+        }
+
+        // Extra text after the reason is not one of the client's or
+        // Chrome's detach errors either.
+        for error in [
+            "CDP error (Runtime.evaluate): Session with given id not found. Error: x",
+            "CDP error (Runtime.evaluate): Target closed: CDP session S detached: x",
+            "CDP error (Runtime.evaluate): Target closed: CDP session  detached",
+            "CDP error (): Session with given id not found.",
+            "CDP error (Page.enable) x: Session with given id not found.",
+        ] {
+            assert!(!is_session_detached_error(error), "{error}");
+        }
     }
 
     #[tokio::test]
