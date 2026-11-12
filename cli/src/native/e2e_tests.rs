@@ -6244,9 +6244,19 @@ async fn e2e_click_rejects_unreachable_elements() {
                 <button id="fieldset-disabled" onclick="document.getElementById('result').textContent = 'fieldset'">Fieldset</button>
             </fieldset>
             <button id="ok" onclick="document.getElementById('result').textContent = 'clicked'">Ok</button>
+            <button id="straddle" style="position:absolute;top:calc(100vh - 10px)" onclick="document.getElementById('result').textContent = 'straddle'">Straddle</button>
+            <button id="moving" style="position:absolute;top:2500px" onclick="document.getElementById('result').textContent = 'moving'">Moving</button>
             <label><input id="hidden-check" type="checkbox" style="display:none"> Accept</label>
             <svg width="300" height="100"><line id="flat-line" x1="20" y1="50" x2="280" y2="50" stroke="black" stroke-width="8" onclick="document.getElementById('result').textContent = 'line'"/></svg>
             <div id="result">idle</div>
+            <script>
+                let moved = false;
+                addEventListener('scroll', () => {
+                    if (moved || window.scrollY < 1000) return;
+                    moved = true;
+                    requestAnimationFrame(() => { document.getElementById('moving').style.top = '2700px'; });
+                });
+            </script>
         </body>
         </html>
     "#;
@@ -6313,6 +6323,24 @@ async fn e2e_click_rejects_unreachable_elements() {
         assert!(error.contains(expected), "{name}: {error}");
     }
     assert_eq!(result_text(&mut state).await, "idle");
+
+    for (selector, expected) in [("#straddle", "straddle"), ("#moving", "moving")] {
+        let resp = execute_command(
+            &json!({ "id": "6a", "action": "click", "selector": selector }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(result_text(&mut state).await, expected, "{selector}");
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "6b", "action": "click", "selector": format!("@{}", find_ref("Straddle")) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "straddle");
 
     let resp = execute_command(
         &json!({ "id": "7", "action": "click", "selector": "#ok" }),
