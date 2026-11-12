@@ -8,7 +8,8 @@ import { wallpaperAt } from './wallpapers';
 import { HeroCamera } from './hero-camera';
 import { layoutRectOf } from '../../stageshow/vendor/kit/measure';
 import { HERO_INITIAL, HERO_STILL, useHeroPlayback } from './hero-playback';
-import { SHOT_GAP, T, heroFrame, peerPosition, type Targets } from './hero-timeline';
+import { PREVIEW_URL, PRODUCTION_URL, PR_URL, SHOT_GAP, T, heroFrame, peerPosition, type Targets } from './hero-timeline';
+import { HeroTabPicker, type HeroTab } from './hero-tab-picker';
 import { LABEL_BOX, PresenceCursor } from './presence-cursor';
 import { ATTACH_SCALE, BrowserWindow, HeadlineShot, shotSize } from './hero-apps';
 import { DesktopApps } from './desktop-apps';
@@ -79,6 +80,15 @@ export function BrowserDesktopScene({ desktop }: { desktop: boolean }) {
     const first = requestAnimationFrame(() => { second = requestAnimationFrame(() => setReady(true)); });
     return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
   }, []);
+  // Reduced motion: the still's browser tabs can be clicked through. The
+  // choice only changes which open tab is active; null means the still's own.
+  const still = heroFrame(playback.time);
+  const [tab, setTab] = useState<HeroTab | null>(null);
+  // Every change of the preference starts the still from its own tab again
+  // ("adjust state when a prop changes", guarded so it settles at once)
+  const [tabFor, setTabFor] = useState(reduced);
+  if (tabFor !== reduced) { setTabFor(reduced); setTab(null); }
+  const selectedTab = reduced ? (tabFor === reduced ? tab : null) ?? still.active : null;
 
   return (
     <figure ref={host} className="ab-hero-demo" data-hero-scene data-ready={ready || undefined} data-scope={desktop ? 'desktop' : 'browser'}>
@@ -87,11 +97,20 @@ export function BrowserDesktopScene({ desktop }: { desktop: boolean }) {
         <Stage {...STAGE_SIZE} fill initial={HERO_INITIAL} poster={HERO_STILL} script={playback.script} play="loop" theme="light" fidelity="standard" className="ab-scene look-vercel">
           {(s, _rect, layout) => (
             <HeroCamera focus={desktop ? null : FOCUS[layout]} size={designSize(layout)} max={CAMERA_MAX} duration={CAMERA_MS} animate={ready}>
-              <HeroWorld time={reduced ? playback.time : s.time} loop={reduced ? 0 : s.loop} layout={layout} desktop={desktop} playing={playback.playing} />
+              <HeroWorld time={reduced ? playback.time : s.time} loop={reduced ? 0 : s.loop} layout={layout} desktop={desktop} playing={playback.playing} selectedTab={selectedTab} />
             </HeroCamera>
           )}
         </Stage>
       </div>
+      {reduced && selectedTab && (
+        <HeroTabPicker
+          host={host}
+          open={{ production: true, preview: still.previewTab, github: still.githubTab }}
+          selected={selectedTab}
+          onSelect={setTab}
+          measureKey={`${desktop ? 'desktop' : 'browser'} ${ready ? 'ready' : 'placing'}`}
+        />
+      )}
     </figure>
   );
 }
@@ -108,7 +127,7 @@ const SERVER_TARGETS: Targets = {
 /** The dock's icons wait this long after mount, then for the browser to be idle. */
 const ASSETS_AFTER = 2_500;
 
-function HeroWorld({ time, loop = 0, layout, desktop, playing }: { time: number; loop?: number; layout: Layout; desktop: boolean; playing: boolean }) {
+function HeroWorld({ time, loop = 0, layout, desktop, playing, selectedTab = null }: { time: number; loop?: number; layout: Layout; desktop: boolean; playing: boolean; selectedTab?: HeroTab | null }) {
   const world = useRef<HTMLDivElement>(null);
   const [targets, setTargets] = useState<Targets>(SERVER_TARGETS);
   // The dock's icons are desktop-only, off camera in browser scope, so they are
@@ -142,7 +161,13 @@ function HeroWorld({ time, loop = 0, layout, desktop, playing }: { time: number;
     if (stage?.parentElement) observer.observe(stage.parentElement);
     return () => observer.disconnect();
   }, [layout]);
-  const frame = heroFrame(time);
+  // A tab chosen in the reduced-motion still (only an open one) becomes the
+  // active tab, its page and its address; everything else stays the still's
+  const timed = heroFrame(time);
+  const chosen = selectedTab && (selectedTab === 'production' || (selectedTab === 'preview' ? timed.previewTab : timed.githubTab)) ? selectedTab : null;
+  const frame = chosen && chosen !== timed.active
+    ? { ...timed, active: chosen, url: chosen === 'github' ? PR_URL : chosen === 'preview' ? PREVIEW_URL : PRODUCTION_URL }
+    : timed;
   const desktopState = desktopFrame(time, loop);
   // The wallpaper only changes where it can be seen. In browser scope it holds
   // the last one shown. Choosing Desktop keeps holding it through the camera's

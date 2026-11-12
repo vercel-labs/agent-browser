@@ -106,7 +106,16 @@ export function useHeroPlayback(reduced: boolean) {
     const state = transport.current;
     if (state.reduced === reduced) return;
     state.reduced = reduced;
-    if (reduced) seek(HERO_POSTER);
+    if (reduced) {
+      seek(HERO_POSTER);
+      return;
+    }
+    // Back from reduced motion: the still paused the transport, so play on from
+    // the frame it parked on (a live script resumes now; one the Stage starts
+    // again picks up `playing` when it wakes)
+    state.playing = true;
+    setPlaying(true);
+    state.active?.wake();
   }, [reduced, seek]);
 
   return { script, time, playing };

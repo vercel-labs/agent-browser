@@ -142,3 +142,14 @@
   --ab-wall-4: color-mix(in oklab, var(--ds-gray-1000) 34%, var(--ds-background-100));
   --ab-wall-5: color-mix(in oklab, var(--ds-gray-1000) 40%, var(--ds-background-100));
 }
+
+/* Reduced motion: the still's browser tabs as real buttons (hero-tab-picker.tsx),
+   transparent over the mock tabs they select; the mock draws the active state.
+   The close buttons and + under them stay decorative. */
+.ab-hero-demo {
+  position: relative;
+  & .ab-tab-picker { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+  & .ab-tab-pick { position: absolute; margin: 0; padding: 0; border: 0; border-radius: 8px 8px 0 0; background: transparent; cursor: pointer; pointer-events: auto; }
+  & .ab-tab-pick:not([data-measured]) { display: none; }
+  & .ab-tab-pick:focus-visible { outline: none; box-shadow: var(--ds-focus-ring); }
+}
