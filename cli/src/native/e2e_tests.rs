@@ -6220,6 +6220,99 @@ async fn e2e_click_reports_covering_overlay() {
     assert_success(&resp);
 }
 
+/// Some apps embed a same-origin iframe inside a web component's shadow root.
+/// The top document's hit test only sees the shadow host there, so the
+/// covered check has to look through the shadow root into the frame.
+#[tokio::test]
+#[ignore]
+async fn e2e_click_reaches_iframe_inside_shadow_root() {
+    let mut state = DaemonState::new();
+    for command in [
+        json!({ "action": "launch", "headless": true }),
+        json!({ "action": "navigate", "url": "about:blank" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+
+    let frame_html = r#"<body style="margin:0">
+        <button id="inner" onclick="document.getElementById('result').textContent = 'clicked'">Inner</button>
+        <button id="covered" style="position:absolute;left:10px;top:120px">Covered</button>
+        <div id="frame-banner" style="position:absolute;left:0;top:100px;width:300px;height:60px"></div>
+        <div id="result" style="position:absolute;top:200px">idle</div>
+    </body>"#;
+    let setup = format!(
+        r#"new Promise(resolve => {{
+            customElements.define('frame-host', class extends HTMLElement {{
+                constructor() {{ super(); this.attachShadow({{ mode: 'open' }}); }}
+            }});
+            const host = document.createElement('frame-host');
+            host.style.display = 'block';
+            document.body.appendChild(host);
+            const frame = document.createElement('iframe');
+            frame.style.cssText = 'border:0;width:400px;height:300px;display:block';
+            frame.onload = () => resolve(true);
+            frame.srcdoc = {frame_html};
+            host.shadowRoot.appendChild(frame);
+        }})"#,
+        frame_html = serde_json::to_string(frame_html).unwrap(),
+    );
+    let resp = execute_command(
+        &json!({ "action": "evaluate", "script": setup }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let snapshot = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+    assert_success(&snapshot);
+    let find_ref = |name: &str| {
+        let refs = get_data(&snapshot)["refs"].as_object().unwrap();
+        let (reference, _) = refs
+            .iter()
+            .find(|(_, node)| node["name"] == name)
+            .unwrap_or_else(|| panic!("no ref named {name}: {snapshot}"));
+        format!("@{reference}")
+    };
+
+    let resp = execute_command(
+        &json!({ "action": "click", "selector": find_ref("Inner") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let read_result = json!({
+        "action": "evaluate",
+        "script": "document.querySelector('frame-host').shadowRoot.querySelector('iframe').contentDocument.getElementById('result').textContent",
+    });
+    let resp = execute_command(&read_result, &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "clicked");
+
+    // The check still runs inside the frame, so an overlay there is reported.
+    let resp = execute_command(
+        &json!({ "action": "click", "selector": find_ref("Covered") }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "covered target should fail: {resp}");
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("covered by <div#frame-banner>"),
+        "unexpected covered-click error: {error}"
+    );
+
+    // Content inside the frame counts as part of the host that contains it.
+    let resp = execute_command(
+        &json!({ "action": "click", "selector": "frame-host" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_click_rejects_unreachable_elements() {
