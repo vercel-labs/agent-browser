@@ -54,7 +54,7 @@ agent-browser record start ./walkthrough.webm --cursor
 
 ## High-density video
 
-Frames come from Chrome's screencast, which captures at the window's real device scale. A scale set with `set viewport <w> <h> <scale>` is emulated: pages render at that density and screenshots have it, but the screencast still captures at the real scale. When the recorder sees screencast frames below the page's scale, it switches to full-density screenshots for the rest of the take, a few requested at once, at up to the recording's frame rate. A busy page can capture fewer frames than the rate, and the video repeats the latest one meanwhile. `record stop` then reports `"capture": "screenshots"` and the page's `deviceScaleFactor`. Should frames still come in below the page's scale, it warns and reports `captureScale`.
+Frames come from Chrome's screencast, which captures at the window's real device scale. A scale set with `set viewport <w> <h> <scale>` is emulated: pages render at that density and screenshots have it, but the screencast still captures at the real scale. When the recorder sees screencast frames below the page's scale, it switches to full-density screenshots for the rest of the take, a few requested at once, at up to the recording's frame rate. A busy page can capture fewer frames than the rate, and the video repeats the latest one meanwhile. `record stop` then reports `"capture": "screenshots"` and the page's `deviceScaleFactor`.
 
 To keep the screencast at full density, launch the browser with a real device scale:
 

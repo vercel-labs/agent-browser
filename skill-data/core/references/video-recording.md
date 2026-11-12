@@ -101,7 +101,7 @@ agent-browser record start ./walkthrough.webm --cursor
 
 ## High-Density Video
 
-Frames come from Chrome's screencast, which captures at the window's real device scale. When the page's scale is emulated with `set viewport <w> <h> <scale>`, recording switches to full-density screenshots, at up to the recording's frame rate (a busy page can capture fewer frames); `record stop` reports `"capture": "screenshots"` and `deviceScaleFactor`, and warns with `captureScale` if frames still came in below the page's scale. To keep the screencast at full density instead, launch with a real device scale:
+Frames come from Chrome's screencast, which captures at the window's real device scale. When the page's scale is emulated with `set viewport <w> <h> <scale>`, recording switches to full-density screenshots, at up to the recording's frame rate (a busy page can capture fewer frames); `record stop` reports `"capture": "screenshots"` and `deviceScaleFactor`. To keep the screencast at full density instead, launch with a real device scale:
 
 ```bash
 agent-browser --args "--force-device-scale-factor=2" open https://example.com

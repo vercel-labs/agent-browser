@@ -10811,6 +10811,65 @@ async fn e2e_recording_emulated_scale_captures_full_density() {
     assert_success(&resp);
 }
 
+/// Verify that a mobile-emulated page without a viewport meta tag reports its
+/// real device scale: its layout viewport is wider than its screen, so the
+/// scale comes from `devicePixelRatio`, not the first frame's width.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_mobile_emulation_uses_device_pixel_ratio() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": "data:text/html,<style>@keyframes s{to{transform:rotate(360deg)}}div{width:80px;height:80px;background:%230a72ef;animation:s 1s linear infinite}</style><h1>No viewport meta</h1><div></div>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "device", "name": "iPhone 14" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-mobile-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["capture"], "screenshots", "{data}");
+    assert_eq!(data["deviceScaleFactor"], 3.0, "{data}");
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verify that an output path without an extension is rejected before the
 /// recording context exists: no new tab, no file, nothing to stop.
 #[tokio::test]

@@ -1622,9 +1622,6 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                         path,
                         recording_fps_suffix(data)
                     );
-                    if let Some(warning) = data.get("warning").and_then(|v| v.as_str()) {
-                        println!("{} {}", color::warning_indicator(), warning);
-                    }
                     if let Some(contact_sheet) =
                         data.get("contactSheetPath").and_then(|v| v.as_str())
                     {

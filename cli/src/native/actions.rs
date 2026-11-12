@@ -1259,11 +1259,8 @@ impl DaemonState {
         let shared_count = Arc::new(AtomicU64::new(0));
         let shared_captured = Arc::new(AtomicU64::new(0));
         let shared_contact_sheet_count = Arc::new(AtomicU64::new(0));
-        let shared_capture_scale = Arc::new(AtomicU64::new(f64::INFINITY.to_bits()));
         let shared_screenshot_capture = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.recording_state.device_scale =
-            recording::frame_scale(&initial_frame.image_data, initial_frame.device_width)
-                .unwrap_or(1.0);
+        self.recording_state.device_scale = initial_frame.device_scale;
         let (cancel_tx, cancel_rx) = oneshot::channel();
         if self.recording_state.cursor {
             self.refresh_active_iframe_sessions().await;
@@ -1299,7 +1296,6 @@ impl DaemonState {
             self.recording_state.contact_sheet_path.clone(),
             self.recording_state.contact_sheet_threshold,
             shared_contact_sheet_count.clone(),
-            shared_capture_scale.clone(),
             shared_screenshot_capture.clone(),
             cancel_rx,
         );
@@ -1307,7 +1303,6 @@ impl DaemonState {
         self.recording_state.shared_frame_count = Some(shared_count);
         self.recording_state.shared_captured_count = Some(shared_captured);
         self.recording_state.shared_contact_sheet_count = Some(shared_contact_sheet_count);
-        self.recording_state.shared_capture_scale = Some(shared_capture_scale);
         self.recording_state.shared_screenshot_capture = Some(shared_screenshot_capture);
         self.recording_state.cancel_tx = Some(cancel_tx);
         Ok(())
