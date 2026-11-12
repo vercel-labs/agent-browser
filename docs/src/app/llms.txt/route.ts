@@ -9,7 +9,7 @@ export async function GET() {
     "",
     `> ${siteDescription}`,
     "",
-    `Documentation: [${siteUrl}](${siteUrl})`,
+    `Documentation: [${siteUrl}/docs](${siteUrl}/docs)`,
     "",
     `Full page Markdown is available at each .md URL or with Accept: text/markdown.`,
     "",

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { generateNotFoundMarkdown } from "@vercel/agent-readability";
 import { parse } from "yaml";
 import { allDocsPages } from "./docs-navigation";
+import { homeMarkdown } from "./home-markdown";
 import { mdxToCleanMarkdown } from "./mdx-to-markdown";
 import { canonicalUrlFor, siteDescription, siteName, siteUrl } from "./site";
 
@@ -94,8 +95,8 @@ export async function loadDocsSource(href: string): Promise<DocsSource | null> {
       return {
         title: data.title,
         href: normalized,
-        markdownHref: normalized === "/" ? "/index.md" : `${normalized}.md`,
-        canonicalUrl: canonicalUrlFor(normalized),
+        markdownHref: normalized === "/" ? "/docs.md" : `${normalized}.md`,
+        canonicalUrl: canonicalUrlFor(normalized === "/" ? "/docs" : normalized),
         description:
           typeof data.description === "string"
             ? data.description
@@ -139,6 +140,22 @@ export async function markdownForPathname(pathname: string): Promise<{
   found: boolean;
 }> {
   const normalized = normalizeDocsHref(pathname);
+  if (normalized === "/") {
+    return {
+      body: [
+        "---",
+        `title: ${JSON.stringify(siteName)}`,
+        `description: ${JSON.stringify(siteDescription)}`,
+        `canonical_url: ${JSON.stringify(canonicalUrlFor("/"))}`,
+        "---",
+        "",
+        homeMarkdown(),
+        "",
+      ].join("\n"),
+      canonicalUrl: canonicalUrlFor("/"),
+      found: true,
+    };
+  }
   if (normalized === "/sitemap") {
     return {
       body: await sitemapMarkdown(),
@@ -146,20 +163,21 @@ export async function markdownForPathname(pathname: string): Promise<{
       found: true,
     };
   }
-  const source = await loadDocsSource(normalized);
+  const source = await loadDocsSource(normalized === "/docs" ? "/" : normalized);
   if (source) {
+    const canonicalUrl = canonicalUrlFor(normalized);
     return {
       body: [
         "---",
         `title: ${JSON.stringify(source.title)}`,
         `description: ${JSON.stringify(source.description)}`,
-        `canonical_url: ${JSON.stringify(source.canonicalUrl)}`,
+        `canonical_url: ${JSON.stringify(canonicalUrl)}`,
         "---",
         "",
         source.markdown,
         "",
       ].join("\n"),
-      canonicalUrl: source.canonicalUrl,
+      canonicalUrl,
       found: true,
     };
   }

@@ -33,6 +33,7 @@ __pycache__/
 
 # Test artifacts
 *.png
+!docs/public/landing/home-og.png
 *.jpeg
 *.jpg
 *.webm

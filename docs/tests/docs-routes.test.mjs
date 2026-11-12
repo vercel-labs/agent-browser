@@ -19,6 +19,7 @@ import {
   representationHeaders,
   indexing,
   assertModernMarkdown,
+  assertHomeMarkdown,
   assertLegacyMarkdown,
   absoluteDestination,
   imageSourceUrls,
@@ -67,6 +68,20 @@ for (const page of pages) {
       tags(html, "html").map((tag) => tag.lang),
       ["en"],
     );
+    const og =
+      page.path === "/"
+        ? {
+            image: `${origin}/landing/home-og.png`,
+            width: "2400",
+            height: "1256",
+            alt: "Browser automation for any agent",
+          }
+        : {
+            image: `${origin}/og${page.path}`,
+            width: "1200",
+            height: "630",
+            alt: page.ogAlt,
+          };
     for (const [key, expected] of Object.entries({
       "og:title": page.ogTitle,
       "og:description": page.ogDescription,
@@ -74,14 +89,14 @@ for (const page of pages) {
       "og:type": "website",
       "og:site_name": "agent-browser",
       "og:locale": "en_US",
-      "og:image": `${origin}/og${page.path === "/" ? "" : page.path}`,
-      "og:image:width": "1200",
-      "og:image:height": "630",
-      "og:image:alt": page.ogAlt,
+      "og:image": og.image,
+      "og:image:width": og.width,
+      "og:image:height": og.height,
+      "og:image:alt": og.alt,
       "twitter:card": "summary_large_image",
       "twitter:title": page.twitterTitle,
       "twitter:description": page.description,
-      "twitter:image": `${origin}/og${page.path === "/" ? "" : page.path}`,
+      "twitter:image": og.image,
     }))
       assert.deepEqual(meta(html, key), [expected], `${page.path}: ${key}`);
     assert.deepEqual(
@@ -174,7 +189,8 @@ for (const page of pages) {
         `<${canonical(page.path)}>; rel="canonical"`,
       );
       const body = await response.text();
-      assertModernMarkdown(body, page);
+      if (page.path === "/") assertHomeMarkdown(body);
+      else assertModernMarkdown(body, page);
       bodies.push(body);
     }
     assert.equal(bodies[0], bodies[1]);
@@ -210,6 +226,47 @@ for (const page of pages) {
     }
   });
 }
+
+test("docs introduction keeps its own Markdown route after the homepage split", async () => {
+  const bodies = [];
+  for (const [path, headers] of [
+    ["/api/docs-md/docs", {}],
+    ["/docs.md", {}],
+    ["/docs", { accept: "text/markdown" }],
+  ]) {
+    const response = await get(path, { headers });
+    responseType(response, "text/markdown");
+    representationHeaders(response);
+    assert.equal(
+      response.headers.get("link"),
+      `<${origin}/docs>; rel="canonical"`,
+    );
+    const body = await response.text();
+    assert.ok(
+      body.startsWith(
+        `---\ntitle: "agent-browser"\ndescription: "Browser automation CLI for AI agents"\ncanonical_url: "${origin}/docs"\n---\n\n`,
+      ),
+      `${path}: docs canonical frontmatter`,
+    );
+    assert.ok(
+      body.includes(
+        "Browser automation CLI designed for AI agents. Compact text output minimizes context usage. 100% native Rust.",
+      ),
+      `${path}: docs introduction`,
+    );
+    bodies.push(body);
+  }
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(bodies[1], bodies[2]);
+
+  const html = await (await get("/docs")).text();
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "alternate" && tag.type === "text/markdown")
+      .map((tag) => tag.href),
+    [`${origin}/docs.md`],
+  );
+});
 
 for (const [name, headers, type] of [
   [
@@ -336,7 +393,8 @@ test("alternating representations and queries never contaminate one another", as
       representationHeaders(response);
       const body = await response.text();
       if (accept === "text/markdown") {
-        assertModernMarkdown(body, page);
+        if (path === "/") assertHomeMarkdown(body);
+        else assertModernMarkdown(body, page);
         assert.ok(
           !body.includes("utm_source") && !body.includes("route-test"),
           "tracking must not leak into Markdown",
@@ -676,7 +734,10 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     assert.deepEqual(
       links.sort((a, b) => a[1].localeCompare(b[1])),
       pages
-        .map((page) => [page.markdownTitle, canonical(page.path)])
+        .map((page) => [
+          page.markdownTitle,
+          page.path === "/" ? `${origin}/docs` : canonical(page.path),
+        ])
         .sort((a, b) => a[1].localeCompare(b[1])),
     );
     const markdownLinks = [...body.matchAll(/\[Markdown\]\(([^)]+)\)/g)].map(
@@ -684,7 +745,13 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       markdownLinks.sort(),
-      pages.map((page) => `${origin}${markdownPath(page.path)}`).sort(),
+      pages
+        .map((page) =>
+          page.path === "/"
+            ? `${origin}/docs.md`
+            : `${origin}${markdownPath(page.path)}`,
+        )
+        .sort(),
     );
     assert.ok(
       !body.includes("/en/") &&

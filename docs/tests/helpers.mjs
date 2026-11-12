@@ -330,6 +330,45 @@ export function assertContainsLines(body, original, label) {
   }
 }
 
+const HOME_FEATURES = [
+  ["Put your agent in control", "/commands"],
+  ["Read only what matters", "/snapshots"],
+  ["Take screenshots and recordings", "/recording"],
+  ["Run performance tests", "/profiler"],
+  ["Run agents side by side", "/sessions"],
+  ["Mock and inspect the network", "/network"],
+];
+
+export function assertHomeMarkdown(body) {
+  const frontmatter = `---\ntitle: "agent-browser"\ndescription: "Browser automation CLI for AI agents"\ncanonical_url: "${origin}"\n---\n\n`;
+  assert.ok(body.startsWith(frontmatter), "homepage: canonical frontmatter");
+  assert.match(body, /^# agent-browser$/m);
+  for (const [title, path] of HOME_FEATURES)
+    assert.ok(
+      body.includes(`**[${title}](${origin}${path})**`),
+      `homepage: missing feature ${JSON.stringify(title)}`,
+    );
+  assert.ok(
+    body.includes(`[Browser automation built for any agent](${origin}/docs)`),
+    "homepage: missing browser docs link",
+  );
+  assert.ok(
+    body.includes(
+      `[Desktop automation built for any agent](${origin}/desktop)`,
+    ),
+    "homepage: missing desktop docs link",
+  );
+  assert.ok(
+    body.includes(`Read the [agent-browser documentation](${origin}/docs)`),
+    "homepage: missing docs pointer",
+  );
+  assert.ok(
+    body.includes(`[llms.txt](${origin}/llms.txt)`),
+    "homepage: missing docs index link",
+  );
+  assert.ok(body.includes("Accept: text/markdown"));
+}
+
 export function assertModernMarkdown(body, page) {
   const frontmatter = `---\ntitle: ${JSON.stringify(page.markdownTitle)}\ndescription: ${JSON.stringify(page.description)}\ncanonical_url: ${JSON.stringify(canonical(page.path))}\n---\n\n`;
   assert.ok(

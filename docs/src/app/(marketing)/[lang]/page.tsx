@@ -8,6 +8,7 @@ import { AgentUseCaseTabs, type AgentUseCasesProps } from '@/components/landing/
 import { pageMetadata } from '@/lib/page-metadata';
 
 const baseMetadata = pageMetadata('');
+const homeOgImage = '/landing/home-og.png';
 export const metadata = {
   ...baseMetadata,
   title: { absolute: page.metadata.title },
@@ -16,11 +17,20 @@ export const metadata = {
     ...baseMetadata.openGraph,
     title: page.metadata.title,
     description: page.metadata.description,
+    images: [
+      {
+        url: homeOgImage,
+        width: 2400,
+        height: 1256,
+        alt: 'Browser automation for any agent',
+      },
+    ],
   },
   twitter: {
     ...baseMetadata.twitter,
     title: page.metadata.title,
     description: page.metadata.description,
+    images: [homeOgImage],
   },
 };
 

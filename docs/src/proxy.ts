@@ -45,7 +45,7 @@ function notFoundResponse() {
 const geistdocsProxy = createProxy({
   config: geistdocsConfig,
   markdownRoutes: [
-    { from: "/docs", to: "/api/docs-md" },
+    { from: "/docs", to: "/api/docs-md/docs" },
     { from: "/*path", to: "/api/docs-md/*path" },
   ],
   before: async ({ request, context }) => {

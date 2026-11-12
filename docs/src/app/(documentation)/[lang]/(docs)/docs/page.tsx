@@ -16,7 +16,7 @@ export const metadata: Metadata = {
   twitter: { ...baseMetadata.twitter, title: 'Introduction | agent-browser' },
   alternates: {
     canonical: canonicalUrlFor('/docs'),
-    types: { 'text/markdown': '/index.md' },
+    types: { 'text/markdown': '/docs.md' },
   },
 };
 
