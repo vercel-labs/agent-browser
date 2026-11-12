@@ -8,6 +8,8 @@ import {
   hash,
   canonical,
   markdownPath,
+  docsCanonical,
+  docsMarkdownPath,
   apiPath,
   text,
   normalize,
@@ -120,8 +122,8 @@ for (const page of publicPages) {
 
 for (const page of fixturePages) {
   test(`${page.path}: original prose, every table cell, code example and link are server rendered`, async () => {
-    // The original introduction remains available at /docs.
-    const html = page.path === "/" ? await (await get("/docs")).text() : await htmlFor(page);
+    // The introduction lives at /introduction after the homepage split.
+    const html = page.path === "/" ? await (await get("/introduction")).text() : await htmlFor(page);
     assert.equal(tags(html, "main").length, 1);
     const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
     assert.ok(
@@ -236,21 +238,21 @@ for (const page of publicPages) {
 test("docs introduction keeps its own Markdown route after the homepage split", async () => {
   const bodies = [];
   for (const [path, headers] of [
-    ["/api/docs-md/docs", {}],
-    ["/docs.md", {}],
-    ["/docs", { accept: "text/markdown" }],
+    ["/api/docs-md/introduction", {}],
+    ["/introduction.md", {}],
+    ["/introduction", { accept: "text/markdown" }],
   ]) {
     const response = await get(path, { headers });
     responseType(response, "text/markdown");
     representationHeaders(response);
     assert.equal(
       response.headers.get("link"),
-      `<${origin}/docs>; rel="canonical"`,
+      `<${origin}/introduction>; rel="canonical"`,
     );
     const body = await response.text();
     assert.ok(
       body.startsWith(
-        `---\ntitle: "agent-browser"\ndescription: "Browser automation CLI for AI agents"\ncanonical_url: "${origin}/docs"\n---\n\n`,
+        `---\ntitle: "agent-browser"\ndescription: "Browser automation CLI for AI agents"\ncanonical_url: "${origin}/introduction"\n---\n\n`,
       ),
       `${path}: docs canonical frontmatter`,
     );
@@ -265,13 +267,28 @@ test("docs introduction keeps its own Markdown route after the homepage split", 
   assert.equal(bodies[0], bodies[1]);
   assert.equal(bodies[1], bodies[2]);
 
-  const html = await (await get("/docs")).text();
+  const html = await (await get("/introduction")).text();
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "canonical")
+      .map((tag) => tag.href),
+    [`${origin}/introduction`],
+  );
   assert.deepEqual(
     tags(html, "link")
       .filter((tag) => tag.rel === "alternate" && tag.type === "text/markdown")
       .map((tag) => tag.href),
-    [`${origin}/docs.md`],
+    [`${origin}/introduction.md`],
   );
+  for (const id of [
+    "features",
+    "works-with",
+    "example",
+    "why-refs",
+    "architecture",
+    "platforms",
+  ])
+    assert.ok(html.includes(`id="${id}"`), `introduction lost #${id}`);
 });
 
 for (const [name, headers, type] of [
@@ -467,7 +484,8 @@ test("trailing slashes keep permanent public paths and query strings", async () 
 
 for (const path of [
   "/missing-page",
-  "/docs/commands",
+  "/docs",
+  "/introduction/commands",
   "/fr/commands",
   "/providers/missing",
   "/engines/missing",
@@ -774,7 +792,7 @@ test("Modern Web Guidance page renders its workflows, metadata and Markdown repr
     );
 });
 
-test("sitemap contains exactly the 40 canonical production URLs", async () => {
+test("sitemap lists the marketing root and every docs canonical exactly once", async () => {
   const response = await get("/sitemap.xml", { headers: agent });
   responseType(response, "application/xml");
   indexing(response);
@@ -785,8 +803,12 @@ test("sitemap contains exactly the 40 canonical production URLs", async () => {
   );
   assert.deepEqual(
     locations.sort(),
-    publicPages.map((page) => canonical(page.path)).sort(),
+    [
+      canonical("/"),
+      ...publicPages.map((page) => docsCanonical(page.path)),
+    ].sort(),
   );
+  assert.equal(new Set(locations).size, locations.length);
   assert.ok(
     !xml.includes("/en/") &&
       !xml.includes("localhost") &&
@@ -809,10 +831,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     assert.deepEqual(
       links.sort((a, b) => a[1].localeCompare(b[1])),
       publicPages
-        .map((page) => [
-          page.markdownTitle,
-          page.path === "/" ? `${origin}/docs` : canonical(page.path),
-        ])
+        .map((page) => [page.markdownTitle, docsCanonical(page.path)])
         .sort((a, b) => a[1].localeCompare(b[1])),
     );
     const markdownLinks = [...body.matchAll(/\[Markdown\]\(([^)]+)\)/g)].map(
@@ -821,11 +840,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     assert.deepEqual(
       markdownLinks.sort(),
       publicPages
-        .map((page) =>
-          page.path === "/"
-            ? `${origin}/docs.md`
-            : `${origin}${markdownPath(page.path)}`,
-        )
+        .map((page) => `${origin}${docsMarkdownPath(page.path)}`)
         .sort(),
     );
     assert.ok(
@@ -961,20 +976,20 @@ test('homepage introduces both tools while keeping the original introduction rea
   );
   assert.ok(!html.includes('platform.twitter.com/widgets.js'));
   assert.ok(text(html).includes('Teach your agent'));
-  assert.ok(tags(html, 'a').some((a) => a.href === '/docs'));
+  assert.ok(tags(html, 'a').some((a) => a.href === '/introduction'));
   assert.ok(
     text(html).includes('Desktop')
   );
-  const docs = await get('/docs');
+  const docs = await get('/introduction');
   responseType(docs, 'text/html');
   const intro = await docs.text();
   assert.ok(
-    tags(intro, 'link').some((link) => link.rel === 'canonical' && link.href === `${origin}/docs`)
+    tags(intro, 'link').some((link) => link.rel === 'canonical' && link.href === `${origin}/introduction`)
   );
   assert.ok(text(intro).includes('Browser automation CLI designed for AI agents'));
   const search = await get('/api/search?query=agent-browser&locale=en');
   assert.ok(
-    (await search.json()).some((result) => result.type === 'page' && result.url === '/docs')
+    (await search.json()).some((result) => result.type === 'page' && result.url === '/introduction')
   );
 });
 
@@ -994,7 +1009,7 @@ test('marketing layout stays independent of a persisted docs chat session', asyn
   assert.ok(!html.includes('body{padding-right:600px}'));
   assert.ok(!html.includes('aria-label="Ask AI"'));
   assert.ok(html.includes('data-geist-button'));
-  const docs = await get('/docs', {
+  const docs = await get('/introduction', {
     headers: { Cookie: 'docs-chat-open=true; docs-chat-width=600' },
   });
   responseType(docs, 'text/html');

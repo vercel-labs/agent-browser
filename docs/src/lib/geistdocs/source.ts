@@ -3,6 +3,7 @@ import {
   type GeistdocsSourceBundle,
 } from "@vercel/geistdocs/source";
 import { docs } from "@/.source/server";
+import { docsIntroHref } from "@/lib/docs-navigation";
 import { loadDocsSource } from "@/lib/docs-source";
 import { config } from "./config";
 
@@ -14,12 +15,12 @@ export const geistdocsSource: GeistdocsSourceBundle = {
     ...bundle.source,
     getPage(...args) {
       const page = bundle.source.getPage(...args);
-      return page && page.slugs.length === 0 ? { ...page, url: "/docs" } : page;
+      return page && page.slugs.length === 0 ? { ...page, url: docsIntroHref } : page;
     },
     getPages(...args) {
       return bundle.source
         .getPages(...args)
-        .map((page) => (page.slugs.length === 0 ? { ...page, url: "/docs" } : page));
+        .map((page) => (page.slugs.length === 0 ? { ...page, url: docsIntroHref } : page));
     },
   },
   async getPageMarkdown(page) {

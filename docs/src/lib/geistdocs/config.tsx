@@ -19,7 +19,7 @@ export const config = defineConfig({
     { id: "docs", label: "Documentation", dir: "content/docs", route: "/" },
   ],
   nav: [
-    { label: "Docs", href: "/docs" },
+    { label: "Docs", href: "/introduction" },
     {
       label: "npm",
       href: "https://www.npmjs.com/package/agent-browser",

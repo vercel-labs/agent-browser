@@ -11,12 +11,12 @@ export const metadata: Metadata = {
   openGraph: {
     ...baseMetadata.openGraph,
     title: 'Introduction | agent-browser',
-    url: canonicalUrlFor('/docs'),
+    url: canonicalUrlFor('/introduction'),
   },
   twitter: { ...baseMetadata.twitter, title: 'Introduction | agent-browser' },
   alternates: {
-    canonical: canonicalUrlFor('/docs'),
-    types: { 'text/markdown': '/docs.md' },
+    canonical: canonicalUrlFor('/introduction'),
+    types: { 'text/markdown': '/introduction.md' },
   },
 };
 

@@ -3,11 +3,12 @@ import { notFound } from 'next/navigation';
 import type { ReactNode } from 'react';
 import type { Root, Node } from 'fumadocs-core/page-tree';
 import { config } from '@/lib/geistdocs/config';
+import { docsIntroHref } from '@/lib/docs-navigation';
 import { geistdocsSource } from '@/lib/geistdocs/source';
 
 function docsTree(tree: Root): Root {
   function remap(node: Node): Node {
-    if (node.type === 'page') return node.url === '/' ? { ...node, url: '/docs' } : node;
+    if (node.type === 'page') return node.url === '/' ? { ...node, url: docsIntroHref } : node;
     if (node.type === 'folder')
       return {
         ...node,

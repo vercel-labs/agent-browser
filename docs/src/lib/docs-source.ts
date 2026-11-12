@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { generateNotFoundMarkdown } from "@vercel/agent-readability";
 import { parse } from "yaml";
-import { allDocsPages } from "./docs-navigation";
+import { allDocsPages, docsIntroHref } from "./docs-navigation";
 import { homeMarkdown } from "./home-markdown";
 import { mdxToCleanMarkdown } from "./mdx-to-markdown";
 import { canonicalUrlFor, siteDescription, siteName, siteUrl } from "./site";
@@ -33,6 +33,11 @@ export function isSafePathSegments(segments: readonly string[]): boolean {
 export function normalizeDocsHref(pathname: string): string {
   if (pathname === "/") return "/";
   return pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+}
+
+/** The introduction source stays at `index.mdx`, so `/` aliases its public URL. */
+function canonicalSourceHref(href: string): string {
+  return href === "/" ? docsIntroHref : href;
 }
 
 function cleanMarkdown(body: string): string {
@@ -71,11 +76,11 @@ function cleanMarkdown(body: string): string {
 }
 
 export async function loadDocsSource(href: string): Promise<DocsSource | null> {
-  const normalized = normalizeDocsHref(href);
+  const normalized = canonicalSourceHref(normalizeDocsHref(href));
   if (!pagesByHref.has(normalized)) return null;
   let pending = sourcePromises.get(normalized);
   if (!pending) {
-    const slug = normalized === "/" ? "index" : normalized.slice(1);
+    const slug = normalized === docsIntroHref ? "index" : normalized.slice(1);
     pending = readFile(
       join(process.cwd(), "content", "docs", `${slug}.mdx`),
       "utf8",
@@ -95,8 +100,8 @@ export async function loadDocsSource(href: string): Promise<DocsSource | null> {
       return {
         title: data.title,
         href: normalized,
-        markdownHref: normalized === "/" ? "/docs.md" : `${normalized}.md`,
-        canonicalUrl: canonicalUrlFor(normalized === "/" ? "/docs" : normalized),
+        markdownHref: `${normalized}.md`,
+        canonicalUrl: canonicalUrlFor(normalized),
         description:
           typeof data.description === "string"
             ? data.description
@@ -163,7 +168,7 @@ export async function markdownForPathname(pathname: string): Promise<{
       found: true,
     };
   }
-  const source = await loadDocsSource(normalized === "/docs" ? "/" : normalized);
+  const source = await loadDocsSource(normalized);
   if (source) {
     const canonicalUrl = canonicalUrlFor(normalized);
     return {

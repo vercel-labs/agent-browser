@@ -12,8 +12,8 @@ const home = {
     "description": "Give your agent the tools to browse, use apps, and check its own work. Open source and ready for the coding agent you already use.",
     "browser": {
       "headline": "Browser automation built for any agent",
-      "docsHref": "/docs",
-      "prompt": "Read the agent-browser docs: https://agent-browser.dev/"
+      "docsHref": "/introduction",
+      "prompt": "Read the agent-browser docs: https://agent-browser.dev/introduction"
     },
     "desktop": {
       "headline": "Desktop automation built for any agent",

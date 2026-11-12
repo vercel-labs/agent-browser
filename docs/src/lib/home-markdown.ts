@@ -25,7 +25,7 @@ export function homeMarkdown(): string {
     "",
     ...home.useCases.items.map(
       ({ title, visual, description }) =>
-        `- **[${title}](${urlFor(FEATURE_DOCS[visual] ?? "/docs")})**: ${description}`,
+        `- **[${title}](${urlFor(FEATURE_DOCS[visual] ?? "/introduction")})**: ${description}`,
     ),
     "",
     "## Browser and desktop",
@@ -35,7 +35,7 @@ export function homeMarkdown(): string {
     "",
     "## Docs",
     "",
-    `Read the [agent-browser documentation](${urlFor("/docs")}) for installation, the command reference, configuration, and troubleshooting. The [llms.txt](${urlFor("/llms.txt")}) index lists every page, and each page is available as Markdown at its \`.md\` URL or with an \`Accept: text/markdown\` header.`,
+    `Read the [agent-browser documentation](${urlFor("/introduction")}) for installation, the command reference, configuration, and troubleshooting. The [llms.txt](${urlFor("/llms.txt")}) index lists every page, and each page is available as Markdown at its \`.md\` URL or with an \`Accept: text/markdown\` header.`,
     "",
   ].join("\n");
 }

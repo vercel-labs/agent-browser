@@ -10,7 +10,8 @@ import { applyDocsResponseHeaders } from "@/lib/docs-response-headers";
 import { config as geistdocsConfig } from "@/lib/geistdocs/config";
 import { isPreviewDeployment } from "@/lib/site";
 
-const pages = new Set([...allDocsPages.map((page) => page.href), "/docs"]);
+// The marketing homepage is public but is not a docs navigation page.
+const pages = new Set([...allDocsPages.map((page) => page.href), "/"]);
 const localeProxy = createI18nMiddleware({
   defaultLanguage: "en",
   languages: ["en"],
@@ -29,7 +30,7 @@ function isFlightRequest(request: NextRequest): boolean {
 
 function notFoundResponse() {
   const response = new NextResponse(
-    '<!doctype html><html lang="en"><head><title>Page Not Found | agent-browser</title><meta name="robots" content="noindex, nofollow"></head><body><main><h1>Page Not Found</h1><p>The requested documentation page does not exist.</p><a href="/">Documentation</a></main></body></html>',
+    '<!doctype html><html lang="en"><head><title>Page Not Found | agent-browser</title><meta name="robots" content="noindex, nofollow"></head><body><main><h1>Page Not Found</h1><p>The requested documentation page does not exist.</p><a href="/introduction">Documentation</a></main></body></html>',
     {
       status: 404,
       headers: {
@@ -44,10 +45,7 @@ function notFoundResponse() {
 
 const geistdocsProxy = createProxy({
   config: geistdocsConfig,
-  markdownRoutes: [
-    { from: "/docs", to: "/api/docs-md/docs" },
-    { from: "/*path", to: "/api/docs-md/*path" },
-  ],
+  markdownRoutes: [{ from: "/*path", to: "/api/docs-md/*path" }],
   before: async ({ request, context }) => {
     if (isFlightRequest(request)) {
       return (await localeProxy(request, context)) ?? NextResponse.next();

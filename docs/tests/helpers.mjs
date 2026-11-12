@@ -16,6 +16,11 @@ export const hash = (body) => createHash("sha256").update(body).digest("hex");
 export const canonical = (path) => `${origin}${path === "/" ? "" : path}`;
 export const markdownPath = (path) =>
   path === "/" ? "/index.md" : `${path}.md`;
+/** Fixture page `/` carries the introduction; its public canonical is `/introduction`. */
+export const docsCanonical = (path) =>
+  path === "/" ? `${origin}/introduction` : canonical(path);
+export const docsMarkdownPath = (path) =>
+  path === "/" ? "/introduction.md" : markdownPath(path);
 export const apiPath = (path) => `/api/docs-md${path === "/" ? "" : path}`;
 export const tokens = (value) =>
   (value ?? "")
@@ -377,7 +382,7 @@ export function assertHomeMarkdown(body) {
       `homepage: missing feature ${JSON.stringify(title)}`,
     );
   assert.ok(
-    body.includes(`[Browser automation built for any agent](${origin}/docs)`),
+    body.includes(`[Browser automation built for any agent](${origin}/introduction)`),
     "homepage: missing browser docs link",
   );
   assert.ok(
@@ -387,7 +392,7 @@ export function assertHomeMarkdown(body) {
     "homepage: missing desktop docs link",
   );
   assert.ok(
-    body.includes(`Read the [agent-browser documentation](${origin}/docs)`),
+    body.includes(`Read the [agent-browser documentation](${origin}/introduction)`),
     "homepage: missing docs pointer",
   );
   assert.ok(
