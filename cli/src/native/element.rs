@@ -1001,29 +1001,39 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
         const frames = [];
         let win = doc.defaultView;
         while (win && win.frameElement) {
-            const frameRect = win.frameElement.getBoundingClientRect();
-            x += frameRect.x + win.frameElement.clientLeft;
-            y += frameRect.y + win.frameElement.clientTop;
-            frames.push(win.frameElement);
+            const fe = win.frameElement;
+            const frameRect = fe.getBoundingClientRect();
+            x = frameRect.x + fe.clientLeft + x * (frameRect.width / (win.innerWidth || 1));
+            y = frameRect.y + fe.clientTop + y * (frameRect.height / (win.innerHeight || 1));
+            frames.push(fe);
             win = win.parent;
         }
         return { x: x, y: y, lx: r.x + r.width / 2, ly: r.y + r.height / 2, frames: frames, view: (win && win.document.defaultView) || window, box: r.width > 0 || r.height > 0 };
     };
     const inside = (m) => m.x >= 0 && m.y >= 0 && m.x < m.view.innerWidth && m.y < m.view.innerHeight;
-    let m = measure();
-    for (let scrolls = 0; scrolls < 2 && m.box && !inside(m); scrolls++) {
-        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-        for (const frame of [...m.frames].reverse()) frame.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const settle = async (m) => {
         for (let i = 0; i < 5; i++) {
             await new Promise((resolve) => {
                 requestAnimationFrame(() => requestAnimationFrame(resolve));
                 setTimeout(resolve, 100);
             });
             const next = measure();
-            const settled = next.x === m.x && next.y === m.y;
+            const moved = next.x !== m.x || next.y !== m.y;
             m = next;
-            if (settled) break;
+            if (!moved) break;
         }
+        return m;
+    };
+    let m = measure();
+    if (el.scrollIntoViewIfNeeded) {
+        el.scrollIntoViewIfNeeded(true);
+        const next = measure();
+        m = next.x !== m.x || next.y !== m.y ? await settle(next) : next;
+    }
+    for (let scrolls = 0; scrolls < 2 && m.box && !inside(m); scrolls++) {
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        for (const frame of [...m.frames].reverse()) frame.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        m = await settle(measure());
     }
     return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, inView: inside(m) };
 })"#;

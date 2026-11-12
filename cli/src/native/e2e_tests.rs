@@ -6246,6 +6246,11 @@ async fn e2e_click_rejects_unreachable_elements() {
             <button id="ok" onclick="document.getElementById('result').textContent = 'clicked'">Ok</button>
             <button id="straddle" style="position:absolute;top:calc(100vh - 10px)" onclick="document.getElementById('result').textContent = 'straddle'">Straddle</button>
             <button id="moving" style="position:absolute;top:2500px" onclick="document.getElementById('result').textContent = 'moving'">Moving</button>
+            <div style="position:absolute;top:400px;height:120px;width:200px;overflow:auto">
+                <div style="height:300px"></div>
+                <button id="clipped" onclick="document.getElementById('result').textContent = 'clipped'">Clipped</button>
+            </div>
+            <iframe id="scaled" style="position:absolute;top:400px;left:300px;width:400px;height:300px;transform:scale(0.5);transform-origin:0 0"></iframe>
             <label><input id="hidden-check" type="checkbox" style="display:none"> Accept</label>
             <svg width="300" height="100"><line id="flat-line" x1="20" y1="50" x2="280" y2="50" stroke="black" stroke-width="8" onclick="document.getElementById('result').textContent = 'line'"/></svg>
             <div id="result">idle</div>
@@ -6256,6 +6261,7 @@ async fn e2e_click_rejects_unreachable_elements() {
                     moved = true;
                     requestAnimationFrame(() => { document.getElementById('moving').style.top = '2700px'; });
                 });
+                document.getElementById('scaled').srcdoc = "<button id='inner' style='margin:100px' onclick=\"document.getElementById('r').textContent='scaled'\">Inner</button><div id='r'>idle</div>";
             </script>
         </body>
         </html>
@@ -6335,6 +6341,14 @@ async fn e2e_click_rejects_unreachable_elements() {
     }
 
     let resp = execute_command(
+        &json!({ "id": "6c", "action": "click", "selector": "#clipped" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "clipped");
+
+    let resp = execute_command(
         &json!({ "id": "6b", "action": "click", "selector": format!("@{}", find_ref("Straddle")) }),
         &mut state,
     )
@@ -6386,6 +6400,26 @@ async fn e2e_click_rejects_unreachable_elements() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["checked"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "12", "action": "frame", "selector": "#scaled" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "13", "action": "click", "selector": "#inner" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14", "action": "gettext", "selector": "#r" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "scaled");
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
