@@ -736,6 +736,20 @@ enum TempProfileState {
     Skip,
 }
 
+/// Starts removing temp profiles in `root` left by daemons that died before
+/// `ChromeProcess::drop` ran. Runs on a detached thread so no launch waits on
+/// recursive deletes, and returns `None` when that thread cannot start.
+#[cfg(unix)]
+fn spawn_stale_temp_profile_sweep(
+    root: PathBuf,
+    min_age: Duration,
+) -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("temp-profile-sweep".into())
+        .spawn(move || sweep_stale_temp_profiles(&root, min_age))
+        .ok()
+}
+
 /// Removes temp profiles in `root` left by daemons that died before
 /// `ChromeProcess::drop` ran, at most `STALE_PROFILE_MAX_PER_SWEEP` per call.
 #[cfg(unix)]
@@ -822,7 +836,7 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     };
 
     #[cfg(unix)]
-    sweep_stale_temp_profiles(&std::env::temp_dir(), STALE_PROFILE_MIN_AGE);
+    let _ = spawn_stale_temp_profile_sweep(std::env::temp_dir(), STALE_PROFILE_MIN_AGE);
 
     // Profile name preprocessing: if --profile is a Chrome profile name (not a
     // path), resolve it to a directory, copy the profile to a temp dir, and
@@ -3319,6 +3333,25 @@ exec sleep 60
             };
             assert_eq!(left("chrome"), count);
             assert_eq!(left("profile"), 5);
+        }
+
+        #[test]
+        fn spawned_sweep_removes_stale_profiles_without_touching_live_ones() {
+            let root = tempfile::tempdir().unwrap();
+            let stale = profile(root.path(), "agent-browser-profile-", None);
+            let live = profile(
+                root.path(),
+                "agent-browser-chrome-",
+                local_lock(std::process::id()),
+            );
+
+            spawn_stale_temp_profile_sweep(root.path().to_path_buf(), Duration::ZERO)
+                .expect("sweep thread")
+                .join()
+                .unwrap();
+
+            assert!(!stale.exists(), "stale profile should be swept");
+            assert!(live.exists(), "live profile must survive the sweep");
         }
     }
 }
