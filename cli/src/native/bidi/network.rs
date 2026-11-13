@@ -1016,6 +1016,32 @@ async fn wait_download(
     }
 }
 
+/// A private directory a download stages into. Dropping it removes the
+/// directory and every file the page put there, on every exit path.
+struct DownloadStage {
+    dir: std::path::PathBuf,
+}
+
+impl DownloadStage {
+    fn create() -> Result<Self, String> {
+        let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        let dir = std::env::temp_dir().join(format!("agent-browser-download-{id}"));
+        super::firefox::create_private_dir(&dir)
+            .map_err(|e| format!("Failed to create download staging directory: {e}"))?;
+        Ok(Self { dir })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.dir
+    }
+}
+
+impl Drop for DownloadStage {
+    fn drop(&mut self) {
+        super::firefox::remove_private_dir(&self.dir);
+    }
+}
+
 /// `download`: clicks the ref or selector and saves the resulting file at `path`.
 /// Only an owned browser may name files on the daemon's filesystem.
 pub async fn download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -1051,18 +1077,20 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .get("path")
         .and_then(Value::as_str)
         .ok_or("Missing 'path' parameter")?;
-    let (dir, _) = chrome::resolve_download_dest(path)?;
-    let download_dir = dir
-        .to_str()
-        .ok_or("Download directory path is not valid UTF-8")?;
+    chrome::resolve_download_dest(path)?;
     let target = resolve_target(state, selector).await?;
+    let stage = DownloadStage::create()?;
+    let stage_dir = stage
+        .path()
+        .to_str()
+        .ok_or("Download staging directory path is not valid UTF-8")?;
     let ff = session(state)?;
     let downloads = ff.net.downloads.clone();
     let cursor = downloads.lock().await.cursor();
     ff.bidi
         .send(
             "browser.setDownloadBehavior",
-            json!({"downloadBehavior": {"type": "allowed", "destinationFolder": download_dir}}),
+            json!({"downloadBehavior": {"type": "allowed", "destinationFolder": stage_dir}}),
         )
         .await?;
     let this = json!({"sharedId": target.shared_id});
@@ -1098,7 +1126,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .or_else(|| {
             record
                 .suggested_filename
-                .map(|name| dir.join(name).to_string_lossy().into_owned())
+                .map(|name| stage.path().join(name).to_string_lossy().into_owned())
         })
         .ok_or("Download completed but could not determine the downloaded file name")?;
     let saved = std::path::Path::new(&saved);
@@ -1108,7 +1136,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             saved.display()
         ));
     }
-    if !chrome::may_move_download(saved, ff.downloads_are_local(), Some(download_dir)) {
+    if !chrome::may_move_download(saved, ff.downloads_are_local(), Some(stage_dir)) {
         return Err(format!(
             "Refusing to move downloaded file from {}",
             saved.display()
@@ -1177,6 +1205,7 @@ pub async fn waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Val
 mod tests {
     use super::*;
     use crate::native::actions::RouteResponse;
+    use crate::native::bidi::session::tests::{fake_session_with_replies, FakeReply};
 
     fn mock_route(pattern: &str, body: &str, status: u16) -> RouteEntry {
         RouteEntry {
@@ -1335,6 +1364,99 @@ mod tests {
         assert!(error.contains("attached Firefox"), "{error}");
         assert!(calls.lock().unwrap().is_empty());
         assert!(!destination.parent().unwrap().exists());
+    }
+
+    fn staged_download_folder(calls: &[Value]) -> std::path::PathBuf {
+        let folder = calls
+            .iter()
+            .find(|request| request["method"] == "browser.setDownloadBehavior")
+            .map(|request| request["params"]["downloadBehavior"]["destinationFolder"].clone())
+            .expect("the download command names a destination folder");
+        std::path::PathBuf::from(folder.as_str().expect("the folder is a string"))
+    }
+
+    async fn failed_download() -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let out = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dest = out.path().join("report.bin");
+        let calls: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+        let recorded = calls.clone();
+        let (ff, _tx, _) = fake_session_with_replies(move |request| {
+            let click = request["params"]["functionDeclaration"]
+                .as_str()
+                .is_some_and(|js| js.contains("this.click"));
+            if click {
+                return FakeReply::Error {
+                    error: "unknown error",
+                    message: "click failed",
+                };
+            }
+            recorded.lock().unwrap().push(request.clone());
+            if request["method"] == "script.callFunction" {
+                FakeReply::Result(json!({"result": {"type": "node", "sharedId": "sid"}}))
+            } else {
+                FakeReply::Result(json!({}))
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        let error = download_to_path(
+            &json!({ "selector": "#dl", "path": dest.to_str().unwrap() }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        let staging = staged_download_folder(&calls.lock().unwrap());
+        (out, staging, error)
+    }
+
+    #[tokio::test]
+    async fn download_stages_outside_the_requested_directory() {
+        let (out, staging, error) = failed_download().await;
+        assert!(error.contains("click failed"), "{error}");
+        assert!(
+            !staging.starts_with(out.path()),
+            "a page-chosen name must never land in {}: {}",
+            out.path().display(),
+            staging.display()
+        );
+        assert!(
+            !staging.starts_with(std::env::current_dir().unwrap()),
+            "the staging directory sits outside the working directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_leaves_the_requested_directory_empty() {
+        let (out, staging, _) = failed_download().await;
+        assert_eq!(
+            std::fs::read_dir(out.path()).unwrap().count(),
+            0,
+            "the requested directory holds no file"
+        );
+        assert!(!staging.exists(), "the staging directory is gone");
+    }
+
+    #[test]
+    fn the_download_stage_removes_its_directory_on_drop() {
+        let dir = {
+            let stage = DownloadStage::create().unwrap();
+            std::fs::write(stage.path().join("conftest.py"), b"page chosen").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(stage.path())
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o700, "the staging directory is private");
+            }
+            stage.path().to_path_buf()
+        };
+        assert!(
+            !dir.exists(),
+            "the staging directory and its contents are gone"
+        );
     }
 
     #[test]

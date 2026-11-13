@@ -2759,6 +2759,10 @@ Compact snapshots keep visible text, status text, and their direct ancestors.
 Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
 interactive to false to retain visible text and status text.
 
+Hints:
+Controls with an empty or duplicated accessible name print hint="..." after
+the ref, read from the icon, image file, data-testid/name/id, and nearest row.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
@@ -3481,6 +3485,12 @@ work); lower it for long sessions where file size matters more than motion.
 With --cursor, an inert overlay renders the pointer and page together so
 drags stay synchronized. It is hidden from accessibility snapshots and
 removed on stop. Screenshots taken while recording include the overlay.
+
+Frames come from Chrome's screencast, which captures at the window's real
+device scale. When the page's scale is emulated (`set viewport <w> <h> 2`),
+recording switches to full-density screenshots, which can capture fewer frames
+on busy pages; `record stop` reports "capture": "screenshots". Launching with
+--args "--force-device-scale-factor=2" keeps the screencast at full density.
 
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)

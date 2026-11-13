@@ -82,6 +82,7 @@ impl Grants {
 }
 
 /// Grants the requested permissions to the open tabs and to every origin a tab loads later.
+/// Requests are intercepted from here on, so a document request waits until its origin holds them.
 pub async fn grant(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let names: Vec<String> = cmd
         .get("permissions")
@@ -111,6 +112,7 @@ pub async fn grant(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
                 .collect()
         })
         .unwrap_or_default();
+    super::network::ensure_intercept(ff).await?;
     let mut grants = ff.permissions.lock().await;
     grants.grant(&ff.bidi, &names, &urls).await?;
     Ok(json!({ "granted": names }))
@@ -194,7 +196,11 @@ mod tests {
         assert_eq!(result, json!({"granted": ["geolocation"]}));
         assert_eq!(
             calls.lock().unwrap().clone(),
-            vec!["browsingContext.getTree", "permissions.setPermission"]
+            vec![
+                "browsingContext.getTree",
+                "network.addIntercept",
+                "permissions.setPermission"
+            ]
         );
     }
 

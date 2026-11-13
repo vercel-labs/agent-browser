@@ -195,7 +195,7 @@ fn user_js(download_path: Option<&str>, restrict_webrtc: bool) -> String {
     js
 }
 
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
@@ -380,7 +380,7 @@ impl Drop for FirefoxProcess {
     }
 }
 
-fn remove_private_dir(dir: &Path) {
+pub(crate) fn remove_private_dir(dir: &Path) {
     for _ in 0..3 {
         if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
             break;

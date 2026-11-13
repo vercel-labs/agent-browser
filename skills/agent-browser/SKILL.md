@@ -33,6 +33,7 @@ agent-browser skills get slack             # Slack workspace automation
 agent-browser skills get dogfood           # Exploratory testing / QA / bug hunts
 agent-browser skills get derive-client     # Record a HAR, derive a standalone API client for a site
 agent-browser skills get webmcp-gen        # Build and validate WebMCP tools for a page
+agent-browser skills get modern-web-guidance  # Apply Modern Web Guidance, then verify the page
 agent-browser skills get vercel-sandbox    # agent-browser inside Vercel Sandbox microVMs
 agent-browser skills get protected-vercel-deployments  # Access protected Vercel deployments
 agent-browser skills get agentcore         # AWS Bedrock AgentCore cloud browsers
