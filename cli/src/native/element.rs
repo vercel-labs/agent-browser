@@ -970,11 +970,34 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     let hit = d.elementFromPoint(lx, ly);
     while (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && hit.contentDocument && hit !== el) {
         const r = hit.getBoundingClientRect();
-        const style = hit.ownerDocument.defaultView.getComputedStyle(hit);
-        const scaleX = r.width / (hit.offsetWidth || r.width);
-        const scaleY = r.height / (hit.offsetHeight || r.height);
-        lx = (lx - r.x - (parseFloat(style.borderLeftWidth) || 0) * scaleX) / scaleX;
-        ly = (ly - r.y - (parseFloat(style.borderTopWidth) || 0) * scaleY) / scaleY;
+        const ownerWin = hit.ownerDocument.defaultView;
+        const style = ownerWin ? ownerWin.getComputedStyle(hit) : null;
+        const scaleX = hit.offsetWidth > 0 ? r.width / hit.offsetWidth : 1;
+        const scaleY = hit.offsetHeight > 0 ? r.height / hit.offsetHeight : 1;
+        const borderLeft = style ? (parseFloat(style.borderLeftWidth) || 0) : hit.clientLeft;
+        const borderTop = style ? (parseFloat(style.borderTopWidth) || 0) : hit.clientTop;
+        const padLeft = style ? (parseFloat(style.paddingLeft) || 0) : 0;
+        const padTop = style ? (parseFloat(style.paddingTop) || 0) : 0;
+        const padRight = style ? (parseFloat(style.paddingRight) || 0) : 0;
+        const padBottom = style ? (parseFloat(style.paddingBottom) || 0) : 0;
+        const contentLeft = r.x + (borderLeft + padLeft) * scaleX;
+        const contentTop = r.y + (borderTop + padTop) * scaleY;
+        const contentWidth = Math.max(0, hit.clientWidth - padLeft - padRight);
+        const contentHeight = Math.max(0, hit.clientHeight - padTop - padBottom);
+        const renderedWidth = contentWidth * scaleX;
+        const renderedHeight = contentHeight * scaleY;
+        if (
+            renderedWidth <= 0 || renderedHeight <= 0 ||
+            lx < contentLeft || lx >= contentLeft + renderedWidth ||
+            ly < contentTop || ly >= contentTop + renderedHeight
+        ) {
+            break;
+        }
+        const childWin = hit.contentDocument.defaultView;
+        const vw = (childWin && childWin.innerWidth) || contentWidth;
+        const vh = (childWin && childWin.innerHeight) || contentHeight;
+        lx = (lx - contentLeft) * (vw / renderedWidth);
+        ly = (ly - contentTop) * (vh / renderedHeight);
         d = hit.contentDocument;
         hit = d.elementFromPoint(lx, ly);
     }
@@ -1012,15 +1035,33 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
         while (win && win.frameElement) {
             const fe = win.frameElement;
             const frameRect = fe.getBoundingClientRect();
-            const style = win.getComputedStyle(fe);
-            const scaleX = frameRect.width / (fe.offsetWidth || frameRect.width);
-            const scaleY = frameRect.height / (fe.offsetHeight || frameRect.height);
-            const borderLeft = (parseFloat(style.borderLeftWidth) || 0) * scaleX;
-            const borderTop = (parseFloat(style.borderTopWidth) || 0) * scaleY;
-            x = frameRect.x + borderLeft + x * ((fe.clientWidth || win.innerWidth) * scaleX / (win.innerWidth || 1));
-            y = frameRect.y + borderTop + y * ((fe.clientHeight || win.innerHeight) * scaleY / (win.innerHeight || 1));
+            const ownerWin = fe.ownerDocument.defaultView || win.parent;
+            const style = ownerWin.getComputedStyle(fe);
+            const scaleX = fe.offsetWidth > 0 ? frameRect.width / fe.offsetWidth : 1;
+            const scaleY = fe.offsetHeight > 0 ? frameRect.height / fe.offsetHeight : 1;
+            const borderLeft = parseFloat(style.borderLeftWidth) || 0;
+            const borderTop = parseFloat(style.borderTopWidth) || 0;
+            const padLeft = parseFloat(style.paddingLeft) || 0;
+            const padTop = parseFloat(style.paddingTop) || 0;
+            const padRight = parseFloat(style.paddingRight) || 0;
+            const padBottom = parseFloat(style.paddingBottom) || 0;
+            const contentLeft = frameRect.x + (borderLeft + padLeft) * scaleX;
+            const contentTop = frameRect.y + (borderTop + padTop) * scaleY;
+            const contentWidth = Math.max(0, fe.clientWidth - padLeft - padRight);
+            const contentHeight = Math.max(0, fe.clientHeight - padTop - padBottom);
+            const renderedWidth = contentWidth * scaleX;
+            const renderedHeight = contentHeight * scaleY;
+            const vw = win.innerWidth;
+            const vh = win.innerHeight;
+            x = contentLeft + (vw > 0 ? x * (renderedWidth / vw) : 0);
+            y = contentTop + (vh > 0 ? y * (renderedHeight / vh) : 0);
             const parentWin = win.parent;
-            reachable = reachable && x >= 0 && y >= 0 && x < parentWin.innerWidth && y < parentWin.innerHeight;
+            reachable = reachable
+                && renderedWidth > 0 && renderedHeight > 0
+                && x >= contentLeft && x < contentLeft + renderedWidth
+                && y >= contentTop && y < contentTop + renderedHeight
+                && x >= 0 && y >= 0
+                && x < parentWin.innerWidth && y < parentWin.innerHeight;
             frames.push(fe);
             win = parentWin;
         }
@@ -1077,7 +1118,8 @@ fn build_selector_js(selector: &str) -> String {
             const point = await clickPoint(el, document);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(document, el, point.lx, point.ly) }};
+            const topDoc = (point.view && point.view.document) || document;
+            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(document, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
         }})()"#,
     )
 }

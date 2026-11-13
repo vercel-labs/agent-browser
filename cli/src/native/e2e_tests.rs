@@ -6251,6 +6251,10 @@ async fn e2e_click_rejects_unreachable_elements() {
                 <button id="clipped" onclick="document.getElementById('result').textContent = 'clipped'">Clipped</button>
             </div>
             <iframe id="scaled" style="position:absolute;top:400px;left:300px;width:400px;height:300px;transform:scale(0.5);transform-origin:0 0"></iframe>
+            <iframe id="padded" style="position:absolute;top:600px;left:450px;width:200px;height:150px;border:0;padding:14px"></iframe>
+            <iframe id="padded-scaled" style="position:absolute;top:800px;left:450px;width:220px;height:180px;border:solid red;border-width:8px 12px 16px 10px;padding:14px 28px 22px 18px;box-sizing:border-box;transform:scale(0.5);transform-origin:0 0"></iframe>
+            <div id="pad-cover" style="position:absolute;left:464px;top:644px;width:16px;height:16px;background:rgba(0,0,0,0.5)"></div>
+            <iframe id="zero-content" style="position:absolute;top:600px;left:720px;width:40px;height:40px;border:0;padding:20px;box-sizing:border-box"></iframe>
             <button id="outside-parent" style="position:absolute;left:120px;top:600px;width:120px;height:50px" onclick="document.getElementById('result').textContent = 'parent'">Parent</button>
             <iframe id="wild" style="position:absolute;left:200px;top:600px;width:200px;height:150px;border:0"></iframe>
             <label><input id="hidden-check" type="checkbox" style="display:none"> Accept</label>
@@ -6264,6 +6268,9 @@ async fn e2e_click_rejects_unreachable_elements() {
                     requestAnimationFrame(() => { document.getElementById('moving').style.top = '2700px'; });
                 });
                 document.getElementById('scaled').srcdoc = "<button id='inner' style='margin:100px' onclick=\"document.getElementById('r').textContent='scaled'\">Inner</button><div id='r'>idle</div>";
+                document.getElementById('padded').srcdoc = "<body style='margin:0'><button id='inner-padded' style='position:absolute;left:0;top:0;width:12px;height:12px;padding:0;border:0' onclick=\"parent.document.getElementById('result').textContent='padded-clicked'\">Padded</button><button id='inner-covered' style='position:absolute;left:2px;top:32px;width:12px;height:12px;padding:0;border:0' onclick=\"parent.document.getElementById('result').textContent='covered-clicked'\">Covered</button></body>";
+                document.getElementById('padded-scaled').srcdoc = "<body style='margin:0'><button id='inner-padded-scaled' style='position:absolute;left:0;top:0;width:16px;height:16px;padding:0;border:0' onclick=\"parent.document.getElementById('result').textContent='padded-scaled-clicked'\">Scaled</button></body>";
+                document.getElementById('zero-content').srcdoc = "<body style='margin:0'><button id='inner-zero' style='width:12px;height:12px'>Zero</button></body>";
                 document.getElementById('wild').srcdoc = "<button id='out' style='position:fixed;left:-100px;top:10px' onclick=\"parent.document.getElementById('result').textContent='child'\">Out</button>";
             </script>
         </body>
@@ -6423,6 +6430,79 @@ async fn e2e_click_rejects_unreachable_elements() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["text"], "scaled");
+
+    let resp = execute_command(
+        &json!({ "id": "14a", "action": "frame", "selector": "#padded" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14b", "action": "click", "selector": "#inner-padded" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14c", "action": "click", "selector": "#inner-covered" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "covered padded target must fail: {resp}"
+    );
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("covered by <div#pad-cover>"),
+        "{resp}"
+    );
+    let resp = execute_command(&json!({ "id": "14d", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "padded-clicked");
+
+    let resp = execute_command(
+        &json!({ "id": "14e", "action": "frame", "selector": "#padded-scaled" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14f", "action": "click", "selector": "#inner-padded-scaled" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "14g", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "padded-scaled-clicked");
+
+    let resp = execute_command(
+        &json!({ "id": "14h", "action": "frame", "selector": "#zero-content" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14i", "action": "click", "selector": "#inner-zero" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "zero-content target must be outside viewport: {resp}"
+    );
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside the viewport"),
+        "{resp}"
+    );
+    let resp = execute_command(&json!({ "id": "14j", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
 
     let resp = execute_command(
         &json!({ "id": "15", "action": "frame", "selector": "#wild" }),
