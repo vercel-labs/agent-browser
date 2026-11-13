@@ -819,17 +819,57 @@ pub fn is_actionable(node: &Node) -> bool {
 
 /// Containers that only carry a click listener (for example an app root with a delegated
 /// handler) are not click targets when something inside them is. Controls and anchors always are.
-fn is_target(node: &Node) -> bool {
-    if !is_actionable(node) {
-        return false;
-    }
-    let generic =
-        node.kind != KIND_FORM_CONTROL && node.kind != KIND_ANCHOR && role_for(node) == "clickable";
-    !generic || !node.children.iter().any(has_actionable)
+fn is_generic_container(node: &Node) -> bool {
+    node.kind != KIND_FORM_CONTROL && node.kind != KIND_ANCHOR && role_for(node) == "clickable"
 }
 
-fn has_actionable(node: &Node) -> bool {
-    is_target(node) || node.children.iter().any(has_actionable)
+#[derive(Clone, Copy, Default)]
+struct Scan {
+    /// The node is a click target, so it gets a ref or a read-only line.
+    target: bool,
+    /// The node or one of its descendants is a click target.
+    subtree: bool,
+}
+
+/// Click-target decisions for the whole tree, computed once, bottom up. Both flags depend on
+/// descendants, so deciding them per node while walking scans a subtree at every level of nested
+/// clickable containers, which is exponential in the nesting depth.
+#[derive(Default)]
+struct Scans {
+    by_node: HashMap<usize, Scan>,
+}
+
+impl Scans {
+    fn new(root: &Node) -> Self {
+        let mut scans = Self::default();
+        scans.visit(root);
+        scans
+    }
+
+    /// Node address as a key. The tree is owned by the caller and not mutated while rendering.
+    fn key(node: &Node) -> usize {
+        node as *const Node as usize
+    }
+
+    /// Returns whether the node or its descendants are a click target.
+    fn visit(&mut self, node: &Node) -> bool {
+        let mut child_target = false;
+        for child in &node.children {
+            child_target |= self.visit(child);
+        }
+        let target = is_actionable(node) && (!is_generic_container(node) || !child_target);
+        let subtree = target || child_target;
+        self.by_node
+            .insert(Self::key(node), Scan { target, subtree });
+        subtree
+    }
+
+    fn get(&self, node: &Node) -> Scan {
+        self.by_node
+            .get(&Self::key(node))
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
 fn role_for(node: &Node) -> &'static str {
@@ -885,6 +925,7 @@ fn is_button_like(role: &str) -> bool {
 struct Walker<'a> {
     opts: &'a RenderOptions,
     labels: HashMap<(u32, i64), String>,
+    scans: Scans,
     items: Vec<Item>,
     /// Depth of enclosing actionable or consumed nodes whose text is already in their name.
     suppress_text: usize,
@@ -1086,7 +1127,7 @@ impl Walker<'_> {
             return;
         }
 
-        let target = is_target(node);
+        let target = self.scans.get(node).target;
         if target && !node.read_only {
             if visible && !over_depth {
                 let item = self.actionable_item(node, indent);
@@ -1152,7 +1193,7 @@ impl Walker<'_> {
         } else if !self.opts.interactive && visible && !over_depth {
             match node.kind {
                 KIND_HEADING | KIND_PARAGRAPH => {
-                    if !has_actionable(node) {
+                    if !self.scans.get(node).subtree {
                         let t = text_of(node);
                         if !t.is_empty() {
                             self.push(Item {
@@ -1230,6 +1271,7 @@ pub fn render_items(doc: &Doc, opts: &RenderOptions) -> Vec<Item> {
     let mut walker = Walker {
         opts,
         labels,
+        scans: Scans::new(&doc.root),
         items: Vec::new(),
         suppress_text: 0,
     };
@@ -1743,6 +1785,52 @@ mod tests {
         assert!(is_verified_version("Chrome/157.0.8103.39"));
         assert!(!is_verified_version("Chrome/158.0.1.1"));
         assert!(!is_verified_version("not a version"));
+    }
+
+    fn clickable(dom_id: i64) -> Node {
+        Node {
+            kind: KIND_ROOT,
+            dom_id: Some(dom_id),
+            outer: Some(Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            }),
+            info: Some(Interaction {
+                tabbable: true,
+                ..Interaction::default()
+            }),
+            ..Node::default()
+        }
+    }
+
+    /// Clickable containers nested one inside the next, `depth` levels deep.
+    fn nested_clickables(depth: i64) -> Node {
+        let mut node = clickable(depth);
+        for level in (0..depth).rev() {
+            let mut parent = clickable(level);
+            parent.children = vec![node];
+            node = parent;
+        }
+        node
+    }
+
+    #[test]
+    fn nested_clickable_containers_stay_linear() {
+        let doc = Doc {
+            root: nested_clickables(30),
+            ..Doc::default()
+        };
+        let start = std::time::Instant::now();
+        let items = render_items(&doc, &interactive());
+        let elapsed = start.elapsed();
+        assert_eq!(items.len(), 1, "only the innermost container is a target");
+        assert_eq!(items[0].target, Some(30));
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "nested clickable containers took {elapsed:?}"
+        );
     }
 
     #[test]
