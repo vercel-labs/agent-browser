@@ -532,7 +532,19 @@ pub async fn select_option(
                 if (options.length === 0) {
                     return { error: 'combobox opened but no visible role=option elements were found' };
                 }
-                const nameOf = (o) => normalize(o.getAttribute('aria-label')) || normalize(o.textContent);
+                // Accessible name precedence: aria-labelledby, aria-label, text
+                // content. Option rows often carry an indicator or a description
+                // next to the label, so textContent alone misses their name.
+                const nameOf = (o) => {
+                    const labels = (o.getAttribute('aria-labelledby') || '').trim();
+                    if (labels) {
+                        const text = labels.split(/\s+/)
+                            .map((id) => { const el = document.getElementById(id); return el ? el.textContent : ''; })
+                            .join(' ');
+                        if (normalize(text)) return normalize(text);
+                    }
+                    return normalize(o.getAttribute('aria-label')) || normalize(o.textContent);
+                };
                 const valueOf = (o) => normalize(o.getAttribute('data-value')) || normalize(o.getAttribute('value'));
                 const wanted = new Set();
                 for (const value of vals) {

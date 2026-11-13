@@ -2317,6 +2317,55 @@ cb.addEventListener('click',function(){if(cb.getAttribute('aria-expanded')==='tr
     assert_success(&resp);
 }
 
+// An option whose accessible name comes from aria-labelledby must match that
+// name, even when its text content also carries an indicator and a description.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_labelled_option() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="true" aria-controls="popup">Choose</div>
+<ul role="listbox" id="popup">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="car" aria-labelledby="car-label"><span aria-hidden="true">new</span><span id="car-label">Car</span><span class="hint"> compact, +$500</span></li>
+</ul>
+<output id="result">none</output>
+<script>
+var r=document.getElementById('result');
+document.querySelectorAll('#popup [role=option]').forEach(function(o){o.addEventListener('click',function(){r.textContent=o.getAttribute('data-value');});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Car"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('result').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "car");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_form_interaction() {
