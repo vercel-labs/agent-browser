@@ -69,6 +69,7 @@ pub(crate) fn full_flags() -> Flags {
     f.restore_check_fn = Some("() => true".to_string());
     f.color_scheme = Some("dark".to_string());
     f.download_path = Some("/downloads".to_string());
+    f.context = Some("tenant-a".to_string());
     f.capture = Some(vec!["flow".to_string()]);
     f.allowed_domains = Some(vec!["a.test".to_string(), "*.b.test".to_string()]);
     f.action_policy = Some("/policy.json".to_string());
@@ -529,6 +530,17 @@ fn launch_options_view_reads_every_launch_variable() {
     assert_eq!(o.ca_cert, None);
     assert_eq!(o.viewport_size, None);
     assert!(!o.use_real_keychain);
+}
+
+#[test]
+fn context_seeds_from_env() {
+    assert_eq!(
+        seeded(&[("AGENT_BROWSER_CONTEXT", "tenant-a")])
+            .context()
+            .as_deref(),
+        Some("tenant-a")
+    );
+    assert_eq!(seeded(&[]).context(), None);
 }
 
 #[test]
