@@ -2273,6 +2273,94 @@ async fn e2e_form_interaction() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_fill_date_and_time_inputs() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<html><body>",
+        "<input id='date' type='date'>",
+        "<input id='time' type='time'>",
+        "<input id='local' type='datetime-local'>",
+        "<input id='month' type='month'>",
+        "<input id='week' type='week'>",
+        "<script>window.changes = [];",
+        "document.addEventListener('change', e => changes.push(e.target.id));</script>",
+        "</body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let cases = [
+        ("#date", "2026-09-26"),
+        ("#time", "20:49"),
+        ("#local", "2026-09-26T20:49"),
+        ("#month", "2026-09"),
+        ("#week", "2026-W39"),
+    ];
+    for (i, (selector, value)) in cases.iter().enumerate() {
+        let resp = execute_command(
+            &json!({ "id": format!("f{i}"), "action": "fill", "selector": selector, "value": value }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(
+            &json!({ "id": format!("v{i}"), "action": "inputvalue", "selector": selector }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["value"], *value, "{selector}");
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "c", "action": "evaluate", "script": "changes.join(',')" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "date,time,local,month,week");
+
+    // A value the input cannot hold is an error, not a silent no-op.
+    let resp = execute_command(
+        &json!({ "id": "bad", "action": "fill", "selector": "#date", "value": "26/09/2026" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(error.contains("YYYY-MM-DD"), "{error}");
+
+    // An empty value clears the input.
+    let resp = execute_command(
+        &json!({ "id": "clear", "action": "fill", "selector": "#date", "value": "" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "cv", "action": "inputvalue", "selector": "#date" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["value"], "");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_select_option_label_override_names() {
     let mut state = DaemonState::new();
     let resp = execute_command(
