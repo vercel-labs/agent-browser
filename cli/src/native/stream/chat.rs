@@ -211,7 +211,11 @@ fn build_summary_text(messages: &[Value]) -> String {
         if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
             if !content.is_empty() {
                 let truncated = if content.len() > 2000 {
-                    format!("{}...[truncated]", &content[..2000])
+                    let mut end = 2000;
+                    while !content.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...[truncated]", &content[..end])
                 } else {
                     content.to_string()
                 };
@@ -1020,6 +1024,34 @@ pub(super) async fn handle_chat_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_truncation_preserves_multibyte_characters() {
+        for character in ["é", "中", "\u{20000}"] {
+            let prefix = "a".repeat(1999);
+            let content = format!("{prefix}{}", character.repeat(10));
+            let summary = build_summary_text(&[json!({
+                "role": "user",
+                "content": content,
+            })]);
+            assert_eq!(summary, format!("[user] {prefix}...[truncated]\n\n"));
+        }
+    }
+
+    #[test]
+    fn summary_keeps_complete_characters_at_the_byte_limit() {
+        let content = "é".repeat(1001);
+        let summary = build_summary_text(&[json!({ "role": "tool", "content": content })]);
+        assert_eq!(
+            summary,
+            format!("[tool] {}...[truncated]\n\n", "é".repeat(1000))
+        );
+        let content = "中".repeat(600);
+        assert_eq!(
+            build_summary_text(&[json!({ "role": "user", "content": content })]),
+            format!("[user] {content}\n\n"),
+        );
+    }
 
     #[test]
     fn chat_allows_webmcp_command() {
