@@ -2366,6 +2366,60 @@ document.querySelectorAll('#popup [role=option]').forEach(function(o){o.addEvent
     assert_success(&resp);
 }
 
+// A matched option that is aria-disabled must fail the command instead of
+// clicking a dead target and reporting success.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_disabled_option() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="true" aria-controls="popup">Choose</div>
+<ul role="listbox" id="popup">
+<li role="option" data-value="basic">Basic</li>
+<li role="option" data-value="pro" aria-disabled="true">Pro</li>
+</ul>
+<output id="result">none</output>
+<script>
+var r=document.getElementById('result');
+document.querySelectorAll('#popup [role=option]').forEach(function(o){o.addEventListener('click',function(){if(o.getAttribute('aria-disabled')==='true')return;r.textContent=o.getAttribute('data-value');});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Pro"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "disabled option must fail: {resp}");
+    let error = resp["error"].as_str().unwrap_or_default().to_string();
+    assert!(
+        error.contains("disabled"),
+        "error should name the disabled option: {error}"
+    );
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('result').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "none");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_form_interaction() {

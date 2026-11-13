@@ -557,6 +557,11 @@ pub async fn select_option(
                     if (matches.length > 1) {
                         return { error: 'Multiple options matched ' + JSON.stringify(value) };
                     }
+                    // A disabled option swallows the click, so selecting it would
+                    // report success with an unchanged widget.
+                    if (matches[0].getAttribute('aria-disabled') === 'true') {
+                        return { error: 'Option "' + nameOf(matches[0]) + '" is disabled' };
+                    }
                     wanted.add(matches[0]);
                 }
                 for (const opt of wanted) {
