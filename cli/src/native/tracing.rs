@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -123,10 +124,25 @@ pub async fn trace_stop(
         }
     }
 
-    // If ReturnAsStream mode was used, read trace data from the IO stream
+    // Tracing has stopped even if reading its output fails.
+    tracing_state.active = false;
+
+    // If ReturnAsStream mode was used, read trace data from the IO stream.
     if let Some(handle) = stream_handle {
-        if trace_events.is_empty() {
-            let stream_data = read_io_stream(client, session_id, &handle).await?;
+        let stream_data = if trace_events.is_empty() {
+            read_io_stream(client, session_id, &handle).await.map(Some)
+        } else {
+            Ok(None)
+        };
+        // Release the handle before propagating an IO or decoding error.
+        let _ = client
+            .send_command(
+                "IO.close",
+                Some(json!({ "handle": handle })),
+                Some(session_id),
+            )
+            .await;
+        if let Some(stream_data) = stream_data? {
             if let Ok(parsed) = serde_json::from_str::<Value>(&stream_data) {
                 if let Some(events) = parsed.get("traceEvents").and_then(|v| v.as_array()) {
                     trace_events.extend(events.iter().cloned());
@@ -144,17 +160,7 @@ pub async fn trace_stop(
                 }
             }
         }
-        // Close the IO stream
-        let _ = client
-            .send_command(
-                "IO.close",
-                Some(json!({ "handle": handle })),
-                Some(session_id),
-            )
-            .await;
     }
-
-    tracing_state.active = false;
 
     let save_path = match path {
         Some(p) => p.to_string(),
@@ -321,7 +327,7 @@ async fn read_io_stream(
     session_id: &str,
     handle: &str,
 ) -> Result<String, String> {
-    let mut data = String::new();
+    let mut data = Vec::new();
     loop {
         let result = client
             .send_command(
@@ -334,16 +340,30 @@ async fn read_io_stream(
             )
             .await?;
 
-        if let Some(chunk) = result.get("data").and_then(|v| v.as_str()) {
-            data.push_str(chunk);
-        }
+        data.extend(decode_io_chunk(&result)?);
 
         let eof = result.get("eof").and_then(|v| v.as_bool()).unwrap_or(true);
         if eof {
             break;
         }
     }
-    Ok(data)
+    String::from_utf8(data).map_err(|e| format!("Trace stream is not valid UTF-8: {}", e))
+}
+
+/// A CDP stream chunk may be base64 encoded, including when its boundary
+/// falls inside a UTF-8 character. Decode bytes before joining the chunks.
+fn decode_io_chunk(result: &Value) -> Result<Vec<u8>, String> {
+    let chunk = result
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Trace IO.read response has no data".to_string())?;
+    if result.get("base64Encoded").and_then(Value::as_bool) == Some(true) {
+        STANDARD
+            .decode(chunk)
+            .map_err(|e| format!("Invalid base64 trace chunk: {}", e))
+    } else {
+        Ok(chunk.as_bytes().to_vec())
+    }
 }
 
 fn get_clock_domain() -> Option<&'static str> {
@@ -369,5 +389,144 @@ fn get_profiles_dir() -> PathBuf {
         home.join(".agent-browser").join("tmp").join("profiles")
     } else {
         std::env::temp_dir().join("agent-browser").join("profiles")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    async fn trace_client(
+        chunks: Vec<Value>,
+        fail_read: bool,
+    ) -> (CdpClient, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let seen_close = closed.clone();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut chunks = chunks.into_iter();
+            while let Some(Ok(message)) = socket.next().await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    break;
+                };
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let method = command["method"].as_str().unwrap();
+                let mut response = json!({ "id": command["id"], "sessionId": "test" });
+                if method == "IO.read" && fail_read {
+                    response["error"] = json!({ "code": -32000, "message": "read failed" });
+                } else {
+                    response["result"] = match method {
+                        "IO.read" => chunks.next().expect("an expected IO.read"),
+                        "IO.close" => {
+                            seen_close.store(true, Ordering::SeqCst);
+                            json!({})
+                        }
+                        _ => json!({}),
+                    };
+                }
+                socket.send(response.to_string().into()).await.unwrap();
+                if method == "Tracing.end" {
+                    socket
+                        .send(
+                            json!({
+                                "method": "Tracing.tracingComplete", "sessionId": "test",
+                                "params": { "stream": "trace-handle" },
+                            })
+                            .to_string()
+                            .into(),
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let client = CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        (client, closed, task)
+    }
+
+    #[tokio::test]
+    async fn trace_stop_decodes_stream_bytes_and_closes_the_handle() {
+        let text = json!({ "traceEvents": [{ "name": "中文" }] }).to_string();
+        let split = text.find('中').unwrap() + 1;
+        let chunks = vec![
+            json!({ "data": STANDARD.encode(&text.as_bytes()[..split]), "base64Encoded": true, "eof": false }),
+            json!({ "data": STANDARD.encode(&text.as_bytes()[split..]), "base64Encoded": true, "eof": true }),
+        ];
+        let (client, closed, task) = trace_client(chunks, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.json");
+        let mut state = TracingState::new();
+        state.active = true;
+        let result = trace_stop(&client, "test", &mut state, path.to_str())
+            .await
+            .unwrap();
+        assert_eq!(result["eventCount"], 1);
+        let saved: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["traceEvents"][0]["name"], "中文");
+        assert!(closed.load(Ordering::SeqCst));
+        assert!(!state.active);
+        client.close().await;
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn trace_stop_releases_a_failed_stream_and_allows_a_new_recording() {
+        let (client, closed, task) = trace_client(Vec::new(), true).await;
+        let mut state = TracingState::new();
+        state.active = true;
+        let error = trace_stop(&client, "test", &mut state, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("read failed"));
+        assert!(closed.load(Ordering::SeqCst));
+        assert!(!state.active);
+        assert_eq!(
+            trace_start(&client, "test", &mut state).await.unwrap()["started"],
+            true
+        );
+        assert!(state.active);
+        client.close().await;
+        task.abort();
+    }
+
+    #[test]
+    fn trace_chunks_preserve_encoded_and_plain_data() {
+        let plain = json!({ "data": "{\"traceEvents\":[" });
+        let encoded = json!({ "data": STANDARD.encode(b"]}"), "base64Encoded": true });
+        let bytes = [
+            decode_io_chunk(&plain).unwrap(),
+            decode_io_chunk(&encoded).unwrap(),
+        ]
+        .concat();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "{\"traceEvents\":[]}");
+    }
+
+    #[test]
+    fn trace_chunks_preserve_a_utf8_character_split_between_reads() {
+        let bytes = "中".as_bytes();
+        let first = json!({ "data": STANDARD.encode(&bytes[..1]), "base64Encoded": true });
+        let second = json!({ "data": STANDARD.encode(&bytes[1..]), "base64Encoded": true });
+        let joined = [
+            decode_io_chunk(&first).unwrap(),
+            decode_io_chunk(&second).unwrap(),
+        ]
+        .concat();
+        assert_eq!(String::from_utf8(joined).unwrap(), "中");
+    }
+
+    #[test]
+    fn trace_chunks_reject_malformed_data() {
+        assert!(decode_io_chunk(&json!({ "data": "%%%", "base64Encoded": true })).is_err());
+        assert!(decode_io_chunk(&json!({ "eof": true })).is_err());
     }
 }
