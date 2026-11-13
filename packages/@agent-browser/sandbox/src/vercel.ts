@@ -295,7 +295,8 @@ export async function startAgentBrowserMcp(
       options,
     );
   } catch (error) {
-    await command.kill().catch(() => undefined);
+    // Cleanup must not turn a bounded initialization failure into an unbounded wait.
+    void command.kill().catch(() => undefined);
     throw error;
   }
 }
