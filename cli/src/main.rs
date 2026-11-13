@@ -805,7 +805,8 @@ impl DashboardConfig {
     }
 
     fn has_same_settings_as(&self, requested: &Self) -> bool {
-        self.port == requested.port && self.allowed_origins == requested.allowed_origins
+        (requested.port == 0 || self.port == requested.port)
+            && self.allowed_origins == requested.allowed_origins
     }
 
     fn access_urls(&self) -> Vec<String> {
@@ -866,8 +867,10 @@ fn parse_dashboard_command(args: &[String]) -> Result<DashboardCommand, String> 
                     .get(index + 1)
                     .filter(|value| !value.starts_with('-'))
                     .ok_or_else(|| "Dashboard option '--port' requires a value.".to_string())?;
-                port = value.parse::<u16>().ok().filter(|port| *port > 0).ok_or_else(|| {
-                    format!("Invalid dashboard port '{value}'. Expected an integer from 1 to 65535.")
+                port = value.parse::<u16>().map_err(|_| {
+                    format!(
+                        "Invalid dashboard port '{value}'. Expected an integer from 0 to 65535."
+                    )
                 })?;
                 saw_port = true;
                 index += 2;
@@ -997,21 +1000,18 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
                     }
                     exit(1);
                 }
+                let running_config = running_config.expect("verified above");
                 if json_mode {
-                    let access_urls = running_config
-                        .as_ref()
-                        .map(DashboardConfig::access_urls)
-                        .unwrap_or_default();
                     print_json_value(json!({
                         "success": true,
-                        "data": { "port": requested_config.port, "pid": pid, "already_running": true, "access_urls": access_urls },
+                        "data": { "port": running_config.port, "pid": pid, "already_running": true, "access_urls": running_config.access_urls() },
                     }));
                 } else {
                     println!(
                         "Dashboard already running at http://localhost:{}",
-                        requested_config.port
+                        running_config.port
                     );
-                    print_dashboard_access_urls(&running_config.expect("verified above"));
+                    print_dashboard_access_urls(&running_config);
                 }
                 return;
             }
@@ -1021,7 +1021,7 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
         let _ = fs::remove_file(get_dashboard_config_path());
     }
 
-    let requested_config = match DashboardConfig::new(port, allowed_origins) {
+    let mut config = match DashboardConfig::new(port, allowed_origins) {
         Ok(config) => config,
         Err(error) => {
             if json_mode {
@@ -1055,24 +1055,19 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
     };
 
     let mut cmd = std::process::Command::new(&exe_path);
-    cmd.env("AGENT_BROWSER_DASHBOARD", "1").env(
-        "AGENT_BROWSER_DASHBOARD_PORT",
-        requested_config.port.to_string(),
-    );
-    if requested_config.allowed_origins.is_empty() {
+    cmd.env("AGENT_BROWSER_DASHBOARD", "1")
+        .env("AGENT_BROWSER_DASHBOARD_PORT", config.port.to_string());
+    if config.allowed_origins.is_empty() {
         cmd.env_remove("AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS");
         cmd.env_remove("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN");
     } else {
         cmd.env(
             "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
-            requested_config.allowed_origins.join(","),
+            config.allowed_origins.join(","),
         )
         .env(
             "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
-            requested_config
-                .access_token
-                .as_deref()
-                .expect("generated above"),
+            config.access_token.as_deref().expect("generated above"),
         );
     }
 
@@ -1098,22 +1093,27 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
 
     match cmd
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(mut child) => {
             let pid = child.id();
-            let write_result = write_dashboard_config(&requested_config)
+            let write_result = read_dashboard_bound_port(&mut child)
+                .and_then(|bound_port| {
+                    config.port = bound_port;
+                    write_dashboard_config(&config)
+                })
                 .and_then(|()| fs::write(&pid_path, pid.to_string()));
             if let Err(error) = write_result {
                 let _ = child.kill();
+                let _ = child.wait();
                 remove_dashboard_sidecars();
                 if json_mode {
-                    print_json_error(format!("Failed to save dashboard state: {error}"));
+                    print_json_error(format!("Failed to start dashboard: {error}"));
                 } else {
                     eprintln!(
-                        "{} Failed to save dashboard state: {}",
+                        "{} Failed to start dashboard: {}",
                         color::error_indicator(),
                         error
                     );
@@ -1124,18 +1124,18 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
             if json_mode {
                 print_json_value(json!({
                     "success": true,
-                    "data": { "port": requested_config.port, "pid": pid, "access_urls": requested_config.access_urls() },
+                    "data": { "port": config.port, "pid": pid, "access_urls": config.access_urls() },
                 }));
             } else {
                 println!(
                     "Dashboard started{}",
-                    if requested_config.access_urls().is_empty() {
-                        format!(" at http://localhost:{}", requested_config.port)
+                    if config.access_urls().is_empty() {
+                        format!(" at http://localhost:{}", config.port)
                     } else {
                         "; open one of the private access URLs below".to_string()
                     }
                 );
-                print_dashboard_access_urls(&requested_config);
+                print_dashboard_access_urls(&config);
             }
         }
         Err(e) => {
@@ -1152,6 +1152,18 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
             exit(1);
         }
     }
+}
+
+/// Block until the spawned dashboard server reports the port it bound.
+fn read_dashboard_bound_port(child: &mut std::process::Child) -> std::io::Result<u16> {
+    use std::io::BufRead;
+
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut line = String::new();
+    std::io::BufReader::new(stdout).read_line(&mut line)?;
+    line.trim().parse().map_err(|_| {
+        std::io::Error::other("the dashboard server exited before it started listening")
+    })
 }
 
 fn print_dashboard_access_urls(config: &DashboardConfig) {
@@ -2248,6 +2260,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(dashboard_config_issue(Some(&equivalent), &requested), None);
+        let any_port = DashboardConfig {
+            port: 0,
+            ..requested.clone()
+        };
+        assert_eq!(dashboard_config_issue(Some(&equivalent), &any_port), None);
         assert!(dashboard_config_issue(Some(&changed), &requested).is_some());
         assert!(dashboard_config_issue(None, &requested).is_some());
     }
@@ -2277,7 +2294,7 @@ mod tests {
             vec!["--bogus"],
             vec!["start", "--allowed-origin", "https://dashboard.example.com"],
             vec!["start", "--port", "nope"],
-            vec!["start", "--port", "0"],
+            vec!["start", "--port", "65536"],
             vec!["start", "--port"],
             vec!["start", "--allowed-origins"],
             vec!["stop", "--port", "4848"],

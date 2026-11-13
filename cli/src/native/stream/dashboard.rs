@@ -633,8 +633,8 @@ pub async fn run_dashboard_server(port: u16) {
         }
     };
 
-    // Port zero is useful for internal tests. Bind IPv6 to the same selected
-    // port so both loopback families reach one dashboard instance.
+    // Bind IPv6 to the port IPv4 selected, which may be OS-assigned for port
+    // zero, so both loopback families reach one dashboard instance.
     let bound_port = ipv4_listener
         .local_addr()
         .map(|address| address.port())
@@ -646,6 +646,10 @@ pub async fn run_dashboard_server(port: u16) {
             None
         }
     };
+
+    // `dashboard start` waits for this line to learn the port and that the
+    // listeners are ready.
+    println!("{bound_port}");
 
     if let Some(ipv6_listener) = ipv6_listener {
         tokio::join!(

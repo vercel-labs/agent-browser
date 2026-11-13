@@ -698,7 +698,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Start dashboard server. Loopback access requires no token. When the dashboard is exposed through a reverse proxy, configure its exact browser origin with allowedOrigins and open the returned private URL. Stop a running dashboard before changing its port or allowed origins.",
+      "description": "Start dashboard server and return the port it listens on. Loopback access requires no token. When the dashboard is exposed through a reverse proxy, configure its exact browser origin with allowedOrigins and open the returned private URL. Stop a running dashboard before changing its port or allowed origins.",
       "inputSchema": {
         "properties": {
           "allowedOrigins": {
@@ -707,8 +707,9 @@
             "type": "string"
           },
           "port": {
+            "description": "Port to listen on (default 4848). Use 0 to pick a free port.",
             "maximum": 65535,
-            "minimum": 1,
+            "minimum": 0,
             "type": "integer"
           },
           "session": {

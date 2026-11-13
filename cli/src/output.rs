@@ -3812,16 +3812,18 @@ receive this token. Configure a reverse proxy to redact cookies from logs.
 Stop the dashboard before changing its port or allowed origins.
 
 Options:
-  --port <n>           Port for the dashboard server (default: 4848)
+  --port <n>           Port for the dashboard server (default: 4848). Use 0 to
+                       pick a free port
   --allowed-origins <origins>
                        Comma-separated exact HTTPS origins allowed when the
                        dashboard is exposed through a reverse proxy. Loopback
                        origins are allowed by default. Can also be set with
                        AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS.
 
-Ports must be integers from 1 to 65535. Every allowed origin must be valid.
-Unknown options, missing values, and malformed origins fail without starting
-the dashboard server.
+Ports must be integers from 0 to 65535. Start returns once the server is
+listening and prints the port it bound (data.port with --json). Every allowed
+origin must be valid. Unknown options, missing values, and malformed origins
+fail without starting the dashboard server.
 
 Global Options:
   --json               Output as JSON
@@ -3829,6 +3831,7 @@ Global Options:
 Examples:
   agent-browser dashboard start
   agent-browser dashboard start --port 8080
+  agent-browser dashboard start --port 0 --json
   agent-browser dashboard start --allowed-origins https://dashboard.example.com
   agent-browser dashboard stop
 "##
