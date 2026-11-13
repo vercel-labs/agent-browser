@@ -357,9 +357,9 @@ async fn get_document_rect_for_selector(
     Ok(Some(offset_rect(rect, offset)))
 }
 
-/// Offset that turns the element's viewport rect into top document
-/// coordinates: the position of every same-process frame it sits in, plus the
-/// top window's scroll.
+/// Offset that turns the element's top viewport rect (see
+/// `get_rect_for_object`) into top document coordinates: the top window's
+/// scroll.
 async fn get_document_offset_for_object(
     client: &CdpClient,
     session_id: &str,
@@ -370,17 +370,11 @@ async fn get_document_offset_for_object(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
                 function_declaration: r#"function() {
-                    let x = 0;
-                    let y = 0;
                     let win = this.ownerDocument.defaultView;
                     while (win && win.frameElement) {
-                        const frame = win.frameElement;
-                        const rect = frame.getBoundingClientRect();
-                        x += rect.x + frame.clientLeft;
-                        y += rect.y + frame.clientTop;
                         win = win.parent;
                     }
-                    return { x: x + (win ? win.scrollX : 0), y: y + (win ? win.scrollY : 0) };
+                    return { x: win ? win.scrollX : 0, y: win ? win.scrollY : 0 };
                 }"#
                 .to_string(),
                 object_id: Some(object_id.to_string()),
@@ -404,6 +398,10 @@ fn offset_rect(mut rect: Rect, (scroll_x, scroll_y): (f64, f64)) -> Rect {
     rect
 }
 
+/// The element's rect in top viewport coordinates. `getBoundingClientRect`
+/// is relative to the element's own frame, so the position of every
+/// same-process frame it sits in is added; otherwise an iframe child would be
+/// placed as if its frame were at the top-left of the page.
 async fn get_rect_for_object(
     client: &CdpClient,
     session_id: &str,
@@ -415,7 +413,17 @@ async fn get_rect_for_object(
             &CallFunctionOnParams {
                 function_declaration: r#"function() {
                     const rect = this.getBoundingClientRect();
-                    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+                    let x = rect.x;
+                    let y = rect.y;
+                    let win = this.ownerDocument.defaultView;
+                    while (win && win.frameElement) {
+                        const frame = win.frameElement;
+                        const frameRect = frame.getBoundingClientRect();
+                        x += frameRect.x + frame.clientLeft;
+                        y += frameRect.y + frame.clientTop;
+                        win = win.parent;
+                    }
+                    return { x, y, width: rect.width, height: rect.height };
                 }"#
                 .to_string(),
                 object_id: Some(object_id.to_string()),
