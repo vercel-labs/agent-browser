@@ -335,19 +335,38 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
                     throw error;
                 }}
             }}
+            function _bindWrapper(OrigCtor, wrapper) {{
+                // The native prototype's constructor is the original function.
+                // Instances created by that function inherit it, so point the
+                // property at the wrapper before page script can call it.
+                wrapper.prototype = OrigCtor.prototype;
+                try {{
+                    Object.defineProperty(OrigCtor.prototype, 'constructor', {{
+                        value: wrapper,
+                        writable: true,
+                        configurable: true
+                    }});
+                }} catch (e) {{
+                    try {{
+                        OrigCtor.prototype.constructor = wrapper;
+                    }} catch (e2) {{}}
+                }}
+            }}
             const OrigWorker = _global.Worker;
             if (typeof OrigWorker === 'function') {{
-                _global.Worker = function(scriptURL, options) {{
+                const WrappedWorker = function(scriptURL, options) {{
                     return _constructWorker(OrigWorker, scriptURL, options, 'Worker');
                 }};
-                _global.Worker.prototype = OrigWorker.prototype;
+                _bindWrapper(OrigWorker, WrappedWorker);
+                _global.Worker = WrappedWorker;
             }}
             const OrigSharedWorker = _global.SharedWorker;
             if (typeof OrigSharedWorker === 'function') {{
-                _global.SharedWorker = function(scriptURL, options) {{
+                const WrappedSharedWorker = function(scriptURL, options) {{
                     return _constructWorker(OrigSharedWorker, scriptURL, options, 'SharedWorker');
                 }};
-                _global.SharedWorker.prototype = OrigSharedWorker.prototype;
+                _bindWrapper(OrigSharedWorker, WrappedSharedWorker);
+                _global.SharedWorker = WrappedSharedWorker;
             }}
             const OrigImportScripts = _global.importScripts;
             if (typeof OrigImportScripts === 'function') {{
@@ -394,25 +413,27 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
             }}
             const OrigWS = _global.WebSocket;
             if (typeof OrigWS === 'function') {{
-                _global.WebSocket = function(url, protocols) {{
+                const WrappedWebSocket = function(url, protocols) {{
                     let checkedUrl = url;
                     try {{
                         checkedUrl = _checkedWebSocketUrl(url, 'WebSocket');
                     }} catch(e) {{ if (e && e.name === 'SecurityError') throw e; }}
                     return new OrigWS(checkedUrl, protocols);
                 }};
-                _global.WebSocket.prototype = OrigWS.prototype;
+                _bindWrapper(OrigWS, WrappedWebSocket);
+                _global.WebSocket = WrappedWebSocket;
             }}
             const OrigES = _global.EventSource;
             if (OrigES) {{
-                _global.EventSource = function(url, opts) {{
+                const WrappedEventSource = function(url, opts) {{
                     let checkedUrl = url;
                     try {{
                         checkedUrl = _checkedUrl(url, 'EventSource');
                     }} catch(e) {{ if (e && e.name === 'SecurityError') throw e; }}
                     return new OrigES(checkedUrl, opts);
                 }};
-                _global.EventSource.prototype = OrigES.prototype;
+                _bindWrapper(OrigES, WrappedEventSource);
+                _global.EventSource = WrappedEventSource;
             }}
             const origBeacon = _global.navigator && _global.navigator.sendBeacon;
             if (origBeacon) {{
@@ -815,6 +836,21 @@ mod tests {
         assert!(script.contains("return worker"));
         assert!(!script.contains("_wrapWorkerWithCspFallback"));
         assert!(!script.contains("return new OrigCtor(checkedUrl, options)"));
+    }
+
+    #[test]
+    fn test_domain_filter_script_rebinds_native_constructors() {
+        let script = domain_filter_script(&["example.com".to_string()]);
+        for marker in [
+            "function _bindWrapper(OrigCtor, wrapper)",
+            "Object.defineProperty(OrigCtor.prototype, 'constructor'",
+            "_bindWrapper(OrigWorker, WrappedWorker)",
+            "_bindWrapper(OrigSharedWorker, WrappedSharedWorker)",
+            "_bindWrapper(OrigWS, WrappedWebSocket)",
+            "_bindWrapper(OrigES, WrappedEventSource)",
+        ] {
+            assert!(script.contains(marker), "missing {marker}");
+        }
     }
 
     #[test]
