@@ -2145,6 +2145,105 @@ async fn e2e_screenshot() {
 // Form interaction: fill, type, select, check
 // ---------------------------------------------------------------------------
 
+// Regression for #1105: `select` on a custom ARIA combobox (div-based, options
+// hidden until opened) must open it and click the matching option, and must
+// error (not silently succeed) on a value that does not exist.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="false" aria-controls="lb">Choose</div>
+<ul role="listbox" id="lb" style="display:none">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="banana">Banana</li>
+</ul>
+<output id="result">none</output>
+<select id="native"><option value="">--</option><option value="x">Xylophone</option><option value="y">Yak</option></select>
+<script>
+var cb=document.getElementById('cb'),lb=document.getElementById('lb'),r=document.getElementById('result');
+function setOpen(open){lb.style.display=open?'block':'none';cb.setAttribute('aria-expanded',String(open));}
+cb.addEventListener('click',function(){setOpen(lb.style.display==='none');});
+lb.querySelectorAll('[role=option]').forEach(function(o){o.addEventListener('click',function(){cb.textContent=o.textContent;r.textContent=o.getAttribute('data-value');setOpen(false);});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple");
+
+    // Already-open combobox must not be toggled shut before matching.
+    let resp = execute_command(&eval("5", "document.getElementById('cb').click(); document.getElementById('cb').getAttribute('aria-expanded')"), &mut state).await;
+    assert_eq!(get_data(&resp)["result"], "true");
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "select", "selector": "#cb", "values": ["Banana"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("7", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "banana");
+
+    // Unknown option errors and lists what is available.
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "select", "selector": "#cb", "values": ["Dragonfruit"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    assert!(
+        serde_json::to_string(&resp)
+            .unwrap_or_default()
+            .contains("Available options"),
+        "error should list options: {resp}"
+    );
+
+    // Native <select> path is unchanged.
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "select", "selector": "#native", "values": ["Yak"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("10", "document.getElementById('native').value"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "y");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_form_interaction() {

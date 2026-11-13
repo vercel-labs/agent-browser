@@ -478,11 +478,74 @@ pub async fn select_option(
     // Matching nothing must be an error, not a silent success: an agent that
     // selects a misspelled option otherwise sees "Done", and only discovers
     // the page state is wrong after more commands. List what was available.
-    let js = r#"function(vals) {
+    //
+    // Native <select> keeps its own path. For a div-based ARIA combobox/listbox
+    // (Radix, Headless UI, ui-sdk) there is no `this.options`, so open the widget
+    // when it is not already expanded, wait for its role=option items, and click
+    // the ones whose accessible name or value matches.
+    let js = r#"async function(vals) {
             const normalize = (value) => String(value ?? '')
                 .replace(/[\u200B\u200C\u200D\u2060\uFEFF]/g, '')
                 .replace(/\s+/g, ' ')
                 .trim();
+            if (!(this instanceof HTMLSelectElement)) {
+                const role = this.getAttribute('role');
+                if (role !== 'combobox' && role !== 'listbox') {
+                    return { error: 'select target <' + this.tagName.toLowerCase() + '> is not a <select> or a role=combobox/listbox element' };
+                }
+                const realClick = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const o = { bubbles: true, cancelable: true, composed: true,
+                                clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+                                button: 0, pointerId: 1, isPrimary: true };
+                    el.dispatchEvent(new PointerEvent('pointerdown', o));
+                    el.dispatchEvent(new MouseEvent('mousedown', o));
+                    el.dispatchEvent(new PointerEvent('pointerup', o));
+                    el.dispatchEvent(new MouseEvent('mouseup', o));
+                    el.dispatchEvent(new MouseEvent('click', o));
+                };
+                // Clicking an open combobox toggles it shut, so only open when collapsed.
+                if (role === 'combobox' && this.getAttribute('aria-expanded') !== 'true') {
+                    realClick(this);
+                }
+                const collect = () => {
+                    let scope = role === 'listbox' ? this : null;
+                    if (!scope) {
+                        const controls = this.getAttribute('aria-controls');
+                        if (controls) scope = document.getElementById(controls);
+                    }
+                    const nodes = Array.from((scope || document).querySelectorAll('[role=option]'));
+                    return nodes.filter((o) => o.getClientRects().length > 0);
+                };
+                let options = collect();
+                for (let i = 0; i < 40 && options.length === 0; i++) {
+                    await new Promise((r) => setTimeout(r, 50));
+                    options = collect();
+                }
+                if (options.length === 0) {
+                    return { error: 'combobox opened but no visible role=option elements were found' };
+                }
+                const nameOf = (o) => normalize(o.getAttribute('aria-label')) || normalize(o.textContent);
+                const valueOf = (o) => normalize(o.getAttribute('data-value')) || normalize(o.getAttribute('value'));
+                const wanted = new Set();
+                for (const value of vals) {
+                    const want = normalize(value);
+                    const matches = options.filter((o) => nameOf(o) === want || (valueOf(o) && valueOf(o) === want));
+                    if (matches.length === 0) {
+                        const available = options.map((o) => '"' + nameOf(o) + '"').join(', ');
+                        return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
+                    }
+                    if (matches.length > 1) {
+                        return { error: 'Multiple options matched ' + JSON.stringify(value) };
+                    }
+                    wanted.add(matches[0]);
+                }
+                for (const opt of wanted) {
+                    opt.scrollIntoView({ block: 'nearest' });
+                    realClick(opt);
+                }
+                return { matched: wanted.size };
+            }
             const options = Array.from(this.options);
             const wanted = new Set();
             for (const value of vals) {
@@ -527,11 +590,22 @@ pub async fn select_option(
                     object_id: None,
                 }]),
                 return_by_value: Some(true),
-                await_promise: Some(false),
+                await_promise: Some(true),
             },
             Some(&effective_session_id),
         )
         .await?;
+
+    // A thrown script error must surface instead of reporting success.
+    if let Some(exc) = result.get("exceptionDetails") {
+        let msg = exc
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("select failed: script error");
+        return Err(msg.to_string());
+    }
 
     if let Some(error) = result
         .get("result")
