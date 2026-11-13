@@ -1755,7 +1755,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_DIFF_SNAPSHOT,
             "Diff snapshot",
             "Diff current snapshot against last or baseline.",
-            json!({ "baseline": { "type": "string" }, "selector": { "type": "string" }, "compact": { "type": "boolean" }, "depth": { "type": "integer" } }),
+            json!({ "baseline": { "type": "string" }, "selector": { "type": "string" }, "interactive": { "type": "boolean" }, "compact": { "type": "boolean" }, "depth": { "type": "integer" } }),
             &[],
         ),
         tool(
@@ -3789,6 +3789,11 @@ fn call_device(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_diff_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = diff_snapshot_command_args(arguments)?;
+    call_cli_tool(arguments, args, None)
+}
+
+fn diff_snapshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["diff".to_string(), "snapshot".to_string()];
     if let Some(baseline) = optional_string(arguments, "baseline")? {
         args.push("--baseline".to_string());
@@ -3798,6 +3803,9 @@ fn call_diff_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push("--selector".to_string());
         args.push(selector);
     }
+    if optional_bool(arguments, "interactive")?.unwrap_or(false) {
+        args.push("--interactive".to_string());
+    }
     if optional_bool(arguments, "compact")?.unwrap_or(false) {
         args.push("--compact".to_string());
     }
@@ -3805,7 +3813,7 @@ fn call_diff_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push("--depth".to_string());
         args.push(depth.to_string());
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_diff_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4886,6 +4894,28 @@ mod tests {
             if arguments["compact"] == true {
                 assert_eq!(command["compact"], true);
             }
+        }
+    }
+
+    #[test]
+    fn diff_snapshot_arguments_use_canonical_cli_command() {
+        for arguments in [
+            json!({}),
+            json!({"interactive": true}),
+            json!({"interactive": false, "baseline": "before.txt"}),
+            json!({"interactive": true, "selector": "#main", "compact": true, "depth": 2}),
+        ] {
+            let args = diff_snapshot_command_args(&arguments).unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["action"], "diff_snapshot");
+            assert_eq!(
+                command["interactive"].as_bool().unwrap_or(false),
+                arguments["interactive"].as_bool().unwrap_or(false)
+            );
+            assert_eq!(command.get("baseline"), arguments.get("baseline"));
+            assert_eq!(command.get("selector"), arguments.get("selector"));
+            assert_eq!(command.get("maxDepth"), arguments.get("depth"));
         }
     }
 

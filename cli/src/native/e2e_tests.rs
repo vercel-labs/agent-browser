@@ -5815,6 +5815,71 @@ async fn e2e_diff_snapshot() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_diff_snapshot_interactive_matches_interactive_baseline() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("snapshot_diff_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let baseline = get_data(&resp)["snapshot"].as_str().unwrap().to_string();
+    assert!(!baseline.contains("StaticText"), "{baseline}");
+    let baseline_dir = tempfile::tempdir().unwrap();
+    let baseline_path = baseline_dir.path().join("baseline.txt");
+    std::fs::write(&baseline_path, format!("{}\n", baseline)).unwrap();
+
+    // Without interactive the full tree is compared and the static text shows up as additions.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "diff_snapshot", "baseline": baseline_path }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], true);
+
+    // With interactive the capture matches the baseline.
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "diff_snapshot",
+            "baseline": baseline_path,
+            "interactive": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["changed"], false, "unexpected diff: {}", data["diff"]);
+    assert_eq!(data["additions"], 0);
+    assert_eq!(data["removals"], 0);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_diff_url_aligns_refs_after_snapshot() {
     let mut state = DaemonState::new();
 
