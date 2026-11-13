@@ -229,6 +229,7 @@ async fn run_chat_turn(
     let mut all_text = String::new();
     let mut all_tool_calls: Vec<Value> = Vec::new();
     let mut had_text = false;
+    let mut completed = false;
 
     for _step in 0..50 {
         if tokio::time::Instant::now() >= total_deadline {
@@ -290,7 +291,17 @@ async fn run_chat_turn(
         }
 
         let (text_chunks, tool_calls) =
-            parse_gateway_stream(gw_response, verbosity, json_mode).await;
+            match parse_gateway_stream(gw_response, verbosity, json_mode).await {
+                Ok(response) => response,
+                Err(error) => {
+                    if json_mode {
+                        println!("{}", json!({"success": false, "error": error}));
+                    } else {
+                        eprintln!("\n{} {}", color::error_indicator(), error);
+                    }
+                    return false;
+                }
+            };
 
         if !text_chunks.is_empty() {
             let text = text_chunks.join("");
@@ -317,6 +328,7 @@ async fn run_chat_turn(
         }
 
         if tool_calls.is_empty() {
+            completed = true;
             break;
         }
 
@@ -379,6 +391,15 @@ async fn run_chat_turn(
         }
     }
 
+    if !completed {
+        let error = "Chat stopped at the 50 step limit before completing the task.";
+        if json_mode {
+            println!("{}", json!({"success": false, "error": error}));
+        } else {
+            eprintln!("\n{} {}", color::error_indicator(), error);
+        }
+        return false;
+    }
     if json_mode {
         println!(
             "{}",
@@ -402,7 +423,7 @@ async fn parse_gateway_stream(
     gw_response: reqwest::Response,
     verbosity: Verbosity,
     json_mode: bool,
-) -> (Vec<String>, Vec<(String, String, String)>) {
+) -> Result<(Vec<String>, Vec<(String, String, String)>), String> {
     use futures_util::StreamExt as _;
 
     let mut text_chunks: Vec<String> = Vec::new();
@@ -414,7 +435,7 @@ async fn parse_gateway_stream(
     while let Some(chunk_result) = byte_stream.next().await {
         let chunk = match chunk_result {
             Ok(c) => c,
-            Err(_) => break,
+            Err(error) => return Err(format!("Gateway stream interrupted: {}", error)),
         };
 
         buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -435,11 +456,10 @@ async fn parse_gateway_stream(
                     // End the streamed text line
                     let _ = std::io::stdout().flush();
                 }
-                return (text_chunks, tool_calls);
+                chat::validate_gateway_tool_calls(&tool_calls)?;
+                return Ok((text_chunks, tool_calls));
             }
-            let Ok(sse_json) = serde_json::from_str::<Value>(data) else {
-                continue;
-            };
+            let sse_json = chat::parse_gateway_event(data)?;
             let delta = sse_json
                 .get("choices")
                 .and_then(|c| c.get(0))
@@ -490,8 +510,7 @@ async fn parse_gateway_stream(
     if !json_mode && !text_chunks.is_empty() {
         let _ = std::io::stdout().flush();
     }
-    let tool_calls = collect_tool_calls(&mut tool_call_args);
-    (text_chunks, tool_calls)
+    Err("Gateway stream ended before its completion marker; no pending tools were executed.".into())
 }
 
 fn collect_tool_calls(
@@ -503,4 +522,63 @@ fn collect_tool_calls(
         .into_iter()
         .filter_map(|idx| map.remove(&idx))
         .collect()
+}
+
+#[cfg(test)]
+mod stream_failure_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn response(body: &str) -> reqwest::Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = body.to_string();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            ).as_bytes()).await.unwrap();
+        });
+        reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn gateway_stream_rejects_errors_and_truncated_tools() {
+        for body in [
+            "data: {\"error\":{\"message\":\"quota exceeded\"}}\n\ndata: [DONE]\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"agent_browser\",\"arguments\":\"{\\\"command\\\":\\\"click @e1\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n",
+            "data: invalid\n\ndata: [DONE]\n\n",
+        ] {
+            assert!(parse_gateway_stream(response(body).await, Verbosity::Quiet, true).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_stream_requires_complete_valid_tool_arguments() {
+        let body = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"agent_browser\",\"arguments\":\"{\"}}]}}]}\n\ndata: [DONE]\n\n";
+        assert!(
+            parse_gateway_stream(response(body).await, Verbosity::Quiet, true)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_stream_accepts_completed_text() {
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n";
+        let (text, calls) = parse_gateway_stream(response(body).await, Verbosity::Quiet, true)
+            .await
+            .unwrap();
+        assert_eq!(text, vec!["done"]);
+        assert!(calls.is_empty());
+    }
 }

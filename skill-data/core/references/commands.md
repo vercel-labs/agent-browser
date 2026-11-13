@@ -510,6 +510,8 @@ Profiles:
 - `network` - Network routes, request inspection, HAR, headers, credentials, offline
 - `state` - Cookies, storage, auth, saved state, sessions, profiles, skills
 - `debug` - Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+
+The `chat` command fails a turn on gateway errors, interrupted responses, or exhausted step limits. Pending tools from an incomplete response are not executed. Chat is a model driven control loop rather than a dedicated MCP tool; MCP clients invoke browser tools directly.
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
 - `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard

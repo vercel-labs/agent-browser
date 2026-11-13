@@ -4163,6 +4163,9 @@ Requires AI_GATEWAY_API_KEY to be set.
 
 In interactive mode, type "quit", "exit", or "q" to leave the REPL.
 
+Gateway errors, interrupted responses, and exhausted step limits fail the turn.
+Pending tool calls from an incomplete response are not executed.
+
 Chat Options:
   --model <name>         AI model (or AI_GATEWAY_MODEL env, default: anthropic/claude-sonnet-4.6)
   -v, --verbose          Show tool commands and their raw output
