@@ -13,6 +13,7 @@ use super::emulation::{self, Settings as EmulationSettings};
 use super::firefox::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
 use super::firefox_devtools::RdpClient;
 use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
+use super::permissions;
 use super::types::UserPromptOpened;
 use crate::native::actions::{EmulatedMedia, PendingDialog};
 use crate::native::cdp::chrome::LaunchOptions;
@@ -52,6 +53,8 @@ pub struct FirefoxSession {
     pub shadow_ids: std::collections::HashSet<i64>,
     /// Emulation applied to the active tab and replayed onto new tabs.
     pub emulation: Arc<std::sync::RwLock<EmulationSettings>>,
+    /// Permissions the session granted, given to each origin as its tabs load it.
+    pub permissions: Arc<tokio::sync::Mutex<permissions::Grants>>,
     /// Launch download directory, restored after `download` redirects it.
     pub download_dir: Option<String>,
     events: mpsc::Receiver<Value>,
@@ -202,11 +205,13 @@ impl FirefoxSession {
             }),
             ..EmulationSettings::default()
         }));
+        let permissions = Arc::new(tokio::sync::Mutex::new(permissions::Grants::default()));
         let dispatcher = Some(super::network::spawn_dispatcher(
             bidi.clone(),
             net.clone(),
             dispatch_events,
             emulation.clone(),
+            permissions.clone(),
         ));
         let mut session = Self {
             process: Some(process),
@@ -224,6 +229,7 @@ impl FirefoxSession {
             touches: Vec::new(),
             shadow_ids: Default::default(),
             emulation,
+            permissions,
             download_dir: options.download_path.clone(),
             events,
             net,
@@ -814,6 +820,7 @@ pub(crate) mod tests {
             touches: Vec::new(),
             shadow_ids: Default::default(),
             emulation: Arc::default(),
+            permissions: Arc::default(),
             download_dir: None,
             visited_origins: HashSet::new(),
             events,
@@ -942,6 +949,7 @@ pub(crate) mod tests {
             ref_documents: HashMap::new(),
             touches: Vec::new(),
             emulation: Arc::default(),
+            permissions: Arc::default(),
             download_dir: None,
             events,
             visited_origins: HashSet::new(),
