@@ -4314,7 +4314,7 @@ Examples:
   agent-browser skills get core --full
   agent-browser skills get core --ref commands
   agent-browser skills get core --ref references/authentication.md
-  agent-browser skills get protected-vercel-deployments
+  agent-browser skills get vercel
   agent-browser skills get electron --full
   agent-browser skills get --all
   agent-browser skills path core

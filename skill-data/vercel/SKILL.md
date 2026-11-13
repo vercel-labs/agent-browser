@@ -1,14 +1,18 @@
 ---
-name: protected-vercel-deployments
-description: Access and test Vercel deployments protected by Vercel Authentication, SSO, or Deployment Protection with agent-browser. Use when a preview or production URL redirects to a Vercel login page, returns a protection 401 or 403, or needs short-lived Trusted Sources OIDC authentication instead of a static bypass secret or public exception.
+name: vercel
+description: Access and test Vercel deployments with agent-browser, behind Deployment Protection or at a different feature flag variant. Use when a preview or production URL redirects to a Vercel login page, returns a protection 401 or 403, needs short-lived Trusted Sources OIDC authentication instead of a static bypass secret or public exception, or must be viewed with a Vercel feature flag set to another variant.
 allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(vc:*), Bash(vercel:*)
 ---
 
-# Protected Vercel deployments
+# Vercel deployments
+
+Reach a Vercel deployment as the user asked to see it without changing what anyone else sees. Pass protection and flag overrides on this browser's requests; changing project settings or a flag's served variant needs explicit approval.
+
+## Deployment Protection
 
 Use the caller's existing Vercel identity and a short-lived OIDC token. Do not disable Deployment Protection, make the deployment public, or ask for a static bypass secret first.
 
-## Same-project preview
+### Same-project preview
 
 A local development token for the target project can access that project's protected Preview deployments through the default Trusted Sources self-access rule. No Trusted Sources configuration is normally required.
 
@@ -45,7 +49,7 @@ Continue the normal workflow in that same session. If your harness runs each com
 
 Never print the token, paste it into source, or save it in an environment file.
 
-## Other environments and callers
+### Other environments and callers
 
 Trusted Sources configuration is needed when:
 
@@ -58,7 +62,7 @@ There is no supported Vercel CLI or public REST API for editing Trusted Sources 
 
 Stop and hand off the exact rule to the human. Do not use browser automation to change access control, and do not broaden unrelated environment mappings. Retry the authenticated `open` after the human confirms the rule is saved.
 
-## Human intervention boundaries
+### Human intervention boundaries
 
 The same-project development to Preview path should run without human intervention when the Vercel CLI is already authenticated and the target project and scope are known. A human is needed only when:
 
@@ -71,7 +75,7 @@ The same-project development to Preview path should run without human interventi
 
 The agent can diagnose each case and state the exact action required, then continue after the user confirms completion.
 
-## Use the correct header
+### Use the correct header
 
 Send the Vercel-issued token as:
 
@@ -81,14 +85,14 @@ x-vercel-trusted-oidc-idp-token: <VERCEL_OIDC_TOKEN>
 
 Do not substitute `x-vercel-oidc-token`. That header carries workload identity into a Vercel Function; it does not authenticate an inbound request through Deployment Protection.
 
-## Diagnose failures
+### Diagnose failures
 
 - Redirect to `vercel.com/login`: Deployment Protection did not accept the request.
 - `TRUSTED_SOURCES_ENVIRONMENT_MISMATCH`: the token is valid, but its caller environment cannot reach the target environment.
 - Application `401` or `403` after protection passes: debug the application's own authentication separately.
 - Application `404` on a deliberately missing route: the request passed Deployment Protection and reached the application.
 
-## Static-secret fallback
+### Static-secret fallback
 
 Use Protection Bypass for Automation only when OIDC is not viable or the tool cannot send the Trusted Sources header. Enabling or rotating it changes access control, so obtain explicit authorization first. Create a dedicated secret so it can be rotated independently, keep it in an environment variable, and pass it as a header:
 
@@ -102,9 +106,55 @@ agent-browser open "$VERCEL_PREVIEW_URL" --headers \
 
 The cookie directive creates a reusable `_vercel_jwt` cookie. Treat saved browser state containing that cookie as a credential.
 
+## Feature flags
+
+To view a variant other than the one an environment serves, set an override cookie in this browser. Do not use `vc flags set`, `enable`, `disable`, `split`, or `rollout` to view a variant, because they change it for everyone using the environment.
+
+Flags declared with `flag()` from the [Flags SDK](https://flags-sdk.dev/docs/api-reference/frameworks/next) apply overrides from the `vercel-flag-overrides` cookie. The cookie value is encrypted with the `FLAGS_SECRET` of the environment under test. Find the flag key and its variants in the source or with `vc flags inspect <flag>`, then mint the cookie without printing the secret. Pulling the secret with `--project` and minting with `vc flags override` both require Vercel CLI `56.3.0` or newer; if the installed version is older, ask the user to upgrade it. Each environment has its own `FLAGS_SECRET`, so set `VERCEL_ENVIRONMENT` to the environment that serves the URL under test, such as `preview` or `production`. Set `VERCEL_PREVIEW_URL`, `VERCEL_PROJECT`, and `VERCEL_SCOPE` as in [Same-project preview](#same-project-preview), including for a deployment without protection; the block stops when any of them is missing.
+
+The mint encrypts the cookie locally with `vc flags override`; no package install or registry access is needed. That command reads `FLAGS_SECRET` from the environment or a `.env` file in its working directory, so the block points it at an empty temporary directory to keep a project `.env.local` from supplying a different secret, and takes the last line of its output, which is the cookie value.
+
+```bash
+(
+  set -e
+  : "${AGENT_BROWSER_SESSION:?set it to the session of the protected open}"
+  : "${VERCEL_ENVIRONMENT:?set it to the environment that serves the URL}"
+  : "${VERCEL_PREVIEW_URL:?set it to the deployment URL}"
+  : "${VERCEL_PROJECT:?set it to the target project}"
+  : "${VERCEL_SCOPE:?set it to the target team scope}"
+  ENV_FILE="$(mktemp)"
+  vc env pull "$ENV_FILE" --environment "$VERCEL_ENVIRONMENT" \
+    --project "$VERCEL_PROJECT" --scope "$VERCEL_SCOPE" --yes >/dev/null
+  PULLED="$(grep '^FLAGS_SECRET=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')"
+  rm "$ENV_FILE"
+  case "$PULLED" in
+    "" | "[SENSITIVE]") ;;
+    *) FLAGS_SECRET="$PULLED" ;;
+  esac
+  case "$FLAGS_SECRET" in
+    "" | "[SENSITIVE]") echo "FLAGS_SECRET is not readable; ask the user for it" >&2; exit 1 ;;
+  esac
+  MINT_DIR="$(mktemp -d)"
+  OVERRIDE="$(FLAGS_SECRET="$FLAGS_SECRET" vc flags override "my-flag=variant-b" \
+    --cwd "$MINT_DIR" --non-interactive | tail -n 1)"
+  rm -rf "$MINT_DIR"
+  test -n "$OVERRIDE"
+  agent-browser --session "$AGENT_BROWSER_SESSION" cookies set vercel-flag-overrides "$OVERRIDE" --url "$VERCEL_PREVIEW_URL"
+  agent-browser --session "$AGENT_BROWSER_SESSION" reload
+  agent-browser --session "$AGENT_BROWSER_SESSION" screenshot
+)
+```
+
+Run this with the session name of the protected `open`, and confirm in the screenshot that the requested variant rendered before reporting. The Flags SDK ignores an override it cannot decrypt without raising an error, so a screenshot that still shows the served variant usually means the secret belongs to another environment. `agent-browser cookies clear` removes the override along with every other cookie, so repeat the protected `open` after clearing.
+
+If `FLAGS_SECRET` is stored as a Secret, `vc env pull` writes the placeholder `[SENSITIVE]` instead of the value because Secret values are write-only, and the script stops. Ask the user for the `FLAGS_SECRET` of `VERCEL_ENVIRONMENT`, export it, and run the script again. A readable value from the pull always takes precedence over an exported one.
+
+If the app evaluates flags without the Flags SDK or through another provider, the cookie has no effect and there is no request-scoped path. Ask the user before changing the flag with `vc flags set`, record the original variant, restore it afterwards, and verify the restore with `vc flags inspect`.
+
 ## Avoid dead ends
 
 - There is no `vercel share` CLI command. Shareable Links are intended for people and are not the automation path.
 - `vercel curl` is useful for HTTP requests, but it cannot render and interact with a page.
+- Changing a flag's served variant to take a screenshot changes it for teammates, CI, and users of that environment. Use the override cookie.
 - Deployment Protection Exceptions make the domain public. Do not use them merely to unblock an agent.
 - Do not expose OIDC tokens, bypass secrets, authenticated URLs, or saved state in logs, screenshots, source files, or user-facing output.
