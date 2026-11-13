@@ -5251,6 +5251,15 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
                 }
             }
         }
+    } else if let Some(path) = state::find_ambiguous_auto_state_file(&session_name) {
+        state.restore_status = "skipped_ambiguous".to_string();
+        state.restore_status_detail = Some(format!(
+            "Skipped legacy state file {} with ambiguous ownership; use `agent-browser state load <path>` after confirming its owner.",
+            path
+        ));
+        state.restore_loaded_path = None;
+        state.restore_load_failed = false;
+        state.restore_validation_pending = false;
     } else {
         state.restore_status = "missing".to_string();
         state.restore_status_detail = None;
@@ -17507,6 +17516,34 @@ mod tests {
         maybe_autosave_restore_state(&mut state, 30_000).await;
         assert!(state.last_autosave_attempt.is_none());
         assert_eq!(state.restore_save_status, "not_attempted");
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_auto_restore_skips_ambiguous_file_without_blocking_autosave() {
+        let guard = EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
+        let home = tempfile::tempdir().unwrap();
+        guard.set("HOME", home.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        let sessions = state::get_sessions_dir();
+        fs::create_dir_all(&sessions).unwrap();
+        let ambiguous = sessions.join("auth-worker-one.json");
+        fs::write(&ambiguous, "original").unwrap();
+
+        let mut state = DaemonState::new();
+        state.session_name = Some("auth".to_string());
+        state.restore_save = "auto".to_string();
+        try_auto_restore_state(&mut state).await;
+        assert_eq!(state.restore_status, "skipped_ambiguous");
+        assert!(state
+            .restore_status_detail
+            .as_deref()
+            .unwrap()
+            .contains(ambiguous.to_str().unwrap()));
+        assert!(!state.restore_load_failed);
+        assert_eq!(auto_save_restore_state(&mut state).await.unwrap(), None);
+        assert_eq!(state.restore_save_status, "no_browser");
+        assert_eq!(fs::read_to_string(&ambiguous).unwrap(), "original");
     }
 
     #[test]

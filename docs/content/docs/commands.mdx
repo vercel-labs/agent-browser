@@ -505,10 +505,12 @@ agent-browser state load <path>       # Load auth state from file
 agent-browser state list              # List saved state files
 agent-browser state show <file>       # Show state summary
 agent-browser state rename <old> <new> # Rename state file
-agent-browser state clear [name]      # Clear states for session name
-agent-browser state clear --all       # Clear all saved states
+agent-browser state clear <name>      # Clear saved states for one restore key
+agent-browser state clear --all       # Clear all saved states (bare `state clear` is an error)
 agent-browser state clean --older-than <days>  # Delete old states
 ```
+
+When a matching legacy filename has multiple plausible owners for the requested key, automatic restore skips it (`restoreStatus: "skipped_ambiguous"` when no unambiguous state file exists) and named `state clear` deletes only the files that key alone owns, keeps the ambiguous ones including encrypted files and backups, and lists the kept paths in `skipped`. Preserve those files and verify ownership before loading one. See [ambiguous legacy state files](/sessions#ambiguous-legacy-state-files) for recovery steps.
 
 ## Sessions
 
