@@ -1,6 +1,6 @@
 [package]
 name = "agent-browser"
-version = "0.41.2"
+version = "0.43.0"
 edition = "2021"
 description = "Fast browser automation CLI for AI agents"
 license = "Apache-2.0"
@@ -38,6 +38,7 @@ hex = "0.4"
 chrono = "0.4"
 urlencoding = "2"
 rust-embed = "8"
+psl = "=2.1.246"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -47,6 +48,7 @@ windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_F
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }

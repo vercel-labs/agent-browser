@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent-browser"
-version = "0.41.2"
+version = "0.43.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -57,6 +57,7 @@ dependencies = [
  "hmac",
  "image",
  "libc",
+ "psl",
  "reqwest",
  "rust-embed",
  "rustls",
@@ -1462,6 +1463,21 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "psl"
+version = "2.1.246"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27d58bd13c235442118460335daf360f0fefaa9035ec4ad957f851d738e7b7d6"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pxfm"
