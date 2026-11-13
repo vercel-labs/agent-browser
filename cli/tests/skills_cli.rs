@@ -122,3 +122,20 @@ fn skills_get_ref_loads_one_reference_through_cli_and_mcp() {
     let with_full = run(&["skills", "get", "core", "--full", "--ref", "commands"]);
     assert!(!with_full.status.success());
 }
+
+#[test]
+fn skills_get_unknown_name_points_to_skills_list() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-browser"))
+        .args(["skills", "get", "missing-skill"])
+        .env("AGENT_BROWSER_SKILLS_DIR", temp.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Skill not found: missing-skill"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("agent-browser skills list"), "{stderr}");
+}

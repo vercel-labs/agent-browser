@@ -172,19 +172,19 @@ impl RdpClient {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
-    async fn put(s: &mut DuplexStream, v: Value) {
+    pub(crate) async fn put(s: &mut DuplexStream, v: Value) {
         let b = v.to_string();
         s.write_all(format!("{}:{}", b.len(), b).as_bytes())
             .await
             .unwrap();
     }
 
-    async fn get(s: &mut DuplexStream) -> Value {
+    pub(crate) async fn get(s: &mut DuplexStream) -> Value {
         let mut len = Vec::new();
         loop {
             let b = s.read_u8().await.unwrap();
@@ -199,7 +199,7 @@ mod tests {
         serde_json::from_slice(&buf).unwrap()
     }
 
-    async fn pair() -> (RdpClient, DuplexStream) {
+    pub(crate) async fn pair() -> (RdpClient, DuplexStream) {
         let (a, mut b) = tokio::io::duplex(65536);
         put(&mut b, json!({"from":"root","applicationType":"browser"})).await;
         let c = RdpClient::from_stream(a).await.unwrap();
