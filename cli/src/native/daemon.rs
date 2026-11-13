@@ -539,6 +539,10 @@ fn spawn_background_tick_if_idle(
             .unwrap_or(false);
         if process_exited {
             let _ = close_current_browser(&mut state).await;
+            // Remember the loss: the next command relaunches the browser,
+            // and that relaunch must be reported as one (issue #2505) instead
+            // of looking like a fresh launch.
+            state.browser_lost = true;
         } else if state.browser.is_some() {
             if let Err(error) = state.drain_cdp_events_background().await {
                 let _ = writeln!(
