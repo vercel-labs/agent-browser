@@ -67,6 +67,14 @@ impl ActionPolicy {
             .map_err(|e| format!("Failed to read policy file: {}", e))?;
         let mut policy: ActionPolicy =
             serde_json::from_str(&contents).map_err(|e| format!("Invalid policy JSON: {}", e))?;
+        if let Some(default) = &policy.default {
+            if !default.eq_ignore_ascii_case("allow") && !default.eq_ignore_ascii_case("deny") {
+                return Err(format!(
+                    "Invalid policy default '{}': expected 'allow' or 'deny'",
+                    default
+                ));
+            }
+        }
         policy.path = path_buf;
         Ok(policy)
     }
@@ -143,6 +151,33 @@ impl ActionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_policy_default_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        for default in ["dney", "confirm", "", " deny"] {
+            fs::write(&path, serde_json::json!({ "default": default }).to_string()).unwrap();
+            let path = path.to_str().unwrap();
+            assert!(ActionPolicy::load(path)
+                .unwrap_err()
+                .contains("Invalid policy default"));
+            let policy = ActionPolicy::from_path(path);
+            assert!(matches!(policy.check("navigate"), PolicyResult::Deny(_)));
+            assert_eq!(policy.check("close"), PolicyResult::Allow);
+        }
+    }
+
+    #[test]
+    fn valid_policy_defaults_remain_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        for (default, allowed) in [("ALLOW", true), ("DeNy", false)] {
+            fs::write(&path, serde_json::json!({ "default": default }).to_string()).unwrap();
+            let policy = ActionPolicy::load(path.to_str().unwrap()).unwrap();
+            assert_eq!(policy.check("navigate") == PolicyResult::Allow, allowed);
+        }
+    }
 
     #[test]
     fn test_policy_allow_whitelist() {
