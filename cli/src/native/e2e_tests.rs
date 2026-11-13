@@ -2420,6 +2420,76 @@ document.querySelectorAll('#popup [role=option]').forEach(function(o){o.addEvent
     assert_success(&resp);
 }
 
+// Selecting an option that is already selected in a multi-select listbox is a
+// no-op; the click toggles, so without the guard the option would be cleared.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_listbox_multiselect() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<ul role="listbox" id="multi" aria-multiselectable="true">
+<li role="option" data-value="apple" aria-selected="true">Apple</li>
+<li role="option" data-value="banana" aria-selected="false">Banana</li>
+</ul>
+<output id="state"></output>
+<script>
+var s=document.getElementById('state'),options=document.querySelectorAll('#multi [role=option]');
+function render(){s.textContent=Array.prototype.map.call(options,function(o){return o.getAttribute('data-value')+'='+o.getAttribute('aria-selected');}).join(',');}
+options.forEach(function(o){o.addEventListener('click',function(){o.setAttribute('aria-selected',o.getAttribute('aria-selected')==='true'?'false':'true');render();});});
+render();
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#multi", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('state').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        get_data(&resp)["result"],
+        "apple=true,banana=false",
+        "an already selected option must stay selected"
+    );
+
+    // Selecting a different option still toggles it on.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "select", "selector": "#multi", "values": ["Banana"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("6", "document.getElementById('state').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple=true,banana=true");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_form_interaction() {

@@ -564,7 +564,11 @@ pub async fn select_option(
                     }
                     wanted.add(matches[0]);
                 }
+                // A click toggles selection in a multi-select listbox, so an option
+                // that is already selected must be left alone.
+                const multi = role === 'listbox' && this.getAttribute('aria-multiselectable') === 'true';
                 for (const opt of wanted) {
+                    if (multi && opt.getAttribute('aria-selected') === 'true') continue;
                     opt.scrollIntoView({ block: 'nearest' });
                     realClick(opt);
                 }
