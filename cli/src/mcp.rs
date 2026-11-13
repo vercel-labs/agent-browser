@@ -2160,7 +2160,7 @@ fn shared_property(key: &str) -> Value {
     match key {
         "session" => json!({
             "type": "string",
-            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores."
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores. When the server sets AGENT_BROWSER_SESSION, the name is scoped under it as <server>--<name> so two servers cannot share a browser; a name equal to the server session is used as-is."
         }),
         "restore" => json!({
             "oneOf": [{ "type": "boolean" }, { "type": "string" }],
@@ -2195,7 +2195,7 @@ fn shared_property(key: &str) -> Value {
     }
 }
 
-const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool accepts these optional arguments even when its schema does not list them: session (isolated browser session name), restore (true or a key; restores and auto-saves browser state when the call launches the browser), allowedDomains (domain patterns that restrict browser and read traffic when the call launches the browser; also disables RTCPeerConnection in Chromium sessions, and is rejected when the server environment or config already sets allowed domains), capture (set to flow to record the session so flow steps and flow save can turn it into a reusable flow, when the call launches the browser), extraArgs (extra CLI arguments such as --engine; global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config, are rejected, so set those in the MCP server environment or config), timeoutMs (positive integer, maximum milliseconds to wait for the tool call), namespace (isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (conditions restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), idleTimeout (such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown), and relaunch (boolean, relaunch the session's browser even when no setting changed).";
+const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool accepts these optional arguments even when its schema does not list them: session (isolated browser session name; scoped under the server's AGENT_BROWSER_SESSION as <server>--<name> when one is set, so two servers cannot share a browser), restore (true or a key; restores and auto-saves browser state when the call launches the browser), allowedDomains (domain patterns that restrict browser and read traffic when the call launches the browser; also disables RTCPeerConnection in Chromium sessions, and is rejected when the server environment or config already sets allowed domains), capture (set to flow to record the session so flow steps and flow save can turn it into a reusable flow, when the call launches the browser), extraArgs (extra CLI arguments such as --engine; global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config, are rejected, so set those in the MCP server environment or config), timeoutMs (positive integer, maximum milliseconds to wait for the tool call), namespace (isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (conditions restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), idleTimeout (such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown), and relaunch (boolean, relaunch the session's browser even when no setting changed).";
 
 /// Levenshtein distance, for suggesting a close argument name.
 fn edit_distance(a: &str, b: &str) -> usize {
@@ -2746,8 +2746,10 @@ fn cli_tool_args(
     session: Option<&str>,
 ) -> Result<Vec<String>, ProtocolError> {
     let extra_args = optional_string_array(arguments, "extraArgs")?.unwrap_or_default();
+    let extra_args = scope_extra_args_sessions(extra_args);
     let mut args = vec!["--json".to_string()];
-    append_common_global_args(&mut args, arguments, session)?;
+    let scoped_session = session.map(scope_tool_session);
+    append_common_global_args(&mut args, arguments, scoped_session.as_deref())?;
     // The CLI reads global flags anywhere in argv, so a tool argument such as
     // a selector could otherwise carry its own --allowed-domains or --session.
     let trusted: Vec<&str> = args.iter().map(|a| global_flag_name(a)).collect();
@@ -2794,6 +2796,15 @@ fn cli_tool_args(
                 "Tool arguments may not set {}; it is already set for this call",
                 name
             )));
+        }
+        // A positional value such as open's url must not smuggle --session
+        // past the pinned session: with no explicit tool session the flag is
+        // not in `trusted`, so the CLI would resolve the injected name
+        // unscoped. extraArgs may still carry --session; it is scoped above.
+        if command_index.is_some() && name == "--session" && pinned_server_session().is_some() {
+            return Err(ProtocolError::invalid_params(
+                "Tool arguments may not set --session; the MCP server pins the session",
+            ));
         }
     }
     if let Some(boundary) = text_boundary {
@@ -4299,6 +4310,58 @@ fn append_session_args(args: &mut Vec<String>, session: Option<&str>) {
         args.push("--session".to_string());
         args.push(session.to_string());
     }
+}
+
+/// Separator joining a pinned server session to a tool-provided session name.
+/// Both parts and the separator use characters valid in session names.
+const SESSION_SCOPE_SEPARATOR: &str = "--";
+
+/// The session this MCP server is pinned to by its environment, if any. The
+/// implicit "default" session does not pin anything, and an invalid pinned
+/// name does not scope anything: the server is already broken for calls
+/// without an explicit session, and scoping under it would only turn a
+/// working explicit session into an invalid one.
+fn pinned_server_session() -> Option<String> {
+    std::env::var("AGENT_BROWSER_SESSION")
+        .ok()
+        .filter(|session| {
+            !session.is_empty()
+                && session != "default"
+                && crate::validation::is_valid_session_name(session)
+        })
+}
+
+/// Scope a tool-provided session name under the server's pinned session, so
+/// two MCP servers sharing a socket directory cannot drive the same browser.
+/// A tool session that already names the pinned session passes through
+/// unchanged; without a pinned session the name is unchanged.
+fn scope_tool_session(session: &str) -> String {
+    match pinned_server_session() {
+        Some(pinned) if pinned != session => {
+            format!("{pinned}{SESSION_SCOPE_SEPARATOR}{session}")
+        }
+        _ => session.to_string(),
+    }
+}
+
+/// Rewrite any `--session` carried in extraArgs under the server's pinned
+/// session, so the escape hatch cannot bypass tool-session scoping. The
+/// `--session=value` form needs no rewrite: the CLI parser only honors the
+/// space-separated form for session resolution.
+fn scope_extra_args_sessions(extra_args: Vec<String>) -> Vec<String> {
+    let mut scoped = Vec::with_capacity(extra_args.len());
+    let mut args = extra_args.into_iter();
+    while let Some(token) = args.next() {
+        if token == "--session" {
+            scoped.push(token);
+            if let Some(value) = args.next() {
+                scoped.push(scope_tool_session(&value));
+            }
+        } else {
+            scoped.push(token);
+        }
+    }
+    scoped
 }
 
 fn append_common_global_args(
@@ -6647,6 +6710,100 @@ mod tests {
             err.message,
             crate::validation::session_name_error("has space")
         );
+    }
+
+    #[test]
+    fn tool_session_is_scoped_under_pinned_server_session() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.set("AGENT_BROWSER_SESSION", "a");
+
+        let args = cli_tool_args(
+            &json!({}),
+            vec!["open".to_string(), "https://example.com".to_string()],
+            Some("shop"),
+        )
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.session, "a--shop");
+    }
+
+    #[test]
+    fn tool_session_matching_pinned_server_session_is_not_scoped() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.set("AGENT_BROWSER_SESSION", "a");
+
+        let args = cli_tool_args(
+            &json!({}),
+            vec!["open".to_string(), "https://example.com".to_string()],
+            Some("a"),
+        )
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.session, "a");
+    }
+
+    #[test]
+    fn tool_session_is_unscoped_without_pinned_server_session() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.remove("AGENT_BROWSER_SESSION");
+
+        let args = cli_tool_args(
+            &json!({}),
+            vec!["open".to_string(), "https://example.com".to_string()],
+            Some("shop"),
+        )
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.session, "shop");
+    }
+
+    #[test]
+    fn extra_args_session_is_scoped_under_pinned_server_session() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.set("AGENT_BROWSER_SESSION", "a");
+
+        let args = cli_tool_args(
+            &json!({"extraArgs": ["--session", "shop"]}),
+            vec!["open".to_string(), "https://example.com".to_string()],
+            None,
+        )
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.session, "a--shop");
+    }
+
+    #[test]
+    fn url_session_flag_does_not_bypass_pinned_server_session() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.set("AGENT_BROWSER_SESSION", "a");
+
+        let err = cli_tool_args(
+            &json!({"extraArgs": ["victim", "https://example.com"]}),
+            vec!["open".to_string(), "--session".to_string()],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message.contains("may not set --session"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn tool_session_is_not_scoped_under_invalid_pinned_session() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.set("AGENT_BROWSER_SESSION", "has space");
+
+        let args = cli_tool_args(
+            &json!({}),
+            vec!["open".to_string(), "https://example.com".to_string()],
+            Some("shop"),
+        )
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.session, "shop");
     }
 
     #[test]
