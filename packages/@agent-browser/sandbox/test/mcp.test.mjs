@@ -97,6 +97,47 @@ test("rejects JSON-RPC errors with the server's code", async () => {
   await client.close();
 });
 
+for (const [method, id] of [["ping", 2], ["ping", "health"], ["unsupported/method", 2]]) {
+  test(`answers server ${method} with id ${id} while a tool call is pending`, async () => {
+    const encoder = new TextEncoder();
+    const received = [];
+    let stdout;
+    let toolId;
+    const send = (message) => stdout.enqueue(encoder.encode(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`));
+    const process = {
+      stdin: new WritableStream({
+        write(chunk) {
+          const message = JSON.parse(new TextDecoder().decode(chunk));
+          received.push(message);
+          if (message.method === "initialize") {
+            send({ id: message.id, result: { serverInfo: { name: "agent-browser", version: "test" } } });
+          } else if (message.method === "tools/call") {
+            toolId = message.id;
+            send({ id, method });
+          } else if (message.id === id && message.method === undefined) {
+            send({ id: toolId, result: { content: [{ type: "text", text: "tool result" }] } });
+          }
+        },
+        close() { stdout.close(); },
+      }),
+      stdout: new ReadableStream({ start(controller) { stdout = controller; } }),
+      wait: async () => ({ exitCode: 0 }),
+    };
+    const client = await connectAgentBrowserMcp(process, { timeout: 500 });
+    try {
+      assert.deepEqual(await client.callTool("agent_browser_snapshot"), {
+        content: [{ type: "text", text: "tool result" }],
+      });
+      const response = received.find((message) => message.id === id && message.method === undefined);
+      assert.deepEqual(response, method === "ping"
+        ? { jsonrpc: "2.0", id, result: {} }
+        : { jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
+    } finally {
+      await client.close();
+    }
+  });
+}
+
 test("times out a request the server never answers", async () => {
   const server = fakeServer(initializeOr(() => undefined));
   const client = await connectAgentBrowserMcp(server.process, { timeout: 20 });
