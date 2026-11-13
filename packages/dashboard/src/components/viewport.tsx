@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai/react";
 import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { drawStreamFrame } from "@/lib/draw-stream-frame";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
 import { Badge } from "@/components/ui/badge";
@@ -233,28 +234,10 @@ export function Viewport() {
     }
   }, [addressValue, navigating, runCmd, url]);
 
-  const drawFrame = useCallback((base64: string) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const bin = atob(base64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-
-    createImageBitmap(new Blob([bytes], { type: "image/jpeg" })).then((bmp) => {
-      canvas.width = bmp.width;
-      canvas.height = bmp.height;
-      const ctx = canvas.getContext("2d");
-      if (ctx) ctx.drawImage(bmp, 0, 0);
-      bmp.close();
-    });
-  }, []);
-
   useEffect(() => {
-    if (frame) {
-      drawFrame(frame);
-    }
-  }, [frame, drawFrame]);
+    const canvas = canvasRef.current;
+    if (frame && canvas) return drawStreamFrame(canvas, frame);
+  }, [frame]);
 
   const isFit =
     canvasArea.width > 0 &&
