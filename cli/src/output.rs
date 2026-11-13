@@ -4013,7 +4013,8 @@ Snapshot Diff:
     -c, --compact            Use compact snapshot format
     -d, --depth <n>          Limit snapshot tree depth
 
-  Without --baseline, compares against the last snapshot taken in this session.
+  Without --baseline, compares against the last snapshot (or diff snapshot)
+  taken on the current tab in this session.
 
 Screenshot Diff:
 

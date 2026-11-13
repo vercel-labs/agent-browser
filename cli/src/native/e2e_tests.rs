@@ -5815,6 +5815,69 @@ async fn e2e_diff_snapshot() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_diff_snapshot_without_baseline_uses_last_snapshot() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("snapshot_diff_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+
+    // Unchanged page: the bare diff compares against that snapshot, not an empty one.
+    let resp = execute_command(&json!({ "id": "4", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["changed"], false, "unexpected diff: {}", data["diff"]);
+    assert_eq!(data["additions"], 0);
+    assert_eq!(data["removals"], 0);
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "evaluate",
+            "script": "document.querySelector('#primary-action').textContent = 'Updated action'"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Only the changed line is reported.
+    let resp = execute_command(&json!({ "id": "6", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["changed"], true);
+    assert_eq!(data["additions"], 1);
+    assert_eq!(data["removals"], 1);
+    assert!(data["diff"].as_str().unwrap().contains("Updated action"));
+
+    // The diff's own capture becomes the next baseline.
+    let resp = execute_command(&json!({ "id": "7", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_diff_url_aligns_refs_after_snapshot() {
     let mut state = DaemonState::new();
 
