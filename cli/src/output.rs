@@ -1831,8 +1831,8 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
 
         // State rename
         if let Some(true) = data.get("renamed").and_then(|v| v.as_bool()) {
-            let old_name = data.get("oldName").and_then(|v| v.as_str()).unwrap_or("");
-            let new_name = data.get("newName").and_then(|v| v.as_str()).unwrap_or("");
+            let old_name = data.get("from").and_then(|v| v.as_str()).unwrap_or("");
+            let new_name = data.get("to").and_then(|v| v.as_str()).unwrap_or("");
             println!(
                 "{} Renamed {} -> {}",
                 color::success_indicator(),
