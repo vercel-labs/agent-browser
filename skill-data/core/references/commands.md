@@ -506,7 +506,7 @@ The default tools profile is `core`, which keeps MCP context small for everyday 
 
 Profiles:
 
-- `core` - Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
+- `core` - Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval and dialogs, close, tab basics, and profile discovery
 - `network` - Network routes, request inspection, HAR, headers, credentials, offline
 - `state` - Cookies, storage, auth, saved state, sessions, profiles, skills
 - `debug` - Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny

@@ -267,7 +267,7 @@ impl ToolProfile {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, tab basics, JavaScript eval, close, and profile discovery.",
+            Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, tab basics, JavaScript dialogs, eval, close, and profile discovery.",
             Self::Network => "Network interception, request inspection, HAR capture, headers, credentials, and offline mode.",
             Self::State => "Cookies, storage, auth profiles, saved browser state, sessions, Chrome profiles, and bundled skills.",
             Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
@@ -373,6 +373,9 @@ const CORE_PROFILE_TOOLS: &[&str] = &[
     TOOL_TAB_LIST,
     TOOL_TAB_SWITCH,
     TOOL_TAB_CLOSE,
+    TOOL_DIALOG_STATUS,
+    TOOL_DIALOG_ACCEPT,
+    TOOL_DIALOG_DISMISS,
     TOOL_EVAL,
     TOOL_CLOSE,
 ];
@@ -4950,6 +4953,9 @@ mod tests {
         assert!(names.contains(&TOOL_SNAPSHOT));
         assert!(names.contains(&TOOL_CLICK));
         assert!(names.contains(&TOOL_SCREENSHOT));
+        assert!(names.contains(&TOOL_DIALOG_STATUS));
+        assert!(names.contains(&TOOL_DIALOG_ACCEPT));
+        assert!(names.contains(&TOOL_DIALOG_DISMISS));
         assert!(names.contains(&TOOL_GET_CDP_URL));
         assert!(names.contains(&TOOL_NETWORK_HAR_START));
         assert!(names.contains(&TOOL_REACT_SUSPENSE));
