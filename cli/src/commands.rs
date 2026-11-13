@@ -6698,19 +6698,23 @@ mod tests {
             r#"webmcp invoke search {"a":1} --params {"b":2}"#,
             r#"webmcp invoke search --params {"a":1} {"b":2}"#,
             r#"webmcp invoke search {"a":1} {"b":2}"#,
+            r#"webmcp invoke search --params {"a":1} --params {"b":2}"#,
         ] {
-            let result = parse_command(&args(input), &default_flags());
-            assert!(
-                matches!(result, Err(ParseError::InvalidValue { .. })),
-                "{input}"
-            );
+            let err = parse_command(&args(input), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(message.contains("given twice"), "{input} gave: {message}");
         }
     }
 
     #[test]
     fn test_webmcp_invoke_rejects_malformed_positional_params() {
-        let result = parse_command(&args("webmcp invoke search not-json"), &default_flags());
-        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+        let err =
+            parse_command(&args("webmcp invoke search not-json"), &default_flags()).unwrap_err();
+        let message = err.format();
+        assert!(
+            message.contains("Invalid JSON for WebMCP params"),
+            "gave: {message}"
+        );
     }
 
     #[test]
