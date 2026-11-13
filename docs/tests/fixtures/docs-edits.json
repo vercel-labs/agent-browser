@@ -332,6 +332,14 @@
       {
         "from": "agent-browser skills get core --full is the recommended starting point for most browser tasks.",
         "to": "Start with agent-browser skills get core. It routes to its references when a task needs more detail, and --full prints all of them at once."
+      },
+      {
+        "from": "**protected-vercel-deployments**: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens.",
+        "to": "**vercel**: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens, and view them at a different feature flag variant with a per-browser override cookie."
+      },
+      {
+        "from": "protected-vercel-deployments: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens.",
+        "to": "vercel: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens, and view them at a different feature flag variant with a per-browser override cookie."
       }
     ],
     "/webgpu": [
