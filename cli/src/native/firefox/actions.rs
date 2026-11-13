@@ -2,7 +2,9 @@
 
 use serde_json::Value;
 
-use super::{capture, emulation, forms, interact, network, page, query, snapshot, storage, tabs};
+use super::{
+    capture, emulation, forms, interact, network, page, permissions, query, snapshot, storage, tabs,
+};
 use crate::native::actions::{self as chrome, DaemonState};
 
 /// Actions that run on Firefox.
@@ -271,7 +273,7 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
         "locale" => emulation::set_locale(cmd, state).await,
         "timezone" => emulation::set_timezone(cmd, state).await,
         "geolocation" => emulation::set_geolocation(cmd, state).await,
-        "permissions" => emulation::set_permissions(cmd, state).await,
+        "permissions" => permissions::grant(cmd, state).await,
         "offline" => emulation::set_offline(cmd, state).await,
         "set_media" | "emulatemedia" => emulation::set_media(cmd, state).await,
         "close" => chrome::handle_close(state).await,

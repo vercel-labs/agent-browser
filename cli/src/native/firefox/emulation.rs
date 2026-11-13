@@ -80,18 +80,6 @@ pub(crate) fn offline(enabled: bool) -> Command {
     )
 }
 
-/// Maps a permission and its origin to `permissions.setPermission`.
-pub(crate) fn permission(name: &str, state: &str, origin: &str) -> Command {
-    (
-        "permissions.setPermission",
-        json!({
-            "descriptor": { "name": name },
-            "state": state,
-            "origin": origin,
-        }),
-    )
-}
-
 /// Validates media emulation and maps it to DevTools `targetConfiguration` values.
 pub(crate) fn validate_media(media: &EmulatedMedia) -> Result<Value, String> {
     let mut config = Map::new();
@@ -328,47 +316,6 @@ pub async fn set_geolocation(cmd: &Value, state: &mut DaemonState) -> Result<Val
     .await?;
     session(state)?.emulation.write().unwrap().geolocation = Some((latitude, longitude, accuracy));
     Ok(json!({ "latitude": latitude, "longitude": longitude }))
-}
-
-/// Grants each permission for the active page's origin.
-pub async fn set_permissions(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let permissions: Vec<String> = cmd
-        .get("permissions")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
-    if permissions.is_empty() {
-        return Ok(json!({ "granted": permissions }));
-    }
-    let url = session(state)?.url().await?;
-    let origin = page_origin(&url)?;
-    for name in &permissions {
-        session(state)?
-            .bidi
-            .send(
-                "permissions.setPermission",
-                permission(name, "granted", &origin).1,
-            )
-            .await?;
-    }
-    Ok(json!({ "granted": permissions }))
-}
-
-fn page_origin(url: &str) -> Result<String, String> {
-    let parsed = url::Url::parse(url).map_err(|_| {
-        "Cannot set permissions without a page origin; navigate to a page first".to_string()
-    })?;
-    let origin = parsed.origin();
-    if origin.is_tuple() {
-        Ok(origin.ascii_serialization())
-    } else {
-        Err("Cannot set permissions without a page origin; navigate to a page first".to_string())
-    }
 }
 
 /// Toggles offline mode for the active tab and any tab opened later.
@@ -610,45 +557,6 @@ mod tests {
             find("emulation.setNetworkConditions")["params"]["networkConditions"]["type"],
             "offline"
         );
-    }
-
-    #[tokio::test]
-    async fn permissions_are_granted_for_the_page_origin() {
-        let (ff, _, _, bidi, _) = fake_session_with_rdp().await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-
-        let result = set_permissions(
-            &json!({"permissions": ["geolocation", "notifications"]}),
-            &mut state,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result, json!({"granted": ["geolocation", "notifications"]}));
-
-        let messages = bidi.lock().unwrap().clone();
-        let grants: Vec<&Value> = messages
-            .iter()
-            .filter(|m| m["method"] == "permissions.setPermission")
-            .collect();
-        assert_eq!(grants.len(), 2);
-        assert_eq!(grants[0]["params"]["descriptor"]["name"], "geolocation");
-        assert_eq!(grants[0]["params"]["origin"], "https://example.com");
-        assert_eq!(grants[0]["params"]["state"], "granted");
-    }
-
-    #[tokio::test]
-    async fn permissions_without_a_page_origin_fail_before_granting() {
-        let (mut state, calls) = session_state().await;
-        let error = set_permissions(&json!({"permissions": ["geolocation"]}), &mut state)
-            .await
-            .unwrap_err();
-        assert!(error.contains("page origin"), "{error}");
-        assert!(!calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|call| call == "permissions.setPermission"));
     }
 
     #[tokio::test]

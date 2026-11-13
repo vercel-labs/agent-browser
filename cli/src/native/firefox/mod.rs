@@ -12,6 +12,7 @@ pub mod interact;
 pub mod navigation;
 pub mod network;
 pub mod page;
+pub mod permissions;
 pub mod process;
 pub mod query;
 pub mod rdp;
