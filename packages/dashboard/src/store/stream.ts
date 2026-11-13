@@ -92,16 +92,12 @@ export function useStreamSync(port: number) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryCountRef = useRef(0);
-  const eventsRef = useRef<ActivityEvent[]>([]);
-  const consoleRef = useRef<ConsoleEntry[]>([]);
   const portRef = useRef(port);
 
   // Reset all stream state when port changes
   useEffect(() => {
     if (portRef.current !== port) {
       portRef.current = port;
-      eventsRef.current = [];
-      consoleRef.current = [];
       setConnected(false);
       setBrowserConnected(false);
       setScreencasting(false);
@@ -165,43 +161,26 @@ export function useStreamSync(port: number) {
           }
           break;
 
-        case "command": {
-          const updated = [...eventsRef.current, msg].slice(-MAX_EVENTS);
-          eventsRef.current = updated;
-          setEvents(updated);
+        case "command":
+          setEvents((events) => [...events, msg].slice(-MAX_EVENTS));
           break;
-        }
 
-        case "console": {
-          const conUpdated = [...consoleRef.current, msg].slice(-MAX_EVENTS);
-          consoleRef.current = conUpdated;
-          setConsoleLogs(conUpdated);
+        case "console":
+        case "page_error":
+          setConsoleLogs((logs) => [...logs, msg].slice(-MAX_EVENTS));
           break;
-        }
 
-        case "page_error": {
-          const conUpdated = [...consoleRef.current, msg].slice(-MAX_EVENTS);
-          consoleRef.current = conUpdated;
-          setConsoleLogs(conUpdated);
+        case "result":
+          setEvents((events) => {
+            const commandIndex = events.findIndex(
+              (entry) => entry.type === "command" && entry.id === msg.id,
+            );
+            const remaining = commandIndex >= 0
+              ? [...events.slice(0, commandIndex), ...events.slice(commandIndex + 1)]
+              : events;
+            return [...remaining, msg].slice(-MAX_EVENTS);
+          });
           break;
-        }
-
-        case "result": {
-          const cmdIdx = eventsRef.current.findIndex(
-            (e) => e.type === "command" && e.id === msg.id,
-          );
-          const base =
-            cmdIdx >= 0
-              ? [
-                  ...eventsRef.current.slice(0, cmdIdx),
-                  ...eventsRef.current.slice(cmdIdx + 1),
-                ]
-              : eventsRef.current;
-          const updated = [...base, msg].slice(-MAX_EVENTS);
-          eventsRef.current = updated;
-          setEvents(updated);
-          break;
-        }
 
         case "tabs":
           setTabs(msg.tabs);
