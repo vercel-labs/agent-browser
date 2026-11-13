@@ -5919,6 +5919,12 @@ async fn apply_settings_patch(
     launches: bool,
 ) -> Result<SettingsOutcome, String> {
     let mut patch = patch.clone();
+    // Environment and config targets are defaults for a session. Once a
+    // command explicitly attached the session to a browser, keep that target
+    // until the caller explicitly chooses another one.
+    if state.attached_target.is_some() && patch.has_default_connection_target() {
+        patch.ignore_default_connection_target();
+    }
     if launches {
         adjust_ca_patch(state, &mut patch)?;
     }
@@ -22838,6 +22844,44 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         .await
         .unwrap();
 
+        assert_eq!(state.attached_target, None);
+    }
+
+    #[tokio::test]
+    async fn test_default_connection_target_does_not_replace_an_explicit_attach() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Cdp, json!("9447"));
+        state.attached_target = Some(AttachedTarget::CdpPort(9447));
+        let patch = Patch::from_wire(Some(&json!({
+            "cdp": "9998",
+            "connectionTargetDefault": true
+        })))
+        .unwrap();
+
+        let outcome = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+
+        assert!(outcome.changes.is_empty());
+        assert!(!outcome.relaunched_browser);
+        assert_eq!(state.settings.get(Key::Cdp), Some(&json!("9447")));
+        assert_eq!(state.attached_target, Some(AttachedTarget::CdpPort(9447)));
+    }
+
+    #[tokio::test]
+    async fn test_explicit_connection_target_can_replace_an_explicit_attach() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Cdp, json!("9447"));
+        state.attached_target = Some(AttachedTarget::CdpPort(9447));
+        let patch = Patch::from_entries(vec![set_to(Key::Cdp, json!("9998"))]);
+
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+
+        assert_eq!(state.settings.get(Key::Cdp), Some(&json!("9998")));
         assert_eq!(state.attached_target, None);
     }
 

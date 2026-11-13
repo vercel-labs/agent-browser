@@ -3990,6 +3990,8 @@ mod tests {
             cli_webgpu: false,
             cli_no_webmcp: false,
             cli_auto_connect: false,
+            cli_cdp: false,
+            cli_provider: false,
             no_auto_connect: false,
             cli_restore: false,
             cli_pin_tab: false,
