@@ -37,7 +37,7 @@ export interface AgentBrowserMcpClient {
     args?: Record<string, unknown>,
     options?: AgentBrowserMcpRequestOptions,
   ): Promise<AgentBrowserMcpToolResult>;
-  /** Sends EOF and waits for the server to exit, within the client's `timeout`. */
+  /** Sends EOF, waits for exit within the client's `timeout`, and releases the stream locks. */
   close(): Promise<{ readonly exitCode: number }>;
 }
 
@@ -69,7 +69,13 @@ export async function connectAgentBrowserMcp(
 ): Promise<AgentBrowserMcpClient> {
   const encoder = new TextEncoder();
   const writer = process.stdin.getWriter();
-  const reader = process.stdout.getReader();
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    reader = process.stdout.getReader();
+  } catch (error) {
+    writer.releaseLock();
+    throw error;
+  }
   const pending = new Map<number, Pending>();
   let nextId = 0;
   let closed: Error | undefined;
@@ -181,19 +187,24 @@ export async function connectAgentBrowserMcp(
         await reading.catch(() => undefined);
         return { exitCode: exit.exitCode };
       })();
-      if (options.timeout === undefined) return closing;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const timedOut = new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`agent-browser mcp close timed out after ${options.timeout}ms.`)),
-          options.timeout,
-        );
-      });
-      closing.catch(() => undefined);
       try {
+        if (options.timeout === undefined) return await closing;
+        const timedOut = new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`agent-browser mcp close timed out after ${options.timeout}ms.`)),
+            options.timeout,
+          );
+        });
+        closing.catch(() => undefined);
         return await Promise.race([closing, timedOut]);
       } finally {
         clearTimeout(timer);
+        // Cancellation can remain pending behind a stalled write; release ownership immediately.
+        void writer.abort(closed).catch(() => undefined);
+        void reader.cancel(closed).catch(() => undefined);
+        writer.releaseLock();
+        reader.releaseLock();
       }
     },
   };
