@@ -3037,7 +3037,7 @@ Examples:
   agent-browser set viewport 1920 1080 2    # 2x retina
   agent-browser set device "iPhone 12"
   agent-browser set geo 37.7749 -122.4194
-  agent-browser set offline on
+  agent-browser set offline on            # Use off to restore connectivity
   agent-browser set headers '{"X-Custom": "value"}'
   agent-browser set credentials admin secret123
   agent-browser set media dark

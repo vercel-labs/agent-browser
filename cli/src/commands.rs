@@ -3647,11 +3647,18 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             Ok(json!({ "id": id, "action": "geolocation", "latitude": lat, "longitude": lng }))
         }
         Some("offline") => {
-            let off = rest
-                .get(1)
-                .map(|s| *s != "off" && *s != "false")
-                .unwrap_or(true);
-            Ok(json!({ "id": id, "action": "offline", "offline": off }))
+            // Omitted values enable offline mode. Keep the boolean aliases for existing scripts.
+            let offline = match rest.get(1).copied() {
+                None | Some("on" | "true") => true,
+                Some("off" | "false") => false,
+                Some(value) => {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("set offline expects on or off, got '{}'", value),
+                        usage: "set offline [on|off]",
+                    });
+                }
+            };
+            Ok(json!({ "id": id, "action": "offline", "offline": offline }))
         }
         Some("headers") => {
             let headers_json = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -6172,6 +6179,20 @@ mod tests {
     }
 
     // === Protocol alignment tests ===
+
+    #[test]
+    fn test_set_offline_accepts_default_and_boolean_aliases() {
+        for (input, offline) in [
+            ("set offline", true),
+            ("set offline on", true),
+            ("set offline true", true),
+            ("set offline off", false),
+            ("set offline false", false),
+        ] {
+            let cmd = parse_command(&args(input), &default_flags()).unwrap();
+            assert_eq!(cmd["offline"], offline, "{input}");
+        }
+    }
 
     #[test]
     fn test_mouse_wheel() {
