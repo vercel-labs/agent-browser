@@ -1045,6 +1045,7 @@ fn plan_is_pure_and_next_holds_the_requested_values() {
             requested: Requested::Set(json!("/b")),
             running: Some(json!("/a")),
             effect: super::spec::Effect::Launch,
+            in_place: false,
         }
     );
 }
@@ -1448,7 +1449,37 @@ fn a_new_target_leaves_the_user_agent_to_the_attach_unless_the_patch_names_firef
 }
 
 #[test]
-fn only_in_place_changes_survive_a_command_that_never_launches() {
+fn a_patch_for_an_attached_firefox_splits_into_session_and_in_place_changes() {
+    let attached_firefox = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let plan = attached_firefox.plan(&patch_of(&[
+        is(Key::UserAgent, json!("AttachedUA/1")),
+        is(Key::DownloadPath, json!("/tmp/downloads")),
+        is(Key::DefaultTimeout, json!(5000)),
+    ]));
+
+    let live = plan.live_only(&attached_firefox);
+    assert_eq!(changed_keys(&live), vec![Key::DefaultTimeout]);
+    assert_eq!(live.next.user_agent(), None);
+    assert_eq!(live.next.launch_options().download_path, None);
+
+    let in_place = plan.in_place_only(&attached_firefox);
+    assert_eq!(
+        changed_keys(&in_place),
+        vec![Key::UserAgent, Key::DownloadPath]
+    );
+    assert_eq!(in_place.next.user_agent().as_deref(), Some("AttachedUA/1"));
+    assert_eq!(
+        in_place.next.launch_options().download_path.as_deref(),
+        Some("/tmp/downloads")
+    );
+    assert!(!in_place.relaunch);
+}
+
+#[test]
+fn only_a_session_level_live_change_precedes_the_gates() {
     let attached_firefox = running_with(&[
         (Key::Cdp, json!("http://127.0.0.1:9333")),
         (Key::Engine, json!("firefox")),
@@ -1460,11 +1491,8 @@ fn only_in_place_changes_survive_a_command_that_never_launches() {
             is(Key::DefaultTimeout, json!(5000)),
         ]))
         .live_only(&attached_firefox);
-    assert_eq!(
-        changed_keys(&plan),
-        vec![Key::UserAgent, Key::DefaultTimeout]
-    );
-    assert_eq!(plan.next.user_agent().as_deref(), Some("AttachedUA/1"));
+    assert_eq!(changed_keys(&plan), vec![Key::DefaultTimeout]);
+    assert_eq!(plan.next.user_agent(), None, "an in-place change waits");
     assert_eq!(plan.next.color_scheme(), None, "a launch setting waits");
     assert_eq!(plan.next.default_timeout_ms(), 5000);
     assert!(!plan.relaunch);

@@ -3367,12 +3367,15 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         _ => {}
     }
 
-    // The settings this invocation set ride on the command. Live settings
-    // apply now, before the policy checks, so a changed policy governs this
-    // command too. Launch settings wait until the launch itself: a command that
-    // is denied or needs confirmation leaves the browser and its settings alone.
+    // The settings this invocation set ride on the command. Session-level live
+    // settings apply now, before the policy checks, so a changed policy governs
+    // this command too. Launch settings wait until the launch itself, and the
+    // changes an attached browser takes in place wait for the gates: a command
+    // that is denied or needs confirmation leaves the browser and its settings
+    // alone.
     let launches = command_launches_browser(cmd);
     let mut launch_patch: Option<Patch> = None;
+    let mut settings_patch: Option<Patch> = None;
     let mut settings_outcome = if action == "close" {
         SettingsOutcome::default()
     } else {
@@ -3383,17 +3386,18 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         if let Err(e) = check_capture_setting(&patch) {
             return error_response(&id, &e);
         }
-        let outcome = match apply_settings_patch(state, &patch, false).await {
+        let outcome = match apply_settings_patch(state, &patch, SettingsPass::BeforeGates).await {
             Ok(outcome) => outcome,
             Err(e) => return error_response(&id, &e),
         };
+        let mut patch = patch;
         if launches {
-            let mut patch = patch;
             if let Err(e) = adjust_ca_patch(state, &mut patch) {
                 return error_response(&id, &e);
             }
-            launch_patch = Some(patch);
+            launch_patch = Some(patch.clone());
         }
+        settings_patch = Some(patch);
         outcome
     };
     // The settings the browser will be launched with, when the patch changes them.
@@ -3535,7 +3539,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // A write `--allow-write` does not cover needs an explicit confirmation,
     // whatever the policy file and --confirm-actions say.
-    if let Some(resp) = park_unconfirmed_flow_write(&id, cmd, action, run_flow.as_deref(), state) {
+    if let Some(mut resp) =
+        park_unconfirmed_flow_write(&id, cmd, action, run_flow.as_deref(), state)
+    {
+        attach_settings_outcome(&mut resp, &settings_outcome);
         return resp;
     }
 
@@ -3558,11 +3565,24 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     };
 
+    if let Some(patch) = settings_patch.as_ref() {
+        if !(launches && launch_plan.is_some()) {
+            match apply_settings_patch(state, patch, SettingsPass::InPlace).await {
+                Ok(outcome) => settings_outcome.absorb_in_place(outcome),
+                Err(e) => {
+                    let mut resp = error_response(&id, &e);
+                    attach_settings_outcome(&mut resp, &settings_outcome);
+                    return resp;
+                }
+            }
+        }
+    }
+
     if !skip_launch {
         if needs_launch {
             // Past the policy gates: the launch settings take effect now.
             if let (Some(patch), Some(_)) = (launch_patch.as_ref(), launch_plan.as_ref()) {
-                match apply_settings_patch(state, patch, true).await {
+                match apply_settings_patch(state, patch, SettingsPass::Launch).await {
                     Ok(outcome) => settings_outcome.absorb(outcome),
                     Err(e) => {
                         let mut resp = error_response(&id, &e);
@@ -3668,7 +3688,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
         "launch" => {
             let applied = match launch_patch.as_ref() {
-                Some(patch) => apply_settings_patch(state, patch, true)
+                Some(patch) => apply_settings_patch(state, patch, SettingsPass::Launch)
                     .await
                     .map(|outcome| settings_outcome.absorb(outcome)),
                 None => Ok(()),
@@ -6215,12 +6235,25 @@ impl SettingsOutcome {
     /// was applied. The launch changes were reported as pending; they are
     /// replaced by what the launch actually did.
     fn absorb(&mut self, launch: SettingsOutcome) {
-        self.changes.retain(|change| change["effect"] == "live");
+        self.changes
+            .retain(|change| change["effect"] == "live" && change["applied"] == true);
         self.changes.extend(launch.changes);
         self.forced = launch.forced;
         self.relaunched_browser = launch.relaunched_browser;
         self.pending = launch.pending;
         self.awaiting_engine = launch.awaiting_engine;
+    }
+
+    /// Takes the in-place changes a pass applied after the gates. They replace
+    /// the not-applied report the pre-gate pass made for the same options.
+    fn absorb_in_place(&mut self, applied: SettingsOutcome) {
+        self.changes.retain(|change| {
+            !applied
+                .changes
+                .iter()
+                .any(|in_place| in_place["option"] == change["option"])
+        });
+        self.changes.extend(applied.changes);
     }
 
     /// Called when the launch failed and the launch settings were put back.
@@ -6349,19 +6382,31 @@ fn adjust_ca_patch(state: &mut DaemonState, patch: &mut Patch) -> Result<(), Str
     Ok(())
 }
 
-/// Plans `patch` against the session's settings and applies the plan. Live
-/// settings change in place. Launch settings close the running browser so the
-/// launch that follows uses them, and they are committed for good only once
+/// Which part of a settings patch a call applies.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsPass {
+    /// Session-level settings, applied before the policy and confirmation gates so they govern the command.
+    BeforeGates,
+    /// Changes an attached browser takes in place, applied only once the gates have passed.
+    InPlace,
+    /// The whole plan, applied by a command that launches or attaches.
+    Launch,
+}
+
+/// Plans `patch` against the session's settings and applies `pass` of the plan.
+/// Live settings change in place. Launch settings close the running browser so
+/// the launch that follows uses them, and they are committed for good only once
 /// that launch succeeds (`rollback_launch_settings` puts them back).
 ///
-/// A command that never launches a browser (`launches` is false) applies only
-/// the live settings. Its launch changes are reported as not applied and stay
-/// pending until a command that launches carries them again.
+/// A `BeforeGates` pass applies only the session-level live settings. Its launch
+/// changes and the changes an attached browser takes in place are reported as not
+/// applied; it never touches the attached browser.
 async fn apply_settings_patch(
     state: &mut DaemonState,
     patch: &Patch,
-    launches: bool,
+    pass: SettingsPass,
 ) -> Result<SettingsOutcome, String> {
+    let launches = pass == SettingsPass::Launch;
     let mut patch = patch.clone();
     if launches {
         adjust_ca_patch(state, &mut patch)?;
@@ -6371,18 +6416,20 @@ async fn apply_settings_patch(
     if full.is_empty() && full.ignored.is_empty() {
         return Ok(SettingsOutcome::default());
     }
-    let ignored: Vec<Value> = full.ignored.iter().map(|c| c.to_ignored_json()).collect();
-    let (plan, deferred) = if launches {
-        (full, Vec::new())
-    } else {
-        let deferred: Vec<Value> = full
-            .changes
-            .iter()
-            .filter(|change| change.effect == Effect::Launch)
-            .map(|change| change.to_json(false))
-            .collect();
-        (full.live_only(&state.settings), deferred)
+    let (plan, deferred) = match pass {
+        SettingsPass::Launch => (full, Vec::new()),
+        SettingsPass::BeforeGates => {
+            let deferred: Vec<Value> = full
+                .changes
+                .iter()
+                .filter(|change| change.effect == Effect::Launch || change.in_place)
+                .map(|change| change.to_json(false))
+                .collect();
+            (full.live_only(&state.settings), deferred)
+        }
+        SettingsPass::InPlace => (full.in_place_only(&state.settings), Vec::new()),
     };
+    let ignored: Vec<Value> = plan.ignored.iter().map(|c| c.to_ignored_json()).collect();
     let changed = |key: Key| plan.changes.iter().any(|change| change.key == key);
 
     // Load the CA trust first: a bad bundle fails before anything changes.
@@ -6615,7 +6662,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
     check_capture_setting(&patch)?;
     let had_browser_before_launch = has_active_browser_session(state);
 
-    let mut outcome = apply_settings_patch(state, &patch, true).await?;
+    let mut outcome = apply_settings_patch(state, &patch, SettingsPass::Launch).await?;
     let reusable = !outcome.relaunched_browser
         && match (state.browser.as_mut(), state.webdriver_backend.as_ref()) {
             (Some(mgr), _) => !mgr.has_process_exited() && mgr.is_connection_alive().await,
@@ -20777,7 +20824,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         )
         .unwrap();
         let reconnect_patch = launch_envelope_patch(&reconnect, None);
-        apply_settings_patch(&mut state, &reconnect_patch, true)
+        apply_settings_patch(&mut state, &reconnect_patch, SettingsPass::Launch)
             .await
             .unwrap();
         assert_eq!(state.settings.engine(), None);
@@ -23709,7 +23756,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::IdleTimeout, json!("120000")),
         ]);
 
-        let outcome = apply_settings_patch(&mut state, &patch, true)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -23739,7 +23786,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             Key::ActionPolicy,
             json!(path.to_str().unwrap()),
         )]);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -23754,11 +23801,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::Profile, json!("/tmp/p")),
             set_to(Key::DefaultTimeout, json!(9000)),
         ]);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
-        let again = apply_settings_patch(&mut state, &patch, true)
+        let again = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -23772,7 +23819,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.settings = Running::defaults();
         let patch = patch_with(vec![set_to(Key::Profile, json!("/tmp/p"))]);
 
-        let outcome = apply_settings_patch(&mut state, &patch, true)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -23795,7 +23842,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::UserAgent, json!("ProbeUA/5")),
         ]);
 
-        let mut outcome = apply_settings_patch(&mut state, &patch, true)
+        let mut outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         assert_eq!(outcome.awaiting_engine.len(), 1);
@@ -23827,7 +23874,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::Cdp, json!("9550")),
             set_to(Key::UserAgent, json!("ProbeUA/5")),
         ]);
-        let mut outcome = apply_settings_patch(&mut state, &patch, true)
+        let mut outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -23843,6 +23890,131 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             .all(|change| change["option"] != "user-agent" || change["effect"] != "ignored"));
     }
 
+    async fn attached_firefox_state() -> (
+        IsolatedEnv,
+        DaemonState,
+        crate::native::bidi::session::tests::Calls,
+    ) {
+        use crate::native::bidi::session::tests::fake_session;
+
+        let (env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Cdp, json!("9333"));
+        state.settings.set(Key::Engine, json!("firefox"));
+        let (ff, _tx, calls) = fake_session().await;
+        state.firefox = Some(ff);
+        (env, state, calls)
+    }
+
+    fn attached_firefox_settings_command() -> Value {
+        json!({
+            "id": "1",
+            "action": "session_info",
+            "settings": { "download-path": "/tmp/x", "user-agent": "X/1" },
+        })
+    }
+
+    fn attached_browser_untouched(
+        state: &DaemonState,
+        calls: &crate::native::bidi::session::tests::Calls,
+    ) {
+        let sent = calls.lock().unwrap().clone();
+        assert!(
+            !sent
+                .iter()
+                .any(|method| method == "browser.setDownloadBehavior"),
+            "{sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|method| method == "emulation.setUserAgentOverride"),
+            "{sent:?}"
+        );
+        assert_eq!(state.settings.user_agent(), None);
+        assert_eq!(state.settings.launch_options().download_path, None);
+    }
+
+    fn reported_setting(resp: &Value, option: &str) -> Value {
+        let changes = resp["data"]["lifecycle"]["settings"]["changes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let reported: Vec<&Value> = changes
+            .iter()
+            .filter(|change| change["option"] == option)
+            .collect();
+        assert_eq!(reported.len(), 1, "{changes:?}");
+        reported[0].clone()
+    }
+
+    #[tokio::test]
+    async fn a_denied_command_does_not_change_the_attached_browser() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        fs::write(&path, r#"{"default":"allow","deny":["session_info"]}"#).unwrap();
+        let (_env, mut state, calls) = attached_firefox_state().await;
+        state.policy = Some(ActionPolicy::load(path.to_str().unwrap()).unwrap());
+
+        let resp = execute_command(&attached_firefox_settings_command(), &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        attached_browser_untouched(&state, &calls);
+        for option in ["user-agent", "download-path"] {
+            assert_eq!(reported_setting(&resp, option)["applied"], false, "{resp}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_command_parked_for_confirmation_does_not_change_the_attached_browser() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        fs::write(&path, r#"{"default":"allow","confirm":["session_info"]}"#).unwrap();
+        let (_env, mut state, calls) = attached_firefox_state().await;
+        state.policy = Some(ActionPolicy::load(path.to_str().unwrap()).unwrap());
+
+        let resp = execute_command(&attached_firefox_settings_command(), &mut state).await;
+
+        assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
+        attached_browser_untouched(&state, &calls);
+        for option in ["user-agent", "download-path"] {
+            assert_eq!(reported_setting(&resp, option)["applied"], false, "{resp}");
+        }
+
+        state
+            .confirmed_policy_actions
+            .insert("session_info".to_string());
+        let resp = execute_command(&attached_firefox_settings_command(), &mut state).await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(state.settings.user_agent().as_deref(), Some("X/1"));
+        assert_eq!(
+            state.settings.launch_options().download_path.as_deref(),
+            Some("/tmp/x")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allowed_command_changes_the_attached_browser_once() {
+        let (_env, mut state, calls) = attached_firefox_state().await;
+
+        let resp = execute_command(&attached_firefox_settings_command(), &mut state).await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        let sent = calls.lock().unwrap().clone();
+        let count = |method: &str| sent.iter().filter(|sent| *sent == method).count();
+        assert_eq!(count("browser.setDownloadBehavior"), 1, "{sent:?}");
+        assert_eq!(count("emulation.setUserAgentOverride"), 1, "{sent:?}");
+        assert_eq!(state.settings.user_agent().as_deref(), Some("X/1"));
+        assert_eq!(
+            state.settings.launch_options().download_path.as_deref(),
+            Some("/tmp/x")
+        );
+        for option in ["user-agent", "download-path"] {
+            assert_eq!(reported_setting(&resp, option)["applied"], true, "{resp}");
+        }
+    }
+
     #[tokio::test]
     async fn test_allowed_domains_change_updates_the_domain_filter() {
         let (_env, mut state) = isolated_state();
@@ -23851,7 +24023,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![set_to(Key::AllowedDomains, json!(["a.test"]))]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -23860,7 +24032,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![(Key::AllowedDomains, Requested::Default)]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -23877,7 +24049,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![(Key::Engine, Requested::Default)]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -23897,7 +24069,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![set_to(Key::Provider, json!("browserless"))]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -23994,13 +24166,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::Cdp, json!("wss://a.example/cdp")),
             set_to(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer a"}"#)),
         ]);
-        apply_settings_patch(&mut state, &first, true)
+        apply_settings_patch(&mut state, &first, SettingsPass::Launch)
             .await
             .unwrap();
         assert!(cdp_headers_from_settings(&state.settings).is_some());
 
         let second = patch_with(vec![set_to(Key::Cdp, json!("wss://b.example/cdp"))]);
-        apply_settings_patch(&mut state, &second, true)
+        apply_settings_patch(&mut state, &second, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -24016,7 +24188,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::DefaultTimeout, json!(9000)),
         ]);
 
-        let outcome = apply_settings_patch(&mut state, &patch, false)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::BeforeGates)
             .await
             .unwrap();
 
@@ -24060,7 +24232,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.settings.set(Key::Profile, json!("/tmp/inherited"));
         let patch = patch_with(vec![set_to(Key::StorageState, json!("/tmp/s.json"))]);
 
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -24076,7 +24248,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.settings = Running::defaults();
         state.settings.set(Key::Profile, json!("/tmp/p"));
 
-        let outcome = apply_settings_patch(&mut state, &Patch::default(), true)
+        let outcome = apply_settings_patch(&mut state, &Patch::default(), SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -24214,7 +24386,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 set_to(Key::UserAgent, json!("ua")),
             ]);
 
-            let outcome = apply_settings_patch(&mut state, &patch, true)
+            let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
                 .await
                 .unwrap();
 
@@ -24332,7 +24504,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::Cdp, json!(endpoint)),
             set_to(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer one"}"#)),
         ]);
-        apply_settings_patch(&mut state, &first, true)
+        apply_settings_patch(&mut state, &first, SettingsPass::Launch)
             .await
             .unwrap();
         assert_eq!(
@@ -24347,7 +24519,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             Key::CdpHeaders,
             json!(r#"{"Authorization":"Bearer two"}"#),
         )]);
-        apply_settings_patch(&mut state, &changed, true)
+        apply_settings_patch(&mut state, &changed, SettingsPass::Launch)
             .await
             .unwrap();
         assert_eq!(
@@ -24359,7 +24531,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         );
 
         let cleared = patch_with(vec![(Key::CdpHeaders, Requested::Default)]);
-        apply_settings_patch(&mut state, &cleared, true)
+        apply_settings_patch(&mut state, &cleared, SettingsPass::Launch)
             .await
             .unwrap();
         assert_eq!(cdp_headers_for(&state, endpoint), None);
@@ -24397,7 +24569,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         fs::write(&config, r#"{"debug":false,"default_timeout":90000}"#).unwrap();
 
         let patch = patch_with(vec![set_to(Key::DefaultTimeout, json!(5000))]);
-        apply_settings_patch(&mut state, &patch, false)
+        apply_settings_patch(&mut state, &patch, SettingsPass::BeforeGates)
             .await
             .unwrap();
 
@@ -24563,7 +24735,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.attached_target = Some(AttachedTarget::AutoConnect);
         let patch = patch_with(vec![(Key::AutoConnect, Requested::Default)]);
 
-        let outcome = apply_settings_patch(&mut state, &patch, true)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -24673,7 +24845,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.settings.set(Key::ProxyPassword, json!("pw"));
 
         let patch = patch_with(vec![set_to(Key::Cdp, json!("ws://127.0.0.1:9999/x"))]);
-        let outcome = apply_settings_patch(&mut state, &patch, true)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -24921,7 +25093,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
         let mut first = DaemonState::with_store(Running::defaults(), store.clone());
         let patch = security_patch(policy.to_str().unwrap());
-        apply_settings_patch(&mut first, &patch, true)
+        apply_settings_patch(&mut first, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         drop(first);
@@ -24951,7 +25123,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut first,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -24983,7 +25155,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut first,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -25006,7 +25178,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut first,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -25030,7 +25202,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut first,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -25061,7 +25233,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             domains(&["example.com"]),
             set_to(Key::ActionPolicy, json!(file.to_str().unwrap())),
         ]);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         (state, store)
@@ -25117,18 +25289,18 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let mut state = DaemonState::with_store(Running::defaults(), store.clone());
         let patch = patch_with(vec![domains(&["example.com"])]);
 
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         assert_eq!(store.saves(), 1);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
-        apply_settings_patch(&mut state, &Patch::default(), true)
+        apply_settings_patch(&mut state, &Patch::default(), SettingsPass::Launch)
             .await
             .unwrap();
         let other = patch_with(vec![set_to(Key::UserAgent, json!("ua"))]);
-        apply_settings_patch(&mut state, &other, true)
+        apply_settings_patch(&mut state, &other, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -25140,9 +25312,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let (_env, _) = isolated_state();
         let store = FlakyStore::counting();
         let mut state = DaemonState::with_store(Running::defaults(), store.clone());
-        apply_settings_patch(&mut state, &patch_with(vec![domains(&["a.com"])]), true)
-            .await
-            .unwrap();
+        apply_settings_patch(
+            &mut state,
+            &patch_with(vec![domains(&["a.com"])]),
+            SettingsPass::Launch,
+        )
+        .await
+        .unwrap();
         let cmd = json!({
             "action": "launch",
             "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/test",
@@ -25181,9 +25357,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let (_env, _) = isolated_state();
         let store = FlakyStore::new(2);
         let mut state = DaemonState::with_store(Running::defaults(), store.clone());
-        apply_settings_patch(&mut state, &patch_with(vec![domains(&["a.com"])]), true)
-            .await
-            .unwrap();
+        apply_settings_patch(
+            &mut state,
+            &patch_with(vec![domains(&["a.com"])]),
+            SettingsPass::Launch,
+        )
+        .await
+        .unwrap();
         let cmd = json!({
             "action": "launch",
             "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/test",
@@ -25211,14 +25391,18 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut first,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
 
-        apply_settings_patch(&mut first, &patch_with(vec![domains(&[])]), true)
-            .await
-            .unwrap();
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&[])]),
+            SettingsPass::Launch,
+        )
+        .await
+        .unwrap();
         assert!(first.domain_filter.read().await.is_none());
         drop(first);
 
@@ -25234,10 +25418,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let mut state = DaemonState::with_store(Running::defaults(), store.clone());
         let before = state.settings.clone();
 
-        let err = apply_settings_patch(&mut state, &security_patch("/p.json"), true)
-            .await
-            .err()
-            .expect("the write fails");
+        let err =
+            apply_settings_patch(&mut state, &security_patch("/p.json"), SettingsPass::Launch)
+                .await
+                .err()
+                .expect("the write fails");
 
         assert!(err.contains("disk full"), "{err}");
         assert!(state.domain_filter.read().await.is_none());
@@ -25278,7 +25463,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -25398,7 +25583,7 @@ mod firefox_routing_tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(accepts(), 0);
         let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(false)))]);
-        let outcome = apply_settings_patch(&mut state, &patch, true)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         assert!(!outcome.relaunched_browser);
@@ -25422,7 +25607,7 @@ mod firefox_routing_tests {
         }
         assert_eq!(accepts(), 1);
         let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(true)))]);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         events.send(prompt("alert")).unwrap();
@@ -25435,7 +25620,7 @@ mod firefox_routing_tests {
         events.send(prompt("prompt")).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(false)))]);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;

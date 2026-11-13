@@ -22,6 +22,9 @@ pub struct Change {
     pub running: Option<Value>,
     /// What the change does to this session: apply in place, or need a browser.
     pub effect: Effect,
+    /// The attached browser takes the change in place, so it changes a browser
+    /// the session does not own.
+    pub in_place: bool,
 }
 
 impl Change {
@@ -80,16 +83,31 @@ impl Plan {
         self.changes.is_empty() && !self.relaunch
     }
 
-    /// The part of the plan a command that never launches a browser applies:
-    /// its in-place changes, taken from `before` so nothing a launch would carry
-    /// moves into the running settings.
+    /// The session-level live settings, taken from `before` so nothing a launch
+    /// would carry moves into the running settings. Changes an attached browser
+    /// takes in place are left out: they change a browser the session does not
+    /// own, so they wait for `in_place_only`.
     pub fn live_only(&self, before: &Running) -> Plan {
+        self.filtered(before, self.ignored.clone(), |change| {
+            change.effect == Effect::Live && !change.in_place
+        })
+    }
+
+    /// The changes an attached browser takes in place, taken from `before`.
+    pub fn in_place_only(&self, before: &Running) -> Plan {
+        self.filtered(before, Vec::new(), |change| change.in_place)
+    }
+
+    /// The part of the plan whose changes `keep` selects, applied to `before`.
+    fn filtered(
+        &self,
+        before: &Running,
+        ignored: Vec<Change>,
+        keep: impl Fn(&Change) -> bool,
+    ) -> Plan {
         let mut next = before.clone();
         let mut changes = Vec::new();
-        for change in &self.changes {
-            if change.effect != Effect::Live {
-                continue;
-            }
+        for change in self.changes.iter().filter(|change| keep(change)) {
             match &change.requested {
                 Requested::Set(value) => next.assign(change.key, value.clone()),
                 Requested::Default => next.unassign(change.key),
@@ -101,7 +119,7 @@ impl Plan {
             awaiting_engine: Vec::new(),
             relaunch: false,
             next,
-            ignored: self.ignored.clone(),
+            ignored,
         }
     }
 }
@@ -322,6 +340,7 @@ fn change(key: Key, requested: Requested, running: Option<Value>, reach: Reach) 
             Reach::InPlace => Effect::Live,
             Reach::Ignored | Reach::Launch | Reach::Awaiting => spec(key).effect,
         },
+        in_place: reach == Reach::InPlace,
     }
 }
 
