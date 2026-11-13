@@ -3626,6 +3626,9 @@ Examples:
             r##"
 agent-browser state - Manage browser state
 
+State files are written privately and atomically. Managed state directories
+restrict access to their owner. Encryption remains optional.
+
 Usage: agent-browser state <operation> [args]
 
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).

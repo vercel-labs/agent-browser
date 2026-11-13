@@ -18,7 +18,7 @@ use super::discovery::discover_sessions;
 #[folder = "../packages/dashboard/out/"]
 struct DashboardAssets;
 
-pub(super) const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n";
+pub(super) const CORS_HEADERS: &str = "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n";
 
 /// Build CORS headers that reflect the request origin only when it passes
 /// `is_allowed_origin`. Used for sensitive endpoints (chat, models) so the
@@ -60,6 +60,12 @@ fn parse_origin(peeked: &[u8]) -> Option<String> {
 
 fn normalize_origin_authority(origin: &str) -> Option<String> {
     let url = url::Url::parse(origin).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
     let host = url.host_str()?.to_ascii_lowercase();
     let host = if host.contains(':') {
         format!("[{host}]")
@@ -136,7 +142,7 @@ fn header_authority_matches_host(request: &str, header_name: &str) -> bool {
     authority == host && is_loopback_authority(&authority) && is_loopback_authority(&host)
 }
 
-/// Protects the command relay by requiring same-origin browser metadata.
+/// Require matching loopback browser metadata for every session API route.
 fn is_same_origin_command_request(request: &str) -> bool {
     if request_header_value(request, "origin").is_some() {
         header_authority_matches_host(request, "origin")
@@ -188,18 +194,17 @@ pub(super) async fn handle_http_request(
     let path = first_line.split_whitespace().nth(1).unwrap_or("/");
     let origin = parse_origin(peeked);
 
+    if path.starts_with("/api/") && !is_same_origin_command_request(&request) {
+        write_json_error_response_no_cors(
+            &mut stream,
+            "403 Forbidden",
+            "Origin or Referer does not match loopback Host header.",
+        )
+        .await;
+        return;
+    }
     if method == "OPTIONS" {
-        if path == "/api/command" {
-            if !is_same_origin_command_request(&request) {
-                write_json_error_response_no_cors(
-                    &mut stream,
-                    "403 Forbidden",
-                    "Origin or Referer does not match Host header.",
-                )
-                .await;
-                return;
-            }
-
+        if path.starts_with("/api/") {
             let cors_headers = command_cors_headers(&request);
             let response = format!(
                 "HTTP/1.1 204 No Content\r\n{cors_headers}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -216,16 +221,6 @@ pub(super) async fn handle_http_request(
     }
 
     if method == "POST" {
-        if path == "/api/command" && !is_same_origin_command_request(&request) {
-            write_json_error_response_no_cors(
-                &mut stream,
-                "403 Forbidden",
-                "Origin or Referer does not match Host header.",
-            )
-            .await;
-            return;
-        }
-
         let full_body = read_full_body(&mut stream, peeked).await;
         if full_body.is_none()
             && (path == "/api/chat" || path == "/api/sessions" || path == "/api/command")
@@ -491,6 +486,51 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn session_api_rejects_untrusted_requests_before_dispatch() {
+        for (method, path) in [
+            ("POST", "/api/chat"),
+            ("POST", "/api/sessions"),
+            ("GET", "/api/sessions"),
+            ("GET", "/api/tabs"),
+            ("GET", "/api/models"),
+            ("OPTIONS", "/api/chat"),
+            ("OPTIONS", "/api/sessions"),
+        ] {
+            for headers in [
+                "Host: localhost:7777\r\nOrigin: https://evil.example\r\n",
+                "Host: rebound.example:7777\r\nOrigin: http://rebound.example:7777\r\n",
+                "Host: localhost:7777\r\nOrigin: null\r\n",
+                "Host: localhost:7777\r\n",
+            ] {
+                let request =
+                    format!("{method} {path} HTTP/1.1\r\n{headers}Content-Length: 0\r\n\r\n");
+                let response = send_request_to_handler(&request, "access-fixture").await;
+                assert!(
+                    response.starts_with("HTTP/1.1 403 Forbidden"),
+                    "{method} {path}: {response}"
+                );
+                assert!(!response.contains("Access-Control-Allow-Origin: *"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_api_allows_same_origin_read_and_preflight() {
+        for (method, path, status) in [
+            ("GET", "/api/tabs", "200 OK"),
+            ("OPTIONS", "/api/chat", "204 No Content"),
+        ] {
+            let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost:7777\r\nOrigin: http://localhost:7777\r\n\r\n");
+            let response = send_request_to_handler(&request, "access-fixture").await;
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+            assert!(!response.contains("Access-Control-Allow-Origin: *"));
+        }
+    }
     use tokio::sync::oneshot;
 
     #[test]
