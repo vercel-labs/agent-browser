@@ -205,7 +205,6 @@ const reconcileSessionsAtom = atom(
 
 export function useSessionsSync(pollInterval = 5000) {
   const failCountRef = useRef(0);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const reconcile = useAtomCallback(
     useCallback((_get, set) => {
@@ -215,12 +214,14 @@ export function useSessionsSync(pollInterval = 5000) {
 
   const fetchSessions = useAtomCallback(
     useCallback(
-      async (get, set) => {
+      async (get, set, signal: AbortSignal) => {
         try {
-          const resp = await fetch(getSessionsUrl());
+          const resp = await fetch(getSessionsUrl(), { signal });
+          if (signal.aborted) return;
           if (resp.ok) {
-            failCountRef.current = 0;
             const data: SessionInfo[] = await resp.json();
+            if (signal.aborted) return;
+            failCountRef.current = 0;
             data.sort((a, b) => a.session.localeCompare(b.session));
             const names = new Set(data.map((x) => x.session));
             for (const prev of get(polledSessionsAtom)) {
@@ -253,11 +254,13 @@ export function useSessionsSync(pollInterval = 5000) {
             // Poll tabs for all sessions
             for (const s of data) {
               try {
-                const tabsResp = await fetch(getSessionTabsPath(s.port)).catch(
+                const tabsResp = await fetch(getSessionTabsPath(s.port), { signal }).catch(
                   () => null,
                 );
+                if (signal.aborted) return;
                 if (tabsResp?.ok) {
                   const tabs = await tabsResp.json();
+                  if (signal.aborted) return;
                   if (tabs.length > 0) {
                     set(tabCacheAtom, (prev) => ({ ...prev, [s.port]: tabs }));
                   }
@@ -272,6 +275,7 @@ export function useSessionsSync(pollInterval = 5000) {
         } catch {
           // Server unreachable
         }
+        if (signal.aborted) return;
         failCountRef.current++;
         if (failCountRef.current >= 2) set(polledSessionsAtom, []);
       },
@@ -280,10 +284,18 @@ export function useSessionsSync(pollInterval = 5000) {
   );
 
   useEffect(() => {
-    fetchSessions();
-    timerRef.current = setInterval(fetchSessions, pollInterval);
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      await fetchSessions(controller.signal);
+      if (!controller.signal.aborted) {
+        timer = setTimeout(() => { void poll(); }, pollInterval);
+      }
+    };
+    void poll();
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      controller.abort();
+      if (timer !== null) clearTimeout(timer);
     };
   }, [fetchSessions, pollInterval]);
 }
