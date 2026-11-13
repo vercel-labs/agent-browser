@@ -4962,11 +4962,13 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
     Ok(())
 }
 
-/// Replaces the stored proxy credentials with the launch options, clearing them when absent.
-async fn store_proxy_credentials(state: &DaemonState, options: &LaunchOptions) {
+/// Replaces the stored proxy credentials with those of the browser being launched. They are
+/// cleared when the launch names none, and for a browser this daemon does not launch itself.
+async fn store_proxy_credentials(state: &DaemonState, options: &LaunchOptions, local: bool) {
     *state.proxy_credentials.write().await = options
         .proxy_username
         .clone()
+        .filter(|_| local)
         .map(|user| (user, options.proxy_password.clone().unwrap_or_default()));
 }
 
@@ -5098,15 +5100,7 @@ async fn auto_launch_inner(
     // browser is never answered proxy challenges on the session's behalf.
     let local = matches!(connection, Connection::Local);
     let has_proxy_auth = local && options.proxy_username.is_some();
-    if has_proxy_auth {
-        let mut creds = state.proxy_credentials.write().await;
-        *creds = Some((
-            options.proxy_username.clone().unwrap_or_default(),
-            options.proxy_password.clone().unwrap_or_default(),
-        ));
-    } else if !local {
-        *state.proxy_credentials.write().await = None;
-    }
+    store_proxy_credentials(state, &options, local).await;
     // Nor is a state file replayed into one.
     let storage_state_path = if local { storage_state_path } else { None };
     let storage_state = storage_state_path.as_deref();
@@ -6049,7 +6043,7 @@ async fn launch_firefox(
         options.proxy_password = None;
         options.storage_state = None;
     }
-    store_proxy_credentials(state, &options).await;
+    store_proxy_credentials(state, &options, !attached).await;
     let storage_state = options.storage_state.clone();
     state.ref_map.invalidate_all_documents();
     state.reset_input_state();
@@ -24863,6 +24857,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
         // Nothing listens on port 1, so the attach fails; the credentials are
         // decided before it is tried.
+        assert!(auto_launch(&mut state, Vec::new()).await.is_err());
+
+        assert!(state.proxy_credentials.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_a_local_launch_without_proxy_credentials_drops_the_previous_ones() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state
+            .settings
+            .set(Key::Proxy, json!("http://other-proxy.example:8080"));
+        state.settings.set(
+            Key::ExecutablePath,
+            json!("/nonexistent/agent-browser-chrome"),
+        );
+        *state.proxy_credentials.write().await = Some(("old".to_string(), "old".to_string()));
+
         assert!(auto_launch(&mut state, Vec::new()).await.is_err());
 
         assert!(state.proxy_credentials.read().await.is_none());
