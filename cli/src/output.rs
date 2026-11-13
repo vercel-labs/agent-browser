@@ -2387,6 +2387,7 @@ Usage: agent-browser select <selector> <value...>
 
 Selects one or more options in a <select> dropdown by value or visible label.
 Label matching normalizes whitespace such as non-breaking spaces.
+A value that matches more than one option is rejected. Pass a value or label that matches exactly one option.
 
 Global Options:
   --json               Output as JSON
