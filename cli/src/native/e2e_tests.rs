@@ -7194,6 +7194,90 @@ async fn e2e_snapshot_cursor_interactive() {
     assert_success(&resp);
 }
 
+/// Interactive snapshots hint ambiguously named or empty controls after the ref brackets.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_hints_ambiguous_controls() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r##"<!doctype html><title>Hints</title>
+<a href="/cart"><img src="/img/cart.png"></a>
+<ul><li>Blue mug
+<button><svg width="16" height="16"><use href="#icon-trash"/></svg></button>
+<button><i class="fa fa-heart"></i></button>
+<button id="edit-btn"><img src="/img/pencil.png"></button>
+</li></ul>
+<input type="email" name="login-email" placeholder="Email">
+<label>Email <input type="email" name="newsletter-email"></label>
+<button>Save</button>
+<ul><li>Invoice 1 <div onclick="void 0">Edit</div></li><li>Invoice 2 <div onclick="void 0">Edit</div></li></ul>
+<div onclick="void 0">Archive</div>"##;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    for hint in [
+        r#"hint="img:cart""#,
+        r#"hint="icon:icon-trash; in:Blue mug""#,
+        r#"hint="icon:fa-heart; in:Blue mug""#,
+        r#"hint="img:pencil; id:edit-btn; in:Blue mug""#,
+        r#"hint="name:login-email""#,
+        r#"hint="name:newsletter-email""#,
+        r#"hint="in:Invoice 1""#,
+        r#"hint="in:Invoice 2""#,
+    ] {
+        assert!(
+            snapshot.contains(hint),
+            "Expected snapshot to contain {}:\n{}",
+            hint,
+            snapshot,
+        );
+    }
+
+    for unique in ["button \"Save\"", "generic \"Archive\""] {
+        let line = snapshot
+            .lines()
+            .find(|line| line.contains(unique))
+            .expect("uniquely named control should be in the snapshot");
+        assert!(
+            !line.contains("hint="),
+            "Uniquely named control should not get a hint:\n{}",
+            snapshot,
+        );
+    }
+
+    for line in snapshot.lines().filter(|line| line.contains("hint=")) {
+        assert!(
+            line.contains("] hint="),
+            "Hint should follow the closed ref brackets:\n{}",
+            snapshot,
+        );
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// A full-page screenshot with a real device scale factor of 2 (not the
 /// emulated one, which already reports CSS pixels) must be the page size
 /// times two, with the page filling it, not twice that with the page in the
@@ -10719,6 +10803,151 @@ async fn e2e_recording_honors_requested_fps() {
         (duration - frames as f64 / FPS as f64).abs() < 0.03,
         "{frames} frames at {FPS} fps should match duration {duration}"
     );
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Verify that a page whose device scale is emulated records at that scale:
+/// Chrome's screencast captures at the window's real scale, so the recorder
+/// switches to full-density screenshots, and every frame keeps the detail.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_emulated_scale_captures_full_density() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 640, "height": 400, "deviceScaleFactor": 2.0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Something always moving, so the screencast sends frames to compare.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "navigate",
+            "url": "data:text/html,<style>@keyframes s{to{transform:rotate(360deg)}}div{width:80px;height:80px;background:%230a72ef;animation:s 1s linear infinite}</style><h1>Density</h1><div></div>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-density-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["capture"], "screenshots", "{data}");
+    assert_eq!(data["deviceScaleFactor"], 2.0);
+    assert!(
+        data.get("warning").is_none(),
+        "frames should be full density: {data}"
+    );
+    let captured = data["capturedFrames"].as_u64().unwrap();
+    assert!(
+        captured >= 10,
+        "an animated page should keep capturing frames, got {captured}"
+    );
+
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&rec_path)
+        .output()
+        .expect("ffprobe should inspect the recording");
+    assert!(probe.status.success());
+    assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "1280,800");
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Verify that a mobile-emulated page without a viewport meta tag reports its
+/// real device scale: its layout viewport is wider than its screen, so the
+/// scale comes from `devicePixelRatio`, not the first frame's width.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_mobile_emulation_uses_device_pixel_ratio() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": "data:text/html,<style>@keyframes s{to{transform:rotate(360deg)}}div{width:80px;height:80px;background:%230a72ef;animation:s 1s linear infinite}</style><h1>No viewport meta</h1><div></div>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "device", "name": "iPhone 14" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-mobile-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["capture"], "screenshots", "{data}");
+    assert_eq!(data["deviceScaleFactor"], 3.0, "{data}");
 
     let _ = std::fs::remove_file(&rec_path);
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
