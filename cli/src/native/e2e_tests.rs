@@ -15838,6 +15838,142 @@ async fn e2e_firefox_attach_user_agent_applies_in_place_and_is_reset() {
     firefox_close(&mut state).await;
 }
 
+/// Overrides and grants reach the page tab of an attached Firefox and are put back on close, even
+/// with a privileged tab open that refuses every command naming it.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_attach_undoes_changes_with_a_privileged_tab_open() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut firefox = start_running_firefox(&["about:home", &fixture.url]);
+    let mut state = DaemonState::new();
+
+    let target = format!(
+        "http://127.0.0.1:{}?devtools={}",
+        firefox.bidi_port, firefox.devtools_port
+    );
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let bidi = state.firefox.as_ref().unwrap().bidi.clone();
+    let tree = bidi
+        .send("browsingContext.getTree", json!({"maxDepth": 0}))
+        .await
+        .unwrap();
+    let contexts: Vec<Value> = tree["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["context"].clone())
+        .collect();
+    assert_eq!(
+        contexts.len(),
+        2,
+        "the page must be open beside Firefox's own page: {tree}"
+    );
+    let refusal = bidi
+        .send(
+            "emulation.setUserAgentOverride",
+            json!({ "userAgent": "Refused/1", "contexts": contexts }),
+        )
+        .await
+        .expect_err("Firefox must refuse one user agent for every tab while about:home is open");
+    assert!(refusal.contains("System access is required"), "{refusal}");
+
+    firefox_switch_to_title(&mut state, "Firefox adapter probe").await;
+    let own = firefox_eval(&mut state, "navigator.userAgent").await;
+    let own_language = firefox_eval(&mut state, "navigator.language").await;
+
+    let resp = firefox_command(
+        &mut state,
+        json!({
+            "id": "user-agent",
+            "action": "launch",
+            "cdpUrl": target,
+            "settings": { "user-agent": "AttachedUA/1" },
+        }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["relaunchedBrowser"],
+        false,
+        "an in-place setting must not reconnect: {resp}"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        json!("AttachedUA/1")
+    );
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "locale", "action": "locale", "locale": "fr-FR" }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.language").await,
+        json!("fr-FR")
+    );
+
+    let permission_state = "navigator.permissions.query({name:'geolocation'}).then(p => p.state)";
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "permissions", "action": "permissions", "permissions": ["geolocation"] }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, permission_state).await,
+        json!("granted")
+    );
+
+    firefox_close(&mut state).await;
+    assert!(
+        firefox.alive(),
+        "close must leave the attached Firefox running"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "clear", "action": "session_info", "settings": { "user-agent": null } }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach-again", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    firefox_switch_to_title(&mut state, "Firefox adapter probe").await;
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        own,
+        "close must put Firefox's own user agent back"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.language").await,
+        own_language,
+        "close must put Firefox's own locale back"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, permission_state).await,
+        json!("prompt"),
+        "close must take the geolocation grant back out of the profile"
+    );
+    firefox_close(&mut state).await;
+}
+
 /// Attaching adopts the tab the user has selected, not the oldest one.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]

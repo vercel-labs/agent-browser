@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use futures_util::future::join_all;
 use serde_json::{json, Map, Value};
 
 use super::client::BidiClient;
@@ -137,22 +140,46 @@ async fn send_scoped(ff: &FirefoxSession, context: &str, command: Command) -> Re
     send_scoped_bidi(&ff.bidi, context, command).await
 }
 
-async fn send_scoped_bidi(
-    bidi: &BidiClient,
-    context: &str,
-    (method, mut params): Command,
-) -> Result<(), String> {
+/// Scopes `command` to one tab, through `context` for the viewport command and `contexts` for
+/// the rest.
+fn scoped(context: &str, (method, mut params): Command) -> Command {
     if method == "browsingContext.setViewport" {
         params["context"] = json!(context);
     } else {
         params["contexts"] = json!([context]);
     }
+    (method, params)
+}
+
+async fn send_scoped_bidi(
+    bidi: &BidiClient,
+    context: &str,
+    command: Command,
+) -> Result<(), String> {
+    let (method, params) = scoped(context, command);
     bidi.send(method, params).await.map(|_| ())
 }
 
-/// The commands that clear every override in `settings` from `contexts`, so a browser the
-/// session does not own gets its own values back.
-pub(crate) fn resets(settings: &Settings, contexts: &[String]) -> Vec<Command> {
+/// Sends `command` to each tab on its own and returns every tab's result in order, so a tab
+/// Firefox will not let the session change, such as a privileged page, does not stop the others.
+pub(crate) async fn send_to_tabs(
+    bidi: &BidiClient,
+    tabs: &[String],
+    command: &Command,
+    timeout: Duration,
+) -> Vec<Result<(), String>> {
+    join_all(tabs.iter().map(|tab| async move {
+        let (method, params) = scoped(tab, command.clone());
+        bidi.send_timeout(method, params, timeout).await.map(|_| ())
+    }))
+    .await
+}
+
+/// The commands that clear every override in `settings`, each addressed to one tab by
+/// `send_to_tabs`, so a browser the session does not own gets its own values back. Media
+/// emulation is not listed because Firefox ends it as soon as the DevTools connection closes
+/// with the session.
+pub(crate) fn resets(settings: &Settings) -> Vec<Command> {
     let shared = [
         (
             settings.user_agent.is_some(),
@@ -180,20 +207,17 @@ pub(crate) fn resets(settings: &Settings, contexts: &[String]) -> Vec<Command> {
             "networkConditions",
         ),
     ];
-    let viewports = contexts
-        .iter()
-        .filter(|_| settings.viewport.is_some())
-        .map(|context| {
-            (
-                "browsingContext.setViewport",
-                json!({ "context": context, "viewport": null, "devicePixelRatio": null }),
-            )
-        });
+    let viewports = settings.viewport.is_some().then(|| {
+        (
+            "browsingContext.setViewport",
+            json!({ "viewport": null, "devicePixelRatio": null }),
+        )
+    });
     let shared = shared
         .into_iter()
         .filter(|(set, ..)| *set)
-        .map(|(_, method, field)| (method, json!({ field: null, "contexts": contexts })));
-    viewports.chain(shared).collect()
+        .map(|(_, method, field)| (method, json!({ field: null })));
+    viewports.into_iter().chain(shared).collect()
 }
 
 /// Applies color scheme and print media to the selected tab through its DevTools configuration actor.
@@ -444,6 +468,40 @@ mod tests {
         let (method, params) = offline(false);
         assert_eq!(method, "emulation.setNetworkConditions");
         assert!(params["networkConditions"].is_null());
+    }
+
+    #[test]
+    fn resets_clear_each_override_without_naming_a_tab() {
+        let settings = Settings {
+            user_agent: Some("Agent/1.0".to_string()),
+            offline: Some(true),
+            ..Settings::default()
+        };
+        assert_eq!(
+            resets(&settings),
+            vec![
+                (
+                    "emulation.setUserAgentOverride",
+                    json!({ "userAgent": null })
+                ),
+                (
+                    "emulation.setNetworkConditions",
+                    json!({ "networkConditions": null })
+                ),
+            ]
+        );
+
+        let settings = Settings {
+            viewport: Some((800, 600, 2.0)),
+            ..Settings::default()
+        };
+        assert_eq!(
+            resets(&settings),
+            vec![(
+                "browsingContext.setViewport",
+                json!({ "viewport": null, "devicePixelRatio": null })
+            )]
+        );
     }
 
     async fn session_state() -> (DaemonState, crate::native::bidi::session::tests::Calls) {

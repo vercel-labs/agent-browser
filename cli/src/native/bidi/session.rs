@@ -522,14 +522,23 @@ impl FirefoxSession {
         if changed.contains(&Key::UserAgent)
             && self.emulation.read().unwrap().user_agent != options.user_agent
         {
-            let contexts = self.open_tabs(START_TIMEOUT).await?;
-            if !contexts.is_empty() {
-                self.bidi
-                    .send(
-                        "emulation.setUserAgentOverride",
-                        json!({"userAgent": options.user_agent, "contexts": contexts}),
-                    )
-                    .await?;
+            let tabs = self.open_tabs(START_TIMEOUT).await?;
+            let results = emulation::send_to_tabs(
+                &self.bidi,
+                &tabs,
+                &(
+                    "emulation.setUserAgentOverride",
+                    json!({"userAgent": options.user_agent}),
+                ),
+                START_TIMEOUT,
+            )
+            .await;
+            let own = tabs
+                .iter()
+                .position(|tab| tab == self.contexts.active_tab())
+                .and_then(|index| results.get(index));
+            if let Some(Err(error)) = own {
+                return Err(error.clone());
             }
             self.emulation.write().unwrap().user_agent = options.user_agent.clone();
         }
@@ -562,8 +571,9 @@ impl FirefoxSession {
             })
     }
 
-    /// Undoes the download folder and the emulation overrides this session holds, in every
-    /// open tab of a browser it does not own.
+    /// Puts the download folder back and clears the emulation overrides this session set in each
+    /// tab of a browser it does not own, then takes its permission grants back. Media emulation
+    /// needs no reset because Firefox ends it when the DevTools connection closes with the session.
     async fn undo_attached_changes(&self) {
         if !self.is_attached() {
             return;
@@ -578,23 +588,23 @@ impl FirefoxSession {
                 )
                 .await;
         }
-        let contexts = self
+        let tabs = self
             .open_tabs(ATTACHED_RESET_TIMEOUT)
             .await
             .unwrap_or_default();
-        if contexts.is_empty() {
-            return;
-        }
         let settings = self.emulation.read().unwrap().clone();
-        for (method, params) in emulation::resets(&settings, &contexts) {
-            let _ = self
-                .bidi
-                .send_timeout(method, params, ATTACHED_RESET_TIMEOUT)
-                .await;
+        for command in emulation::resets(&settings) {
+            emulation::send_to_tabs(&self.bidi, &tabs, &command, ATTACHED_RESET_TIMEOUT).await;
         }
+        self.permissions
+            .lock()
+            .await
+            .revoke(&self.bidi, ATTACHED_RESET_TIMEOUT)
+            .await;
     }
 
-    /// Undoes what it changed, ends the BiDi session and releases any owned Firefox process.
+    /// Undoes what it changed, ends the BiDi session and releases any owned Firefox process. The
+    /// DevTools connection closes with the session, which is what ends media emulation.
     pub async fn close(self) {
         self.undo_attached_changes().await;
         let _ = self
@@ -1249,6 +1259,160 @@ pub(crate) mod tests {
             expected.push((json!("session.end"), json!({})));
             assert_eq!(commands, expected);
         }
+    }
+
+    /// A command that names a privileged tab is refused whole, so each tab is addressed on its own.
+    #[tokio::test]
+    async fn attached_user_agent_overrides_and_resets_each_tab_on_its_own() {
+        let (url, _tx, _calls, messages) = fake_bidi_with_replies(|message: &Value| {
+            if message["method"] == "browsingContext.getTree" {
+                return FakeReply::Result(json!({"contexts": [
+                    {"context": "ctx-active"},
+                    {"context": "ctx-privileged"},
+                ]}));
+            }
+            let names_privileged = message["params"]["contexts"]
+                .as_array()
+                .is_some_and(|contexts| contexts.contains(&json!("ctx-privileged")));
+            if names_privileged {
+                return FakeReply::Error {
+                    error: "unsupported operation",
+                    message: "System access is required",
+                };
+            }
+            FakeReply::Result(json!({}))
+        })
+        .await;
+        let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+        let mut session = session_over_bidi(bidi).await;
+        let options = LaunchOptions {
+            user_agent: Some("Agent/1.0".to_string()),
+            ..LaunchOptions::default()
+        };
+
+        session
+            .apply_attached_settings(&options, &[Key::UserAgent])
+            .await
+            .expect("a privileged tab must not stop the session's own tab");
+        session.close().await;
+
+        let messages = messages.lock().unwrap();
+        let overrides: Vec<&Value> = messages
+            .iter()
+            .filter(|message| message["method"] == "emulation.setUserAgentOverride")
+            .collect();
+        assert_eq!(overrides.len(), 4, "{messages:?}");
+        for message in &overrides {
+            assert_eq!(
+                message["params"]["contexts"].as_array().map(Vec::len),
+                Some(1),
+                "each tab must be addressed on its own: {message}"
+            );
+        }
+        let sent = |context: &str, user_agent: Value| {
+            overrides.iter().any(|message| {
+                message["params"]["contexts"] == json!([context])
+                    && message["params"]["userAgent"] == user_agent
+            })
+        };
+        assert!(sent("ctx-active", json!("Agent/1.0")));
+        assert!(
+            sent("ctx-active", Value::Null),
+            "close must put the session's own tab back"
+        );
+    }
+
+    /// A refusal from the tab the session drives is the session's own failure.
+    #[tokio::test]
+    async fn attached_user_agent_reports_its_own_tab_refusing() {
+        let (url, _tx, _calls, _) = fake_bidi_with_replies(|message: &Value| {
+            if message["method"] == "browsingContext.getTree" {
+                return FakeReply::Result(json!({"contexts": [
+                    {"context": "ctx-active"},
+                    {"context": "ctx-other"},
+                ]}));
+            }
+            if message["params"]["contexts"] == json!(["ctx-active"]) {
+                return FakeReply::Error {
+                    error: "unsupported operation",
+                    message: "System access is required",
+                };
+            }
+            FakeReply::Result(json!({}))
+        })
+        .await;
+        let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+        let mut session = session_over_bidi(bidi).await;
+        let options = LaunchOptions {
+            user_agent: Some("Agent/1.0".to_string()),
+            ..LaunchOptions::default()
+        };
+
+        let error = session
+            .apply_attached_settings(&options, &[Key::UserAgent])
+            .await
+            .unwrap_err();
+        assert!(error.contains("System access is required"), "{error}");
+    }
+
+    /// A grant left in the profile of a browser the session does not own is taken back on close.
+    #[tokio::test]
+    async fn closing_an_attached_session_takes_its_permission_grants_back() {
+        let (url, _tx, _calls, messages) = fake_bidi_with_replies(|message: &Value| {
+            if message["method"] == "browsingContext.getTree" {
+                return FakeReply::Result(json!({"contexts": [{"context": "ctx-active"}]}));
+            }
+            FakeReply::Result(json!({}))
+        })
+        .await;
+        let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+        let session = session_over_bidi(bidi).await;
+        session
+            .permissions
+            .lock()
+            .await
+            .grant(
+                &session.bidi,
+                &["geolocation".to_string()],
+                &["https://example.com/page".to_string()],
+            )
+            .await
+            .unwrap();
+
+        session.close().await;
+
+        let messages = messages.lock().unwrap();
+        let last = messages
+            .iter()
+            .rfind(|message| message["method"] == "permissions.setPermission")
+            .expect("close must send permissions.setPermission");
+        assert_eq!(last["params"]["state"], "prompt");
+        assert_eq!(last["params"]["origin"], "https://example.com");
+        assert_eq!(last["params"]["descriptor"]["name"], "geolocation");
+    }
+
+    /// Media emulation ends when the DevTools connection closes, so close must close it.
+    #[tokio::test]
+    async fn closing_a_session_closes_its_devtools_connection() {
+        let (url, _tx, _calls, _) =
+            fake_bidi_with(|_| json!({"contexts": [{"context": "ctx-active"}]})).await;
+        let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+        let events = bidi.subscribe_buffered();
+        let (devtools, mut server) = tokio::io::duplex(4096);
+        put(&mut server, json!({"from": "root"})).await;
+        let rdp = RdpClient::from_stream(devtools).await.unwrap();
+
+        test_session(bidi, rdp, events).close().await;
+
+        let mut buffer = [0; 8];
+        let read = tokio::time::timeout(Duration::from_secs(2), server.read(&mut buffer))
+            .await
+            .expect("the DevTools stream must end when the session closes")
+            .unwrap();
+        assert_eq!(
+            read, 0,
+            "close must close the session's DevTools connection"
+        );
     }
 
     /// A session whose BiDi socket has closed, as when its Firefox goes away.
