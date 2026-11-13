@@ -58,7 +58,8 @@ fn prepare_js() -> String {
                 doc = frame.ownerDocument;
                 blocker = blockerAt(doc, frame, parentX, parentY);
             }}
-            return {{ x: x, y: y, reason: notActionable(document, el, x, y), blocker: blocker }};
+            const reachable = x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight;
+            return {{ x: x, y: y, reason: notActionable(el, reachable), blocker: blocker }};
         }}"#
     )
 }

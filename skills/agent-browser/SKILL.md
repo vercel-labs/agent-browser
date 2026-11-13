@@ -35,7 +35,7 @@ agent-browser skills get derive-client     # Record a HAR, derive a standalone A
 agent-browser skills get webmcp-gen        # Build and validate WebMCP tools for a page
 agent-browser skills get modern-web-guidance  # Apply Modern Web Guidance, then verify the page
 agent-browser skills get vercel-sandbox    # agent-browser inside Vercel Sandbox microVMs
-agent-browser skills get protected-vercel-deployments  # Access protected Vercel deployments
+agent-browser skills get vercel  # Protected Vercel deployments and flag overrides
 agent-browser skills get agentcore         # AWS Bedrock AgentCore cloud browsers
 ```
 
