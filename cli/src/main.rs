@@ -35,14 +35,12 @@ use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::OpenProcess;
 
-use commands::{
-    attach_ca_cert_to_launch_command, gen_id, parse_cdp_headers, parse_command, ParseError,
-};
+use commands::{gen_id, parse_cdp_headers, parse_command, ParseError};
 use connection::{
     cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir,
     is_agent_browser_process, is_pid_alive, send_command, walk_daemons, DaemonOptions, Response,
 };
-use flags::{clean_args, parse_flags, split_launch_args, Flags};
+use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
@@ -67,63 +65,12 @@ fn print_json_error(message: impl AsRef<str>) {
     }));
 }
 
-/// Like print_json_error, but keeps a machine-readable code such as
-/// `outcome_unknown` from a failed daemon response.
-fn print_json_error_with_code(message: impl AsRef<str>, code: Option<&str>) {
-    let mut value = json!({
-        "success": false,
-        "error": message.as_ref(),
-    });
-    if let Some(code) = code {
-        value["code"] = json!(code);
-    }
-    print_json_value(value);
-}
-
 fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
     print_json_value(json!({
         "success": false,
         "error": message.as_ref(),
         "type": error_type,
     }));
-}
-
-fn should_send_hide_scrollbars_launch_option(
-    cli_hide_scrollbars: bool,
-    hide_scrollbars: bool,
-) -> bool {
-    cli_hide_scrollbars || !hide_scrollbars
-}
-
-fn apply_hide_scrollbars_launch_option(
-    launch_cmd: &mut serde_json::Value,
-    cli_hide_scrollbars: bool,
-    hide_scrollbars: bool,
-) {
-    if should_send_hide_scrollbars_launch_option(cli_hide_scrollbars, hide_scrollbars) {
-        launch_cmd["hideScrollbars"] = json!(hide_scrollbars);
-    }
-}
-
-fn attach_script_launch_options(launch_cmd: &mut serde_json::Value, flags: &Flags) {
-    if !flags.init_scripts.is_empty() {
-        launch_cmd["initScripts"] = json!(&flags.init_scripts);
-    }
-    if !flags.enable.is_empty() {
-        launch_cmd["enable"] = json!(&flags.enable);
-    }
-}
-
-fn attach_webmcp_launch_option(launch_cmd: &mut serde_json::Value, flags: &Flags) {
-    if flags.no_webmcp || flags.cli_no_webmcp {
-        launch_cmd["webmcp"] = json!(!flags.no_webmcp);
-    }
-}
-
-fn attach_allowed_domains_to_launch_command(launch_cmd: &mut serde_json::Value, flags: &Flags) {
-    if let Some(ref domains) = flags.allowed_domains {
-        launch_cmd["allowedDomains"] = json!(domains);
-    }
 }
 
 fn attach_pin_tab_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
@@ -144,15 +91,112 @@ fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::Pl
     cmd["plugins"] = json!(plugins);
 }
 
-fn command_is_external_launch(cmd: &serde_json::Value) -> bool {
-    cmd.get("action").and_then(|value| value.as_str()) == Some("launch")
-        && (cmd.get("cdpUrl").is_some()
-            || cmd.get("cdpPort").is_some()
-            || cmd.get("provider").is_some()
-            || cmd
-                .get("autoConnect")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false))
+/// Identifies CDP metadata requests, including batches containing only those requests.
+fn command_is_cdp_url_metadata(cmd: &serde_json::Value) -> bool {
+    match cmd.get("action").and_then(|value| value.as_str()) {
+        Some("cdp_url") => true,
+        Some("batch") => {
+            if let Some(commands) = cmd.get("commands").and_then(|value| value.as_array()) {
+                !commands.is_empty()
+                    && commands.iter().all(|command| {
+                        command.as_str().is_some_and(|command| {
+                            commands::shell_words_split(command)
+                                .starts_with(&["get".into(), "cdp-url".into()])
+                        })
+                    })
+            } else if let Some(argv) = cmd.get("argv").and_then(|value| value.as_array()) {
+                !argv.is_empty()
+                    && argv.iter().all(|args| {
+                        args.as_array()
+                            .is_some_and(|args| args.starts_with(&[json!("get"), json!("cdp-url")]))
+                    })
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The settings patch one command carries. A browserless command never
+/// launches a browser, so CA trust does not apply to it.
+fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings::Patch {
+    let patch = session_settings::Patch::from_flags(flags);
+    // Asking for a running browser's CDP URL never launches or relaunches one,
+    // so launch settings do not apply to it.
+    if command_is_cdp_url_metadata(cmd) {
+        return patch.without_launch_settings();
+    }
+    let mut patch = patch;
+    if command_is_browserless(cmd) {
+        patch.remove(session_settings::Key::CaCert);
+        patch.remove(session_settings::Key::ClearCaCert);
+    }
+    patch
+}
+
+/// The settings for one command of a batch. `--relaunch` asks for one relaunch
+/// per invocation: every command that can launch a browser carries it until the
+/// daemon reports it applied (`relaunch_applied`).
+fn batch_item_settings(
+    flags: &Flags,
+    cmd: &serde_json::Value,
+    relaunch_applied: bool,
+) -> session_settings::Patch {
+    let mut patch = command_settings(flags, cmd);
+    if relaunch_applied || !native::actions::command_launches_browser(cmd) {
+        patch.clear_relaunch();
+    }
+    patch
+}
+
+/// Whether the daemon applied a forced relaunch for this response. A command
+/// denied by policy or parked for confirmation never reaches the launch, so it
+/// reports none and the next command carries the relaunch. `confirm` replays
+/// the parked command and nests that command's response under `result`.
+fn response_applied_relaunch(resp: &connection::Response) -> bool {
+    let Some(data) = resp.data.as_ref() else {
+        return false;
+    };
+    [
+        "/lifecycle/settings/forcedRelaunch",
+        "/result/data/lifecycle/settings/forcedRelaunch",
+    ]
+    .iter()
+    .any(|path| data.pointer(path).and_then(|v| v.as_bool()) == Some(true))
+}
+
+/// Checks a `--cdp` value and its headers. The value is either a port number
+/// or a ws, wss, http or https URL.
+fn validate_cdp_flags(flags: &Flags) -> Result<(), String> {
+    let Some(cdp_value) = flags.cdp.as_deref() else {
+        return Ok(());
+    };
+    let is_url = ["ws://", "wss://", "http://", "https://"]
+        .iter()
+        .any(|scheme| cdp_value.starts_with(scheme));
+    if !is_url {
+        match cdp_value.parse::<u32>() {
+            Ok(0) => return Err("Invalid CDP port: port must be greater than 0".to_string()),
+            Ok(port) if port > 65535 => {
+                return Err(format!(
+                    "Invalid CDP port: {} is out of range (valid range: 1-65535)",
+                    port
+                ))
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return Err(format!(
+                    "Invalid CDP value: '{}' is not a valid port number or URL",
+                    cdp_value
+                ))
+            }
+        }
+    }
+    if let Some(raw) = flags.cdp_headers.as_deref() {
+        parse_cdp_headers(raw)?;
+    }
+    Ok(())
 }
 
 /// Commands that make their own HTTPS requests and never need a browser
@@ -184,53 +228,6 @@ fn command_is_browserless(cmd: &serde_json::Value) -> bool {
     }
 }
 
-/// Identifies CDP metadata requests, including batches containing only those requests.
-fn command_is_cdp_url_metadata(cmd: &serde_json::Value) -> bool {
-    match cmd.get("action").and_then(|value| value.as_str()) {
-        Some("cdp_url") => true,
-        Some("batch") => {
-            if let Some(commands) = cmd.get("commands").and_then(|value| value.as_array()) {
-                !commands.is_empty()
-                    && commands.iter().all(|command| {
-                        command.as_str().is_some_and(|command| {
-                            commands::shell_words_split(command)
-                                .starts_with(&["get".into(), "cdp-url".into()])
-                        })
-                    })
-            } else if let Some(argv) = cmd.get("argv").and_then(|value| value.as_array()) {
-                !argv.is_empty()
-                    && argv.iter().all(|args| {
-                        args.as_array()
-                            .is_some_and(|args| args.starts_with(&[json!("get"), json!("cdp-url")]))
-                    })
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
-fn build_provider_launch_command(provider: &str, flags: &Flags) -> serde_json::Value {
-    let mut launch_cmd = json!({
-        "id": gen_id(),
-        "action": "launch",
-        "provider": provider
-    });
-    launch_cmd["plugins"] = json!(flags.plugins.clone());
-    attach_script_launch_options(&mut launch_cmd, flags);
-    attach_webmcp_launch_option(&mut launch_cmd, flags);
-    attach_allowed_domains_to_launch_command(&mut launch_cmd, flags);
-    attach_restore_config_to_command(&mut launch_cmd, flags);
-    attach_ca_cert_to_launch_command(&mut launch_cmd, flags);
-
-    if let Some(ref cs) = flags.color_scheme {
-        launch_cmd["colorScheme"] = json!(cs);
-    }
-
-    launch_cmd
-}
-
 fn restore_key_from_flags(flags: &Flags) -> Option<&str> {
     flags.restore.as_deref().or(flags.session_name.as_deref())
 }
@@ -242,6 +239,10 @@ fn is_valid_restore_save_policy(policy: &str) -> bool {
 fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     if flags.cdp.is_some() && flags.provider.is_some() {
         return Some("Cannot use --cdp and -p/--provider together");
+    }
+
+    if flags.cli_auto_connect && flags.no_auto_connect {
+        return Some("Cannot use --auto-connect and --no-auto-connect together");
     }
 
     if flags.auto_connect && flags.cdp.is_some() {
@@ -321,173 +322,6 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     }
 
     None
-}
-
-fn build_local_launch_command(flags: &Flags) -> serde_json::Value {
-    let mut launch_cmd = json!({
-        "id": gen_id(),
-        "action": "launch",
-    });
-    // Only send headless when the user set it on this invocation. When
-    // absent, the daemon falls back to its spawn-time AGENT_BROWSER_HEADED
-    // env, so a follow-up command without --headed (common when env vars
-    // like AGENT_BROWSER_ARGS force a launch command on every call) does
-    // not flip a headed session back to headless and relaunch the browser
-    // onto about:blank.
-    if flags.headed || flags.cli_headed {
-        launch_cmd["headless"] = json!(!flags.headed);
-    }
-    launch_cmd["plugins"] = json!(flags.plugins.clone());
-    attach_restore_config_to_command(&mut launch_cmd, flags);
-
-    let cmd_obj = launch_cmd
-        .as_object_mut()
-        .expect("json! macro guarantees object type");
-
-    // Add executable path if specified
-    if let Some(ref exec_path) = flags.executable_path {
-        cmd_obj.insert("executablePath".to_string(), json!(exec_path));
-    }
-
-    // Add profile path if specified
-    if let Some(ref profile_path) = flags.profile {
-        cmd_obj.insert("profile".to_string(), json!(profile_path));
-    }
-
-    // Add state path if specified
-    if let Some(ref state_path) = flags.state {
-        cmd_obj.insert("storageState".to_string(), json!(state_path));
-    }
-
-    if let Some(ref proxy_str) = flags.proxy {
-        let parsed = parse_proxy(proxy_str);
-        let mut proxy_obj = json!({ "server": parsed.server });
-        if let Some(ref username) = parsed.username {
-            proxy_obj["username"] = json!(username);
-        }
-        if let Some(ref password) = parsed.password {
-            proxy_obj["password"] = json!(password);
-        }
-        if let Some(ref bypass) = flags.proxy_bypass {
-            proxy_obj["bypass"] = json!(bypass);
-        }
-        cmd_obj.insert("proxy".to_string(), proxy_obj);
-    }
-
-    if let Some(ref ua) = flags.user_agent {
-        cmd_obj.insert("userAgent".to_string(), json!(ua));
-    }
-
-    if let Some(ref a) = flags.args {
-        cmd_obj.insert("args".to_string(), json!(split_launch_args(a)));
-    }
-
-    if !flags.extensions.is_empty() {
-        cmd_obj.insert("extensions".to_string(), json!(flags.extensions));
-    }
-
-    if !flags.init_scripts.is_empty() {
-        cmd_obj.insert("initScripts".to_string(), json!(flags.init_scripts));
-    }
-
-    if !flags.enable.is_empty() {
-        cmd_obj.insert("enable".to_string(), json!(flags.enable));
-    }
-
-    if flags.ignore_https_errors {
-        launch_cmd["ignoreHTTPSErrors"] = json!(true);
-    }
-
-    attach_ca_cert_to_launch_command(&mut launch_cmd, flags);
-
-    if flags.allow_file_access {
-        launch_cmd["allowFileAccess"] = json!(true);
-    }
-
-    apply_hide_scrollbars_launch_option(
-        &mut launch_cmd,
-        flags.cli_hide_scrollbars,
-        flags.hide_scrollbars,
-    );
-
-    if flags.webgpu || flags.cli_webgpu {
-        launch_cmd["webgpu"] = json!(flags.webgpu);
-    }
-    attach_webmcp_launch_option(&mut launch_cmd, flags);
-
-    // Env-only opt-out for automatic Xvfb; always stamped from the CLI's
-    // fresh environment so both setting and unsetting the var take effect
-    // on daemons spawned before the change.
-    launch_cmd["noXvfb"] = json!(flags.no_xvfb);
-
-    if let Some(ref cs) = flags.color_scheme {
-        launch_cmd["colorScheme"] = json!(cs);
-    }
-
-    if let Some(ref dp) = flags.download_path {
-        launch_cmd["downloadPath"] = json!(dp);
-    }
-
-    attach_allowed_domains_to_launch_command(&mut launch_cmd, flags);
-
-    if let Some(ref engine) = flags.engine {
-        launch_cmd["engine"] = json!(engine);
-    }
-    attach_obscura_proxy_bypass(&mut launch_cmd, flags);
-
-    launch_cmd
-}
-
-fn merge_local_launch_config(cmd: &mut serde_json::Value, mut launch_cmd: serde_json::Value) {
-    let launch_obj = launch_cmd
-        .as_object_mut()
-        .expect("json! macro guarantees object type");
-    if let Some(cmd_obj) = cmd.as_object() {
-        for (key, value) in cmd_obj {
-            launch_obj.insert(key.clone(), value.clone());
-        }
-    }
-    *cmd = launch_cmd;
-}
-
-fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -> bool {
-    (flags.headed
-        || flags.cli_headed
-        || flags.executable_path.is_some()
-        || flags.profile.is_some()
-        || flags.state.is_some()
-        || flags.proxy.is_some()
-        || flags.args.is_some()
-        || flags.user_agent.is_some()
-        || ((flags.ca_cert.is_some() || flags.clear_ca_cert) && !command_is_browserless(command))
-        || flags.allow_file_access
-        || should_send_hide_scrollbars_launch_option(
-            flags.cli_hide_scrollbars,
-            flags.hide_scrollbars,
-        )
-        || flags.webgpu
-        || flags.cli_webgpu
-        || flags.no_webmcp
-        || flags.cli_no_webmcp
-        || flags.color_scheme.is_some()
-        || flags.download_path.is_some()
-        || flags.engine.is_some()
-        || flags.allowed_domains.is_some()
-        || !flags.init_scripts.is_empty()
-        || !flags.enable.is_empty()
-        || !flags.extensions.is_empty())
-        && flags.cdp.is_none()
-        && flags.provider.is_none()
-        && !flags.auto_connect
-        && !command_is_cdp_url_metadata(command)
-        && !command_is_external_launch(command)
-}
-
-/// Sends this invocation's resolved Obscura bypass setting, including an explicit clear.
-fn attach_obscura_proxy_bypass(cmd: &mut serde_json::Value, flags: &Flags) {
-    if flags.engine.as_deref() == Some("obscura") {
-        cmd["proxyBypass"] = json!(flags.proxy_bypass);
-    }
 }
 
 fn attach_restore_config_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
@@ -1406,16 +1240,72 @@ fn run_dashboard_stop(json_mode: bool) {
     }
 }
 
+/// Forgets what a session keeps once it is closed: its saved TLS selection and
+/// its stored security settings. Called only after the daemon confirmed the
+/// close, so a close that policy denied or a confirmation parked leaves the
+/// session contained.
+fn clear_closed_session(session: &str) {
+    tls::clear_session(session);
+    if let Err(e) = session_settings::clear_file(session) {
+        eprintln!("{} {}", color::warning_indicator(), e);
+    }
+}
+
+/// What `close` forgets before it is sent. The stored security settings stay:
+/// the daemon that handles the close (a running one, or one `close` starts)
+/// enforces them, so a policy that denies `close` still applies, and drops
+/// them itself once the close succeeds.
+fn forget_before_close(session: &str) {
+    tls::clear_session(session);
+}
+
+/// Starts or reuses the session's daemon. A `close` whose daemon refuses to
+/// start because of the stored settings file clears that file and tries once
+/// more, so a corrupt file can always be cleared with `close`.
+fn ensure_daemon_for(
+    session: &str,
+    opts: &DaemonOptions,
+    is_close: bool,
+) -> Result<connection::DaemonResult, String> {
+    match ensure_daemon(session, opts) {
+        Err(e) if is_close && session_settings::is_refusal(&e) => {
+            session_settings::clear_file(session)?;
+            ensure_daemon(session, opts)
+        }
+        other => other,
+    }
+}
+
+/// Whether a response says the browser was closed, as opposed to denied,
+/// parked for confirmation or failed.
+fn close_completed(resp: &connection::Response) -> bool {
+    resp.success
+        && resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("closed"))
+            .and_then(|v| v.as_bool())
+            == Some(true)
+}
+
 fn run_close_all(flags: &Flags) {
     // walk_daemons auto-cleans stale .pid / .sock / .stream sidecar files and
     // separates out the standalone dashboard. We only want to send `close` to
     // real session daemons; the dashboard has its own `dashboard stop`.
     let inventory = walk_daemons();
-    let sessions: Vec<(String, u32)> = inventory
+    let mut sessions: Vec<(String, Option<u32>)> = inventory
         .sessions
         .iter()
-        .map(|s| (s.name.clone(), s.pid))
+        .map(|s| (s.name.clone(), Some(s.pid)))
         .collect();
+
+    // Sessions whose daemon is gone still hold stored security settings that
+    // govern them. They are closed like the others: a daemon starts with those
+    // settings, so a policy denying `close` still applies.
+    let orphans = session_settings::orphan_sessions(&get_socket_dir(), |session| {
+        sessions.iter().any(|(name, _)| name == session) || connection::daemon_ready(session)
+    });
+    sessions.extend(orphans.into_iter().map(|name| (name, None)));
 
     if sessions.is_empty() {
         if flags.json {
@@ -1433,6 +1323,12 @@ fn run_close_all(flags: &Flags) {
     let mut failed: Vec<(String, String)> = Vec::new();
 
     for (session, pid) in &sessions {
+        if pid.is_none() {
+            if let Err(e) = ensure_daemon_for(session, &DaemonOptions::bare(), true) {
+                failed.push((session.clone(), e));
+                continue;
+            }
+        }
         let cmd = json!({ "id": gen_id(), "action": "close" });
         // A close whose response was lost leaves the daemon in an unknown
         // state; force-kill it like an unreachable one.
@@ -1444,18 +1340,47 @@ fn run_close_all(flags: &Flags) {
             }
         });
         match result {
-            Ok(resp) if resp.success => {
-                tls::clear_session(session);
+            Ok(resp) if close_completed(&resp) => {
+                clear_closed_session(session);
                 closed.push(session.clone());
             }
             Ok(resp) => {
-                let err = resp.error.unwrap_or_else(|| "Unknown error".to_string());
+                // Denied, waiting for confirmation or failed: still running.
+                let waiting = resp
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("confirmation_required"))
+                    .and_then(|v| v.as_bool())
+                    == Some(true);
+                let mut err = match (resp.error, waiting) {
+                    (Some(err), _) => err,
+                    (None, true) => "close is waiting for confirmation".to_string(),
+                    (None, false) => "Unknown error".to_string(),
+                };
+                if pid.is_none() {
+                    // The daemon was started only to close this session; stop
+                    // it so the session is left as it was found, with its
+                    // stored settings. A parked confirmation goes with it.
+                    connection::stop_daemon(session);
+                    if waiting {
+                        err = format!(
+                            "close needs confirmation; run `agent-browser --session {s} close`, then `agent-browser --session {s} confirm <id>` with the id it prints",
+                            s = session
+                        );
+                    }
+                }
                 failed.push((session.clone(), err));
+            }
+            Err(e) if pid.is_none() => {
+                // A daemon started only to close this session did not answer.
+                connection::stop_daemon(session);
+                failed.push((session.clone(), e));
             }
             Err(_) => {
                 // Daemon is unreachable despite its process existing.
                 // Force-kill the process and clean up stale files so future
                 // sessions are not poisoned.
+                let pid = &pid.unwrap_or_default();
                 if is_agent_browser_process(*pid) {
                     #[cfg(unix)]
                     unsafe {
@@ -1471,6 +1396,7 @@ fn run_close_all(flags: &Flags) {
                     }
                 }
                 cleanup_stale_files(session);
+                clear_closed_session(session);
                 closed.push(session.clone());
             }
         }
@@ -1775,7 +1701,7 @@ fn main() {
     }
     match cmd.get("action").and_then(|v| v.as_str()) {
         Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
-        Some("close") => tls::clear_session(&flags.session),
+        Some("close") => forget_before_close(&flags.session),
         _ => {}
     }
     // Handle --password-stdin for auth save
@@ -1857,6 +1783,7 @@ fn main() {
                 error: None,
                 code: None,
                 warning: None,
+                recorded: None,
             },
             Err(e) => connection::Response {
                 success: false,
@@ -1864,6 +1791,7 @@ fn main() {
                 error: Some(e),
                 code: None,
                 warning: None,
+                recorded: None,
             },
         };
         let output_opts = OutputOptions::from_flags(&flags);
@@ -1960,7 +1888,8 @@ fn main() {
         plugins: Some(plugin_registry_json.as_str()),
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
+    let is_close = cmd.get("action").and_then(|v| v.as_str()) == Some("close");
+    let daemon_result = match ensure_daemon_for(&flags.session, &daemon_opts, is_close) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -1980,237 +1909,21 @@ fn main() {
         );
     }
 
-    // Auto-connect to existing browser. This is sent even when the daemon is
-    // already running so launch compatibility stays idempotent.
-    if flags.auto_connect {
-        let mut launch_cmd = json!({
-            "id": gen_id(),
-            "action": "launch",
-            "autoConnect": true
-        });
-        attach_script_launch_options(&mut launch_cmd, &flags);
-        attach_webmcp_launch_option(&mut launch_cmd, &flags);
-        attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
-        attach_pin_tab_to_command(&mut launch_cmd, &flags);
-        attach_restore_config_to_command(&mut launch_cmd, &flags);
-
-        if flags.ignore_https_errors {
-            launch_cmd["ignoreHTTPSErrors"] = json!(true);
-        }
-
-        attach_ca_cert_to_launch_command(&mut launch_cmd, &flags);
-
-        if let Some(ref cs) = flags.color_scheme {
-            launch_cmd["colorScheme"] = json!(cs);
-        }
-
-        if let Some(ref dp) = flags.download_path {
-            launch_cmd["downloadPath"] = json!(dp);
-        }
-
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some((
-                resp.error
-                    .unwrap_or_else(|| "Auto-connect failed".to_string()),
-                resp.code,
-            )),
-            Err(e) => Some((e.to_string(), None)),
-        };
-
-        if let Some((msg, code)) = err {
-            if flags.json {
-                print_json_error_with_code(msg, code.as_deref());
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
-        }
-    }
-
-    // Connect via CDP if --cdp flag is set
-    // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
-    if let Some(ref cdp_value) = flags.cdp {
-        // Validate CDP value eagerly (even when daemon is already running) so
-        // the user gets an immediate error for bad input instead of a silent no-op.
-        let launch_cmd = if cdp_value.starts_with("ws://")
-            || cdp_value.starts_with("wss://")
-            || cdp_value.starts_with("http://")
-            || cdp_value.starts_with("https://")
-        {
-            // It's a URL - use cdpUrl field
-            json!({
-                "id": gen_id(),
-                "action": "launch",
-                "cdpUrl": cdp_value
-            })
+    // Reject a bad CDP target before the command runs, even when the daemon
+    // is already up, so the user gets an immediate error.
+    if let Err(msg) = validate_cdp_flags(&flags) {
+        if flags.json {
+            print_json_error(&msg);
         } else {
-            // It's a port number - validate and use cdpPort field
-            let cdp_port: u16 = match cdp_value.parse::<u32>() {
-                Ok(0) => {
-                    let msg = "Invalid CDP port: port must be greater than 0".to_string();
-                    if flags.json {
-                        print_json_error(&msg);
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), msg);
-                    }
-                    exit(1);
-                }
-                Ok(p) if p > 65535 => {
-                    let msg = format!(
-                        "Invalid CDP port: {} is out of range (valid range: 1-65535)",
-                        p
-                    );
-                    if flags.json {
-                        print_json_error(&msg);
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), msg);
-                    }
-                    exit(1);
-                }
-                Ok(p) => p as u16,
-                Err(_) => {
-                    let msg = format!(
-                        "Invalid CDP value: '{}' is not a valid port number or URL",
-                        cdp_value
-                    );
-                    if flags.json {
-                        print_json_error(&msg);
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), msg);
-                    }
-                    exit(1);
-                }
-            };
-            json!({
-                "id": gen_id(),
-                "action": "launch",
-                "cdpPort": cdp_port
-            })
-        };
-
-        let mut launch_cmd = launch_cmd;
-        attach_script_launch_options(&mut launch_cmd, &flags);
-        attach_webmcp_launch_option(&mut launch_cmd, &flags);
-        attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
-        attach_pin_tab_to_command(&mut launch_cmd, &flags);
-        attach_restore_config_to_command(&mut launch_cmd, &flags);
-
-        if flags.ignore_https_errors {
-            launch_cmd["ignoreHTTPSErrors"] = json!(true);
+            eprintln!("{} {}", color::error_indicator(), msg);
         }
-
-        attach_ca_cert_to_launch_command(&mut launch_cmd, &flags);
-
-        if let Some(ref cs) = flags.color_scheme {
-            launch_cmd["colorScheme"] = json!(cs);
-        }
-
-        if let Some(ref dp) = flags.download_path {
-            launch_cmd["downloadPath"] = json!(dp);
-        }
-
-        if let Some(ref raw) = flags.cdp_headers {
-            match parse_cdp_headers(raw) {
-                Ok(headers) => launch_cmd["cdpHeaders"] = headers,
-                Err(msg) => {
-                    if flags.json {
-                        print_json_error(&msg);
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), msg);
-                    }
-                    exit(1);
-                }
-            }
-        }
-
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some((
-                resp.error
-                    .unwrap_or_else(|| "CDP connection failed".to_string()),
-                resp.code,
-            )),
-            Err(e) => Some((e.to_string(), None)),
-        };
-
-        if let Some((msg, code)) = err {
-            if flags.json {
-                print_json_error_with_code(msg, code.as_deref());
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
-        }
+        exit(1);
     }
 
-    // Launch with cloud provider if -p flag is set.
-    if let Some(provider) = flags
-        .provider
-        .as_ref()
-        .filter(|_| !command_is_cdp_url_metadata(&cmd))
-    {
-        let launch_cmd = build_provider_launch_command(provider, &flags);
-
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some((
-                resp.error
-                    .unwrap_or_else(|| "Provider connection failed".to_string()),
-                resp.code,
-            )),
-            Err(e) => Some((e.to_string(), None)),
-        };
-
-        if let Some((msg, code)) = err {
-            if flags.json {
-                print_json_error_with_code(msg, code.as_deref());
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
-        }
-    }
-
-    // Launch headed browser or configure browser options (without CDP or provider)
-    if should_send_local_launch_config(&flags, &cmd) {
-        let launch_cmd = build_local_launch_command(&flags);
-        if cmd.get("action").and_then(|v| v.as_str()) == Some("launch") {
-            // Bare `open` is itself a launch, so it carries the local launch
-            // options instead of following them with a second envelope that
-            // would change the launch hash and relaunch without them.
-            merge_local_launch_config(&mut cmd, launch_cmd);
-        } else {
-            match send_command(launch_cmd, &flags.session) {
-                Ok(resp) if !resp.success => {
-                    // Launch command failed (e.g., invalid state file, profile error)
-                    let error_msg = resp
-                        .error
-                        .unwrap_or_else(|| "Browser launch failed".to_string());
-                    if flags.json {
-                        print_json_error_with_code(error_msg, resp.code.as_deref());
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), error_msg);
-                    }
-                    exit(1);
-                }
-                Err(e) => {
-                    if flags.json {
-                        print_json_error(e);
-                    } else {
-                        eprintln!(
-                            "{} Could not configure browser: {}",
-                            color::error_indicator(),
-                            e
-                        );
-                    }
-                    exit(1);
-                }
-                Ok(_) => {
-                    // Launch succeeded
-                }
-            }
-        }
+    // The settings this invocation set ride on the command. The daemon plans
+    // them against the running session and reports what changed.
+    if let Some(wire) = command_settings(&flags, &cmd).to_wire() {
+        cmd["settings"] = wire;
     }
 
     // Handle batch command: from args or stdin
@@ -2254,6 +1967,9 @@ fn main() {
             let success = resp.success;
             // Extract action for context-specific output handling
             let action = cmd.get("action").and_then(|v| v.as_str());
+            if action == Some("close") && close_completed(&resp) {
+                clear_closed_session(&flags.session);
+            }
             print_response_with_opts(&resp, action, &output_opts);
             if !success {
                 exit(1);
@@ -2344,13 +2060,14 @@ fn run_batch(
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut had_error = false;
+    let mut relaunch_applied = false;
 
     for (i, cmd_args) in commands.iter().enumerate() {
         if cmd_args.is_empty() {
             continue;
         }
 
-        let mut parsed = match parse_command(cmd_args, flags) {
+        let mut parsed = match commands::parse_batch_command(cmd_args, flags) {
             Ok(mut c) => {
                 if flags.default_timeout.is_none() {
                     commands::inherit_wait_timeout(
@@ -2397,11 +2114,19 @@ fn run_batch(
             .map(|s| s.to_string());
         attach_plugins_to_command(&mut parsed, &flags.plugins);
         attach_restore_config_to_command(&mut parsed, flags);
+        let settings = batch_item_settings(flags, &parsed, relaunch_applied);
+        if let Some(wire) = settings.to_wire() {
+            parsed["settings"] = wire;
+        }
 
         attach_pin_tab_to_command(&mut parsed, flags);
 
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
+                if action.as_deref() == Some("close") && close_completed(&resp) {
+                    clear_closed_session(&flags.session);
+                }
+                relaunch_applied |= response_applied_relaunch(&resp);
                 if flags.json {
                     let mut result = batch_result_identity(i, cmd_args, omit_command);
                     result["success"] = json!(resp.success);
@@ -2496,39 +2221,6 @@ mod tests {
         assert_eq!(command["inputMode"], "human");
     }
 
-    #[test]
-    fn bare_open_carries_local_launch_config_and_session_settings() {
-        let args: Vec<String> = [
-            "--profile",
-            "/tmp/profile",
-            "--args",
-            "--lang=en-US",
-            "--pin-tab",
-            "--input-mode",
-            "smooth",
-            "open",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-        let flags = crate::flags::parse_flags(&args);
-        let mut command =
-            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
-        super::attach_input_mode(&mut command, &flags);
-        super::attach_pin_tab_to_command(&mut command, &flags);
-        let id = command["id"].clone();
-        assert!(super::should_send_local_launch_config(&flags, &command));
-
-        super::merge_local_launch_config(&mut command, super::build_local_launch_command(&flags));
-
-        assert_eq!(command["action"], "launch");
-        assert_eq!(command["id"], id);
-        assert_eq!(command["profile"], "/tmp/profile");
-        assert_eq!(command["args"], serde_json::json!(["--lang=en-US"]));
-        assert_eq!(command["pinTab"], true);
-        assert_eq!(command["defaultInputMode"], "smooth");
-    }
-
     use super::*;
 
     #[test]
@@ -2601,51 +2293,192 @@ mod tests {
         }
     }
 
-    /// The settings patch carries every value the launch envelope helpers
-    /// attach to a launch command.
+    fn settings_of(args: &[&str]) -> (serde_json::Value, serde_json::Value) {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let flags = crate::flags::parse_flags(&args);
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        let wire = command_settings(&flags, &command)
+            .to_wire()
+            .unwrap_or(serde_json::Value::Null);
+        (command, wire)
+    }
+
     #[test]
-    fn test_settings_patch_carries_launch_envelope_values() {
-        use crate::session_settings::tests::full_flags;
-        use crate::session_settings::{Key, Patch};
+    fn bare_open_is_a_plain_launch_and_its_settings_ride_in_the_patch() {
+        let (command, wire) = settings_of(&[
+            "--profile",
+            "/tmp/profile",
+            "--args",
+            "--lang=en-US",
+            "--headed",
+            "open",
+        ]);
 
-        let mut flags = full_flags();
-        flags.engine = Some("obscura".to_string());
-        let patch = Patch::from_flags(&flags);
-
-        let mut cmd = build_provider_launch_command("browserless", &flags);
-        attach_pin_tab_to_command(&mut cmd, &flags);
-        attach_obscura_proxy_bypass(&mut cmd, &flags);
-        apply_hide_scrollbars_launch_option(
-            &mut cmd,
-            flags.cli_hide_scrollbars,
-            flags.hide_scrollbars,
-        );
-
-        let envelope_fields = [
-            ("initScripts", Key::InitScripts),
-            ("enable", Key::Enable),
-            ("webmcp", Key::Webmcp),
-            ("allowedDomains", Key::AllowedDomains),
-            ("restoreKey", Key::RestoreKey),
-            ("restoreSave", Key::RestoreSave),
-            ("restoreCheckUrl", Key::RestoreCheckUrl),
-            ("restoreCheckText", Key::RestoreCheckText),
-            ("restoreCheckFn", Key::RestoreCheckFn),
-            ("caCert", Key::CaCert),
-            ("clearCaCert", Key::ClearCaCert),
-            ("colorScheme", Key::ColorScheme),
-            ("pinTab", Key::PinTab),
-            ("hideScrollbars", Key::HideScrollbars),
-            ("proxyBypass", Key::ProxyBypass),
-            ("plugins", Key::Plugins),
-        ];
-        for (field, key) in envelope_fields {
-            assert_eq!(
-                patch.value(key),
-                Some(&cmd[field]),
-                "{field} differs from the patch"
+        assert_eq!(command["action"], "launch");
+        for field in ["profile", "args", "headless"] {
+            assert!(
+                command.get(field).is_none(),
+                "{field} must not ride on the launch"
             );
         }
+        assert_eq!(wire["profile"], "/tmp/profile");
+        assert_eq!(wire["args"], serde_json::json!(["--lang=en-US"]));
+        assert_eq!(wire["headed"], true);
+    }
+
+    #[test]
+    fn settings_distinguish_ca_trust_set_omitted_and_cleared() {
+        let (_, omitted) = settings_of(&["get", "url"]);
+        assert!(omitted.get("ca-cert").is_none() && omitted.get("clear-ca-cert").is_none());
+
+        let (_, cleared) = settings_of(&["--no-ca-cert", "get", "url"]);
+        assert_eq!(cleared["clear-ca-cert"], true);
+        assert!(cleared.get("ca-cert").is_none());
+    }
+
+    #[test]
+    fn browserless_commands_do_not_carry_ca_trust() {
+        let (_, wire) = settings_of(&["--no-ca-cert", "read", "https://example.com"]);
+        assert!(wire.get("clear-ca-cert").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn cdp_flags_are_validated_before_the_command_runs() {
+        let flags = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            crate::flags::parse_flags(&args)
+        };
+        assert!(validate_cdp_flags(&flags(&["--cdp", "9222", "get", "url"])).is_ok());
+        assert!(
+            validate_cdp_flags(&flags(&["--cdp", "ws://127.0.0.1:9222/x", "get", "url"])).is_ok()
+        );
+        for (value, message) in [
+            ("0", "greater than 0"),
+            ("70000", "out of range"),
+            ("nope", "not a valid port number or URL"),
+        ] {
+            let error = validate_cdp_flags(&flags(&["--cdp", value, "get", "url"])).unwrap_err();
+            assert!(error.contains(message), "{value}: {error}");
+        }
+        let error = validate_cdp_flags(&flags(&[
+            "--cdp",
+            "9222",
+            "--cdp-headers",
+            "[]",
+            "get",
+            "url",
+        ]))
+        .unwrap_err();
+        assert!(error.contains("JSON object"), "{error}");
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_carries_no_launch_settings() {
+        let (command, wire) = settings_of(&[
+            "--profile",
+            "/tmp/p",
+            "--args",
+            "--disable-gpu",
+            "--no-auto-dialog",
+            "get",
+            "cdp-url",
+        ]);
+        assert!(command_is_cdp_url_metadata(&command));
+        assert_eq!(wire["no-auto-dialog"], true);
+        assert!(
+            wire.get("profile").is_none() && wire.get("args").is_none(),
+            "{wire}"
+        );
+
+        let (command, wire) = settings_of(&["--profile", "/tmp/p", "snapshot"]);
+        assert!(!command_is_cdp_url_metadata(&command));
+        assert_eq!(wire["profile"], "/tmp/p");
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_batches_carry_no_launch_settings() {
+        for command in [
+            json!({ "action": "batch", "commands": ["get cdp-url", "get 'cdp-url' ignored"] }),
+            json!({ "action": "batch", "argv": [["get", "cdp-url"]] }),
+        ] {
+            assert!(command_is_cdp_url_metadata(&command), "{command}");
+        }
+        for command in [
+            json!({ "action": "batch", "commands": ["get cdp-url", "open about:blank"] }),
+            json!({ "action": "batch", "argv": [["get", "cdp-url"], ["snapshot"]] }),
+            json!({ "action": "batch", "commands": ["batch 'get cdp-url'"] }),
+            json!({ "action": "batch", "argv": [["batch", "get cdp-url"]] }),
+            json!({ "action": "batch", "commands": [] }),
+            json!({ "action": "batch", "argv": [[]] }),
+            json!({ "action": "batch" }),
+        ] {
+            assert!(!command_is_cdp_url_metadata(&command), "{command}");
+        }
+    }
+
+    #[test]
+    fn test_relaunch_is_sent_with_the_first_batch_command_only() {
+        let args: Vec<String> = ["--relaunch", "--profile", "/tmp/p", "get", "url"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let flags = crate::flags::parse_flags(&args);
+        let cmd = serde_json::json!({ "action": "url" });
+
+        assert!(batch_item_settings(&flags, &cmd, false).forces_relaunch());
+        let second = batch_item_settings(&flags, &cmd, true);
+        assert!(!second.forces_relaunch());
+        assert!(second.value(session_settings::Key::Profile).is_some());
+    }
+
+    #[test]
+    fn test_relaunch_skips_batch_commands_that_cannot_launch() {
+        let args: Vec<String> = ["--relaunch", "batch", "read https://example.com", "get url"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let flags = crate::flags::parse_flags(&args);
+
+        for cmd in [
+            serde_json::json!({ "action": "read", "url": "https://example.com" }),
+            serde_json::json!({ "action": "auth_login", "noNavigate": true }),
+            serde_json::json!({ "action": "state_list" }),
+        ] {
+            assert!(
+                !batch_item_settings(&flags, &cmd, false).forces_relaunch(),
+                "{cmd}"
+            );
+        }
+        let url = serde_json::json!({ "action": "url" });
+        assert!(batch_item_settings(&flags, &url, false).forces_relaunch());
+    }
+
+    #[test]
+    fn test_only_a_reported_relaunch_counts_as_applied() {
+        let response = |data: serde_json::Value| connection::Response {
+            success: true,
+            data: Some(data),
+            ..Default::default()
+        };
+        assert!(response_applied_relaunch(&response(serde_json::json!({
+            "lifecycle": { "settings": { "changes": [], "forcedRelaunch": true } }
+        }))));
+        assert!(response_applied_relaunch(&response(serde_json::json!({
+            "confirmed": true,
+            "result": { "success": true, "data": {
+                "lifecycle": { "settings": { "changes": [], "forcedRelaunch": true } }
+            } }
+        }))));
+        // Parked for confirmation or denied: the launch never ran.
+        assert!(!response_applied_relaunch(&response(serde_json::json!({
+            "confirmation_required": true, "confirmation_id": "c1"
+        }))));
+        assert!(!response_applied_relaunch(&connection::Response {
+            success: false,
+            error: Some("Action denied by policy".to_string()),
+            ..Default::default()
+        }));
     }
 
     #[test]
@@ -2738,25 +2571,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_hide_scrollbars_launch_option_serialization() {
-        assert!(!should_send_hide_scrollbars_launch_option(false, true));
-        assert!(should_send_hide_scrollbars_launch_option(false, false));
-        assert!(should_send_hide_scrollbars_launch_option(true, true));
-
-        let mut default_cmd = json!({ "action": "launch" });
-        apply_hide_scrollbars_launch_option(&mut default_cmd, false, true);
-        assert!(default_cmd.get("hideScrollbars").is_none());
-
-        let mut config_false_cmd = json!({ "action": "launch" });
-        apply_hide_scrollbars_launch_option(&mut config_false_cmd, false, false);
-        assert_eq!(config_false_cmd["hideScrollbars"], false);
-
-        let mut cli_true_cmd = json!({ "action": "launch" });
-        apply_hide_scrollbars_launch_option(&mut cli_true_cmd, true, true);
-        assert_eq!(cli_true_cmd["hideScrollbars"], true);
-    }
-
     fn neutral_launch_config_flags() -> Flags {
         let mut flags = parse_flags(&[]);
         flags.headed = false;
@@ -2781,6 +2595,7 @@ mod tests {
         flags.download_path = None;
         flags.engine = None;
         flags.allowed_domains = None;
+        flags.capture = None;
         flags.init_scripts.clear();
         flags.enable.clear();
         flags.extensions.clear();
@@ -2788,20 +2603,6 @@ mod tests {
         flags.provider = None;
         flags.auto_connect = false;
         flags
-    }
-
-    #[test]
-    fn test_attach_allowed_domains_to_launch_command() {
-        let mut flags = neutral_launch_config_flags();
-        flags.allowed_domains = Some(vec!["example.com".to_string(), "*.example.org".to_string()]);
-        let mut cmd = json!({ "action": "launch" });
-
-        attach_allowed_domains_to_launch_command(&mut cmd, &flags);
-
-        assert_eq!(
-            cmd["allowedDomains"],
-            json!(["example.com", "*.example.org"])
-        );
     }
 
     #[test]
@@ -2822,64 +2623,6 @@ mod tests {
         let mut disabled_cmd = json!({ "action": "launch" });
         attach_pin_tab_to_command(&mut disabled_cmd, &flags);
         assert_eq!(disabled_cmd["pinTab"], false);
-    }
-
-    #[test]
-    fn test_provider_launch_command_preserves_ca_clear_transition() {
-        let mut flags = neutral_launch_config_flags();
-        flags.clear_ca_cert = true;
-
-        let cmd = build_provider_launch_command("browserbase", &flags);
-
-        assert_eq!(cmd["clearCaCert"], true);
-        assert!(cmd.get("caCert").is_none());
-    }
-
-    #[test]
-    fn test_ca_cert_launch_transition_distinguishes_set_omit_and_clear() {
-        let mut flags = neutral_launch_config_flags();
-        let mut omitted = json!({ "action": "launch" });
-        attach_ca_cert_to_launch_command(&mut omitted, &flags);
-        assert!(omitted.get("caCert").is_none());
-        assert!(omitted.get("clearCaCert").is_none());
-
-        flags.ca_cert = Some("/tmp/proxy-ca.pem".to_string());
-        let mut set = json!({ "action": "launch" });
-        attach_ca_cert_to_launch_command(&mut set, &flags);
-        assert_eq!(set["caCert"], "/tmp/proxy-ca.pem");
-        assert!(set.get("clearCaCert").is_none());
-
-        flags.ca_cert = None;
-        flags.clear_ca_cert = true;
-        let mut cleared = json!({ "action": "launch" });
-        attach_ca_cert_to_launch_command(&mut cleared, &flags);
-        assert!(cleared.get("caCert").is_none());
-        assert_eq!(cleared["clearCaCert"], true);
-    }
-
-    #[test]
-    fn test_connect_launch_command_preserves_ca_clear_transition() {
-        let mut flags = neutral_launch_config_flags();
-        flags.clear_ca_cert = true;
-        let cmd = parse_command(&["connect".to_string(), "9222".to_string()], &flags).unwrap();
-
-        assert_eq!(cmd["cdpPort"], 9222);
-        assert_eq!(cmd["clearCaCert"], true);
-        assert!(!should_send_local_launch_config(&flags, &cmd));
-    }
-
-    #[test]
-    fn test_ca_transition_is_attached_only_to_launch_commands() {
-        let mut flags = neutral_launch_config_flags();
-        flags.clear_ca_cert = true;
-        let mut launch = json!({ "action": "launch", "autoConnect": true });
-        let mut snapshot = json!({ "action": "snapshot" });
-
-        attach_ca_cert_to_launch_command(&mut launch, &flags);
-        attach_ca_cert_to_launch_command(&mut snapshot, &flags);
-
-        assert_eq!(launch["clearCaCert"], true);
-        assert!(snapshot.get("clearCaCert").is_none());
     }
 
     #[test]
@@ -2948,74 +2691,6 @@ mod tests {
             root_schema["properties"]["noWebmcp"],
             docs_schema["properties"]["noWebmcp"]
         );
-    }
-
-    #[test]
-    fn test_allowed_domains_requests_local_launch_configuration() {
-        let mut flags = neutral_launch_config_flags();
-        let command = json!({ "action": "snapshot" });
-        assert!(!should_send_local_launch_config(&flags, &command));
-
-        flags.allowed_domains = Some(vec!["example.com".to_string()]);
-        assert!(should_send_local_launch_config(&flags, &command));
-
-        flags.cdp = Some("9222".to_string());
-        assert!(!should_send_local_launch_config(&flags, &command));
-    }
-
-    #[test]
-    fn test_no_webmcp_requests_local_launch_configuration() {
-        let mut flags = neutral_launch_config_flags();
-        let command = json!({ "action": "snapshot" });
-        flags.no_webmcp = true;
-        flags.cli_no_webmcp = true;
-        assert!(should_send_local_launch_config(&flags, &command));
-
-        let mut launch = json!({ "action": "launch" });
-        attach_webmcp_launch_option(&mut launch, &flags);
-        assert_eq!(launch["webmcp"], false);
-    }
-
-    #[test]
-    fn test_cdp_url_metadata_ignores_launch_configuration() {
-        let mut flags = neutral_launch_config_flags();
-        flags.engine = Some("chrome".to_string());
-        flags.executable_path = Some("/usr/local/bin/chromium".to_string());
-        flags.args = Some("--disable-gpu".to_string());
-
-        assert!(!should_send_local_launch_config(
-            &flags,
-            &json!({ "action": "cdp_url" })
-        ));
-        assert!(should_send_local_launch_config(
-            &flags,
-            &json!({ "action": "snapshot" })
-        ));
-    }
-
-    #[test]
-    fn test_cdp_url_metadata_batches_ignore_launch_configuration() {
-        let mut flags = neutral_launch_config_flags();
-        flags.headed = true;
-        for command in [
-            json!({ "action": "batch", "commands": ["get cdp-url", "get 'cdp-url' ignored"] }),
-            json!({ "action": "batch", "argv": [["get", "cdp-url"]] }),
-        ] {
-            assert!(command_is_cdp_url_metadata(&command), "{command}");
-            assert!(!should_send_local_launch_config(&flags, &command));
-        }
-        for command in [
-            json!({ "action": "batch", "commands": ["get cdp-url", "open about:blank"] }),
-            json!({ "action": "batch", "argv": [["get", "cdp-url"], ["snapshot"]] }),
-            json!({ "action": "batch", "commands": ["batch 'get cdp-url'"] }),
-            json!({ "action": "batch", "argv": [["batch", "get cdp-url"]] }),
-            json!({ "action": "batch", "commands": [] }),
-            json!({ "action": "batch", "argv": [[]] }),
-            json!({ "action": "batch" }),
-        ] {
-            assert!(!command_is_cdp_url_metadata(&command), "{command}");
-            assert!(should_send_local_launch_config(&flags, &command));
-        }
     }
 
     #[test]
@@ -3142,6 +2817,21 @@ mod tests {
         for (flags, expected) in cases {
             assert_eq!(incompatible_launch_mode_error(&flags), Some(expected));
         }
+    }
+
+    #[test]
+    fn test_incompatible_launch_mode_error_rejects_no_auto_connect_with_auto_connect() {
+        let mut flags = launch_mode_flags(true, false, false, false);
+        flags.cli_auto_connect = true;
+        flags.no_auto_connect = true;
+        assert_eq!(
+            incompatible_launch_mode_error(&flags),
+            Some("Cannot use --auto-connect and --no-auto-connect together")
+        );
+
+        let mut reset = launch_mode_flags(false, false, false, false);
+        reset.no_auto_connect = true;
+        assert_eq!(incompatible_launch_mode_error(&reset), None);
     }
 
     #[test]
@@ -3303,6 +2993,7 @@ mod tests {
             })),
             error: None,
             warning: None,
+            recorded: None,
         };
 
         let prompt = confirmation_prompt_from_response(&resp).unwrap();

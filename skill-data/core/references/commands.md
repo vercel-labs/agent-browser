@@ -48,6 +48,12 @@ agent-browser batch \
   "navigate http://localhost:3000/target"
 ```
 
+Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Keep command-specific options and literal command arguments inside each item:
+
+```bash
+agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
+```
+
 `open` with no URL gives you a clean launch so interception rules and cookies can take effect on the *first* real navigation. Pass `--init-script <path>` at launch to install a script before navigation. Use this flow for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
 
 With `--json`, `--omit-command` replaces each `command` array with a stable zero-based `index` field on success, failure, or `--bail`; default output is unchanged. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
@@ -263,6 +269,28 @@ agent-browser network har stop [output.har]    # Stop and save HAR
 
 If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
 
+## Saved flows
+
+Experimental. A run can fail on a page that changed or answers differently each time; when it does, the flow is marked unverified and you continue with the UI.
+
+```bash
+agent-browser --capture flow open <url>               # Open a session that records its commands and requests
+agent-browser flow steps [--json]                     # Recorded steps: seq, command, URL, request count, ok or failed
+agent-browser flow save <name> [--param k=v]... [--output <id>] [--description <text>] [--timeout <ms>]  # Keep first-party JSON requests, turn values into params; --output takes a saved id (s1r1, numbered within the range) or a capture id s<step>r<n>; an id that means two requests is refused
+agent-browser flow save <name> --from <seq> --to <seq>  # Save a range of steps
+agent-browser flow run <name> [--param k=v]... [--timeout <ms>]  # Send over HTTP, falling back to the page and then a replay; --timeout bounds the whole run
+agent-browser flow run <name> --where field=value --fields a,b.c --limit 5  # Return only matching items and fields
+agent-browser flow list [--origin <host>]             # Saved flows, with params and verified state
+```
+
+`flow save` waits for first-party requests the range's last step started that have no response yet, up to the command timeout (`--timeout` to wait less); a response whose body gets no bytes for 500 ms after its headers (a long poll) is not waited on. Requests left out are reported as `still loading at save`, also in the error when nothing else was recorded.
+
+`--capture flow` is a launch setting: on a running session without capture it relaunches the browser with capture on, and later commands that repeat or omit it do not relaunch. Every recorded command returns `recorded: {seq}` in JSON. Failed commands stay in the recording with `ok: false`. Saving does not stop the capture, so one session can save several flows; by default `flow save` starts at the last navigation after the previous save. `close` reports `unsaved: {steps: N}` when steps after the last save exist. `har stop` is unavailable while capture is on; use `flow save`.
+
+`flow save` keeps first-party JSON responses and, for pages rendered on the server, JSON the HTML embeds (`__NEXT_DATA__`, JSON-LD, `window.x = {...}` state); a run fetches the page and reads the same block back. `flow save` also finds params on its own: a value the task sent that came from an item of an earlier response (an id picked from a list) becomes a param, and a value copied from a single field (a session key) is filled from that response on every run. The save report lists them, plus the steps it could not turn into requests and why, such as a login the recording stopped at.
+
+Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGENT_BROWSER_FLOWS_DIR`) and are `version: 1`; a file with an unknown field fails to load. Cookies, `authorization` and token or CSRF headers are never saved. The value of a credential parameter (`token`, `csrf`, `auth`, `apikey`, `signature`, `password`; not pagination cursors like `pageToken`) in a navigation URL, the start URL or a write is saved as `<redacted>`, and that step is not replayed; a saved request's own URL is sent as recorded. A value typed with `fill`, `type`, `keyboard type` or `inserttext` is saved as a param (`{{name}}` in the step, no copy of the value, so a run needs `--param name=value`) or, when the field is a password, `one-time-code`, `cc-*` or otherwise secret, as `<redacted>`. A run tries direct HTTP, then the request from the page, then a replay of the recorded commands, and starts the next run at the tier that worked; a transport error or a skipped tier does not move it. Every tier checks the response shape against the recording; a mismatch on every tier fails the run with `drifted`, naming the missing key, and marks the flow unverified (use the page, then save again). A run that a later tier answered after a mismatch returns the data with `verified: false` and `drift`, and the flow is unverified too. A read also goes on to the next tier after a network error, and after a 5xx once an earlier tier saw the site change; any other non-drift failure of a read, such as a 4xx rejecting the params, ends the request. A 401 or 403 stops the run with `auth_expired`. When the recording sent a credential header the file does not keep, or the request carries a recorded signature or timestamp header with a per-request value (`X-Sig`, `X-Ts`, nonce, hmac), the HTTP and in-page tiers may only lack what the page adds, so the run goes on to the replay, where the page's own scripts send fresh values; a 401 or 403 from the replay is `auth_expired`. If the replay cannot get an answer, the run reports `credential_not_sendable` (use the page UI, signing in again does not help) or `request_signed` (the signature expires, use the page). A 429 stops the run with `rate_limited` (and `retryAfter` when the site sent one) and a bot challenge with `blocked`, and a host that resolves to an address a run does not send to with `address_refused` (nothing is sent); no other tier is tried. A run that stops after a tier saw the shape change also marks the flow unverified. A write with no answer, answered with a 5xx or 408, answered with a redirect, or answered with a 2xx that is not JSON (a login page or a bot challenge, say) returns `outcome_unknown` and is never sent again: check the site before rerunning; a write answered with a 2xx JSON body of a different shape was applied, returns `write_applied`, marks the flow unverified and must not be repeated; a write rejected with another 4xx was not applied. Requests, redirects and navigations outside the base domain of the flow's start URL are rejected, regardless of `--allowed-domains`. A direct request goes only to public addresses, checked when each host resolves and on every redirect: a host that resolves to a loopback, private or link-local address fails with `resolved to a non-public address` and nothing is sent (a flow recorded against `localhost` runs only against loopback, one against a local IP or a name the browser reached directly only at local addresses, saved as `"reach": "loopback"` or `"reach": "local"`, only against local addresses and never link-local or cloud metadata; a recording through a proxy or from cache is not marked local and the save report says why in `reachNote`). A proxy from `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` is used at any address and checks the requests that go through it, not agent-browser; a target excluded by `NO_PROXY` is checked like any other. A proxy name that is an `https://` hostname is trusted by the resolver, so a direct target with that same name skips the filter. The replay tier runs only plain interactions and stops when the tab leaves the site. The in-page tier is skipped unless the active tab is on the flow's site. `flow save` lists the flow's writes with ids: explicit ones (non-GET, GraphQL mutations) and suspected ones (a GET whose path has a whole `logout`, `signout`, `unsubscribe`, `delete` or `remove` segment). `flow run <name> --allow-write <all|id,...>` sends the writes it covers; any other write asks for confirmation as policy action `flow_write:<id>`, which `--action-policy` and `--confirm-actions` also see.
+
 ## Tabs and Windows
 
 ```bash
@@ -443,6 +471,8 @@ The dashboard runs on port 4848 by default, independent of browser sessions. It 
 
 `agent-browser install` downloads Chrome for Testing. On macOS versions below 13, the command stops before the download and prints instructions to update macOS or install Chrome manually. If `sw_vers -productVersion` is unavailable, exits with an error, returns no version, or returns a malformed version, the command reports a detection error and stops before making a network request. On Linux, `--with-deps` also installs system dependencies and exits nonzero if the package manager cannot install every required browser library.
 
+At launch, agent-browser uses the browser from `agent-browser install` first. When that is missing, it falls back to a system Chrome (on macOS, Chrome, Chrome Canary, Chromium, and Brave in `/Applications`, then in `~/Applications`), then to the Puppeteer and Playwright caches.
+
 ## Diagnostics
 
 Run `doctor` first when a command fails unexpectedly (`Unknown command`, `Failed to connect`, stale daemons, version mismatches after `upgrade`, missing Chrome).
@@ -501,7 +531,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`.
+Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`. The typed `relaunch` argument maps to `--relaunch`; `open` and `tab_new` list it in their schema.
 
 For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__open`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, backed by agent-browser inside the eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship in `@agent-browser/eve/sandbox`.
 
@@ -537,12 +567,14 @@ agent-browser --use-system-ca         # OS trust store for CLI requests (read, i
 agent-browser --hide-scrollbars false # Keep native scrollbars visible in headless Chromium screenshots
 agent-browser --engine <name> ...     # chrome (default), lightpanda, obscura (experimental)
 agent-browser --auto-connect ...      # Connect to an already-running Chrome
+agent-browser --no-auto-connect ...   # Return an --auto-connect session to a local launch
 agent-browser --profile <name|path>   # Use a Chrome profile (login state survives)
 agent-browser --state <path> ...      # Load saved auth state from JSON
 agent-browser --restore [name] ...    # Auto-save and restore session state; defaults to --session
 agent-browser --restore-save <policy> # auto (default), always, or never
 agent-browser --namespace <name> ...  # Isolate daemon sockets and restore-state directories
 agent-browser --idle-timeout <time>   # Daemon idle shutdown (default 1h; 0 disables)
+agent-browser --relaunch ...          # Relaunch the browser even when no setting changed; once per batch
 agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command

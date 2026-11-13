@@ -69,6 +69,7 @@ pub(crate) fn full_flags() -> Flags {
     f.restore_check_fn = Some("() => true".to_string());
     f.color_scheme = Some("dark".to_string());
     f.download_path = Some("/downloads".to_string());
+    f.capture = Some(vec!["flow".to_string()]);
     f.allowed_domains = Some(vec!["a.test".to_string(), "*.b.test".to_string()]);
     f.action_policy = Some("/policy.json".to_string());
     f.confirm_actions = Some("click,fill".to_string());
@@ -217,6 +218,7 @@ fn patch_carries_every_daemon_options_field() {
     assert_eq!(set(&p, Key::RestoreCheckText), json!("Welcome")); // restore_check_text
     assert_eq!(set(&p, Key::RestoreCheckFn), json!("() => true")); // restore_check_fn
     assert_eq!(set(&p, Key::DownloadPath), json!("/downloads")); // download_path
+    assert_eq!(set(&p, Key::Capture), json!(["flow"])); // capture
     assert_eq!(set(&p, Key::AllowedDomains), json!(["a.test", "*.b.test"])); // allowed_domains
     assert_eq!(set(&p, Key::ActionPolicy), json!("/policy.json")); // action_policy
     assert_eq!(set(&p, Key::ConfirmActions), json!("click,fill")); // confirm_actions
@@ -308,6 +310,24 @@ fn obscura_clears_an_unset_proxy_bypass() {
     );
     f.engine = Some("chrome".to_string());
     assert_eq!(Patch::from_flags(&f).get(Key::ProxyBypass), None);
+}
+
+#[test]
+fn no_auto_connect_resets_the_connection_and_beats_env_and_config() {
+    let mut f = blank_flags();
+    f.auto_connect = true;
+    assert_eq!(set(&Patch::from_flags(&f), Key::AutoConnect), json!(true));
+
+    // An env or config `auto_connect` is already folded into the flag.
+    f.no_auto_connect = true;
+    f.auto_connect = false;
+    assert_eq!(
+        Patch::from_flags(&f).get(Key::AutoConnect),
+        Some(&Requested::Default)
+    );
+
+    f.no_auto_connect = false;
+    assert_eq!(Patch::from_flags(&f).get(Key::AutoConnect), None);
 }
 
 #[test]
@@ -515,8 +535,16 @@ fn launch_options_view_reads_every_launch_variable() {
 fn boolean_spellings_match_each_variable() {
     // `1` or `true` only.
     assert!(!seeded(&[("AGENT_BROWSER_HEADED", "yes")]).headed());
-    assert!(!seeded(&[("AGENT_BROWSER_WEBGPU", "yes")]).webgpu());
-    assert!(seeded(&[("AGENT_BROWSER_WEBGPU", "true")]).webgpu());
+    assert!(
+        !seeded(&[("AGENT_BROWSER_WEBGPU", "yes")])
+            .launch_options()
+            .webgpu
+    );
+    assert!(
+        seeded(&[("AGENT_BROWSER_WEBGPU", "true")])
+            .launch_options()
+            .webgpu
+    );
     // `1`, `true` or `yes`.
     assert!(seeded(&[("AGENT_BROWSER_PIN_TAB", "yes")]).pin_tab());
     assert!(!seeded(&[("AGENT_BROWSER_PIN_TAB", "on")]).pin_tab());
@@ -530,34 +558,60 @@ fn boolean_spellings_match_each_variable() {
     assert!(seeded(&[("AGENT_BROWSER_HIDE_SCROLLBARS", "anything")]).hide_scrollbars());
 }
 
+/// A seeded `Running` with the given connection keys set directly.
+fn connected(pairs: &[(Key, Value)]) -> Running {
+    let mut r = seeded(&[]);
+    for (key, value) in pairs {
+        r.set(*key, value.clone());
+    }
+    r
+}
+
+#[test]
+fn connection_keys_are_not_seeded_from_the_environment() {
+    let r = seeded(&[
+        ("AGENT_BROWSER_CDP", "9222"),
+        ("AGENT_BROWSER_CDP_HEADERS", r#"{"A":"b"}"#),
+        ("AGENT_BROWSER_AUTO_CONNECT", "1"),
+        ("AGENT_BROWSER_PROVIDER", "kernel"),
+    ]);
+    assert_eq!(r.connection(), Connection::Local);
+    assert_eq!(r.cdp_headers(), None);
+    assert_eq!(r.provider(), None);
+}
+
+#[test]
+fn device_is_still_seeded_from_the_environment() {
+    let r = seeded(&[("AGENT_BROWSER_IOS_DEVICE", "iPhone 15")]);
+    assert_eq!(
+        r.get(Key::Device).and_then(Value::as_str),
+        Some("iPhone 15")
+    );
+}
+
 #[test]
 fn connection_view_follows_precedence() {
     assert_eq!(
-        seeded(&[("AGENT_BROWSER_CDP", "9222")]).connection(),
+        connected(&[(Key::Cdp, json!("9222"))]).connection(),
         Connection::Cdp("9222".into())
     );
     assert_eq!(
-        seeded(&[("AGENT_BROWSER_AUTO_CONNECT", "0")]).connection(),
-        Connection::AutoConnect,
-        "presence alone turns auto-connect on"
-    );
-    assert_eq!(
-        seeded(&[("AGENT_BROWSER_PROVIDER", "kernel")]).connection(),
+        connected(&[(Key::Provider, json!("kernel"))]).connection(),
         Connection::Provider("kernel".into())
     );
     assert_eq!(
-        seeded(&[
-            ("AGENT_BROWSER_PROVIDER", "kernel"),
-            ("AGENT_BROWSER_AUTO_CONNECT", "1"),
-            ("AGENT_BROWSER_CDP", "9222"),
+        connected(&[
+            (Key::Provider, json!("kernel")),
+            (Key::AutoConnect, json!(true)),
+            (Key::Cdp, json!("9222")),
         ])
         .connection(),
         Connection::Cdp("9222".into())
     );
     assert_eq!(
-        seeded(&[
-            ("AGENT_BROWSER_PROVIDER", "kernel"),
-            ("AGENT_BROWSER_AUTO_CONNECT", "1"),
+        connected(&[
+            (Key::Provider, json!("kernel")),
+            (Key::AutoConnect, json!(true)),
         ])
         .connection(),
         Connection::AutoConnect
@@ -651,10 +705,7 @@ fn headed_for_plugin_providers_accepts_any_value_but_off_spellings() {
 
 #[test]
 fn provider_view_ignores_connection_precedence() {
-    let r = seeded(&[
-        ("AGENT_BROWSER_PROVIDER", "kernel"),
-        ("AGENT_BROWSER_CDP", "9222"),
-    ]);
+    let r = connected(&[(Key::Provider, json!("kernel")), (Key::Cdp, json!("9222"))]);
     assert_eq!(r.provider().as_deref(), Some("kernel"));
     assert_eq!(r.connection(), Connection::Cdp("9222".into()));
 }
@@ -717,7 +768,7 @@ fn extensions_file_keeps_the_trimmed_original_value() {
 fn cdp_headers_view_is_the_raw_value() {
     let raw = r#"{"Authorization":"Bearer x"}"#;
     assert_eq!(
-        seeded(&[("AGENT_BROWSER_CDP_HEADERS", raw)])
+        connected(&[(Key::CdpHeaders, json!(raw))])
             .cdp_headers()
             .as_deref(),
         Some(raw)
@@ -772,5 +823,599 @@ fn debug_output_never_contains_secrets() {
         assert!(!patch.contains(secret), "{secret} leaked: {patch}");
     }
     // The values themselves are untouched.
-    assert_eq!(r.proxy_password().as_deref(), Some("hunter2"));
+    assert_eq!(
+        r.launch_options().proxy_password.as_deref(),
+        Some("hunter2")
+    );
+}
+
+// ---- Running::plan ----
+
+fn patch_of(entries: &[(Key, Requested)]) -> Patch {
+    Patch::from_entries(entries.iter().cloned())
+}
+
+fn is(key: Key, value: Value) -> (Key, Requested) {
+    (key, Requested::Set(value))
+}
+
+fn running_with(entries: &[(Key, Value)]) -> Running {
+    let mut r = Running::defaults();
+    for (key, value) in entries {
+        r.set(*key, value.clone());
+    }
+    r
+}
+
+fn changed_keys(plan: &super::plan::Plan) -> Vec<Key> {
+    plan.changes.iter().map(|c| c.key).collect()
+}
+
+#[test]
+fn headers_sent_with_a_provider_or_auto_connect_are_free_on_the_next_command() {
+    // Env or config `cdpHeaders` ride on every command, whatever the target.
+    for target in [
+        is(Key::Provider, json!("browserbox")),
+        is(Key::AutoConnect, json!(true)),
+    ] {
+        let patch = patch_of(&[target.clone(), is(Key::CdpHeaders, json!(r#"{"A":"b"}"#))]);
+        let first = connected(&[]).plan(&patch);
+        assert!(first.relaunch, "{:?}", target.0);
+        let second = first.next.plan(&patch);
+        assert!(
+            second.changes.is_empty() && !second.relaunch,
+            "{:?}: {:?}",
+            target.0,
+            second.changes.iter().map(|c| c.key).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn plan_table_running_by_patch() {
+    struct Case {
+        name: &'static str,
+        running: Vec<(Key, Value)>,
+        patch: Vec<(Key, Requested)>,
+        changed: Vec<Key>,
+        relaunch: bool,
+    }
+    let cases = vec![
+        Case {
+            name: "an empty patch changes nothing",
+            running: vec![(Key::Profile, json!("/a"))],
+            patch: vec![],
+            changed: vec![],
+            relaunch: false,
+        },
+        Case {
+            name: "a key the patch does not name is left alone",
+            running: vec![(Key::Profile, json!("/a")), (Key::Headed, json!(true))],
+            patch: vec![is(Key::Args, json!(["--x"]))],
+            changed: vec![Key::Args],
+            relaunch: true,
+        },
+        Case {
+            name: "equal value is free",
+            running: vec![(Key::Profile, json!("/a"))],
+            patch: vec![is(Key::Profile, json!("/a"))],
+            changed: vec![],
+            relaunch: false,
+        },
+        Case {
+            name: "a different launch value relaunches",
+            running: vec![(Key::Profile, json!("/a"))],
+            patch: vec![is(Key::Profile, json!("/b"))],
+            changed: vec![Key::Profile],
+            relaunch: true,
+        },
+        Case {
+            name: "a live value applies without a relaunch",
+            running: vec![(Key::DefaultTimeout, json!(5000))],
+            patch: vec![is(Key::DefaultTimeout, json!(9000))],
+            changed: vec![Key::DefaultTimeout],
+            relaunch: false,
+        },
+        Case {
+            name: "the default is equal to nothing running",
+            running: vec![],
+            patch: vec![
+                is(Key::Headed, json!(false)),
+                is(Key::HideScrollbars, json!(true)),
+                is(Key::Webmcp, json!(true)),
+                is(Key::RestoreSave, json!("auto")),
+            ],
+            changed: vec![],
+            relaunch: false,
+        },
+        Case {
+            name: "turning a default-true setting off is a change",
+            running: vec![],
+            patch: vec![is(Key::HideScrollbars, json!(false))],
+            changed: vec![Key::HideScrollbars],
+            relaunch: true,
+        },
+        Case {
+            name: "an explicit reset of a set value is a change",
+            running: vec![(Key::ProxyBypass, json!("localhost"))],
+            patch: vec![(Key::ProxyBypass, Requested::Default)],
+            changed: vec![Key::ProxyBypass],
+            relaunch: true,
+        },
+        Case {
+            name: "an auto-connect reset of an attached session relaunches locally",
+            running: vec![(Key::AutoConnect, json!(true))],
+            patch: vec![(Key::AutoConnect, Requested::Default)],
+            changed: vec![Key::AutoConnect],
+            relaunch: true,
+        },
+        Case {
+            name: "a reset of a key another target already displaced is reported once",
+            running: vec![(Key::AutoConnect, json!(true))],
+            patch: vec![
+                is(Key::Cdp, json!("9447")),
+                (Key::AutoConnect, Requested::Default),
+            ],
+            changed: vec![Key::Cdp, Key::AutoConnect],
+            relaunch: true,
+        },
+        Case {
+            name: "an auto-connect reset of a local session is free",
+            running: vec![],
+            patch: vec![(Key::AutoConnect, Requested::Default)],
+            changed: vec![],
+            relaunch: false,
+        },
+        Case {
+            name: "an explicit reset of an unset value is free",
+            running: vec![],
+            patch: vec![(Key::ProxyBypass, Requested::Default)],
+            changed: vec![],
+            relaunch: false,
+        },
+        Case {
+            name: "live and launch changes together relaunch once",
+            running: vec![
+                (Key::Profile, json!("/a")),
+                (Key::NoAutoDialog, json!(false)),
+            ],
+            patch: vec![
+                is(Key::Profile, json!("/b")),
+                is(Key::NoAutoDialog, json!(true)),
+            ],
+            changed: vec![Key::Profile, Key::NoAutoDialog],
+            relaunch: true,
+        },
+        Case {
+            name: "security settings follow their effect class",
+            running: vec![],
+            patch: vec![
+                is(Key::AllowedDomains, json!(["a.test"])),
+                is(Key::ActionPolicy, json!("/policy.json")),
+                is(Key::ConfirmActions, json!("click")),
+            ],
+            changed: vec![Key::AllowedDomains, Key::ActionPolicy, Key::ConfirmActions],
+            relaunch: true,
+        },
+        Case {
+            name: "only live changes leave the browser alone",
+            running: vec![],
+            patch: vec![
+                is(Key::ActionPolicy, json!("/policy.json")),
+                is(Key::ConfirmActions, json!("click")),
+                is(Key::IdleTimeout, json!("60000")),
+                is(Key::PinTab, json!(true)),
+            ],
+            changed: vec![
+                Key::ActionPolicy,
+                Key::ConfirmActions,
+                Key::IdleTimeout,
+                Key::PinTab,
+            ],
+            relaunch: false,
+        },
+    ];
+    for case in cases {
+        let plan = running_with(&case.running).plan(&patch_of(&case.patch));
+        assert_eq!(changed_keys(&plan), case.changed, "{}", case.name);
+        assert_eq!(plan.relaunch, case.relaunch, "{}", case.name);
+        assert_eq!(plan.is_empty(), case.changed.is_empty() && !case.relaunch);
+    }
+}
+
+#[test]
+fn plan_is_pure_and_next_holds_the_requested_values() {
+    let running = running_with(&[(Key::Profile, json!("/a")), (Key::Args, json!(["--x"]))]);
+    let before = running.clone();
+    let plan = running.plan(&patch_of(&[
+        is(Key::Profile, json!("/b")),
+        (Key::Args, Requested::Default),
+    ]));
+
+    assert_eq!(
+        running, before,
+        "planning must not touch the running values"
+    );
+    assert_eq!(plan.next.get(Key::Profile), Some(&json!("/b")));
+    assert_eq!(plan.next.get(Key::Args), None);
+    assert_eq!(
+        plan.changes[0],
+        super::plan::Change {
+            key: Key::Profile,
+            requested: Requested::Set(json!("/b")),
+            running: Some(json!("/a")),
+        }
+    );
+}
+
+#[test]
+fn a_forced_relaunch_needs_no_change() {
+    let mut flags = blank_flags();
+    flags.relaunch = true;
+    let patch = Patch::from_flags(&flags);
+    assert!(!patch.is_noop());
+
+    let plan = running_with(&[(Key::Profile, json!("/a"))]).plan(&patch);
+    assert!(plan.changes.is_empty());
+    assert!(plan.relaunch);
+    assert!(!plan.is_empty());
+
+    let wire = patch.to_wire().unwrap();
+    assert_eq!(wire, json!({"relaunch": true}));
+    assert_eq!(Patch::from_wire(Some(&wire)).unwrap(), patch);
+}
+
+#[test]
+fn a_connection_target_displaces_the_others() {
+    let running = running_with(&[
+        (Key::Cdp, json!("9222")),
+        (Key::CdpHeaders, json!(r#"{"Authorization":"x"}"#)),
+    ]);
+    let plan = running.plan(&patch_of(&[is(Key::Provider, json!("browserless"))]));
+
+    assert_eq!(
+        changed_keys(&plan),
+        vec![Key::Provider, Key::Cdp, Key::CdpHeaders]
+    );
+    assert!(plan.relaunch);
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Provider("browserless".to_string())
+    );
+    assert_eq!(plan.next.get(Key::CdpHeaders), None);
+}
+
+#[test]
+fn no_ca_cert_drops_the_trust_in_effect() {
+    let running = running_with(&[(Key::CaCert, json!("/ca.pem"))]);
+    let plan = running.plan(&patch_of(&[is(Key::ClearCaCert, json!(true))]));
+    assert_eq!(changed_keys(&plan), vec![Key::ClearCaCert]);
+    assert!(plan.relaunch);
+    assert_eq!(plan.next.get(Key::CaCert), None);
+    assert_eq!(
+        plan.next.get(Key::ClearCaCert),
+        None,
+        "a one-shot is not kept"
+    );
+
+    let none_in_effect = Running::defaults().plan(&patch_of(&[is(Key::ClearCaCert, json!(true))]));
+    assert!(none_in_effect.is_empty());
+}
+
+#[test]
+fn planning_keeps_the_seed_shims_in_step() {
+    let plan = Running::defaults().plan(&patch_of(&[
+        is(Key::Extensions, json!(["/a", "/b"])),
+        is(Key::Headed, json!(true)),
+    ]));
+    assert_eq!(plan.next.extensions_file_contents(), Some("/a,/b"));
+    assert!(plan.next.plugin_provider_headed());
+}
+
+#[test]
+fn changes_report_redacted_values() {
+    let running = running_with(&[(Key::ProxyPassword, json!("old-secret"))]);
+    let plan = running.plan(&patch_of(&[
+        is(Key::ProxyPassword, json!("new-secret")),
+        is(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer t"}"#)),
+        is(Key::Proxy, json!("http://user:pw@proxy.example:8080")),
+    ]));
+
+    let reported: Vec<Value> = plan.changes.iter().map(|c| c.to_json(true)).collect();
+    let text = serde_json::to_string(&reported).unwrap();
+    for secret in ["old-secret", "new-secret", "Bearer t", "user:pw"] {
+        assert!(!text.contains(secret), "{secret} leaked: {text}");
+    }
+    let password = reported
+        .iter()
+        .find(|c| c["option"] == "proxy-password")
+        .unwrap();
+    assert_eq!(password["requested"], json!("<redacted>"));
+    assert_eq!(password["running"], json!("<redacted>"));
+    assert_eq!(password["effect"], json!("relaunch"));
+    assert_eq!(password["applied"], json!(true));
+}
+
+#[test]
+fn change_json_names_the_class_and_whether_it_took_effect() {
+    let plan = Running::defaults().plan(&patch_of(&[
+        is(Key::Profile, json!("/b")),
+        is(Key::DefaultTimeout, json!(9000)),
+    ]));
+    let launch = plan.changes[0].to_json(false);
+    assert_eq!(launch["option"], json!("profile"));
+    assert_eq!(launch["requested"], json!("/b"));
+    assert_eq!(launch["running"], Value::Null);
+    assert_eq!(launch["effect"], json!("relaunch"));
+    assert_eq!(launch["applied"], json!(false));
+    let live = plan.changes[1].to_json(true);
+    assert_eq!(live["effect"], json!("live"));
+}
+
+#[test]
+fn launch_identity_follows_launch_settings_only() {
+    let base = running_with(&[(Key::Profile, json!("/a"))]);
+    let live_change = base
+        .plan(&patch_of(&[is(Key::DefaultTimeout, json!(9000))]))
+        .next;
+    let launch_change = base.plan(&patch_of(&[is(Key::Profile, json!("/b"))])).next;
+
+    assert_eq!(base.launch_identity(), live_change.launch_identity());
+    assert_ne!(base.launch_identity(), launch_change.launch_identity());
+}
+
+#[test]
+fn a_session_started_from_the_same_settings_plans_nothing() {
+    let mut flags = blank_flags();
+    flags.profile = Some("/work/profile".to_string());
+    flags.args = Some("--lang=en-US,--no-first-run".to_string());
+    flags.headed = true;
+    flags.cli_headed = true;
+    flags.default_timeout = Some(7000);
+    flags.idle_timeout = Some("120000".to_string());
+
+    let started = seeded(&[
+        ("AGENT_BROWSER_PROFILE", "/work/profile"),
+        ("AGENT_BROWSER_ARGS", "--lang=en-US,--no-first-run"),
+        ("AGENT_BROWSER_HEADED", "1"),
+        ("AGENT_BROWSER_DEFAULT_TIMEOUT", "7000"),
+        ("AGENT_BROWSER_IDLE_TIMEOUT_MS", "120000"),
+    ]);
+
+    assert!(started.plan(&Patch::from_flags(&flags)).is_empty());
+}
+
+#[test]
+fn a_value_marked_changed_in_place_is_a_change_even_when_equal() {
+    let running = running_with(&[(Key::CaCert, json!("/ca.pem"))]);
+    let mut patch = patch_of(&[is(Key::CaCert, json!("/ca.pem"))]);
+    assert!(running.plan(&patch).is_empty());
+
+    patch.mark_changed_in_place(Key::CaCert);
+    let plan = running.plan(&patch);
+    assert_eq!(changed_keys(&plan), vec![Key::CaCert]);
+    assert!(plan.relaunch);
+}
+
+// ---- review fixes ----
+
+#[test]
+fn cdp_headers_do_not_follow_the_session_to_another_endpoint() {
+    let running = running_with(&[
+        (Key::Cdp, json!("wss://a.example/cdp")),
+        (Key::CdpHeaders, json!(r#"{"Authorization":"Bearer a"}"#)),
+    ]);
+
+    let moved = running.plan(&patch_of(&[is(Key::Cdp, json!("wss://b.example/cdp"))]));
+    assert_eq!(changed_keys(&moved), vec![Key::Cdp, Key::CdpHeaders]);
+    assert_eq!(moved.next.cdp_headers(), None);
+
+    let same = running.plan(&patch_of(&[is(Key::Cdp, json!("wss://a.example/cdp"))]));
+    assert!(same.is_empty());
+    assert!(same.next.cdp_headers().is_some());
+
+    let with_headers = running.plan(&patch_of(&[
+        is(Key::Cdp, json!("wss://b.example/cdp")),
+        is(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer b"}"#)),
+    ]));
+    assert_eq!(
+        with_headers.next.cdp_headers().as_deref(),
+        Some(r#"{"Authorization":"Bearer b"}"#)
+    );
+}
+
+#[test]
+fn cdp_urls_are_reported_without_userinfo_or_query() {
+    let url = "wss://user:pw@host.example:9222/devtools/browser/abc?token=SECRET#frag";
+    let plan = Running::defaults().plan(&patch_of(&[is(Key::Cdp, json!(url))]));
+    let reported = plan.changes[0].to_json(true);
+    assert_eq!(
+        reported["requested"],
+        json!("wss://host.example:9222/devtools/browser/abc?<redacted>")
+    );
+    for leaked in ["SECRET", "user:pw", "frag"] {
+        assert!(!reported.to_string().contains(leaked), "{reported}");
+    }
+    assert!(!format!("{:?}", plan.next).contains("SECRET"));
+    assert!(!format!("{:?}", patch_of(&[is(Key::Cdp, json!(url))])).contains("SECRET"));
+    assert_eq!(super::spec::redact_url("9222"), "9222");
+    assert_eq!(
+        super::spec::redact_url("http://127.0.0.1:9222/json/version"),
+        "http://127.0.0.1:9222/json/version"
+    );
+}
+
+#[test]
+fn storage_state_displaces_an_inherited_profile_and_extensions() {
+    let running = running_with(&[
+        (Key::Profile, json!("/p")),
+        (Key::Extensions, json!(["/e"])),
+    ]);
+    let plan = running.plan(&patch_of(&[is(Key::StorageState, json!("/s.json"))]));
+    assert_eq!(
+        changed_keys(&plan),
+        vec![Key::StorageState, Key::Profile, Key::Extensions]
+    );
+    assert_eq!(plan.next.get(Key::Profile), None);
+    assert_eq!(plan.next.get(Key::Extensions), None);
+    assert!(plan.relaunch);
+
+    // And the other way round: the one set last wins.
+    let back = plan.next.plan(&patch_of(&[is(Key::Profile, json!("/p"))]));
+    assert_eq!(back.next.get(Key::StorageState), None);
+}
+
+#[test]
+fn a_conflict_inside_one_patch_is_left_for_the_launch_to_reject() {
+    let plan = Running::defaults().plan(&patch_of(&[
+        is(Key::Profile, json!("/p")),
+        is(Key::StorageState, json!("/s.json")),
+    ]));
+    assert_eq!(plan.next.get(Key::Profile), Some(&json!("/p")));
+    assert_eq!(plan.next.get(Key::StorageState), Some(&json!("/s.json")));
+}
+
+#[test]
+fn security_settings_cannot_be_cleared_with_a_null() {
+    for name in ["allowed-domains", "action-policy", "confirm-actions"] {
+        let wire = json!({ name: null });
+        assert!(
+            matches!(
+                Patch::from_wire(Some(&wire)),
+                Err(SettingsError::Invalid(_, _))
+            ),
+            "{name}"
+        );
+    }
+    assert!(Patch::from_wire(Some(&json!({"proxy-bypass": null}))).is_ok());
+}
+
+#[test]
+fn a_patch_without_launch_settings_keeps_only_live_ones() {
+    let patch = patch_of(&[
+        is(Key::Profile, json!("/p")),
+        is(Key::DefaultTimeout, json!(5000)),
+    ]);
+    let live = patch.without_launch_settings();
+    assert!(live.get(Key::Profile).is_none());
+    assert!(live.get(Key::DefaultTimeout).is_some());
+}
+
+#[test]
+fn local_only_settings_are_ignored_for_external_sessions() {
+    for target in [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::Provider, json!("browserbase")),
+        (Key::AutoConnect, json!(true)),
+    ] {
+        let running = running_with(&[target]);
+        let plan = running.plan(&patch_of(&[
+            is(Key::Args, json!(["--x"])),
+            is(Key::Profile, json!("/p")),
+            is(Key::ExecutablePath, json!("/chrome")),
+            is(Key::Extensions, json!(["/e"])),
+            is(Key::Proxy, json!("http://proxy:1")),
+            is(Key::UserAgent, json!("ua")),
+            is(Key::IgnoreHttpsErrors, json!(true)),
+        ]));
+
+        // Only the setting that also applies to an external browser changes.
+        assert_eq!(changed_keys(&plan), vec![Key::IgnoreHttpsErrors]);
+        let ignored: Vec<Key> = plan.ignored.iter().map(|c| c.key).collect();
+        assert_eq!(
+            ignored,
+            vec![
+                Key::Profile,
+                Key::Args,
+                Key::ExecutablePath,
+                Key::Extensions,
+                Key::Proxy,
+                Key::UserAgent
+            ]
+        );
+        assert_eq!(plan.next.get(Key::Args), None);
+        assert!(plan.ignored[0].to_ignored_json()["reason"].is_string());
+
+        let only_local = running.plan(&patch_of(&[is(Key::Args, json!(["--x"]))]));
+        assert!(
+            !only_local.relaunch,
+            "env args never start a new cloud session"
+        );
+        assert!(only_local.is_empty());
+    }
+}
+
+#[test]
+fn local_only_settings_apply_to_a_local_session() {
+    let plan = Running::defaults().plan(&patch_of(&[is(Key::Args, json!(["--x"]))]));
+    assert!(plan.relaunch && plan.ignored.is_empty());
+
+    // A target set by the same patch makes the local-only keys inert.
+    let plan = Running::defaults().plan(&patch_of(&[
+        is(Key::Provider, json!("browserbase")),
+        is(Key::Args, json!(["--x"])),
+    ]));
+    assert_eq!(plan.ignored.len(), 1);
+}
+
+#[test]
+fn no_xvfb_can_be_turned_off() {
+    let mut flags = blank_flags();
+    flags.no_xvfb_set = true;
+    flags.no_xvfb = false;
+    let patch = Patch::from_flags(&flags);
+    assert_eq!(patch.get(Key::NoXvfb), Some(&Requested::Set(json!(false))));
+
+    let running = running_with(&[(Key::NoXvfb, json!(true))]);
+    assert_eq!(changed_keys(&running.plan(&patch)), vec![Key::NoXvfb]);
+    assert!(Patch::from_flags(&blank_flags()).get(Key::NoXvfb).is_none());
+}
+
+#[test]
+fn inherited_local_settings_are_dropped_when_the_session_goes_external() {
+    let local = [
+        (Key::StorageState, json!("/s.json")),
+        (Key::Profile, json!("/p")),
+        (Key::Extensions, json!(["/e"])),
+        (Key::Proxy, json!("http://proxy:1")),
+        (Key::ProxyUsername, json!("user")),
+        (Key::ProxyPassword, json!("pw")),
+        (Key::ExecutablePath, json!("/chrome")),
+        (Key::Args, json!(["--x"])),
+    ];
+    for target in [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::Provider, json!("browserbase")),
+        (Key::AutoConnect, json!(true)),
+    ] {
+        let running = running_with(&local);
+        let plan = running.plan(&patch_of(&[is(target.0, target.1.clone())]));
+        for (key, _) in &local {
+            assert_eq!(plan.next.get(*key), None, "{key:?} survives {:?}", target.0);
+        }
+        let dropped: Vec<Key> = plan.ignored.iter().map(|c| c.key).collect();
+        assert!(dropped.contains(&Key::StorageState) && dropped.contains(&Key::ProxyPassword));
+        // Switching target relaunches once; dropping the values adds nothing.
+        assert_eq!(changed_keys(&plan), vec![target.0]);
+    }
+}
+
+#[test]
+fn local_settings_are_kept_while_the_session_stays_local() {
+    let running = running_with(&[
+        (Key::StorageState, json!("/s.json")),
+        (Key::ProxyUsername, json!("user")),
+    ]);
+    let plan = running.plan(&patch_of(&[is(Key::DefaultTimeout, json!(5000))]));
+    assert_eq!(plan.next.get(Key::StorageState), Some(&json!("/s.json")));
+    assert_eq!(plan.next.get(Key::ProxyUsername), Some(&json!("user")));
+    assert!(plan.ignored.is_empty());
+}
+
+#[test]
+fn an_empty_provider_resets_the_session_to_local() {
+    let running = running_with(&[(Key::Cdp, json!("9222"))]);
+    let plan = running.plan(&patch_of(&[is(Key::Provider, json!(""))]));
+    assert_eq!(plan.next.connection(), Connection::Local);
+    assert!(plan.relaunch);
 }
