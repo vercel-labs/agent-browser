@@ -4,6 +4,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+use super::bidi::SANDBOX;
 use super::daemon::session;
 use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
@@ -12,8 +13,6 @@ use crate::native::cookies::Cookie;
 use crate::native::state::{self, OriginStorage, StorageState};
 use crate::native::storage::storage_js_name;
 use crate::validation::{is_valid_session_name, session_name_error};
-
-const STORAGE_SANDBOX: &str = "agent-browser";
 
 /// Reads one origin's storage through a sandbox and returns `null` unless the page is still on
 /// `expectedOrigin`, checked in the same call so a navigation cannot race the read.
@@ -371,7 +370,7 @@ async fn read_origin_storage(
         .bidi
         .call_function_in_sandbox(
             context,
-            STORAGE_SANDBOX,
+            SANDBOX,
             ORIGIN_STORAGE_JS,
             vec![json!(expected_origin)],
         )
@@ -669,7 +668,7 @@ pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<
             .bidi
             .call_function_in_sandbox(
                 &landing.context,
-                STORAGE_SANDBOX,
+                SANDBOX,
                 RESTORE_STORAGE_JS,
                 vec![json!(origin.origin), json!(payload)],
             )
