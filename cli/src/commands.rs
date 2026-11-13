@@ -2532,7 +2532,7 @@ fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                         command["timeout"] = json!(timeout);
                         index += 1;
                     }
-                    raw if !raw.starts_with("--") => {
+                    raw if !raw.starts_with('-') => {
                         set_invoke_params(&mut command, &mut has_params, raw)?;
                     }
                     other => {
@@ -6711,6 +6711,21 @@ mod tests {
     fn test_webmcp_invoke_rejects_malformed_positional_params() {
         let result = parse_command(&args("webmcp invoke search not-json"), &default_flags());
         assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_webmcp_invoke_reports_single_dash_arguments_as_unknown_options() {
+        for input in [
+            "webmcp invoke search -frame f1",
+            r#"webmcp invoke search {"a":1} -d"#,
+        ] {
+            let err = parse_command(&args(input), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(
+                message.contains("Unknown webmcp invoke option"),
+                "{input} gave: {message}"
+            );
+        }
     }
 
     #[test]
