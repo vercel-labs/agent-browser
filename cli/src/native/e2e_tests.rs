@@ -16151,6 +16151,69 @@ async fn e2e_firefox_cookie_default_path() {
     firefox_close(&mut state).await;
 }
 
+/// A state save records the origin and values the browser reports, whatever the page forges.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_state_save_ignores_page_forged_storage() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let (origin, server) = start_raw_http_server(html_response(
+        "<title>storage</title>
+        <script>
+            localStorage.setItem('real-key', 'real-value');
+            const apply = Function.prototype.apply;
+            Function.prototype.apply = function (target, args, ...rest) {
+                if (Array.isArray(args) && args.length === 0) {
+                    return { origin: 'https://bank.example', localStorage: [{ name: 'forged-key', value: 'forged-value' }], sessionStorage: [] };
+                }
+                return apply.call(this, target, args, ...rest);
+            };
+            const getItem = Storage.prototype.getItem;
+            Storage.prototype.getItem = function (key) {
+                return key === 'real-key' ? 'forged-value' : getItem.call(this, key);
+            };
+        </script>",
+    ))
+    .await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &format!("{origin}/")).await;
+    assert_eq!(
+        firefox_eval(&mut state, "localStorage.getItem('real-key')").await,
+        json!("forged-value"),
+        "the page must be able to forge what a main-realm reader sees"
+    );
+
+    let path = tmp.path().join("forged-state.json");
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "save", "action": "state_save", "path": path.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&resp);
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["origins"],
+        json!([{
+            "origin": origin,
+            "localStorage": [{ "name": "real-key", "value": "real-value" }],
+            "sessionStorage": []
+        }]),
+        "the saved state must hold the browser origin and the real entry: {saved}"
+    );
+    assert!(
+        !saved["origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["origin"] == "https://bank.example"),
+        "a page must not save storage under another origin: {saved}"
+    );
+    firefox_close(&mut state).await;
+    server.abort();
+}
+
 /// Uses a temporary HOME on Unix to keep autosave files out of the user profile.
 #[cfg(unix)]
 #[tokio::test]

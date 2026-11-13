@@ -128,18 +128,6 @@ impl BidiClient {
         }
     }
 
-    /// Runs `script.callFunction` in a browsing context and returns the decoded result.
-    pub async fn call_function(
-        &self,
-        context: &str,
-        js: &str,
-        this: Option<Value>,
-        args: Vec<Value>,
-    ) -> Result<Value, String> {
-        self.call_function_target(json!({"context": context}), js, this, args)
-            .await
-    }
-
     /// Runs a function in a named sandbox, isolated from the page's JavaScript globals.
     pub(crate) async fn call_function_in_sandbox(
         &self,
