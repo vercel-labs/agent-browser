@@ -48,7 +48,7 @@ pub fn diff_screenshot(
     let rgba_a = img_a.to_rgba8();
     let rgba_b = img_b.to_rgba8();
     let total = (wa as u64) * (ha as u64);
-    let max_color_distance = threshold * 255.0 * (3.0_f64).sqrt();
+    let max_color_distance_squared = threshold * threshold * 255.0 * 255.0 * 3.0;
     let mut different = 0u64;
 
     let mut diff_img = image::RgbaImage::new(wa, ha);
@@ -57,16 +57,22 @@ pub fn diff_screenshot(
         for x in 0..wa {
             let pa = rgba_a.get_pixel(x, y);
             let pb = rgba_b.get_pixel(x, y);
-            let dr = (pa[0] as f64) - (pb[0] as f64);
-            let dg = (pa[1] as f64) - (pb[1] as f64);
-            let db = (pa[2] as f64) - (pb[2] as f64);
-            let dist = (dr * dr + dg * dg + db * db).sqrt();
+            // Compare the visible colors on a white background. RGB values
+            // beneath transparent pixels do not describe visible changes.
+            let visible = |pixel: &image::Rgba<u8>, channel: usize| {
+                let alpha = pixel[3] as u32;
+                (pixel[channel] as u32 * alpha + 255 * (255 - alpha)) as f64 / 255.0
+            };
+            let dr = visible(pa, 0) - visible(pb, 0);
+            let dg = visible(pa, 1) - visible(pb, 1);
+            let db = visible(pa, 2) - visible(pb, 2);
+            let distance_squared = dr * dr + dg * dg + db * db;
 
-            if dist > max_color_distance {
+            if distance_squared > max_color_distance_squared {
                 different += 1;
                 diff_img.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
             } else {
-                let gray = ((pa[0] as u16 + pa[1] as u16 + pa[2] as u16) / 3) as u8;
+                let gray = ((visible(pa, 0) + visible(pa, 1) + visible(pa, 2)) / 3.0) as u8;
                 let dimmed = (gray as f64 * 0.3) as u8;
                 diff_img.put_pixel(x, y, image::Rgba([dimmed, dimmed, dimmed, 255]));
             }
@@ -167,6 +173,49 @@ pub fn diff_unified(a: &str, b: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_diff_detects_a_visible_alpha_change() {
+        let result =
+            diff_screenshot(&pixel_png([0, 0, 0, 0]), &pixel_png([0, 0, 0, 255]), 0.0).unwrap();
+        assert!(!result.matched);
+        assert_eq!(result.different_pixels, 1);
+        assert_eq!(result.mismatch_percentage, 100.0);
+    }
+
+    #[test]
+    fn screenshot_diff_ignores_colors_beneath_full_transparency() {
+        let result =
+            diff_screenshot(&pixel_png([255, 0, 0, 0]), &pixel_png([0, 0, 255, 0]), 0.0).unwrap();
+        assert!(result.matched);
+        assert!(result.diff_image.is_none());
+    }
+
+    #[test]
+    fn screenshot_diff_compares_composited_partial_transparency() {
+        let result = diff_screenshot(
+            &pixel_png([0, 0, 0, 128]),
+            &pixel_png([127, 127, 127, 255]),
+            0.0,
+        )
+        .unwrap();
+        assert!(result.matched);
+    }
+
+    #[test]
+    fn screenshot_diff_preserves_opaque_thresholds() {
+        let black = pixel_png([0, 0, 0, 255]);
+        let white = pixel_png([255, 255, 255, 255]);
+        assert!(diff_screenshot(&black, &white, 1.0).unwrap().matched);
+        assert!(!diff_screenshot(&black, &white, 0.99).unwrap().matched);
+    }
+
+    fn pixel_png(color: [u8; 4]) -> Vec<u8> {
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba(color));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
 
     #[test]
     fn test_diff_identical() {
