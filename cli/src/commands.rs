@@ -3572,6 +3572,8 @@ fn parse_finite_f64(raw: &str, what: &str, usage: &'static str) -> Result<f64, P
         })
 }
 
+/// Parse `set` subcommands. `timezone` and `locale` accept any non-empty token;
+/// `off` and `default` map to an empty override so later tabs do not replay it.
 fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &[
         "viewport",
@@ -3583,6 +3585,8 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "credentials",
         "auth",
         "media",
+        "timezone",
+        "locale",
     ];
 
     match rest.first().copied() {
@@ -3694,13 +3698,49 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 json!({ "id": id, "action": "emulatemedia", "colorScheme": color, "reducedMotion": reduced }),
             )
         }
+        Some("timezone") => {
+            let tz = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "set timezone".to_string(),
+                usage: "set timezone <iana|off|default>",
+            })?;
+            if tz.is_empty() {
+                return Err(ParseError::MissingArguments {
+                    context: "set timezone".to_string(),
+                    usage: "set timezone <iana|off|default>",
+                });
+            }
+            let timezone_id = if *tz == "off" || *tz == "default" {
+                ""
+            } else {
+                *tz
+            };
+            Ok(json!({ "id": id, "action": "timezone", "timezoneId": timezone_id }))
+        }
+        Some("locale") => {
+            let tag = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "set locale".to_string(),
+                usage: "set locale <tag|off|default>",
+            })?;
+            if tag.is_empty() {
+                return Err(ParseError::MissingArguments {
+                    context: "set locale".to_string(),
+                    usage: "set locale <tag|off|default>",
+                });
+            }
+            let locale = if *tag == "off" || *tag == "default" {
+                ""
+            } else {
+                *tag
+            };
+            Ok(json!({ "id": id, "action": "locale", "locale": locale }))
+        }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
             valid_options: VALID,
         }),
         None => Err(ParseError::MissingArguments {
             context: "set".to_string(),
-            usage: "set <viewport|device|geo|offline|headers|credentials|media> [args...]",
+            usage: "set <viewport|device|geo|timezone|locale|offline|headers|credentials|media> [args...]",
         }),
     }
 }
@@ -6190,6 +6230,95 @@ mod tests {
         let zero = parse_command(&args("mouse wheel 0 0"), &default_flags()).unwrap();
         assert_eq!(zero["deltaY"], 0.0);
         assert_eq!(zero["deltaX"], 0.0);
+    }
+
+    #[test]
+    fn test_parse_command_set_timezone() {
+        let cmd = parse_command(&args("set timezone America/New_York"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "timezone");
+        assert_eq!(cmd["timezoneId"], "America/New_York");
+    }
+
+    #[test]
+    fn test_parse_command_set_timezone_off() {
+        let cmd = parse_command(&args("set timezone off"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "timezone");
+        assert_eq!(cmd["timezoneId"], "");
+    }
+
+    #[test]
+    fn test_parse_command_set_timezone_default() {
+        let cmd = parse_command(&args("set timezone default"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "timezone");
+        assert_eq!(cmd["timezoneId"], "");
+    }
+
+    #[test]
+    fn test_parse_command_set_timezone_missing() {
+        assert!(matches!(
+            parse_command(&args("set timezone"), &default_flags()),
+            Err(ParseError::MissingArguments { context, .. }) if context == "set timezone"
+        ));
+    }
+
+    #[test]
+    fn test_parse_command_set_timezone_empty_token() {
+        assert!(matches!(
+            parse_command(
+                &["set".into(), "timezone".into(), "".into()],
+                &default_flags(),
+            ),
+            Err(ParseError::MissingArguments { context, .. }) if context == "set timezone"
+        ));
+    }
+
+    #[test]
+    fn test_parse_command_set_locale() {
+        let cmd = parse_command(&args("set locale en-GB"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "locale");
+        assert_eq!(cmd["locale"], "en-GB");
+    }
+
+    #[test]
+    fn test_parse_command_set_locale_off() {
+        let cmd = parse_command(&args("set locale off"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "locale");
+        assert_eq!(cmd["locale"], "");
+    }
+
+    #[test]
+    fn test_parse_command_set_locale_default() {
+        let cmd = parse_command(&args("set locale default"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "locale");
+        assert_eq!(cmd["locale"], "");
+    }
+
+    #[test]
+    fn test_parse_command_set_locale_missing() {
+        assert!(matches!(
+            parse_command(&args("set locale"), &default_flags()),
+            Err(ParseError::MissingArguments { context, .. }) if context == "set locale"
+        ));
+    }
+
+    #[test]
+    fn test_parse_command_set_locale_empty_token() {
+        assert!(matches!(
+            parse_command(
+                &["set".into(), "locale".into(), "".into()],
+                &default_flags(),
+            ),
+            Err(ParseError::MissingArguments { context, .. }) if context == "set locale"
+        ));
+    }
+
+    #[test]
+    fn test_parse_command_set_unknown_lists_timezone_and_locale() {
+        let error = parse_command(&args("set bogon"), &default_flags())
+            .unwrap_err()
+            .format();
+        assert!(error.contains("timezone"), "{error}");
+        assert!(error.contains("locale"), "{error}");
     }
 
     #[test]
