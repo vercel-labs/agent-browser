@@ -7966,6 +7966,8 @@ mod tests {
         delay: Duration,
         /// Whether reading the tab's URL never returns in time.
         tab_hangs: bool,
+        /// A stalled cookie or route lookup before the HTTP request starts.
+        preflight_hangs: Option<&'static str>,
         /// Why the browser cannot start, if it cannot.
         launch_error: Option<String>,
     }
@@ -7981,6 +7983,7 @@ mod tests {
                 poll_each_run: None,
                 delay: Duration::ZERO,
                 tab_hangs: false,
+                preflight_hangs: None,
                 launch_error: None,
             }
         }
@@ -8014,9 +8017,15 @@ mod tests {
     #[async_trait::async_trait]
     impl Browser for ScriptBrowser {
         async fn cookie_header(&mut self, _: &str) -> Option<String> {
+            if self.preflight_hangs == Some("cookies") {
+                std::future::pending::<()>().await;
+            }
             None
         }
         async fn routed_response(&mut self, _: &str) -> Option<RoutedResponse> {
+            if self.preflight_hangs == Some("routes") {
+                std::future::pending::<()>().await;
+            }
             None
         }
         async fn tab_url(&mut self) -> Option<String> {
@@ -8687,6 +8696,35 @@ mod tests {
                 r.reason
             );
             drop(listener);
+        }
+
+        #[test]
+        fn http_preflight_obeys_the_run_deadline_before_sending() {
+            block_on(async {
+                let flow = flow_of(json!({}));
+                let client = http_client(None, &flow).await.unwrap();
+                for lookup in ["cookies", "routes"] {
+                    for write in [false, true] {
+                        let mut browser = ScriptBrowser::new(Vec::new(), Vec::new());
+                        browser.preflight_hangs = Some(lookup);
+                        let req = PreparedRequest {
+                            write,
+                            method: if write { "POST" } else { "GET" }.to_string(),
+                            ..prepared("s1r1")
+                        };
+                        let result = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            http::send(&client, &mut browser, &req, soon(20)),
+                        )
+                        .await
+                        .expect("the HTTP preflight must stop at the run deadline");
+                        assert!(!result.ok && !result.drift && !result.transport);
+                        assert_eq!(result.status, None);
+                        assert_eq!(result.stop, None, "a write was never sent");
+                        assert!(result.reason.unwrap().contains("time is up"));
+                    }
+                }
+            });
         }
 
         #[test]
