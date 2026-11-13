@@ -97,6 +97,37 @@ test("rejects JSON-RPC errors with the server's code", async () => {
   await client.close();
 });
 
+for (const response of [
+  {},
+  { result: {}, error: { code: -32603, message: "failed" } },
+  { result: {}, jsonrpc: "1.0" },
+  { error: null },
+  { error: { code: "-32603", message: "failed" } },
+  { error: { code: -32603, message: 42 } },
+]) {
+  test(`rejects malformed MCP response ${JSON.stringify(response)}`, async () => {
+    let first = true;
+    const server = fakeServer(initializeOr(() => {
+      if (first) { first = false; return response; }
+      return { result: { content: [] } };
+    }));
+    const client = await connectAgentBrowserMcp(server.process);
+    await assert.rejects(client.callTool("agent_browser_click"), /invalid JSON-RPC/);
+    assert.deepEqual(await client.callTool("agent_browser_snapshot"), { content: [] });
+    await client.close();
+  });
+}
+
+for (const result of [null, {}, { serverInfo: {} }, { serverInfo: { name: 1, version: "test" } }]) {
+  test(`cleans up invalid initialize result ${JSON.stringify(result)}`, async () => {
+    const server = fakeServer(() => ({ result }));
+    await assert.rejects(connectAgentBrowserMcp(server.process), /invalid server information/);
+    assert.equal(server.process.stdin.locked, false);
+    assert.equal(server.process.stdout.locked, false);
+    assert.equal(server.received.some((message) => message.method === "notifications/initialized"), false);
+  });
+}
+
 test("times out a request the server never answers", async () => {
   const server = fakeServer(initializeOr(() => undefined));
   const client = await connectAgentBrowserMcp(server.process, { timeout: 20 });
@@ -195,7 +226,7 @@ test("close rejects within the timeout when a write stalls", async () => {
       write() {
         if (++writes > 1) return new Promise(() => {});
         stdout.enqueue(
-          encoder.encode(`${JSON.stringify({ id: 1, jsonrpc: "2.0", result: { serverInfo: {} } })}\n`),
+          encoder.encode(`${JSON.stringify({ id: 1, jsonrpc: "2.0", result: { serverInfo: { name: "agent-browser", version: "test" } } })}\n`),
         );
       },
     }),

@@ -82,11 +82,22 @@ export async function connectAgentBrowserMcp(
   const reading = (async () => {
     for await (const line of readLines(reader)) {
       const message = parseMessage(line);
-      if (message === undefined || typeof message.id !== "number") continue;
+      if (message === undefined || message.method !== undefined || typeof message.id !== "number") {
+        continue;
+      }
       const entry = pending.get(message.id);
       if (entry === undefined) continue;
-      if (message.error !== undefined) entry.reject(new AgentBrowserMcpError(message.error));
-      else entry.resolve(message.result);
+      if (message.jsonrpc !== "2.0" || ("result" in message) === ("error" in message)) {
+        entry.reject(new Error("agent-browser mcp returned an invalid JSON-RPC response."));
+      } else if ("error" in message) {
+        entry.reject(
+          isRpcError(message.error)
+            ? new AgentBrowserMcpError(message.error)
+            : new Error("agent-browser mcp returned an invalid JSON-RPC error."),
+        );
+      } else {
+        entry.resolve(message.result);
+      }
     }
     failAll(new Error("agent-browser mcp closed its output."));
   })();
@@ -154,6 +165,13 @@ export async function connectAgentBrowserMcp(
       clientInfo: options.clientInfo ?? { name: "@agent-browser/sandbox", version: "0" },
       protocolVersion: AGENT_BROWSER_MCP_PROTOCOL_VERSION,
     });
+    if (
+      !initialized ||
+      typeof initialized.serverInfo?.name !== "string" ||
+      typeof initialized.serverInfo?.version !== "string"
+    ) {
+      throw new Error("agent-browser mcp returned invalid server information during initialization.");
+    }
   } catch (error) {
     failAll(toError(error));
     // A stalled write would hold abort() open, so release the streams without waiting.
@@ -219,9 +237,17 @@ async function* readLines(reader: ReadableStreamDefaultReader<Uint8Array>): Asyn
 }
 
 interface JsonRpcMessage {
-  readonly error?: { readonly code: number; readonly message: string; readonly data?: unknown };
+  readonly error?: unknown;
   readonly id?: unknown;
+  readonly jsonrpc?: unknown;
+  readonly method?: unknown;
   readonly result?: unknown;
+}
+
+function isRpcError(value: unknown): value is { code: number; message: string; data?: unknown } {
+  if (typeof value !== "object" || value === null) return false;
+  const error = value as Record<string, unknown>;
+  return Number.isInteger(error.code) && typeof error.message === "string";
 }
 
 function parseMessage(line: string): JsonRpcMessage | undefined {
