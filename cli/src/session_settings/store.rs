@@ -316,21 +316,18 @@ pub fn orphan_sessions(dir: &Path, is_live: impl Fn(&str) -> bool) -> Vec<String
     sessions
 }
 
-/// In-memory store for tests.
-#[cfg(test)]
+/// In-memory store: settings that belong to one process only.
 #[derive(Default)]
 pub struct MemStore {
     value: std::sync::Mutex<Option<SecurityView>>,
 }
 
-#[cfg(test)]
 impl MemStore {
     pub fn stored(&self) -> Option<SecurityView> {
         self.value.lock().unwrap().clone()
     }
 }
 
-#[cfg(test)]
 impl Store for MemStore {
     fn load(&self) -> Result<Option<SecurityView>, StoreError> {
         Ok(self.stored())

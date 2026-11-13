@@ -2027,14 +2027,11 @@ fn execute_url_read(mut cmd: serde_json::Value, flags: &Flags) -> Result<Respons
     }
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    // The same stored security settings a daemon for this session would boot
-    // with, without starting one.
-    let store: std::sync::Arc<dyn session_settings::Store> = std::sync::Arc::new(
-        session_settings::FsStore::new(&connection::get_socket_dir(), &flags.session),
+    // Settings live in this process: a read must not write daemon files.
+    let mut state = native::actions::DaemonState::with_store(
+        session_settings::Running::from_env(),
+        std::sync::Arc::new(session_settings::MemStore::default()),
     );
-    let settings = session_settings::Running::boot(store.as_ref(), &flags.session)
-        .map_err(|e| e.to_string())?;
-    let mut state = native::actions::DaemonState::with_store(settings, store);
     // The parser already stamped this invocation's merged domain allowlist.
     let response = rt.block_on(async {
         *state.domain_filter.write().await = None;
