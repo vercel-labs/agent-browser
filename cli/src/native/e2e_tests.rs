@@ -1988,6 +1988,116 @@ async fn e2e_presentational_cross_origin_iframe_refs_support_fill_and_inputvalue
     server.abort();
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_frame_css_selector_selects_cross_origin_iframes() {
+    // The top page is served from 127.0.0.1 and its iframes from localhost, so
+    // each iframe is cross-origin and runs out of process. Neither iframe has a
+    // `name` attribute; one is in the initial HTML, the other is added later.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/");
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.starts_with("GET /child ") {
+                    "<!doctype html><button>Child button</button>".to_string()
+                } else {
+                    format!(
+                        "<!doctype html><h1>Top</h1><div id='not-a-frame'></div><iframe id='static-frame' src='http://localhost:{port}/child'></iframe>"
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": url}),
+            &mut state,
+        )
+        .await,
+    );
+    let inject = format!(
+        "new Promise(resolve => {{ const f = document.createElement('iframe'); f.id = 'dynamic-frame'; f.src = 'http://localhost:{port}/child'; f.onload = () => resolve(true); document.body.appendChild(f); }})"
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "evaluate", "script": inject}),
+            &mut state,
+        )
+        .await,
+    );
+
+    for frame in ["static-frame", "dynamic-frame"] {
+        let resp = execute_command(
+            &json!({"id": format!("frame-{frame}"), "action": "frame", "selector": format!("#{frame}")}),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["frame"], frame);
+        assert!(state.active_frame_id.is_some());
+
+        let snapshot = execute_command(
+            &json!({"id": format!("snap-{frame}"), "action": "snapshot"}),
+            &mut state,
+        )
+        .await;
+        assert_success(&snapshot);
+        let refs = get_data(&snapshot)["refs"].as_object().unwrap();
+        assert!(
+            refs.values()
+                .any(|node| node["role"] == "button" && node["name"] == "Child button"),
+            "snapshot scoped to #{frame} should contain the child button: {}",
+            serde_json::to_string_pretty(&snapshot).unwrap_or_default()
+        );
+        assert!(
+            !refs.values().any(|node| node["role"] == "heading"),
+            "snapshot scoped to #{frame} should not contain the top heading"
+        );
+        assert_success(
+            &execute_command(
+                &json!({"id": format!("main-{frame}"), "action": "mainframe"}),
+                &mut state,
+            )
+            .await,
+        );
+    }
+
+    for selector in ["#not-a-frame", "#missing"] {
+        let resp = execute_command(
+            &json!({"id": "bad", "action": "frame", "selector": selector}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Could not find frame for selector"));
+    }
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    server.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
