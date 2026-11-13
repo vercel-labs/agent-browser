@@ -450,8 +450,11 @@ pub(super) async fn cdp_event_loop(
                                                 "metadata": {
                                                     "offsetTop": meta.and_then(|m| m.get("offsetTop")).and_then(|v| v.as_f64()).unwrap_or(0.0),
                                                     "pageScaleFactor": meta.and_then(|m| m.get("pageScaleFactor")).and_then(|v| v.as_f64()).unwrap_or(1.0),
-                                                    "deviceWidth": vw,
-                                                    "deviceHeight": vh,
+                                                    // Forward the real page size from CDP. Clients map
+                                                    // pointer input into this space, and the configured
+                                                    // viewport can differ from it (window chrome, resizes).
+                                                    "deviceWidth": meta.and_then(|m| m.get("deviceWidth")).and_then(|v| v.as_f64()).unwrap_or(vw as f64),
+                                                    "deviceHeight": meta.and_then(|m| m.get("deviceHeight")).and_then(|v| v.as_f64()).unwrap_or(vh as f64),
                                                     "scrollOffsetX": meta.and_then(|m| m.get("scrollOffsetX")).and_then(|v| v.as_f64()).unwrap_or(0.0),
                                                     "scrollOffsetY": meta.and_then(|m| m.get("scrollOffsetY")).and_then(|v| v.as_f64()).unwrap_or(0.0),
                                                     "timestamp": frame_timestamp_ms(meta),

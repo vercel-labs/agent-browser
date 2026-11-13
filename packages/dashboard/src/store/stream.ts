@@ -24,7 +24,18 @@ export const screencastingAtom = atom(false);
 export const recordingAtom = atom(false);
 export const viewportWidthAtom = atom(1280);
 export const viewportHeightAtom = atom(720);
-export const currentFrameAtom = atom<string | null>(null);
+/**
+ * Latest screencast frame. `deviceWidth` and `deviceHeight` are the page's
+ * CSS size from the CDP frame metadata, which pointer input must be mapped
+ * into. They can differ from the configured viewport above, for example when
+ * the browser window's content area is smaller than the requested viewport.
+ */
+export interface StreamFrame {
+  data: string;
+  deviceWidth: number;
+  deviceHeight: number;
+}
+export const currentFrameAtom = atom<StreamFrame | null>(null);
 export const streamEventsAtom = atom<ActivityEvent[]>([]);
 export const consoleLogsAtom = atom<ConsoleEntry[]>([]);
 export const streamTabsAtom = atom<TabInfo[]>([]);
@@ -150,7 +161,11 @@ export function useStreamSync(port: number) {
 
       switch (msg.type) {
         case "frame":
-          setFrame(msg.data);
+          setFrame({
+            data: msg.data,
+            deviceWidth: msg.metadata?.deviceWidth ?? 0,
+            deviceHeight: msg.metadata?.deviceHeight ?? 0,
+          });
           break;
 
         case "status":
