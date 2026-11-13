@@ -62,7 +62,8 @@ With `--json`, `--omit-command` replaces each `command` array with a stable zero
 ```bash
 agent-browser snapshot            # Full accessibility tree
 agent-browser snapshot -i         # Interactive elements only (recommended)
-agent-browser snapshot -c         # Compact output
+agent-browser snapshot -c         # Compact: fit in about 2000 tokens
+agent-browser snapshot -c --max-tokens 800  # Compact with a custom budget (0 = no cap)
 agent-browser snapshot -d 3       # Limit depth to 3
 agent-browser snapshot -s "#main" # Scope to CSS selector
 agent-browser snapshot --delta     # Full state once, then bounded structural deltas

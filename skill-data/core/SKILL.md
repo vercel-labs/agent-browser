@@ -84,7 +84,7 @@ Load another skill with `agent-browser skills get <name>` when the task is outsi
 agent-browser snapshot -i                 # interactive elements (preferred)
 agent-browser snapshot                    # full tree
 agent-browser snapshot -i -u              # include link hrefs
-agent-browser snapshot -i -c              # compact: drop empty structural nodes
+agent-browser snapshot -i -c              # compact: fit in ~2000 tokens, refs unchanged
 agent-browser snapshot -s "#main"         # scope to a CSS selector
 agent-browser snapshot -i --delta         # full state once, then only changes
 agent-browser snapshot -i --json          # machine-readable

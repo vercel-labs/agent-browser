@@ -3730,7 +3730,7 @@
         "properties": {
           "compact": {
             "default": false,
-            "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text.",
+            "description": "Budget mode: drop empty structure, collapse long tables and lists, truncate long text and values, and keep the highest-priority lines (controls first, then headings and landmarks, labels, other text) within maxTokens. Omitted content is marked with lines such as '… 480 more rows'. Refs match the full snapshot.",
             "type": "boolean"
           },
           "delta": {
@@ -3757,6 +3757,11 @@
             "default": true,
             "description": "Only include interactive elements.",
             "type": "boolean"
+          },
+          "maxTokens": {
+            "description": "Approximate token budget for compact snapshots (default 2000, 0 for no cap). Implies compact. Collapsing and truncation apply at any budget, so raising it only restores lines the budget cut; set compact to false to see collapsed items.",
+            "minimum": 0,
+            "type": "integer"
           },
           "selector": {
             "description": "Scope the snapshot to a CSS selector.",

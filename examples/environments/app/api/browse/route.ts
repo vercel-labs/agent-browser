@@ -66,7 +66,6 @@ export async function POST(req: NextRequest) {
         } else {
           const result = await sandbox.snapshotUrl(url, {
             interactive: true,
-            compact: true,
             onStep,
           });
           send("result", { ok: true, ...result });

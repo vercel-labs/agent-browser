@@ -1031,6 +1031,19 @@ fn parse_command_inner(
                     "-C" | "--cursor" => {
                         obj.insert("cursor".to_string(), json!(true));
                     }
+                    "--max-tokens" => {
+                        let value = rest.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                        let Some(n) = value else {
+                            return Err(ParseError::InvalidValue {
+                                message: "--max-tokens requires a non-negative integer".to_string(),
+                                usage: "snapshot -c [--max-tokens <n>]",
+                            });
+                        };
+                        // A budget only applies to compact snapshots, so it implies -c.
+                        obj.insert("compact".to_string(), json!(true));
+                        obj.insert("maxTokens".to_string(), json!(n));
+                        i += 1;
+                    }
                     "-u" | "--urls" => {
                         obj.insert("urls".to_string(), json!(true));
                     }
@@ -5473,6 +5486,31 @@ mod tests {
         let cmd = parse_command(&args("snapshot --compact"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["compact"], true);
+    }
+
+    #[test]
+    fn test_snapshot_max_tokens_implies_compact() {
+        let cmd = parse_command(&args("snapshot -i --max-tokens 800"), &default_flags()).unwrap();
+        assert_eq!(cmd["compact"], true);
+        assert_eq!(cmd["interactive"], true);
+        assert_eq!(cmd["maxTokens"], 800);
+
+        let cmd = parse_command(&args("snapshot -c --max-tokens 0"), &default_flags()).unwrap();
+        assert_eq!(cmd["maxTokens"], 0);
+
+        let cmd = parse_command(&args("snapshot -c"), &default_flags()).unwrap();
+        assert!(cmd.get("maxTokens").is_none());
+
+        for bad in [
+            "snapshot --max-tokens",
+            "snapshot --max-tokens lots",
+            "snapshot --max-tokens -5",
+        ] {
+            assert!(matches!(
+                parse_command(&args(bad), &default_flags()),
+                Err(ParseError::InvalidValue { .. })
+            ));
+        }
     }
 
     #[test]

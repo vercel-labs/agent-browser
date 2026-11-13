@@ -9,12 +9,13 @@ The `snapshot` command returns a compact accessibility tree with refs for elemen
 
 Filter output to reduce size:
 
-Compact snapshots (`-c`) keep visible text, status text, and their direct ancestors. Empty sibling branches are removed. Interactive snapshots (`-i`) filter out noninteractive content. MCP snapshots default to interactive; set `interactive: false` to retain visible text and status text.
+Compact snapshots (`-c`) fit the tree in a token budget. See [Compact snapshots](#compact-snapshots). Interactive snapshots (`-i`) filter out noninteractive content. MCP snapshots default to interactive; set `interactive: false` to retain visible text and status text.
 
 ```bash
 agent-browser snapshot                    # Full accessibility tree
 agent-browser snapshot -i                 # Interactive elements only (recommended)
-agent-browser snapshot -c                 # Compact (remove empty elements)
+agent-browser snapshot -c                 # Compact (fit in about 2000 tokens)
+agent-browser snapshot -c --max-tokens 800  # Compact with a smaller budget
 agent-browser snapshot -d 3               # Limit depth to 3 levels
 agent-browser snapshot -s "#main"         # Scope to CSS selector
 agent-browser snapshot -i -c -d 5         # Combine options
@@ -27,11 +28,56 @@ agent-browser snapshot -i -c -d 5         # Combine options
   <tbody>
     <tr><td><code>-i, --interactive</code></td><td>Only interactive elements (buttons, links, inputs)</td></tr>
     <tr><td><code>-u, --urls</code></td><td>Include href URLs for link elements</td></tr>
-    <tr><td><code>-c, --compact</code></td><td>Remove empty structural elements</td></tr>
+    <tr><td><code>-c, --compact</code></td><td>Fit the snapshot in a token budget, keeping the most important lines</td></tr>
+    <tr><td><code>--max-tokens &lt;n&gt;</code></td><td>Compact budget in approximate tokens (default 2000, <code>0</code> for no cap). Implies <code>-c</code></td></tr>
     <tr><td><code>-d, --depth</code></td><td>Limit tree depth</td></tr>
     <tr><td><code>-s, --selector</code></td><td>Scope to CSS selector</td></tr>
   </tbody>
 </table>
+
+## Compact snapshots
+
+`snapshot -c` keeps a large page readable within a fixed budget. The default snapshot output does not change.
+
+1. Structural lines with no content below them are removed.
+2. Runs of more than 12 adjacent siblings with the same role, such as table rows, list items, select options, and links, keep their first 5 and last 2 items. Items that contain a focused, selected, or checked element are kept too, as are items with interactive content when no more than a quarter of the run has any. Header rows are always kept and are not counted. A marker states how many items were hidden and the total, for example `- … 493 more rows (500 total)`.
+3. Text and values longer than 100 characters are shortened with an ellipsis, including the values of text fields. Names of interactive elements are never shortened. Text that only repeats a nearby name, such as a label matching its input, is dropped.
+4. If the tree is still over budget, lines are kept in priority order with their ancestors, so the output remains a tree. Interactive elements rank first, then headings and landmarks, then labels and text next to controls, then other text. Links inside running text rank just below headings, except in the viewport or in the first paragraph or list under a heading, where they rank with other controls. A link that only repeats its heading, such as a section permalink, ranks with headings. A line kept from a table row brings the row's identifying cell (its row header, or else its first named cell), and a link kept from the paragraph under a heading brings that heading unless a parent such as a named region already shows its name. The focused element is always kept. Content in the viewport and in open dialogs ranks higher, and hidden, offscreen, and collapsed content ranks lower. Each parent with omitted children gets one marker such as `- … 12 more links`.
+
+When anything is omitted, the last line reports how much was shown and how to see more, for example `(compact: showing 107 of 591 lines; ...)`. Collapsing and shortening happen at any budget, so raising `--max-tokens` or scoping the snapshot with `-s` only brings back lines the budget cut. To see collapsed items or full text, run the snapshot without `-c`. The last line names only the options that help: `--max-tokens` and `-s` when the budget cut lines, and dropping `-c` when items were collapsed.
+
+Because `-c` hides content, scripts that process the whole snapshot should use plain `snapshot` or `snapshot -i`.
+
+```bash
+agent-browser snapshot -c
+# - main
+#   - heading "Customers" [level=1, ref=e1]
+#   - search
+#     - LabelText
+#       - searchbox "Filter customers" [ref=e6]
+#     - button "Apply filter" [ref=e3]
+#   - table "All customers (500)"
+#     - rowgroup
+#       - row
+#         - columnheader "Select all" [ref=e3007]
+#           - checkbox "Select all" [checked=false, ref=e4513]
+#         ...
+#     - row
+#       - cell "Select customer 1" [ref=e7]
+#         - checkbox "Select customer 1" [checked=false, ref=e3013]
+#       ...
+#     - … 493 more rows (500 total)
+#     ...
+#   - navigation "Pagination" [ref=e2]
+#     - link "Previous" [ref=e4]
+#     - StaticText " Page 2 of 40 "
+#     - link "Next" [ref=e5]
+# (compact: showing 92 of 5022 lines; use --max-tokens <n> or -s <selector> for more, or drop -c to see collapsed items)
+```
+
+Compaction only hides lines. A compact snapshot assigns the same refs as a full snapshot of the same page, and refs of hidden lines still work with `click`, `fill`, and other commands. `-i` combines with `-c`: the interactive tree is collapsed and budgeted the same way. `-i -c` also prints table rows and the `table`/`rowgroup` lines above them, and `list` and `tree` lines (they have no ref), so a table collapses by whole rows, rows or links from separate tables and lists never share one collapsed run, and each kept button or link is shown with its row's identifying cell. These added lines do not count toward `-d`, so `-i -c -d <n>` keeps the same controls as `-i -d <n>`. Plain `-i` output does not change.
+
+The budget is estimated from line length, calibrated against the o200k tokenizer, and errs high, so real token counts usually land at or under the budget. `diff snapshot --compact` only removes empty structure and does not apply a budget, so diffs stay complete.
 
 ## Output format
 

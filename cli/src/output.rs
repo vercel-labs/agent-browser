@@ -2747,16 +2747,37 @@ Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
 Options:
   -i, --interactive    Only include interactive elements
   -u, --urls           Include href URLs for link elements
-  -c, --compact        Remove empty structural elements
+  -c, --compact        Fit the snapshot in a token budget (default about 2000)
+      --max-tokens <n> Set the compact budget; implies -c. 0 removes the cap
   -d, --depth <n>      Limit tree depth
   -s, --selector <sel> Scope snapshot to CSS selector
       --delta          Return full state once, then unchanged or structural deltas
                        Deltas include ref changes and an exact treeChange line splice
       --full           Force full state and update the delta baseline
 
-Compact snapshots keep visible text, status text, and their direct ancestors.
-Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
-interactive to false to retain visible text and status text.
+Compact snapshots drop empty structure, collapse long tables, lists, and
+selects to their first and last items (plus focused, selected, or checked
+ones), and shorten text and values longer than 100 characters. Interactive
+names are never shortened. When the tree is still over budget, the most important lines are
+kept with their ancestors: controls first, then headings and landmarks, then
+labels, then other text. Links in running text rank below headings unless they
+are in the viewport or in the first paragraph under a heading. Focused,
+in-viewport, and open dialog content ranks higher; hidden, offscreen, and
+collapsed content ranks lower. A control kept from a table row is shown with
+the row's identifying cell. Omitted content is marked with lines such as
+"- … 480 more rows (500 total)". Collapsing and shortening happen at any
+budget, so --max-tokens and -s only bring back lines the budget cut; drop -c
+to see collapsed items. Scripts that need every line should not use -c.
+
+Refs in compact output are the same refs the full snapshot prints, and refs
+of omitted lines keep working with click, fill, and other commands.
+
+Interactive snapshots filter out noninteractive content and combine with -c;
+-i -c also prints table rows and their table, list, and tree containers, so
+each row's cells stay together and separate short lists are not collapsed
+as one. These lines do not count toward -d.
+MCP snapshots default to interactive; set interactive to false to retain
+visible text and status text.
 
 Hints:
 Controls with an empty or duplicated accessible name print hint="..." after
@@ -2770,6 +2791,8 @@ Examples:
   agent-browser snapshot
   agent-browser snapshot -i
   agent-browser snapshot -i --urls
+  agent-browser snapshot -c
+  agent-browser snapshot -i -c --max-tokens 800
   agent-browser snapshot --compact --depth 5
   agent-browser snapshot -s "#main-content"
   agent-browser snapshot --delta
@@ -4010,7 +4033,7 @@ Snapshot Diff:
   Options:
     -b, --baseline <file>    Compare against a saved snapshot file
     -s, --selector <sel>     Scope snapshot to a CSS selector or @ref
-    -c, --compact            Use compact snapshot format
+    -c, --compact            Remove empty structural elements (no token budget)
     -d, --depth <n>          Limit snapshot tree depth
 
   Without --baseline, compares against the last snapshot taken in this session.
@@ -4035,7 +4058,7 @@ URL Diff:
     --full                   Full page screenshots
     --wait-until <strategy>  Navigation wait strategy: load, domcontentloaded, networkidle (default: load)
     -s, --selector <sel>     Scope snapshots to a CSS selector or @ref
-    -c, --compact            Use compact snapshot format
+    -c, --compact            Remove empty structural elements (no token budget)
     -d, --depth <n>          Limit snapshot tree depth
 
 Global Options:
@@ -4614,7 +4637,8 @@ Setup:
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
-  -c, --compact              Remove empty structural elements
+  -c, --compact              Fit in a token budget, ranked by importance
+  --max-tokens <n>           Compact token budget (default 2000; 0 = no cap)
   -d, --depth <n>            Limit tree depth
   -s, --selector <sel>       Scope to CSS selector
 
