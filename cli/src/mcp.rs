@@ -1372,7 +1372,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_NETWORK_HAR_STOP,
             "HAR stop",
-            "Stop HAR capture.",
+            "Stop an active HAR capture and export it, including captures with no requests. Fails if no recording is active. A failed export can be retried.",
             json!({ "path": { "type": "string" } }),
             &[],
         ),

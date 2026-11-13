@@ -268,6 +268,8 @@ agent-browser network har stop [output.har]    # Stop and save HAR
 
 If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
 
+Stopping requires an active HAR recording. After a daemon restart or a successful export, start a new recording before stopping again. Stopping an active recording with no requests saves an empty HAR.
+
 ## Saved flows
 
 Experimental. A run can fail on a page that changed or answers differently each time; when it does, the flow is marked unverified and you continue with the UI.

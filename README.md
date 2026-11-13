@@ -99,6 +99,8 @@ Run `agent-browser --help` for the full list, or `agent-browser <command> --help
 
 Flags, environment variables, and `agent-browser.json` are documented in [Configuration](https://agent-browser.dev/configuration).
 
+To export a HAR, run `network har start` before `network har stop`. Start a new recording after a successful export or daemon restart.
+
 ## Platforms
 
 Native binaries ship for macOS (ARM64, x64), Linux (ARM64, x64, glibc and musl), and Windows (x64). The npm package picks the right binary for the host.

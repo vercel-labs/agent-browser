@@ -3089,6 +3089,10 @@ Examples:
   agent-browser network har start
   agent-browser network har start --content all
   agent-browser network har stop ./capture.har
+
+HAR stop requires an active recording. After a daemon restart or a successful
+export, start a new recording. An active recording with no requests exports an
+empty HAR. Failed exports keep the recording available for retry.
 "##
         }
 
