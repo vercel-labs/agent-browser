@@ -75,7 +75,7 @@ Load another skill with `agent-browser skills get <name>` when the task is outsi
 | `webmcp-gen` | Build and validate WebMCP tools for a page |
 | `modern-web-guidance` | Apply Chrome's Modern Web Guidance to UI code and verify the built page in the browser |
 | `vercel-sandbox` | agent-browser inside Vercel Sandbox microVMs |
-| `protected-vercel-deployments` | Vercel deployments behind Authentication, SSO, or Deployment Protection |
+| `vercel` | Vercel deployments behind Authentication, SSO, or Deployment Protection, or viewed at a different feature flag variant |
 | `agentcore` | AWS Bedrock AgentCore cloud browsers |
 
 ## Reading a page
@@ -178,6 +178,8 @@ agent-browser auth login my-app
 ```
 
 Load `references/authentication.md` for `--no-navigate`, credential provider plugins, and importing a logged-in browser.
+
+To get past a login wall, deployment protection, or a feature flag, pass the credential or override on this browser's requests with a header or cookie. Do not change shared project state, such as a flag's served variant or protection settings, without explicit approval.
 
 ### Keep a login across runs
 
