@@ -654,13 +654,24 @@ mod agentcore {
         AGENTCORE_WS_HEADERS.with(|cell| cell.borrow_mut().take())
     }
 
-    pub async fn connect() -> Result<(String, Option<ProviderSession>), String> {
-        let region = env::var("AGENTCORE_REGION")
+    /// Region for AgentCore requests: `AGENTCORE_REGION`, then the AWS SDK
+    /// variables `AWS_REGION` and `AWS_DEFAULT_REGION`, then `us-east-1`.
+    pub(super) fn region_from_env() -> String {
+        env::var("AGENTCORE_REGION")
             .or_else(|_| env::var("AWS_REGION"))
             .or_else(|_| env::var("AWS_DEFAULT_REGION"))
-            .unwrap_or_else(|_| "us-east-1".to_string());
-        let browser_id =
-            env::var("AGENTCORE_BROWSER_ID").unwrap_or_else(|_| "aws.browser.v1".to_string());
+            .unwrap_or_else(|_| "us-east-1".to_string())
+    }
+
+    /// Browser identifier for AgentCore requests: `AGENTCORE_BROWSER_ID`, then
+    /// the AWS-managed `aws.browser.v1`.
+    pub(super) fn browser_id_from_env() -> String {
+        env::var("AGENTCORE_BROWSER_ID").unwrap_or_else(|_| "aws.browser.v1".to_string())
+    }
+
+    pub async fn connect() -> Result<(String, Option<ProviderSession>), String> {
+        let region = region_from_env();
+        let browser_id = browser_id_from_env();
         let timeout_secs: u64 = env::var("AGENTCORE_SESSION_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -952,15 +963,7 @@ mod agentcore {
         let info = get_agentcore_info();
         let (region, browser_id) = match &info {
             Some(i) => (i.region.clone(), i.browser_identifier.clone()),
-            None => {
-                let region = env::var("AGENTCORE_REGION")
-                    .or_else(|_| env::var("AWS_REGION"))
-                    .or_else(|_| env::var("AWS_DEFAULT_REGION"))
-                    .unwrap_or_else(|_| "us-east-1".to_string());
-                let browser_id = env::var("AGENTCORE_BROWSER_ID")
-                    .unwrap_or_else(|_| "aws.browser.v1".to_string());
-                (region, browser_id)
-            }
+            None => (region_from_env(), browser_id_from_env()),
         };
 
         let host = format!("bedrock-agentcore.{}.amazonaws.com", region);
@@ -1291,20 +1294,27 @@ mod tests {
 
     #[test]
     fn test_agentcore_env_defaults() {
-        // Test that default values are used when env vars not set
-        std::env::remove_var("AGENTCORE_REGION");
-        std::env::remove_var("AGENTCORE_BROWSER_ID");
-        std::env::remove_var("AGENTCORE_SESSION_TIMEOUT");
+        let vars = [
+            "AGENTCORE_REGION",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "AGENTCORE_BROWSER_ID",
+        ];
+        let guard = EnvGuard::new(&vars);
+        for name in vars {
+            guard.remove(name);
+        }
+        assert_eq!(agentcore::region_from_env(), "us-east-1");
+        assert_eq!(agentcore::browser_id_from_env(), "aws.browser.v1");
 
-        // These would be used in connect() - just verify they don't panic
-        let region = std::env::var("AGENTCORE_REGION")
-            .or_else(|_| std::env::var("AWS_REGION"))
-            .unwrap_or_else(|_| "us-east-1".to_string());
-        assert_eq!(region, "us-east-1");
-
-        let browser_id =
-            std::env::var("AGENTCORE_BROWSER_ID").unwrap_or_else(|_| "aws.browser.v1".to_string());
-        assert_eq!(browser_id, "aws.browser.v1");
+        guard.set("AWS_DEFAULT_REGION", "eu-west-1");
+        assert_eq!(agentcore::region_from_env(), "eu-west-1");
+        guard.set("AWS_REGION", "eu-central-1");
+        assert_eq!(agentcore::region_from_env(), "eu-central-1");
+        guard.set("AGENTCORE_REGION", "us-west-2");
+        assert_eq!(agentcore::region_from_env(), "us-west-2");
+        guard.set("AGENTCORE_BROWSER_ID", "custom-browser");
+        assert_eq!(agentcore::browser_id_from_env(), "custom-browser");
     }
 
     #[test]
