@@ -31,11 +31,11 @@ Browser responses automatically announce WebMCP tools on first discovery and whe
 ```bash
 agent-browser open https://example.com  # Announces brief tool summary
 agent-browser webmcp list search --json # Fetch only the selected schema
-agent-browser webmcp invoke search '{"query":"browser agents"}'
-agent-browser webmcp invoke search --params '{"query":"browser agents"}'  # Same input as a flag
+agent-browser webmcp invoke search --params '{"query":"browser agents"}'
 agent-browser webmcp invoke slow_tool --params @input.json --detach
 agent-browser webmcp result <invocation-id>
 agent-browser webmcp cancel <invocation-id>
+agent-browser webmcp invoke search '{"query":"browser agents"}'  # Same input, after the tool name
 ```
 
 JSON exposes updates as `data.webmcp`; CLI and MCP text use the same summaries. An omitted field means no update. A one-time `status: "ready"` update with `tools: []` clears previously advertised tools; `status: "unavailable"` invalidates them when observation fails. Every emitted summary replaces earlier availability, including schema-only changes. After conversation compaction or joining an existing browser session, use `webmcp list` to recover context. Administrative commands and explicit metadata requests do not append duplicate summaries.
