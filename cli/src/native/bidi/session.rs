@@ -478,7 +478,7 @@ impl FirefoxSession {
     }
 
     /// Returns whether this session attached to a Firefox someone else runs.
-    fn is_attached(&self) -> bool {
+    pub(crate) fn is_attached(&self) -> bool {
         self.process.is_none()
     }
 

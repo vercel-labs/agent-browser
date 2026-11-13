@@ -3323,6 +3323,14 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // disables a sticky pin restored from disk or enabled earlier. Both are
     // persisted with the binding so the setting survives daemon restarts;
     // absence of the field leaves the current state untouched.
+    if cmd.get("pinTab").and_then(Value::as_bool) == Some(true)
+        && state
+            .firefox
+            .as_ref()
+            .is_some_and(bidi::session::FirefoxSession::is_attached)
+    {
+        return error_response(&id, FIREFOX_ATTACH_PIN_TAB_ERROR);
+    }
     match cmd.get("pinTab").and_then(|v| v.as_bool()) {
         Some(pin) if pin != state.pin_tab => {
             // Persist the pinned state before committing it to live state, so a
@@ -5973,6 +5981,11 @@ async fn firefox_session_has_exited(session: &mut bidi::session::FirefoxSession)
     session.has_exited()
 }
 
+/// Why `--pin-tab` is refused for an attached Firefox: the binding cannot be enforced there, so
+/// a closed tab would hand later commands to another tab.
+const FIREFOX_ATTACH_PIN_TAB_ERROR: &str =
+    "--pin-tab is not supported with Firefox attach; pass --no-pin-tab to disable it";
+
 /// Starts or attaches to Firefox with the session's resolved settings.
 async fn launch_firefox(
     state: &mut DaemonState,
@@ -5997,10 +6010,7 @@ async fn launch_firefox(
     };
     let attached = cdp.is_some();
     if attached && state.pin_tab {
-        return Err(
-            "--pin-tab is not supported with Firefox attach; pass --no-pin-tab to disable it"
-                .to_string(),
-        );
+        return Err(FIREFOX_ATTACH_PIN_TAB_ERROR.to_string());
     }
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
         allowed_domains: &allowed_domains,
@@ -23904,6 +23914,30 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let (ff, _tx, calls) = fake_session().await;
         state.firefox = Some(ff);
         (env, state, calls)
+    }
+
+    #[tokio::test]
+    async fn test_pin_tab_is_refused_on_a_firefox_that_is_already_attached() {
+        let (_env, mut state, calls) = attached_firefox_state().await;
+        for _ in 0..2 {
+            let resp = execute_command(
+                &json!({ "id": "1", "action": "url", "pinTab": true }),
+                &mut state,
+            )
+            .await;
+            assert_eq!(resp["success"], false, "{resp}");
+            assert!(
+                resp["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("--pin-tab is not supported")),
+                "{resp}"
+            );
+            assert!(!state.pin_tab, "a refused pin must not be recorded");
+        }
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "a refused command must not reach the browser"
+        );
     }
 
     fn attached_firefox_settings_command() -> Value {
