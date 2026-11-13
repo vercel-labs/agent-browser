@@ -6327,6 +6327,56 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_preserves_state_list_unix_seconds() {
+        let response = json!({
+            "success": true,
+            "data": {
+                "directory": "/tmp/.agent-browser/sessions",
+                "files": [
+                    {
+                        "filename": "timestamp-fixture.json",
+                        "path": "/tmp/.agent-browser/sessions/timestamp-fixture.json",
+                        "size": 30,
+                        "modified": 1_794_000_000,
+                        "encrypted": false
+                    },
+                    {
+                        "filename": "vault.json.enc",
+                        "path": "/tmp/.agent-browser/sessions/vault.json.enc",
+                        "size": 30,
+                        "modified": 1_794_000_000,
+                        "encrypted": true
+                    }
+                ]
+            }
+        });
+        let result = tool_result_from_run(CliRun {
+            exit_code: Some(0),
+            stdout: response.to_string(),
+            stderr: String::new(),
+        });
+
+        assert_eq!(result["structuredContent"]["response"], response);
+        let structured_files = result["structuredContent"]["response"]["data"]["files"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            structured_files[0]["modified"].as_u64(),
+            Some(1_794_000_000)
+        );
+        assert_eq!(
+            structured_files[0]["path"],
+            "/tmp/.agent-browser/sessions/timestamp-fixture.json"
+        );
+        assert_eq!(structured_files[0]["size"].as_u64(), Some(30));
+        assert_eq!(structured_files[1]["encrypted"], true);
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let text_response: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(text_response, response);
+    }
+
+    #[test]
     fn tool_result_preserves_webmcp_in_text_and_structured_content() {
         let context = json!({"status": "ready", "toolCount": 1, "tools": [{
             "name": "search", "description": "Search products", "frameId": "main",

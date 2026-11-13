@@ -274,6 +274,8 @@ agent-browser state save ./backup.json
 agent-browser state load ./backup.json
 ```
 
+Text output from `agent-browser state list` shows modification dates in UTC. JSON output preserves the original Unix seconds.
+
 ## Authenticated sessions
 
 Use `--headers` to set HTTP headers for a specific origin:
