@@ -1988,6 +1988,10 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             print_confirmation_required(pending);
             return;
         }
+        if let Some(err) = confirmed_replay_error(data) {
+            eprintln!("{} {}", color::error_indicator(), err);
+            return;
+        }
         if data
             .get("confirmed")
             .and_then(|v| v.as_bool())
@@ -2007,6 +2011,23 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
 
         // Default success
         println!("{} Done", color::success_indicator());
+    }
+}
+
+fn confirmed_replay_error(data: &serde_json::Value) -> Option<&str> {
+    if data.get("confirmed").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let result = data.get("result")?;
+    if result.get("success").and_then(|v| v.as_bool()) == Some(false) {
+        Some(
+            result
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Confirmed action failed"),
+        )
+    } else {
+        None
     }
 }
 
@@ -4980,6 +5001,24 @@ pub fn print_version() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn confirmed_text_reports_replay_failure() {
+        let failed = serde_json::json!({
+            "confirmed": true,
+            "action": "click",
+            "result": { "success": false, "error": "element not found" }
+        });
+        assert_eq!(
+            super::confirmed_replay_error(&failed),
+            Some("element not found")
+        );
+        let ok = serde_json::json!({
+            "confirmed": true,
+            "result": { "success": true }
+        });
+        assert_eq!(super::confirmed_replay_error(&ok), None);
+    }
 
     #[test]
     fn flow_save_text_shows_why_a_flow_is_not_local() {

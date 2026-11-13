@@ -14783,6 +14783,24 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 // Confirmation handlers (stub)
 // ---------------------------------------------------------------------------
 
+/// `confirm` is success only when the replayed command succeeded. The text
+/// printer treats `confirmed: true` as the whole outcome, so a failed replay
+/// has to be the command error rather than a nested `result.success`.
+fn confirm_outcome(action: &str, replay: &Value) -> Result<Value, String> {
+    if replay.get("success").and_then(Value::as_bool) != Some(true) {
+        let error = replay
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Confirmed action failed");
+        return Err(error.to_string());
+    }
+    Ok(json!({
+        "confirmed": true,
+        "action": action,
+        "result": replay,
+    }))
+}
+
 async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let pending = state
         .pending_confirmation
@@ -14803,7 +14821,7 @@ async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     state.preloaded_flow = None;
     state.confirmed_policy_actions = previous_confirmed;
 
-    Ok(json!({ "confirmed": true, "action": pending.action, "result": result }))
+    confirm_outcome(&pending.action, &result)
 }
 
 /// The parked command as `confirm` replays it: without its action policy and
@@ -15608,6 +15626,27 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn confirm_outcome_reports_replay_failure() {
+        let failed = serde_json::json!({
+            "id": "1",
+            "success": false,
+            "error": "element not found"
+        });
+        let err = super::confirm_outcome("click", &failed).unwrap_err();
+        assert_eq!(err, "element not found");
+
+        let ok = serde_json::json!({
+            "id": "1",
+            "success": true,
+            "data": { "clicked": true }
+        });
+        let value = super::confirm_outcome("click", &ok).unwrap();
+        assert_eq!(value["confirmed"], true);
+        assert_eq!(value["action"], "click");
+        assert_eq!(value["result"]["success"], true);
+    }
+
     /// Serves `Browser.getVersion` on one fixed `ws://` address for any number
     /// of connections and counts the calls.
     async fn version_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
