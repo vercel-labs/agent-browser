@@ -673,6 +673,7 @@ pub const VITALS_INIT: &str = r#"
 
   const cwv = { lcp: null, cls: 0, clsEntries: [], fcp: null, inp: null };
   window.__AB_VITALS__ = cwv;
+  let clsWindowStart = null, clsWindowLast = null, clsWindowValue = 0;
 
   try {
     new PerformanceObserver((list) => {
@@ -693,7 +694,17 @@ pub const VITALS_INIT: &str = r#"
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
         if (!entry.hadRecentInput) {
-          cwv.cls += entry.value;
+          // CLS is the largest shift window, with gaps below 1s and a span below 5s.
+          if (clsWindowStart !== null &&
+              entry.startTime - clsWindowLast < 1000 &&
+              entry.startTime - clsWindowStart < 5000) {
+            clsWindowValue += entry.value;
+          } else {
+            clsWindowStart = entry.startTime;
+            clsWindowValue = entry.value;
+          }
+          clsWindowLast = entry.startTime;
+          cwv.cls = Math.max(cwv.cls, clsWindowValue);
           cwv.clsEntries.push({
             value: Math.round(entry.value * 10000) / 10000,
             startTime: Math.round(entry.startTime * 100) / 100,
@@ -714,13 +725,34 @@ pub const VITALS_INIT: &str = r#"
   } catch {}
 
   try {
-    new PerformanceObserver((list) => {
-      let worst = cwv.inp || 0;
+    const longestInteractions = [];
+    let minInteractionId = Infinity, maxInteractionId = 0;
+    const observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
-        if (entry.duration > worst) worst = entry.duration;
+        const id = entry.interactionId;
+        if (!id) continue;
+        minInteractionId = Math.min(minInteractionId, id);
+        maxInteractionId = Math.max(maxInteractionId, id);
+        const previous = longestInteractions.find((interaction) => interaction.id === id);
+        if (previous) {
+          previous.duration = Math.max(previous.duration, entry.duration);
+        } else if (longestInteractions.length < 10 ||
+                   entry.duration > longestInteractions[longestInteractions.length - 1].duration) {
+          longestInteractions.push({ id, duration: entry.duration });
+        }
+        longestInteractions.sort((a, b) => b.duration - a.duration);
+        if (longestInteractions.length > 10) longestInteractions.pop();
       }
-      if (worst > 0) cwv.inp = Math.round(worst * 100) / 100;
-    }).observe({ type: "event", buffered: true, durationThreshold: 40 });
+      if (longestInteractions.length > 0) {
+        // Match web-vitals' bounded p98 estimate and interaction-count fallback.
+        const count = performance.interactionCount ??
+          ((maxInteractionId - minInteractionId) / 7 + 1);
+        const index = Math.min(longestInteractions.length - 1, Math.floor(count / 50));
+        cwv.inp = Math.round(longestInteractions[index].duration * 100) / 100;
+      }
+    });
+    observer.observe({ type: "event", buffered: true, durationThreshold: 0 });
+    observer.observe({ type: "first-input", buffered: true });
   } catch {}
 
   // React profiling build emits console.timeStamp(label, start, end, track, trackGroup, color)
@@ -753,7 +785,7 @@ pub const VITALS_READ: &str = r#"
   const timing = window.__AB_REACT_TIMING__ || [];
   const nav = performance.getEntriesByType("navigation")[0];
   const ttfb = nav
-    ? Math.round((nav.responseStart - nav.requestStart) * 100) / 100
+    ? Math.round(Math.max(0, nav.responseStart - (nav.activationStart || 0)) * 100) / 100
     : null;
   return JSON.stringify({ cwv, timing, ttfb });
 })()
