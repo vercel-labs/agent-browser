@@ -2832,6 +2832,112 @@ async fn e2e_tabs() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_tab_list_filter_and_limit() {
+    // Each page takes its title from its path, so no title word appears in
+    // any URL and a title match cannot pass through the URL branch.
+    let (origin, server) = start_raw_http_server(html_response(
+        "<script>document.title = { '/a': 'Alpha Docs Portal', '/b': 'Beta Dashboard', \
+         '/c': 'Gamma Docs Release Notes' }[location.pathname];</script>",
+    ))
+    .await;
+    let page = |path: &str| format!("{origin}{path}");
+    async fn list(state: &mut DaemonState, id: &str, options: Value) -> Vec<Value> {
+        let mut cmd = json!({ "id": id, "action": "tab_list" });
+        for (key, value) in options.as_object().unwrap() {
+            cmd[key] = value.clone();
+        }
+        let resp = execute_command(&cmd, state).await;
+        assert_success(&resp);
+        get_data(&resp)["tabs"].as_array().unwrap().clone()
+    }
+    fn ids(tabs: &[Value]) -> Vec<&str> {
+        tabs.iter().map(|t| t["tabId"].as_str().unwrap()).collect()
+    }
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": page("/a") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    for (id, url) in [
+        ("3", page("/b")),
+        ("4", page("/c")),
+        ("5", "about:blank".to_string()),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": id, "action": "tab_new", "url": url }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+    }
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "tab_switch", "tabId": "t3" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let all = list(&mut state, "7", json!({})).await;
+    assert_eq!(ids(&all), ["t1", "t2", "t3", "t4"]);
+
+    // Title match, different case, keeps the real active flag.
+    let tabs = list(&mut state, "8", json!({ "filter": "docs" })).await;
+    assert_eq!(ids(&tabs), ["t1", "t3"]);
+    assert_eq!(tabs[0]["title"], "Alpha Docs Portal");
+    assert_eq!(tabs[0]["active"], false);
+    assert_eq!(tabs[1]["active"], true);
+
+    // URL match.
+    let tabs = list(&mut state, "9", json!({ "filter": "ABOUT:BLANK" })).await;
+    assert_eq!(ids(&tabs), ["t4"]);
+
+    // Limit applies after the filter, in tab order.
+    let tabs = list(&mut state, "10", json!({ "filter": "docs", "limit": 1 })).await;
+    assert_eq!(ids(&tabs), ["t1"]);
+    let tabs = list(&mut state, "11", json!({ "limit": 2 })).await;
+    assert_eq!(ids(&tabs), ["t1", "t2"]);
+
+    // No match, and the active tab is excluded without being changed.
+    assert!(
+        list(&mut state, "12", json!({ "filter": "nothing-matches" }))
+            .await
+            .is_empty()
+    );
+    let tabs = list(&mut state, "13", json!({ "filter": "dashboard" })).await;
+    assert_eq!(ids(&tabs), ["t2"]);
+    assert_eq!(tabs[0]["active"], false);
+    let all = list(&mut state, "14", json!({})).await;
+    assert_eq!(all[2]["active"], true);
+
+    // Invalid wire values are rejected.
+    for (id, options) in [
+        ("15", json!({ "limit": 0 })),
+        ("16", json!({ "filter": "" })),
+    ] {
+        let mut cmd = json!({ "id": id, "action": "tab_list" });
+        for (key, value) in options.as_object().unwrap() {
+            cmd[key] = value.clone();
+        }
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_eq!(resp["success"], false, "{cmd}");
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_tab_ids_not_reused() {
     let mut state = DaemonState::new();
 

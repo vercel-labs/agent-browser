@@ -1729,7 +1729,7 @@ fn parse_command_inner(
                     }
                     Ok(cmd)
                 }
-                Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
+                Some("list") => parse_tab_list(&rest[1..], &id, batch_item),
                 Some("close") => {
                     let mut cmd = json!({ "id": id, "action": "tab_close" });
                     if let Some(tab_ref) = rest.get(1) {
@@ -1737,6 +1737,9 @@ fn parse_command_inner(
                     }
                     Ok(cmd)
                 }
+                // `tab --filter docs` lists like `tab list --filter docs`. Tab
+                // refs never start with `--`, so this cannot shadow a switch.
+                Some(option) if option.starts_with("--") => parse_tab_list(&rest, &id, batch_item),
                 Some(tab_ref) => Ok(json!({
                     "id": id,
                     "action": "tab_switch",
@@ -2214,6 +2217,69 @@ fn parse_command_inner(
             command: cmd.to_string(),
         }),
     }
+}
+
+/// Parses the options of `tab [list] [--filter <text>] [--limit <n>]`.
+///
+/// Each option takes its value either as the next token or attached with `=`.
+/// A next token that starts with `--` is treated as the following option, not
+/// as a value, so a filter that itself starts with `--` must use the attached
+/// form (`--filter=--json`). The MCP adapter always uses the attached form.
+/// Unknown options and stray positionals are rejected so that a typo such as
+/// `--fliter` cannot silently return every tab.
+fn parse_tab_list(args: &[&str], id: &str, batch_item: bool) -> Result<Value, ParseError> {
+    const USAGE: &str = "tab list [--filter <text>] [--limit <n>]";
+    let mut cmd = json!({ "id": id, "action": "tab_list" });
+    let mut i = 0;
+    while i < args.len() {
+        let (name, attached) = match args[i].split_once('=') {
+            Some((name, value)) if name.starts_with("--") => (name, Some(value)),
+            _ => (args[i], None),
+        };
+        if name != "--filter" && name != "--limit" {
+            reject_batch_global_flag(batch_item, name)?;
+            return Err(ParseError::UnknownSubcommand {
+                subcommand: name.to_string(),
+                valid_options: &["--filter <text>", "--limit <n>"],
+            });
+        }
+        let value = match (attached, args.get(i + 1)) {
+            (Some(value), _) => {
+                i += 1;
+                value
+            }
+            (None, Some(value)) if !value.starts_with("--") => {
+                i += 2;
+                *value
+            }
+            (None, _) => {
+                return Err(ParseError::MissingArguments {
+                    context: format!("tab list {}", name),
+                    usage: USAGE,
+                });
+            }
+        };
+        if name == "--filter" {
+            if value.is_empty() {
+                return Err(ParseError::InvalidValue {
+                    message: "Invalid --filter: text must not be empty".to_string(),
+                    usage: USAGE,
+                });
+            }
+            cmd["filter"] = json!(value);
+        } else {
+            let limit = value
+                .parse::<u64>()
+                .ok()
+                .filter(|limit| *limit > 0)
+                .ok_or_else(|| ParseError::InvalidValue {
+                    message: format!("Invalid --limit '{}': expected a positive integer", value),
+                    usage: USAGE,
+                })?;
+            cmd["limit"] = json!(limit);
+        }
+    }
+    Ok(cmd)
 }
 
 /// Parse `flow <steps|save|run|list>`: save a task captured with `--capture flow`, run it by sending its requests directly, from the page, or by replaying the recorded commands.
@@ -5229,6 +5295,140 @@ mod tests {
         let cmd = parse_command(&args("tab select"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
         assert_eq!(cmd["tabId"], "select");
+    }
+
+    #[test]
+    fn test_tab_list_filter_and_limit() {
+        for line in [
+            "tab list --filter docs --limit 2",
+            "tab list --limit 2 --filter docs",
+            "tab --filter docs --limit 2",
+            "tab list --filter=docs --limit=2",
+            "tab --limit=2 --filter docs",
+        ] {
+            let cmd = parse_command(&args(line), &default_flags()).unwrap();
+            assert_eq!(cmd["action"], "tab_list", "{line}");
+            assert_eq!(cmd["filter"], "docs", "{line}");
+            assert_eq!(cmd["limit"], 2, "{line}");
+        }
+    }
+
+    #[test]
+    fn test_tab_list_without_options_sends_no_fields() {
+        for line in ["tab", "tab list"] {
+            let cmd = parse_command(&args(line), &default_flags()).unwrap();
+            let fields = cmd.as_object().unwrap();
+            assert_eq!(fields.len(), 2, "{line}: {cmd}");
+            assert_eq!(cmd["action"], "tab_list");
+        }
+        let cmd = parse_command(&args("tab list --filter docs"), &default_flags()).unwrap();
+        assert!(cmd.get("limit").is_none());
+        let cmd = parse_command(&args("tab list --limit 3"), &default_flags()).unwrap();
+        assert!(cmd.get("filter").is_none());
+    }
+
+    #[test]
+    fn test_tab_list_filter_values_are_literal() {
+        let cases = [
+            (vec!["tab", "list", "--filter=--json"], "--json"),
+            (vec!["tab", "list", "--filter=a=b"], "a=b"),
+            (vec!["tab", "list", "--filter", "-draft"], "-draft"),
+            (vec!["tab", "list", "--filter", "Docs Site"], "Docs Site"),
+            (vec!["tab", "list", "--filter", " "], " "),
+        ];
+        for (argv, expected) in cases {
+            let argv: Vec<String> = argv.into_iter().map(String::from).collect();
+            let cmd = parse_command(&argv, &default_flags()).unwrap();
+            assert_eq!(cmd["filter"], expected, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn test_tab_list_repeated_option_last_wins() {
+        let cmd = parse_command(
+            &args("tab list --filter a --filter b --limit 1 --limit 4"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["filter"], "b");
+        assert_eq!(cmd["limit"], 4);
+    }
+
+    #[test]
+    fn test_tab_list_missing_option_values() {
+        for line in [
+            "tab list --filter",
+            "tab list --limit",
+            "tab --filter",
+            "tab list --filter --limit 2",
+            "tab list --limit --filter docs",
+        ] {
+            let err = parse_command(&args(line), &default_flags()).unwrap_err();
+            assert!(
+                matches!(err, ParseError::MissingArguments { .. }),
+                "{line}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tab_list_invalid_option_values() {
+        for line in [
+            "tab list --filter=",
+            "tab list --limit 0",
+            "tab list --limit -1",
+            "tab list --limit 1.5",
+            "tab list --limit abc",
+            "tab list --limit=",
+            "tab list --limit 99999999999999999999999",
+        ] {
+            let err = parse_command(&args(line), &default_flags()).unwrap_err();
+            assert!(
+                matches!(err, ParseError::InvalidValue { .. }),
+                "{line}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tab_list_rejects_unknown_options_and_extra_args() {
+        for line in [
+            "tab list --fliter docs",
+            "tab list docs",
+            "tab list --filter docs extra",
+            "tab --unknown",
+        ] {
+            let err = parse_command(&args(line), &default_flags()).unwrap_err();
+            assert!(
+                matches!(err, ParseError::UnknownSubcommand { .. }),
+                "{line}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tab_list_options_with_global_flags() {
+        let argv = args("tab list --filter docs --json --session work --limit 2");
+        let flags = crate::flags::parse_flags(&argv);
+        let cmd = parse_command(&crate::flags::clean_args(&argv), &flags).unwrap();
+        assert_eq!(cmd["filter"], "docs");
+        assert_eq!(cmd["limit"], 2);
+        assert!(flags.json);
+        assert_eq!(flags.session, "work");
+    }
+
+    #[test]
+    fn test_tab_list_batch_items() {
+        let cmd = parse_batch_command(&args("tab list --filter docs --limit 2"), &default_flags())
+            .unwrap();
+        assert_eq!(cmd["filter"], "docs");
+        assert_eq!(cmd["limit"], 2);
+        let err = parse_batch_command(&args("tab list --filter docs --json"), &default_flags())
+            .unwrap_err();
+        assert!(
+            matches!(&err, ParseError::InvalidValue { message, .. } if message.contains("outer batch invocation")),
+            "{err:?}"
+        );
     }
 
     // === Network ===

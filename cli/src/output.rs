@@ -1291,6 +1291,10 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         // Tabs
         if let Some(tabs) = data.get("tabs").and_then(|v| v.as_array()) {
+            // Normally only `tab list --filter` comes back empty.
+            if tabs.is_empty() {
+                println!("No matching tabs");
+            }
             for tab in tabs {
                 let tab_id = tab.get("tabId").and_then(|v| v.as_str()).unwrap_or("?");
                 let tab_label = tab.get("label").and_then(|v| v.as_str());
@@ -3214,10 +3218,17 @@ pass --no-pin-tab to turn it off again.
 
 Operations:
   list                       List open tabs with their ids and labels (default)
+  list --filter <text>       List tabs whose title or URL contains <text>
+  list --limit <n>           List at most <n> tabs (applied after --filter)
   new [url]                  Open a new tab
   new --label <name> [url]   Open a new tab with a label like `docs` or `app`
   close [t<N>|label|target]  Close a tab (current if no ref given)
   <t<N>|label|target>        Switch to a tab by id, label, or CDP target id
+
+Options:
+  --filter <text>      Keep tabs whose title or URL contains <text>, ignoring ASCII
+                       case. Use --filter=<text> when <text> starts with `--`
+  --limit <n>          Return at most <n> tabs, in tab order (n >= 1)
 
 Global Options:
   --json               Output as JSON (includes each tab's targetId)
@@ -3235,6 +3246,8 @@ Examples:
   agent-browser tab close t1
   agent-browser tab close docs
   agent-browser tab list --json                        # Includes CDP target ids
+  agent-browser tab list --filter docs                 # Title or URL contains "docs"
+  agent-browser tab --filter github.com --limit 3
   agent-browser tab close 4A0B7C4E1F2D3A4B5C6D7E8F90A1B2C3  # Close by target id
 "##
         }

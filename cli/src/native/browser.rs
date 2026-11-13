@@ -183,6 +183,10 @@ pub(crate) fn should_track_target(target: &TargetInfo) -> bool {
         && (target.url.is_empty() || !is_internal_chrome_target(&target.url))
 }
 
+/// How long `tab list` waits for fresh target info before it falls back to
+/// the cached titles and URLs.
+const TAB_LIST_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
+
 fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo) -> bool {
     if let Some(page) = pages.iter_mut().find(|p| p.target_id == target.target_id) {
         page.url = target.url.clone();
@@ -1868,9 +1872,27 @@ impl BrowserManager {
     }
 
     pub fn tab_list(&self) -> Vec<Value> {
+        self.tab_list_filtered(None, None)
+    }
+
+    /// Lists tabs like [`Self::tab_list`], keeping only tabs whose title or URL
+    /// contains `filter` (ASCII case-insensitive substring), then at most
+    /// `limit` of them, in tab order. `active` is computed from each tab's real
+    /// position, so it stays correct when earlier tabs are filtered out, and no
+    /// row is active when the active tab does not match. Read-only: the active
+    /// tab and the session's tab binding are not changed.
+    pub fn tab_list_filtered(&self, filter: Option<&str>, limit: Option<usize>) -> Vec<Value> {
+        let needle = filter.map(str::to_ascii_lowercase);
         self.pages
             .iter()
             .enumerate()
+            .filter(|(_, p)| {
+                needle.as_deref().is_none_or(|needle| {
+                    p.title.to_ascii_lowercase().contains(needle)
+                        || p.url.to_ascii_lowercase().contains(needle)
+                })
+            })
+            .take(limit.unwrap_or(usize::MAX))
             .map(|(i, p)| {
                 json!({
                     "tabId": format_tab_id(p.tab_id),
@@ -2508,6 +2530,31 @@ impl BrowserManager {
 
     pub fn update_page_target_info(&mut self, target: &TargetInfo) -> bool {
         update_page_target_info_in_pages(&mut self.pages, target)
+    }
+
+    /// Re-reads the URL and title of every tracked page from the browser.
+    ///
+    /// Chrome does not reliably send `Target.targetInfoChanged` when a
+    /// background tab sets its title, so the cached title can still be the
+    /// address it showed while loading. Best effort: on error or after
+    /// `TAB_LIST_REFRESH_TIMEOUT` the cached values are kept.
+    pub async fn refresh_page_target_infos(&mut self) {
+        let params = json!({});
+        let request = self.client.send_command_typed::<_, GetTargetsResult>(
+            "Target.getTargets",
+            &params,
+            None,
+        );
+        let Ok(Ok(result)) = tokio::time::timeout(TAB_LIST_REFRESH_TIMEOUT, request).await else {
+            return;
+        };
+        for target in result
+            .target_infos
+            .iter()
+            .filter(|t| should_track_target(t))
+        {
+            self.update_page_target_info(target);
+        }
     }
 
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
@@ -4705,6 +4752,187 @@ mod tests {
         let mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
         let tabs = mgr.tab_list();
         assert_eq!(tabs[0]["targetId"], TARGET_A);
+    }
+
+    fn titled(tab_id: u32, url: &str, title: &str) -> PageInfo {
+        PageInfo {
+            title: title.to_string(),
+            ..page(tab_id, &format!("TARGET{}", tab_id), url)
+        }
+    }
+
+    fn tab_ids(tabs: &[Value]) -> Vec<&str> {
+        tabs.iter().map(|t| t["tabId"].as_str().unwrap()).collect()
+    }
+
+    async fn filter_fixture() -> BrowserManager {
+        test_manager(vec![
+            titled(1, "https://docs.example.com/start", "Getting Started"),
+            titled(2, "https://github.com/vercel-labs", "Vercel Labs"),
+            titled(3, "https://example.org/blog", "Release Notes for Docs"),
+            titled(4, "about:blank", ""),
+        ])
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_tab_list_filtered_without_options_matches_tab_list() {
+        let mgr = filter_fixture().await;
+        assert_eq!(mgr.tab_list_filtered(None, None), mgr.tab_list());
+        assert_eq!(mgr.tab_list().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_tab_list_filtered_matches_url_or_title_case_insensitively() {
+        let mgr = filter_fixture().await;
+        // "docs" is in tab 1's URL and tab 3's title (as "Docs").
+        assert_eq!(
+            tab_ids(&mgr.tab_list_filtered(Some("docs"), None)),
+            ["t1", "t3"]
+        );
+        // Title only, different case.
+        assert_eq!(
+            tab_ids(&mgr.tab_list_filtered(Some("VERCEL LABS"), None)),
+            ["t2"]
+        );
+        // URL only.
+        assert_eq!(
+            tab_ids(&mgr.tab_list_filtered(Some("about:blank"), None)),
+            ["t4"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tab_list_filtered_non_ascii_matches_exact_case() {
+        let mgr = test_manager(vec![titled(1, "https://example.com", "Über Uns")]).await;
+        assert_eq!(tab_ids(&mgr.tab_list_filtered(Some("Über"), None)), ["t1"]);
+        assert_eq!(tab_ids(&mgr.tab_list_filtered(Some("uns"), None)), ["t1"]);
+    }
+
+    #[tokio::test]
+    async fn test_tab_list_filtered_no_match_is_empty() {
+        let mgr = filter_fixture().await;
+        assert!(mgr.tab_list_filtered(Some("nothing-here"), None).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tab_list_filtered_limit_applies_after_filter_in_tab_order() {
+        let mgr = filter_fixture().await;
+        assert_eq!(tab_ids(&mgr.tab_list_filtered(None, Some(2))), ["t1", "t2"]);
+        assert_eq!(
+            tab_ids(&mgr.tab_list_filtered(Some("example"), Some(1))),
+            ["t1"]
+        );
+        assert_eq!(
+            tab_ids(&mgr.tab_list_filtered(Some("docs"), Some(10))),
+            ["t1", "t3"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tab_list_filtered_keeps_row_fields() {
+        let mgr = filter_fixture().await;
+        let full = mgr.tab_list();
+        let filtered = mgr.tab_list_filtered(Some("vercel"), None);
+        assert_eq!(filtered, vec![full[1].clone()]);
+    }
+
+    #[tokio::test]
+    async fn test_tab_list_filtered_marks_active_by_real_position() {
+        let mut mgr = filter_fixture().await;
+        mgr.active_page_index = 2;
+        // Tab 3 is the third page; after filtering it is the first row and
+        // must still be the active one.
+        let rows = mgr.tab_list_filtered(Some("release"), None);
+        assert_eq!(tab_ids(&rows), ["t3"]);
+        assert_eq!(rows[0]["active"], true);
+
+        let rows = mgr.tab_list_filtered(Some("docs"), None);
+        assert_eq!(rows[0]["active"], false);
+        assert_eq!(rows[1]["active"], true);
+    }
+
+    #[tokio::test]
+    async fn test_tab_list_filtered_excluding_active_tab_keeps_selection() {
+        let mut mgr = filter_fixture().await;
+        mgr.active_page_index = 1;
+        let rows = mgr.tab_list_filtered(Some("docs"), None);
+        assert!(rows.iter().all(|row| row["active"] == false));
+        assert_eq!(mgr.active_page_index, 1);
+        assert_eq!(mgr.tab_list()[1]["active"], true);
+    }
+
+    /// Mock browser that answers `Target.getTargets` with `target_infos` and
+    /// nothing else.
+    async fn start_mock_cdp_get_targets(target_infos: Value) -> String {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut tx, mut rx) = tokio_tungstenite::accept_async(stream)
+                .await
+                .unwrap()
+                .split();
+            while let Some(Ok(Message::Text(text))) = rx.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                if cmd["method"] == "Target.getTargets" {
+                    let reply = json!({
+                        "id": cmd["id"],
+                        "result": { "targetInfos": target_infos },
+                    });
+                    let _ = tx.send(Message::Text(reply.to_string())).await;
+                }
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn test_refresh_page_target_infos_updates_tracked_pages_only() {
+        let url = start_mock_cdp_get_targets(json!([
+            { "targetId": "TARGET1", "type": "page", "title": "Alpha Docs", "url": "https://a.test/", "attached": true },
+            { "targetId": "TARGET2", "type": "page", "title": "New Tab", "url": "chrome://newtab/", "attached": true },
+            { "targetId": "UNTRACKED", "type": "page", "title": "Other", "url": "https://other.test/", "attached": false },
+        ]))
+        .await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut mgr = test_manager_from(
+            client,
+            url,
+            vec![
+                titled(1, "https://a.test/", "a.test/"),
+                titled(2, "https://b.test/", "Beta"),
+                titled(3, "https://c.test/", "Gamma"),
+            ],
+        );
+
+        mgr.refresh_page_target_infos().await;
+
+        let tabs = mgr.tab_list();
+        assert_eq!(tabs[0]["title"], "Alpha Docs");
+        // Internal Chrome pages and targets missing from the reply are not
+        // applied, the same as for `Target.targetInfoChanged` events.
+        assert_eq!(tabs[1]["title"], "Beta");
+        assert_eq!(tabs[1]["url"], "https://b.test/");
+        assert_eq!(tabs[2]["title"], "Gamma");
+        assert_eq!(tab_ids(&tabs), ["t1", "t2", "t3"]);
+        assert_eq!(
+            tab_ids(&mgr.tab_list_filtered(Some("alpha docs"), None)),
+            ["t1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_page_target_infos_keeps_cache_when_browser_is_silent() {
+        let mut mgr = filter_fixture().await;
+        let before = mgr.tab_list();
+        let started = Instant::now();
+        mgr.refresh_page_target_infos().await;
+        assert!(started.elapsed() < TAB_LIST_REFRESH_TIMEOUT + Duration::from_secs(1));
+        assert_eq!(mgr.tab_list(), before);
     }
 
     #[test]

@@ -1439,7 +1439,16 @@ fn parity_tools() -> Vec<Value> {
             }),
             &[],
         ),
-        tool(TOOL_TAB_LIST, "Tab list", "List tabs.", json!({}), &[]),
+        tool(
+            TOOL_TAB_LIST,
+            "Tab list",
+            "List tabs. Use filter and limit to keep the result small when many tabs are open.",
+            json!({
+                "filter": { "type": "string", "minLength": 1, "description": "Keep tabs whose title or URL contains this text, ignoring ASCII case." },
+                "limit": { "type": "integer", "minimum": 1, "description": "Return at most this many tabs, applied after filter, in tab order." }
+            }),
+            &[],
+        ),
         tool(
             TOOL_TAB_SWITCH,
             "Tab switch",
@@ -2537,7 +2546,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_COOKIES_SET_CURL => call_cookies_set_curl(arguments),
         TOOL_COOKIES_CLEAR => call_literal(arguments, &["cookies", "clear"]),
         TOOL_TAB_NEW => call_tab_new(arguments),
-        TOOL_TAB_LIST => call_literal(arguments, &["tab", "list"]),
+        TOOL_TAB_LIST => call_cli_tool(arguments, tab_list_args(arguments)?, None),
         TOOL_TAB_SWITCH => call_one_string(arguments, "tab", "tab"),
         TOOL_TAB_CLOSE => call_optional_one(arguments, &["tab", "close"], "tab"),
         TOOL_WINDOW_NEW => call_literal(arguments, &["window", "new"]),
@@ -3021,6 +3030,27 @@ fn webmcp_result_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     if let Some(timeout) = optional_u64(arguments, "waitTimeoutMs")? {
         args.push("--timeout".to_string());
         args.push(timeout.to_string());
+    }
+    Ok(args)
+}
+
+/// Builds `tab list` args. Values use the attached `--opt=value` form so a
+/// filter such as `--json` reaches the tab parser as text instead of being
+/// read as a global flag.
+fn tab_list_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["tab".to_string(), "list".to_string()];
+    if let Some(filter) = optional_string(arguments, "filter")? {
+        if filter.is_empty() {
+            return Err(ProtocolError::invalid_params("filter must not be empty"));
+        }
+        args.push(format!("--filter={}", filter));
+    }
+    if let Some(limit) = optional_value(arguments, "limit")? {
+        let limit = limit
+            .as_u64()
+            .filter(|limit| *limit > 0)
+            .ok_or_else(|| ProtocolError::invalid_params("limit must be a positive integer"))?;
+        args.push(format!("--limit={}", limit));
     }
     Ok(args)
 }
@@ -5606,6 +5636,77 @@ mod tests {
             let args = text_command_args(&arguments, command).unwrap();
             assert!(cli_tool_args(&arguments, args, None).is_err());
         }
+    }
+
+    #[test]
+    fn tab_list_schema_adds_filter_and_limit_to_shared_properties() {
+        let tool = find_tool(TOOL_TAB_LIST).unwrap();
+        let properties = &tool["inputSchema"]["properties"];
+        assert_eq!(properties["filter"]["type"], "string");
+        assert_eq!(properties["filter"]["minLength"], 1);
+        assert_eq!(properties["limit"]["type"], "integer");
+        assert_eq!(properties["limit"]["minimum"], 1);
+        assert!(properties.get("session").is_some());
+        assert!(tool["inputSchema"]["required"]
+            .as_array()
+            .is_none_or(|required| required.is_empty()));
+    }
+
+    #[test]
+    fn tab_list_args_reach_the_cli_parser() {
+        let parse = |arguments: Value| {
+            let args = cli_tool_args(&arguments, tab_list_args(&arguments).unwrap(), None).unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let parsed =
+                crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+            (flags, parsed)
+        };
+
+        let (_, parsed) = parse(json!({}));
+        assert_eq!(parsed["action"], "tab_list");
+        assert!(parsed.get("filter").is_none());
+        assert!(parsed.get("limit").is_none());
+
+        let (_, parsed) = parse(json!({ "filter": "Docs Site", "limit": 2 }));
+        assert_eq!(parsed["filter"], "Docs Site");
+        assert_eq!(parsed["limit"], 2);
+
+        // Flag-like filters stay literal text and never become global flags.
+        let (baseline, _) = parse(json!({}));
+        for filter in [
+            "--json",
+            "--session",
+            "--allowed-domains",
+            "--filter=x",
+            "-x",
+        ] {
+            let (flags, parsed) = parse(json!({ "filter": filter }));
+            assert_eq!(parsed["filter"], filter);
+            assert_eq!(flags.session, baseline.session);
+            assert_eq!(flags.allowed_domains, baseline.allowed_domains);
+        }
+    }
+
+    #[test]
+    fn tab_list_args_reject_invalid_values() {
+        for arguments in [
+            json!({ "filter": "" }),
+            json!({ "filter": 3 }),
+            json!({ "limit": 0 }),
+            json!({ "limit": -1 }),
+            json!({ "limit": 1.5 }),
+            json!({ "limit": "2" }),
+        ] {
+            assert!(
+                tab_list_args(&arguments).is_err(),
+                "expected invalid params for {}",
+                arguments
+            );
+        }
+        let definition = find_tool(TOOL_TAB_LIST).unwrap();
+        assert!(
+            reject_unknown_arguments(TOOL_TAB_LIST, &definition, &json!({ "count": 2 })).is_err()
+        );
     }
 
     #[test]

@@ -294,6 +294,8 @@ Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGEN
 
 ```bash
 agent-browser tab                              # List tabs with tabId and label
+agent-browser tab list --filter docs           # Only tabs whose title or URL contains "docs"
+agent-browser tab list --limit 5               # At most 5 tabs (after --filter)
 agent-browser tab new [url]                    # New tab
 agent-browser tab new --label docs [url]       # New tab with a memorable label
 agent-browser tab t2                           # Switch to tab by id
@@ -321,6 +323,8 @@ agent-browser tab close docs             # close by label
 Labels are never auto-generated, never rewritten on navigation, and must be unique within a session. A label starts with a letter and contains only letters, digits, `-`, or `_`, and cannot use the reserved `t<N>` or `T<N>` tab-id form. Rejected labels preserve the current tab's refs and selected frame. To interact with another tab, switch to it first: the daemon maintains a single active tab, so refs (`@eN`) belong to the tab that was active when the snapshot ran.
 
 Tabs opened through `tab new` or `click --new-tab` inherit the session's setup before their first document loads: user agent, `set headers`, `set credentials`, origin-scoped `--headers`, init scripts, `route` rules, and emulation overrides (color scheme, timezone, locale, geolocation, offline). Turning offline mode off or setting headers to `{}` restores the default setup for future tabs.
+
+When many tabs are open (for example over `--cdp` or `--auto-connect`), narrow the list instead of reading every row: `--filter <text>` keeps tabs whose title or URL contains the text, ignoring ASCII case, and `--limit <n>` caps the count after filtering. No match returns an empty list. Use the attached form `--filter=<text>` when the text starts with `--`.
 
 `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Target ids stay stable across daemon restarts, unlike `t<N>` ids, which are per-daemon counters. With `--pin-tab` the session is pinned to its bound tab: if that tab is closed, commands fail with a `tab_gone` error instead of falling back to another tab, and `tab new` or `tab list` recover. JSON errors include `code: "tab_gone"` and a recovery object with `data.targetId` plus optional sanitized `data.lastUrl`; batch uses `result` for the same object.
 
