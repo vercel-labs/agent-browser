@@ -8745,6 +8745,29 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     result
 }
 
+/// A download landed only when Chrome's GUID file was moved onto `dest`,
+/// when `dest` was created by this attempt, or when an existing `dest` was
+/// rewritten after the attempt started. An untouched file that was already
+/// there is not the download.
+fn download_file_landed(
+    guid_moved: bool,
+    existed_before: bool,
+    exists_now: bool,
+    mtime_before: Option<std::time::SystemTime>,
+    mtime_after: Option<std::time::SystemTime>,
+) -> bool {
+    if guid_moved || !exists_now {
+        return guid_moved;
+    }
+    if !existed_before {
+        return true;
+    }
+    match (mtime_before, mtime_after) {
+        (Some(before), Some(after)) => after > before,
+        _ => false,
+    }
+}
+
 async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = cmd
         .get("selector")
@@ -8786,6 +8809,10 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let download_dir_str = download_dir
         .to_str()
         .ok_or("Download directory path is not valid UTF-8")?;
+    let existed_before = dest.exists();
+    let mtime_before = std::fs::metadata(&dest)
+        .and_then(|meta| meta.modified())
+        .ok();
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -8871,9 +8898,11 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     }
 
     // With "allowAndName" behavior, Chrome saves the file using the GUID as filename.
-    // Rename it to the user-requested filename.
-    if let Some(guid) = downloaded_guid {
-        let guid_path = guid_download_path(&download_dir, &guid)?;
+    // Rename it to the user-requested filename. A name Chrome chose itself is
+    // accepted only when dest appeared or changed during this attempt.
+    let mut guid_moved = false;
+    if let Some(guid) = downloaded_guid.as_deref() {
+        let guid_path = guid_download_path(&download_dir, guid)?;
         if wait_for_downloaded_file(&guid_path).await {
             if !may_move_download(&guid_path, true, Some(download_dir_str)) {
                 return Err(format!(
@@ -8884,25 +8913,35 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             }
             std::fs::rename(&guid_path, &dest)
                 .map_err(|e| format!("Failed to rename downloaded file: {}", e))?;
-        } else {
-            // The file might have been saved under its original name instead
-            // of the GUID (e.g. when Chrome falls back to "allow" behavior).
-            if !dest.exists() {
-                return Err(format!(
-                    "Downloaded file not found at expected path (GUID: {})",
-                    guid
-                ));
-            }
+            guid_moved = true;
         }
-    } else {
-        // GUID capture failed -- the file may have been saved under its original name
-        // by Chrome. Only return success if dest already exists (avoid touching
-        // unrelated files in the directory).
-        if !dest.exists() {
+    }
+
+    let exists_now = dest.exists();
+    let mtime_after = std::fs::metadata(&dest)
+        .and_then(|meta| meta.modified())
+        .ok();
+    if !download_file_landed(
+        guid_moved,
+        existed_before,
+        exists_now,
+        mtime_before,
+        mtime_after,
+    ) {
+        if existed_before {
             return Err(
-                "Download completed but could not determine the downloaded file name".to_string(),
+                "Download finished, but the destination already existed and was not updated"
+                    .to_string(),
             );
         }
+        if let Some(guid) = downloaded_guid.as_deref() {
+            return Err(format!(
+                "Downloaded file not found at expected path (GUID: {guid})"
+            ));
+        }
+        return Err(
+            "Download completed but could not determine the downloaded file name".to_string(),
+        );
     }
 
     let dest_str = dest.to_string_lossy().to_string();
@@ -15608,6 +15647,41 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn download_file_landed_rejects_an_unchanged_destination() {
+        use std::time::{Duration, SystemTime};
+        let then = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let later = then + Duration::from_secs(5);
+        assert!(
+            !super::download_file_landed(false, true, true, Some(then), Some(then)),
+            "a preexisting file with the same mtime is not a new download"
+        );
+        assert!(super::download_file_landed(
+            false,
+            false,
+            true,
+            None,
+            Some(then)
+        ));
+        assert!(super::download_file_landed(
+            true,
+            true,
+            true,
+            Some(then),
+            Some(then)
+        ));
+        assert!(super::download_file_landed(
+            false,
+            true,
+            true,
+            Some(then),
+            Some(later)
+        ));
+        assert!(!super::download_file_landed(
+            false, false, false, None, None
+        ));
+    }
+
     /// Serves `Browser.getVersion` on one fixed `ws://` address for any number
     /// of connections and counts the calls.
     async fn version_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
