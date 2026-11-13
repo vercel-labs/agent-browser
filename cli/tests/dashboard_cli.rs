@@ -227,6 +227,25 @@ fn dashboard_start_fails_when_another_process_holds_the_port() {
 }
 
 #[test]
+fn dashboard_start_fails_when_another_process_holds_ipv6_loopback() {
+    // No IPv6 means nothing can answer on ::1, so there is nothing to squat.
+    let Ok(squatter) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let _cleanup = DashboardCleanup(&tmp);
+    let port = squatter.local_addr().unwrap().port().to_string();
+
+    let started = run_dashboard(&tmp, &["dashboard", "start", "--port", &port, "--json"]);
+
+    assert!(
+        !started.status.success(),
+        "startup reported success for a port it does not own on ::1"
+    );
+    assert!(!socket_dir(&tmp).join("dashboard.ready").exists());
+}
+
+#[test]
 fn dashboard_listens_on_and_authorizes_ipv6_loopback() {
     // Some minimal CI/container kernels disable IPv6 entirely. In that case
     // the production server deliberately remains available on IPv4 only.

@@ -3850,7 +3850,7 @@ The window uses the dashboard's /pip view. If the dashboard is not running, pip
 starts it on --port (default: 4848). The window opens only for a dashboard the
 CLI started and verified; if another process already holds the port, pip fails
 instead of showing it. The window is available on macOS only; on other
-platforms, open http://localhost:<port>/pip in a browser.
+platforms, open http://127.0.0.1:<port>/pip in a browser.
 
 Drag the window by its top edge or with Cmd held anywhere; it snaps to the
 nearest screen corner. Resize it from the bottom corners. Double-click the top

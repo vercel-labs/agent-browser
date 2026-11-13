@@ -56,8 +56,10 @@ pub fn pid_path() -> PathBuf {
     get_socket_dir().join("pip.pid")
 }
 
+/// URL of the dashboard the CLI verified. The server binds 127.0.0.1, so the
+/// window loads that address rather than a name that can resolve elsewhere.
 pub fn pip_url(dashboard_port: u16) -> String {
-    format!("http://localhost:{dashboard_port}/pip")
+    format!("http://127.0.0.1:{dashboard_port}/pip")
 }
 
 /// Where the helper may live relative to the running CLI binary.
@@ -188,6 +190,6 @@ mod tests {
 
     #[test]
     fn builds_the_dashboard_pip_url() {
-        assert_eq!(pip_url(4848), "http://localhost:4848/pip");
+        assert_eq!(pip_url(4848), "http://127.0.0.1:4848/pip");
     }
 }

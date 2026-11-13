@@ -2,10 +2,10 @@ import AppKit
 import WebKit
 
 // Floating, non-activating picture-in-picture window for an agent-browser session.
-// Usage: agent-browser-pip [url]   (default http://localhost:4848/pip)
+// Usage: agent-browser-pip [url]   (default http://127.0.0.1:4848/pip)
 // Normally started by `agent-browser pip`.
 
-let defaultURL = "http://localhost:4848/pip"
+let defaultURL = "http://127.0.0.1:4848/pip"
 let margin: CGFloat = 16
 let dragStripHeight: CGFloat = 20
 let resizeHandleSize: CGFloat = 14
@@ -280,7 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     guard frame.isMainFrame else { return false }
     let origin = frame.securityOrigin
     return origin.protocol.lowercased() == "http"
-      && isLoopbackHost(origin.host)
+      && isVerifiedHost(origin.host)
       && origin.port == dashboardPort
   }
 
@@ -375,11 +375,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     return host == "localhost" || host == "127.0.0.1"
   }
 
-  private func isDashboardURL(_ candidate: URL?) -> Bool {
-    guard let candidate, candidate.scheme == "http", let host = candidate.host else {
+  /// Only the address the CLI verified is trusted. Another loopback name can
+  /// resolve to a listener the dashboard process does not own.
+  private func isVerifiedHost(_ host: String?) -> Bool {
+    guard let host = host?.lowercased(), let verified = url.host?.lowercased() else {
       return false
     }
-    return isLoopbackHost(host) && (candidate.port ?? 80) == dashboardPort
+    return host == verified && isLoopbackHost(host)
+  }
+
+  private func isDashboardURL(_ candidate: URL?) -> Bool {
+    guard let candidate, candidate.scheme == "http" else {
+      return false
+    }
+    return isVerifiedHost(candidate.host) && (candidate.port ?? 80) == dashboardPort
   }
 
   // MARK: Geometry

@@ -111,7 +111,7 @@ The window follows the session whose agent acted most recently. While the agent 
   </tbody>
 </table>
 
-The window dims after a minute without agent activity and closes itself a minute after its session ends. The window only opens for a dashboard the CLI started and verified: if another process already holds the port, `pip` fails instead of displaying it. On other platforms, open `http://localhost:4848/pip` in a browser to get the same view. From a source checkout, build the macOS helper with `pnpm build:pip`.
+The window dims after a minute without agent activity and closes itself a minute after its session ends. The window only opens for a dashboard the CLI started and verified at `127.0.0.1`: if another process already holds the port, `pip` fails instead of displaying it. On other platforms, open `http://127.0.0.1:4848/pip` in a browser to get the same view. From a source checkout, build the macOS helper with `pnpm build:pip`.
 
 ## WebSocket protocol
 

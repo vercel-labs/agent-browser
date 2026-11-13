@@ -641,6 +641,13 @@ pub async fn run_dashboard_server(port: u16) {
         .unwrap_or(port);
     let ipv6_listener = match TcpListener::bind((Ipv6Addr::LOCALHOST, bound_port)).await {
         Ok(listener) => Some(listener),
+        // A kernel without IPv6 cannot answer on ::1 at all. A port already
+        // taken there belongs to another process that would answer for the
+        // dashboard on loopback.
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!("Failed to bind dashboard server on [::1]:{bound_port}: {error}");
+            return;
+        }
         Err(error) => {
             eprintln!("Failed to bind dashboard server on [::1]:{bound_port}: {error}");
             None
