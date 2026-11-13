@@ -2385,7 +2385,7 @@ impl AllowWrite {
 }
 
 pub fn is_write(method: &str, body: Option<&str>) -> bool {
-    !matches!(method, "GET" | "HEAD" | "OPTIONS") && !is_graphql_query(body)
+    !matches!(method, "GET" | "HEAD" | "OPTIONS") && !(method == "POST" && is_graphql_query(body))
 }
 
 /// A GraphQL POST that only runs queries reads data; mutations still count
@@ -2430,6 +2430,47 @@ pub(crate) fn flow_of(mut v: Value) -> Flow {
 mod tests {
     use super::page::*;
     use super::*;
+
+    #[test]
+    fn graphql_query_bodies_do_not_make_other_http_methods_reads() {
+        for body in [
+            r#"{"query":"query Items { items { id } }"}"#,
+            r#"[{"query":"{ items { id } }"}]"#,
+        ] {
+            assert!(!is_write("POST", Some(body)));
+            for method in ["PUT", "PATCH", "DELETE", "CONNECT", "TRACE"] {
+                assert!(is_write(method, Some(body)), "{method} must remain a write");
+            }
+        }
+    }
+
+    #[test]
+    fn graphql_query_body_cannot_bypass_a_flow_write_declaration() {
+        for method in ["PUT", "PATCH", "DELETE"] {
+            let mut flow = flow_of(json!({
+                "output": "s1r1",
+                "steps": [{ "requests": [{
+                    "id": "s1r1", "method": method,
+                    "url": "https://a.test/items",
+                    "body": "{\"query\":\"query Items { items { id } }\"}"
+                }] }]
+            }));
+            assert!(
+                prepare(&flow, &[]).is_err(),
+                "{method} needs a write declaration"
+            );
+            flow.writes.push(Write {
+                id: "s1r1".to_string(),
+                method: method.to_string(),
+                url: "https://a.test/items".to_string(),
+                kind: WriteKind::Explicit,
+                step: 1,
+            });
+            let requests = prepare(&flow, &[]).unwrap();
+            assert!(requests[0].write);
+            assert!(!AllowWrite::parse(None).unwrap().covers("s1r1"));
+        }
+    }
 
     #[test]
     fn the_start_host_addresses_come_from_the_saved_range_only() {
