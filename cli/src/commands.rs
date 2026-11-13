@@ -949,6 +949,15 @@ fn parse_command_inner(
                     }
                     arg => {
                         reject_batch_global_flag(batch_item, arg)?;
+                        if arg.starts_with('-') && arg.len() > 1 {
+                            // An unknown flag must not become a selector or an
+                            // output path (a typo like `--full-page` used to
+                            // write a file named `--full-page`).
+                            return Err(ParseError::InvalidValue {
+                                message: format!("unknown flag '{}' for screenshot", arg),
+                                usage: "screenshot [selector] [path] [--full|-f] [--if-changed] [--threshold <0-1>]",
+                            });
+                        }
                         positional.push(arg);
                     }
                 }
@@ -5404,6 +5413,41 @@ mod tests {
         let cmd = parse_command(&args("screenshot --if-changed"), &default_flags()).unwrap();
         assert_eq!(cmd["ifChanged"], true);
         assert!(cmd.get("threshold").is_none());
+    }
+
+    #[test]
+    fn test_screenshot_unknown_flag_errors() {
+        // `--full-page` is not a flag (the real one is `--full`). It must error
+        // instead of becoming the output path, which wrote a file named
+        // `--full-page` (issue #1622).
+        let result = parse_command(&args("screenshot body --full-page"), &default_flags());
+        let err = result.expect_err("unknown flag must error");
+        let message = err.format();
+        assert!(message.contains("unknown flag '--full-page'"), "{message}");
+        assert!(message.contains("--full"), "{message}");
+    }
+
+    #[test]
+    fn test_screenshot_unknown_flag_alone_errors() {
+        // With one argument the unknown flag used to be read as a selector,
+        // producing "Element not found: --full-page".
+        let result = parse_command(&args("screenshot --full-page"), &default_flags());
+        assert!(result.is_err(), "got: {:?}", result);
+        let result = parse_command(&args("screenshot -x out.png"), &default_flags());
+        assert!(result.is_err(), "got: {:?}", result);
+    }
+
+    #[test]
+    fn test_screenshot_known_flags_still_parse() {
+        let cmd = parse_command(
+            &args("screenshot .btn ./button.png --full --if-changed"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["selector"], ".btn");
+        assert_eq!(cmd["path"], "./button.png");
+        assert_eq!(cmd["fullPage"], true);
+        assert_eq!(cmd["ifChanged"], true);
     }
 
     #[test]
