@@ -14,6 +14,10 @@ agent-browser install  # Download Chrome from Chrome for Testing (first time)
 
 This is the fastest option -- commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
 
+npm, pnpm, Yarn, and Bun download only the binary for your platform, from a matching `@agent-browser/cli-*` optional dependency. The global `agent-browser` command runs the native binary directly. Package managers that block install scripts by default, such as npm 12, pnpm, and Bun, link it on the first run instead, so no extra setup is needed. Installing with `--omit=optional` skips the binary; reinstall without that flag.
+
+On macOS versions below 13, `agent-browser install` stops before downloading Chrome for Testing and prints instructions to update macOS or install Chrome manually. Update macOS to version 13 or later through **System Settings > General > Software Update**, or install Chrome from [Google's Chrome download page](https://www.google.com/chrome/). This check applies when you run `agent-browser install`; the package installation commands above remain unchanged. If `sw_vers -productVersion` is unavailable, exits with an error, returns no version, or returns a malformed version, `agent-browser install` reports a detection error and stops before making a network request.
+
 ## Quick start (no install)
 
 ```bash
@@ -54,10 +58,9 @@ Compiles from source (~2-3 min). Requires Node.js 24+, pnpm 11+, and the Rust to
 git clone https://github.com/vercel-labs/agent-browser
 cd agent-browser
 pnpm install
-pnpm build
-pnpm build:native
-./bin/agent-browser install
+pnpm build:source
 pnpm link --global
+agent-browser install
 ```
 
 ## Windows browser sessions
@@ -75,6 +78,8 @@ agent-browser install --with-deps
 ```
 
 This exits nonzero if the package manager cannot install every required browser library.
+
+When run as root, this command calls the detected package manager directly. For non-root users, it uses `sudo`. If you are not root and `sudo` is unavailable, it reports that root privileges or `sudo` are required.
 
 ## Updating
 
@@ -152,6 +157,22 @@ AGENT_BROWSER_EXECUTABLE_PATH=/path/to/chromium agent-browser open example.com
 ### Serverless example
 
 Use `@sparticuz/chromium` or similar to obtain a Chromium executable path, then pass it via `--executable-path` or `AGENT_BROWSER_EXECUTABLE_PATH`.
+
+For example, in an AWS Lambda handler:
+
+```typescript
+import chromium from "@sparticuz/chromium";
+import { execSync } from "child_process";
+
+export async function handler() {
+  const executablePath = await chromium.executablePath();
+  const result = execSync(
+    `AGENT_BROWSER_EXECUTABLE_PATH=${executablePath} agent-browser open https://example.com && agent-browser snapshot -i --json`,
+    { encoding: "utf-8" }
+  );
+  return JSON.parse(result);
+}
+```
 
 ## AI agent setup
 

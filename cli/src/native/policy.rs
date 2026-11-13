@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 
@@ -32,15 +31,14 @@ pub struct ActionPolicy {
     confirm: Option<Vec<String>>,
 }
 
-/// Confirmation categories parsed from AGENT_BROWSER_CONFIRM_ACTIONS.
+/// Confirmation categories parsed from the confirm-actions setting.
 #[derive(Debug, Clone)]
 pub struct ConfirmActions {
     pub categories: HashSet<String>,
 }
 
 impl ConfirmActions {
-    pub fn from_env() -> Option<Self> {
-        let val = env::var("AGENT_BROWSER_CONFIRM_ACTIONS").ok()?;
+    pub fn parse(val: &str) -> Option<Self> {
         if val.is_empty() {
             return None;
         }
@@ -73,18 +71,9 @@ impl ActionPolicy {
         Ok(policy)
     }
 
-    /// Load policy if AGENT_BROWSER_ACTION_POLICY env var is set.
-    /// Falls back to AGENT_BROWSER_POLICY for backwards compatibility.
-    /// A file that cannot be loaded yields a policy that denies every action except `close`.
-    pub fn load_if_exists() -> Option<Self> {
-        let path = env::var("AGENT_BROWSER_ACTION_POLICY")
-            .or_else(|_| env::var("AGENT_BROWSER_POLICY"))
-            .ok()?;
-        Some(Self::load_or_deny(&path))
-    }
-
-    /// Load policy from `path`; a file that cannot be loaded denies every action except `close`.
-    pub fn load_or_deny(path: &str) -> Self {
+    /// Load the policy at `path`. A file that cannot be loaded yields a policy
+    /// that denies every action except `close`.
+    pub fn from_path(path: &str) -> Self {
         let mut policy = Self {
             path: PathBuf::from(path),
             ..Self::default()
@@ -154,7 +143,6 @@ impl ActionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::EnvGuard;
 
     #[test]
     fn test_policy_allow_whitelist() {
@@ -232,12 +220,10 @@ mod tests {
 
     #[test]
     fn test_policy_fails_closed_on_load_and_reload() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_ACTION_POLICY", "AGENT_BROWSER_POLICY"]);
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("policy.json");
         let path = file.to_string_lossy().to_string();
-        guard.set("AGENT_BROWSER_ACTION_POLICY", &path);
-        let mut policy = ActionPolicy::load_if_exists().unwrap();
+        let mut policy = ActionPolicy::from_path(&path);
         assert!(matches!(policy.check("evaluate"), PolicyResult::Deny(_)));
         assert_eq!(policy.check("close"), PolicyResult::Allow);
 
@@ -258,10 +244,8 @@ mod tests {
     }
 
     #[test]
-    fn test_confirm_actions_from_env() {
-        let _guard = EnvGuard::new(&["AGENT_BROWSER_CONFIRM_ACTIONS"]);
-        _guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate,click,fill");
-        let ca = ConfirmActions::from_env().unwrap();
+    fn test_confirm_actions_parse() {
+        let ca = ConfirmActions::parse("navigate,click,fill").unwrap();
         assert!(ca.requires_confirmation("navigate"));
         assert!(ca.requires_confirmation("click"));
         assert!(ca.requires_confirmation("fill"));

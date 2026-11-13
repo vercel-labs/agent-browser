@@ -1,8 +1,179 @@
 # agent-browser
 
-## 0.39.4
+## 0.43.0
 
 <!-- release:start -->
+
+### New Features
+
+- Added **snapshot hints** for controls whose accessible name is empty or shared with another ref in the same snapshot. The hint follows the ref and lists the control's icon, image file, `data-testid`, `name` or `id`, and the text of the nearest row or list item (#2578)
+- Added a **Modern Web Guidance skill** that retrieves Chrome's guidance for a task and checks the built page in agent-browser (#2577)
+
+### Bug Fixes
+
+- Fixed **commands on closed tabs** waiting for the timeout. A command whose tab closes before Chrome answers now fails with `Target closed: CDP session <id> detached` (#2576)
+- Fixed **recordings with an emulated device scale**, which now capture at full density by switching to screenshots when a screencast frame is below the page's scale (#2572)
+
+### Improvements
+
+- Native binaries now ship as **per-platform packages**, so an install downloads only the binary for the host platform, and the global command links to it when install scripts are blocked (#2150)
+- **Snapshots of large pages** parse the accessibility tree once, so they finish sooner (#2509)
+
+### Documentation
+
+- Added a **Modern Web Guidance** guide to the docs (#2546, #2573, #2575)
+
+### Contributors
+
+- @ctate
+- @lahfir
+- @shuding
+
+<!-- release:end -->
+
+## 0.42.0
+
+### New Features
+
+- Added **saved flows** (experimental): record a browser task once, then replay its requests. A run tries direct HTTP first, then the same request from the page, then a replay of the recorded commands, and saves the tier that worked. Runs send requests only to public addresses, and saving waits for in-flight requests and follows redirects to the end (#2236, #2397, #2432, #2433, #2444)
+- **MCP tools** now list only the shared arguments each tool uses (#2311)
+
+### Bug Fixes
+
+- Fixed **session reuse and relaunch**, now decided in one place in the daemon. A connection target is kept only after an attach succeeds, and security settings persist across daemon restarts (#2396, #2418, #2429)
+- Fixed **Safari and iOS WebDriver sessions** being dropped (#2385)
+- Fixed **fill and type** altering literal text, and **mouse and element coordinates** losing fractional values (#2394, #2393)
+- Fixed **percent-encoded proxy credentials** not being decoded (#2389)
+- Fixed **downloads** moving local files from an attached Chrome (#2392)
+- Fixed **MCP tool results** that repeated JSON stdout (#2390)
+- Fixed **unknown commands and cookie operations**, now rejected, and **misplaced global options** in batch commands (#2383, #2386)
+- Fixed **errors output** to print page error text, and labeled `storage clear` as storage rather than the request log (#2427, #2428)
+- Fixed **macOS Chrome discovery** for apps installed in the user's Applications folder (#2388)
+- Fixed **Windows recording** opening ffmpeg console windows (#2382)
+- Skipped a repeat `Browser.getVersion` call after the outdated-browser check (#2420)
+
+### Improvements
+
+- The **core skill** now tells agents to prefer snapshots: screenshot only when asked or for content the DOM cannot represent, and wait and snapshot again when an expected element is missing (#2453, #2461)
+- The package now declares a **Node 22 minimum** and drops `engines.pnpm` (#2404)
+- Docs and dashboard chat use **openai/gpt-6-luna-fast** (#2440)
+- Upgraded the repository to **TypeScript 7**
+
+### Contributors
+
+- @Railly
+- @ctate
+- @lahfir
+
+## 0.41.2
+
+
+### New Features
+
+- Added **targeted skill references** with `skills get <name> --ref <ref>` and the MCP `agent_browser_skills_get` tool's `refs` argument, so agents can load one reference or template at a time (#2310)
+- Added **Chrome security warnings** when newer stable releases list CVE fixes, without blocking commands. Set `AGENT_BROWSER_NO_VERSION_CHECK=1` to skip the check (#2309)
+
+### Bug Fixes
+
+- Fixed **session restarts** when commands omit or change timeout settings, preserving open pages and reusing the running daemon's default timeout for waits (#2288)
+- Fixed **bare `open`** dropping configured profiles and browser arguments and relaunching Chrome with a temporary profile (#2287)
+- Fixed **browserless commands** starting a browser when launch options are set in the environment (#2309)
+- Fixed **Windows home directory detection** to respect `USERPROFILE`, and kept the MCP tool catalog's line endings consistent for Windows tests (#2305)
+
+### Improvements
+
+- Slimmed **the core agent skill** and routed detailed guidance to references, with instructions to pass `--session` on every command (#2303, #2312)
+
+### Documentation
+
+- Simplified **the README**, moved detailed guidance to the docs site, and corrected source build instructions (#2302)
+
+### Contributors
+
+- @Railly
+- @ctate
+- @fahimscirex
+- @holny
+- @lahfir
+- @zyz619963502zyz
+
+
+## 0.41.1
+
+### Bug Fixes
+
+- Fixed **cookie attributes** so `cookies set` honors `--http-only` and `--same-site`, preserves the existing aliases, and rejects unknown arguments (#2256)
+- Fixed **page error clearing** so `errors --clear` removes captured errors (#2253)
+- Fixed **MCP selector waits** so bare integer selectors return an error instead of becoming timed waits (#2254)
+- Fixed **plugin error redaction** so sensitive operations omit unsupported protocol values (#2255)
+- Fixed **invalid limit handling** so overflowing idle timeouts and invalid output limits produce warnings instead of overflowing or being silently ignored (#2250, #2258)
+- Removed **unpinned npx execution permission** from the installed agent skill (#2249)
+
+### Documentation
+
+- Documented **stdin MCP connections** that reuse one server process in Vercel Sandbox (#2248)
+- Configured **desktop documentation routes** and the desktop sitemap for the docs site (#2278)
+
+### Contributors
+
+- @Railly
+- @lahfir
+
+
+## 0.41.0
+
+### Breaking Changes
+
+- **`@agent-browser/eve` tools now come from the MCP tool catalog.** The extension exposes the CLI's MCP tools instead of 21 hand-written ones, so tool names and inputs change: `navigate` is `open`, `evaluate` is `eval`, `press_key` is `press`, `select_option` is `select`, `set_checked` is `check` and `uncheck`, `get` is `get_text`, `get_url` and the other `get_*` tools, `tabs` is the `tab_*` tools, and `wait_for` is the `wait_*` tools. The same names apply to `@agent-browser/eve/tools` overrides. The sandbox needs agent-browser 0.41, which the extension installs by default (#2241)
+
+### New Features
+
+- Added **`agent-browser mcp call <tool> '<json>'`** to run one MCP tool without a stdio session and print its result as JSON with the agent-browser version, for runtimes that cannot keep a process open between tool calls (#2238)
+- Added **`@agent-browser/sandbox/mcp-tools.json`**, every MCP tool with its title, description, input schema, annotations and profiles, generated from the CLI and checked by a test (#2240)
+
+### Improvements
+
+- **`@agent-browser/eve` runs each tool as its own short-lived process**, so no `agent-browser` process outlives a tool call. The 28 `core` tools are listed to the model and the other 14 are deferred, found with `eve__search`, which keeps the listed tool context at its previous size (#2241)
+
+### Bug Fixes
+
+- **MCP tool arguments can no longer set global flags.** The CLI reads global flags anywhere in its arguments, so a value such as a selector or `extraArgs` entry could carry its own `--allowed-domains` and override the server or caller allowlist. Tool calls that try are now rejected (#2238)
+
+### Contributors
+
+- @Railly
+- @lahfir
+
+## 0.40.0
+
+
+### Breaking Changes
+
+- **`@agent-browser/eve` now requires eve 0.84.0 or later.** eve 0.84.0 rejects extensions built by earlier releases, so the extension is now built with it. Apps on older eve should stay on `@agent-browser/eve@0.39` (#2226)
+
+### New Features
+
+- Added **one MCP server per Vercel Sandbox** with `startAgentBrowserMcp` in `@agent-browser/sandbox/vercel`, which keeps a single `agent-browser mcp` running over Sandbox stdin, and `connectAgentBrowserMcp` for any runtime that exposes stdin and stdout streams (#2228)
+- Added **`--omit-command`** to `batch` and `omitCommand` to the MCP batch tool, replacing repeated raw command arrays in JSON output with zero-based indexes (#2216)
+
+### Bug Fixes
+
+- Fixed **`state load` and launch-time storage restores** exposing saved tokens to page scripts and writing one origin's storage into another after a redirect; storage is now written through DevTools only while the page is on the saved origin, and skipped origins are reported (#2212)
+- Fixed **`<session>.config` files** piling up in the socket directory after daemons exit (#2128)
+- Fixed **mocked cross-origin responses** failing CORS: `network route --body` now takes `--allow-origin <origin>` (also in the MCP `network_route` tool) to answer preflights and send CORS headers to that origin, and sends a JSON body as `application/json` when no content type is set (#2229)
+- Fixed **Windows sessions** where a dead daemon could keep holding a pinned tab, and where two sessions with the same name in different socket directories could connect to each other's daemon (#2223)
+
+### Contributors
+
+- @OwenKephart
+- @Railly
+- @lahfir
+- @hichipli
+- @jomatsu
+
+
+## 0.39.4
+
 
 ### Bug Fixes
 
@@ -21,7 +192,6 @@
 - @aamirhullur
 - @zyz619963502zyz
 
-<!-- release:end -->
 
 ## 0.39.3
 
