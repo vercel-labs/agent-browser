@@ -18435,41 +18435,58 @@ mod tests {
         assert!(only_security.get("settings").is_none());
     }
 
-    #[tokio::test]
-    async fn test_a_confirmed_launch_keeps_the_allowed_domains_it_was_parked_with() {
-        let (_env, mut state) = isolated_state();
-        let dir = tempfile::tempdir().unwrap();
-        let policy = dir.path().join("policy.json");
-        fs::write(&policy, r#"{"confirm":["navigate"]}"#).unwrap();
+    // A confirmed replay nests execute_command, which needs more stack than a
+    // test thread's default in debug builds.
+    #[test]
+    fn test_a_confirmed_launch_keeps_the_allowed_domains_it_was_parked_with() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let (_env, mut state) = isolated_state();
+                        let dir = tempfile::tempdir().unwrap();
+                        let policy = dir.path().join("policy.json");
+                        fs::write(&policy, r#"{"confirm":["navigate"]}"#).unwrap();
 
-        let parked = execute_command(
-            &json!({
-                "id": "parked",
-                "action": "navigate",
-                "url": "https://a.example",
-                "settings": {
-                    "action-policy": policy.to_str().unwrap(),
-                    "allowed-domains": ["a.example"],
-                    "executable-path": "/missing/chrome-for-test"
-                }
-            }),
-            &mut state,
-        )
-        .await;
-        assert_eq!(parked["data"]["confirmation_required"], true);
-        assert!(
-            state.domain_filter.read().await.is_none(),
-            "deferred to the launch"
-        );
+                        let parked = execute_command(
+                            &json!({
+                                "id": "parked",
+                                "action": "navigate",
+                                "url": "https://a.example",
+                                "settings": {
+                                    "action-policy": policy.to_str().unwrap(),
+                                    "allowed-domains": ["a.example"],
+                                    "executable-path": "/missing/chrome-for-test"
+                                }
+                            }),
+                            &mut state,
+                        )
+                        .await;
+                        assert_eq!(parked["data"]["confirmation_required"], true);
+                        assert!(
+                            state.domain_filter.read().await.is_none(),
+                            "deferred to the launch"
+                        );
 
-        // The launch fails (no browser binary) after the settings apply.
-        let _ = execute_command(&json!({ "id": "c", "action": "confirm" }), &mut state).await;
+                        // The launch fails (no browser binary) after the settings apply.
+                        let _ =
+                            execute_command(&json!({ "id": "c", "action": "confirm" }), &mut state)
+                                .await;
 
-        assert_eq!(
-            state.settings.security().allowed_domains,
-            Some(vec!["a.example".to_string()])
-        );
-        assert!(state.domain_filter.read().await.is_some());
+                        assert_eq!(
+                            state.settings.security().allowed_domains,
+                            Some(vec!["a.example".to_string()])
+                        );
+                        assert!(state.domain_filter.read().await.is_some());
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[tokio::test]

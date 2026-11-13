@@ -3856,7 +3856,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Load cookies and storage state. Origins whose page does not stay on the saved origin are skipped and listed in skippedOrigins.",
+      "description": "Load cookies and storage state. Origins whose page does not stay on the saved origin are skipped and listed in skippedOrigins. Restored origins are remembered for later localStorage collection.",
       "inputSchema": {
         "properties": {
           "path": {
@@ -3914,7 +3914,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Save cookies and storage state.",
+      "description": "Save cookies and storage without revisiting sites over the network. A temporary-target collection failure leaves the existing snapshot unchanged.",
       "inputSchema": {
         "properties": {
           "path": {
