@@ -424,7 +424,6 @@ fn parse_command_inner(
 
     match cmd {
         // === Navigation ===
-        // Maps to "navigate" action in protocol; reflected in ACTION_CATEGORIES in action-policy.ts
         "open" | "goto" | "navigate" => {
             for arg in &rest {
                 reject_batch_global_flag(batch_item, arg)?;

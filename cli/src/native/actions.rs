@@ -2889,6 +2889,32 @@ fn policy_actions_for_command(
     if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
         actions.push("navigate".to_string());
     }
+    // `diff url` navigates to both URLs before it snapshots either one, so a
+    // snapshot-only allow list must not admit it while `navigate` is denied or
+    // needs confirmation.
+    if action == "diff_url" {
+        actions.push("navigate".to_string());
+    }
+    // `wait --fn` and `waitforfunction` run page code through
+    // Runtime.evaluate, so the eval category has to gate them. Filing them
+    // under `wait` alone let a policy that denies `eval` admit arbitrary
+    // script through the wait command.
+    if action == "waitforfunction"
+        || (action == "wait" && cmd.get("function").and_then(|v| v.as_str()).is_some())
+    {
+        actions.push("evaluate".to_string());
+    }
+    // The locator commands resolve an element and then dispatch a subaction
+    // (`find role button` clicks, `find text X fill ...` writes). Check the
+    // resolved subaction as its own action so deny and confirmation cover the
+    // work the command actually does.
+    if FIND_SUBACTION_COMMANDS.contains(&action) {
+        let subaction = cmd
+            .get("subaction")
+            .and_then(|v| v.as_str())
+            .unwrap_or("click");
+        actions.push(locator_subaction_action(subaction).to_string());
+    }
     if let Some(flow) = flow.filter(|_| action == "flow_run") {
         actions.extend(flow.run_writes().iter().map(|w| w.action()));
     }
@@ -2934,6 +2960,21 @@ fn policy_actions_for_command(
         }
     }
     actions
+}
+
+/// The policy action a locator subaction performs, for the policy check.
+///
+/// `click`, `fill`, `check` and `hover` are protocol actions, so their own
+/// name is the action to check. The `text` subaction reads the element the way
+/// the `gettext` action does and has no protocol action of its own, so it is
+/// checked as `gettext`: the `get` category covers it, and a policy that
+/// allows reading a locator keeps working.
+fn locator_subaction_action(subaction: &str) -> &str {
+    if subaction == "text" {
+        "gettext"
+    } else {
+        subaction
+    }
 }
 
 /// The external browser the session's settings connect to, as the launch field
@@ -17746,6 +17787,121 @@ mod tests {
                 &Running::from_env()
             ),
             vec!["a11y".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_diff_url_policy_actions_include_navigation() {
+        let cmd = json!({
+            "action": "diff_url",
+            "id": "diff-url-policy",
+            "url1": "https://example.com/a",
+            "url2": "https://example.com/b"
+        });
+
+        assert_eq!(
+            policy_actions_for_command(&cmd, "diff_url", false, None, None, &Running::from_env()),
+            vec!["diff_url".to_string(), "navigate".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_wait_function_policy_actions_include_evaluate() {
+        let wait_for_function = json!({
+            "action": "waitforfunction",
+            "id": "wait-fn-policy",
+            "expression": "window.ready === true"
+        });
+        let wait_with_function = json!({
+            "action": "wait",
+            "id": "wait-function-policy",
+            "function": "window.ready === true"
+        });
+        let plain_wait = json!({ "action": "wait", "id": "wait-policy", "timeout": 10 });
+
+        assert_eq!(
+            policy_actions_for_command(
+                &wait_for_function,
+                "waitforfunction",
+                false,
+                None,
+                None,
+                &Running::from_env()
+            ),
+            vec!["waitforfunction".to_string(), "evaluate".to_string()]
+        );
+        assert_eq!(
+            policy_actions_for_command(
+                &wait_with_function,
+                "wait",
+                false,
+                None,
+                None,
+                &Running::from_env()
+            ),
+            vec!["wait".to_string(), "evaluate".to_string()]
+        );
+        assert_eq!(
+            policy_actions_for_command(
+                &plain_wait,
+                "wait",
+                false,
+                None,
+                None,
+                &Running::from_env()
+            ),
+            vec!["wait".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_locator_policy_actions_include_the_resolved_subaction() {
+        let click = json!({
+            "action": "getbyrole",
+            "id": "locator-policy-click",
+            "role": "button",
+            "subaction": "click"
+        });
+        let default_click = json!({
+            "action": "getbyrole",
+            "id": "locator-policy-default",
+            "role": "button"
+        });
+        let fill = json!({
+            "action": "getbytext",
+            "id": "locator-policy-fill",
+            "text": "Email",
+            "subaction": "fill",
+            "value": "a@example.com"
+        });
+        let text = json!({
+            "action": "nth",
+            "id": "locator-policy-text",
+            "selector": ".item",
+            "index": 0,
+            "subaction": "text"
+        });
+
+        let actions = |cmd: &Value, action: &str| {
+            policy_actions_for_command(cmd, action, false, None, None, &Running::from_env())
+        };
+        assert_eq!(
+            actions(&click, "getbyrole"),
+            vec!["getbyrole".to_string(), "click".to_string()]
+        );
+        assert_eq!(
+            actions(&default_click, "getbyrole"),
+            vec!["getbyrole".to_string(), "click".to_string()]
+        );
+        assert_eq!(
+            actions(&fill, "getbytext"),
+            vec!["getbytext".to_string(), "fill".to_string()]
+        );
+        // The read subaction has no protocol action of its own; it is the
+        // `gettext` action and the `get` category covers it.
+        assert_eq!(
+            actions(&text, "nth"),
+            vec!["nth".to_string(), "gettext".to_string()]
         );
     }
 
