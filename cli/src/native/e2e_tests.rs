@@ -16185,6 +16185,56 @@ async fn e2e_firefox_frame_by_name_and_url() {
     firefox_close(&mut state).await;
 }
 
+/// `frame` reads the frame window in the BiDi sandbox and trusts only a frame the browser reports,
+/// so a page that shadows `contentWindow` cannot forge a browsing context.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_frame_ignores_a_page_forged_content_window() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        r#"new Promise((resolve) => {
+            document.body.innerHTML = '<iframe id=f srcdoc="<p id=marker>inside</p>"></iframe>';
+            Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', { configurable: true, get: () => window });
+            const frame = document.querySelector('#f');
+            Object.defineProperty(frame, 'contentWindow', { configurable: true, get: () => window });
+            frame.addEventListener('load', () => resolve(true));
+        })"#,
+    )
+    .await;
+
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        firefox_act(&mut state, "frame", "#f", json!({})),
+    )
+    .await
+    .expect("frame must not hang on a forged contentWindow");
+    assert_success(&resp);
+    let after = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        firefox_command(&mut state, json!({ "id": "after", "action": "url" })),
+    )
+    .await
+    .expect("commands after frame must not hang");
+    assert_success(&after);
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "document.querySelector('#marker')?.textContent || ''"
+        )
+        .await,
+        json!("inside"),
+        "{resp}"
+    );
+    firefox_close(&mut state).await;
+}
+
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_snapshot_tracks_active_window() {

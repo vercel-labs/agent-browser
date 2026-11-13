@@ -1,6 +1,6 @@
 //! Firefox read/query commands, semantic locators, frame switching and eval handles.
 
-use super::client::BidiClient;
+use super::client::{BidiClient, SANDBOX};
 use super::daemon::session;
 use super::target::{resolve_target, Target};
 use crate::native::actions::{self as chrome, DaemonState};
@@ -58,6 +58,17 @@ fn selector(cmd: &Value) -> Result<&str, String> {
 /// Runs a Chrome element function body with `this` set to the resolved node.
 async fn call_on_target(bidi: &BidiClient, target: &Target, js: &str) -> Result<Value, String> {
     bidi.call_function(&target.context, js, Some(target.node_ref()), Vec::new())
+        .await
+}
+
+/// Runs a Chrome element function body in the sandbox with `this` set to the resolved node, so
+/// page patches of the element cannot change what it reads.
+async fn call_on_target_in_sandbox(
+    bidi: &BidiClient,
+    target: &Target,
+    js: &str,
+) -> Result<Value, String> {
+    bidi.call_function_on_in_sandbox(&target.context, SANDBOX, js, target.node_ref())
         .await
 }
 
@@ -546,7 +557,7 @@ async fn frame_names(
         pending.extend(children);
         let frames = ff
             .bidi
-            .call_function(id, FRAME_NAMES_JS, None, vec![])
+            .call_function_in_sandbox(id, SANDBOX, FRAME_NAMES_JS, vec![])
             .await?;
         for frame in frames.as_array().into_iter().flatten() {
             if let (Some(name), Some(child)) = (frame[0].as_str(), frame[1].as_str()) {
@@ -612,26 +623,32 @@ pub async fn frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
     }
     let sel = selector(cmd)?;
     let from_ref = parse_ref(sel).is_some();
-    let target = resolve_target(state, sel).await?;
-    let ff = session(state)?;
-    let value = call_on_target(&ff.bidi, &target, FRAME_WINDOW_JS).await?;
-    let window = value["window"].as_str().unwrap_or_default();
-    if window.is_empty() {
-        return Err(if from_ref {
+    let missing_frame = || {
+        if from_ref {
             "Ref does not point to an iframe element".to_string()
         } else {
             "Could not find frame for selector".to_string()
-        });
+        }
+    };
+    let target = resolve_target(state, sel).await?;
+    let ff = session(state)?;
+    let value = call_on_target_in_sandbox(&ff.bidi, &target, FRAME_WINDOW_JS).await?;
+    let window = value["window"].as_str().unwrap_or_default().to_string();
+    if window.is_empty() {
+        return Err(missing_frame());
+    }
+    ff.refresh_frame_tree().await?;
+    let tab = ff.contexts.active_tab().to_string();
+    if !ff.contexts.is_frame_of(&window, &tab) {
+        return Err(missing_frame());
     }
     let label = value["label"]
         .as_str()
         .filter(|label| !label.is_empty())
         .unwrap_or(sel)
         .to_string();
-    ff.contexts
-        .record(&json!({"context": window, "parent": target.context}));
-    ff.contexts.activate(window);
-    state.active_frame_id = Some(window.to_string());
+    ff.contexts.activate(&window);
+    state.active_frame_id = Some(window);
     Ok(json!({ "frame": label }))
 }
 
@@ -810,6 +827,56 @@ mod tests {
             "ctx-active"
         );
         assert!(state.active_frame_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn frame_refuses_a_window_the_browser_does_not_report_as_a_frame() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let log = requests.clone();
+        let (ff, _tx, _) = super::super::session::tests::fake_session_with_replies(move |v| {
+            use super::super::session::tests::FakeReply;
+            log.lock().unwrap().push(v.clone());
+            FakeReply::Result(match v["method"].as_str() {
+                Some("script.callFunction") if v["params"]["target"]["sandbox"].is_string() => {
+                    json!({"type": "success", "result": {"type": "object", "value": [
+                        ["label", {"type": "string", "value": "forged"}],
+                        ["window", {"type": "window", "value": {"context": "ctx-active"}}]
+                    ]}})
+                }
+                Some("script.callFunction") => {
+                    json!({"type": "success", "result": {"type": "node", "sharedId": "node-1"}})
+                }
+                Some("browsingContext.getTree") => {
+                    json!({"contexts": [{"context": "ctx-active", "children": []}]})
+                }
+                _ => json!({}),
+            })
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        let error = frame(&json!({"selector": "#f"}), &mut state)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "Could not find frame for selector");
+        assert!(state.active_frame_id.is_none());
+        let ff = state.firefox.as_ref().unwrap();
+        assert_eq!(ff.contexts.active(), "ctx-active");
+        assert_eq!(ff.contexts.tab_of("ctx-active"), Some("ctx-active"));
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r["method"] == "script.callFunction"
+                    && r["params"]["target"]["sandbox"].is_string())
+                .count(),
+            1
+        );
+        assert!(requests
+            .iter()
+            .any(|r| r["method"] == "browsingContext.getTree"));
     }
 
     #[tokio::test]

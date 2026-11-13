@@ -13,6 +13,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The sandbox every script that must not see page patches runs in.
+pub(crate) const SANDBOX: &str = "agent-browser";
+
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 type WsSink = futures_util::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
@@ -210,6 +213,24 @@ impl BidiClient {
             js,
             None,
             args,
+            DEFAULT_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Runs a function in a named sandbox with `this` set to a remote object reference.
+    pub(crate) async fn call_function_on_in_sandbox(
+        &self,
+        context: &str,
+        sandbox: &str,
+        js: &str,
+        this: Value,
+    ) -> Result<Value, String> {
+        self.call_function_target(
+            json!({"context": context, "sandbox": sandbox}),
+            js,
+            Some(this),
+            Vec::new(),
             DEFAULT_TIMEOUT,
         )
         .await
