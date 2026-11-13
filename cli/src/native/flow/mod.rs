@@ -3003,7 +3003,7 @@ mod tests {
 
     #[test]
     fn page_fetch_leaves_browser_headers_to_the_browser() {
-        let script = page_fetch_script(&prepared("s1r1"));
+        let script = page_fetch_script(&prepared("s1r1"), Duration::from_secs(20));
         assert!(script.contains("country"));
         assert!(!script.contains("User-Agent"));
         assert!(!script.contains("sec-ch-ua"));
@@ -4454,7 +4454,7 @@ mod tests {
         }));
         let req = prepare_all(&flow, &[]).unwrap().remove(0);
         // The browser stops at the 3xx, so no hop is sent before a check.
-        assert!(page_fetch_script(&req).contains(r#""redirect":"manual""#));
+        assert!(page_fetch_script(&req, Duration::from_secs(20)).contains(r#""redirect":"manual""#));
         let r = page::page_result(
             &HostPolicy::of(&flow),
             &req,
@@ -4468,7 +4468,9 @@ mod tests {
             method: "POST".to_string(),
             ..req
         };
-        assert!(page_fetch_script(&write).contains(r#""redirect":"manual""#));
+        assert!(
+            page_fetch_script(&write, Duration::from_secs(20)).contains(r#""redirect":"manual""#)
+        );
     }
 
     #[test]
@@ -5317,10 +5319,10 @@ mod tests {
             write: true,
             ..prepared("s1r1")
         };
-        let script = page_fetch_script(&write);
+        let script = page_fetch_script(&write, Duration::from_secs(20));
         assert!(!script.contains("catch"), "{script}");
         assert_eq!(script.matches("fetch(").count(), 1, "{script}");
-        let read = page_fetch_script(&prepared("s1r1"));
+        let read = page_fetch_script(&prepared("s1r1"), Duration::from_secs(20));
         assert!(read.contains("catch"));
     }
 

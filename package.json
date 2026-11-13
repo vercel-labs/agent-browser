@@ -29,6 +29,7 @@
     "build:all-platforms": "npm run version:sync && (npm run build:linux & npm run build:windows & wait) && npm run build:macos",
     "build:docker": "docker build --platform linux/amd64 -t agent-browser-builder -f docker/Dockerfile.build .",
     "release": "npm run version:sync && npm run build:all-platforms && npm publish",
+    "test:flow-page": "node --test test/flow-page-fetch.test.mjs",
     "postinstall": "node scripts/postinstall.js",
     "test:launcher": "node --test test/launcher.test.mjs",
     "build:dashboard": "cd packages/dashboard && pnpm build",

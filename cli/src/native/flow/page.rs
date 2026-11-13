@@ -2,9 +2,19 @@
 
 use super::*;
 
+const PAGE_FETCH_WRITE: &str =
+    r#"const r = await fetch(u, { ...i, credentials: 'include', signal: controller.signal });"#;
+const PAGE_FETCH_READ: &str = r#"let r;
+try {
+    r = await fetch(u, { ...i, credentials: 'include', signal: controller.signal });
+} catch (e) {
+    if (controller.signal.aborted) throw e;
+    r = await fetch(u, { ...i, signal: controller.signal });
+}"#;
+
 /// Tier 2: the page sends the request itself, so the browser adds its own
 /// cookies, client hints and any headers the site's scripts would not.
-pub fn page_fetch_script(req: &PreparedRequest) -> String {
+pub fn page_fetch_script(req: &PreparedRequest, timeout: Duration) -> String {
     // Headers the browser sets itself. Sending them as app headers turns the
     // request into a CORS preflight the site never allowed.
     let headers: Map<String, Value> = req
@@ -27,18 +37,29 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
     // A write is never sent a second time: a thrown fetch may still have
     // reached the server, so it is reported as an unknown outcome instead.
     let send = if req.write {
-        "const r = await fetch(u, { ...i, credentials: 'include' });"
+        PAGE_FETCH_WRITE
     } else {
-        "let r; try { r = await fetch(u, { ...i, credentials: 'include' }); } \
-         catch (e) { r = await fetch(u, i); }"
+        PAGE_FETCH_READ
     };
+    // Dropping the CDP evaluation future does not cancel fetch in the page.
+    // Keep its timer alive through response-body consumption as well.
     format!(
-        "(async () => {{ const u = {url}, i = {init}; \
-         {send} \
-         return {{ status: r.type === 'opaqueredirect' ? 302 : r.status, redirected: r.type === 'opaqueredirect', url: r.url, retryAfter: r.headers.get('retry-after'), text: await r.text() }}; }})()",
+        r#"(async () => {{
+    const u = {url}, i = {init};
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("the run's time is up")), {timeout_ms});
+    try {{
+        {send}
+        return {{ status: r.type === 'opaqueredirect' ? 302 : r.status, redirected: r.type === 'opaqueredirect', url: r.url, retryAfter: r.headers.get('retry-after'), text: await r.text() }};
+    }} finally {{
+        clearTimeout(timer);
+    }}
+}})()"#,
         url = json!(req.url),
         init = init,
-        send = send
+        send = send,
+        // Browsers store timer delays as signed 32-bit milliseconds.
+        timeout_ms = timeout.as_millis().min(i32::MAX as u128),
     )
 }
 
@@ -147,7 +168,8 @@ pub async fn send(
             Failure::unavailable("the run's time is up".to_string()),
         );
     }
-    let value = match tokio::time::timeout(left, browser.eval(&page_fetch_script(req))).await {
+    let value = match tokio::time::timeout(left, browser.eval(&page_fetch_script(req, left))).await
+    {
         Ok(value) => value,
         Err(_) => Err("the run's time is up".to_string()),
     };
