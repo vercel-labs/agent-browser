@@ -3021,12 +3021,25 @@ Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina;
                              scale must be finite)
   device <name>              Emulate device (e.g., "iPhone 12")
-  geo <lat> <lng>            Set geolocation (coordinates must be finite)
+  geo <lat> <lng>            Set geolocation (coordinates must be finite).
+                             navigator.geolocation also needs set permissions geolocation
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
         [reduced-motion]     Enable reduced motion
+  permissions <name...>      Grant Chrome permission types. Optional --origin <url>
+                             scopes the grant; omit it for the whole browser context.
+                             Names (kebab = CDP): geolocation, notifications,
+                             camera=videoCapture, microphone=audioCapture,
+                             clipboard-read=clipboardReadWrite,
+                             clipboard-write=clipboardSanitizedWrite, midi,
+                             midi-sysex=midiSysex, background-sync=backgroundSync,
+                             idle-detection=idleDetection,
+                             persistent-storage=durableStorage,
+                             payment-handler=paymentHandler,
+                             window-management=windowManagement, sensors
+                             Identity CDP names also parse (videoCapture, ...).
 
 Global Options:
   --json               Output as JSON
@@ -3037,6 +3050,9 @@ Examples:
   agent-browser set viewport 1920 1080 2    # 2x retina
   agent-browser set device "iPhone 12"
   agent-browser set geo 37.7749 -122.4194
+  agent-browser set permissions geolocation
+  agent-browser set permissions camera microphone
+  agent-browser set permissions clipboard-read --origin https://example.com
   agent-browser set offline on
   agent-browser set headers '{"X-Custom": "value"}'
   agent-browser set credentials admin secret123
@@ -4234,7 +4250,7 @@ Tool profiles:
              batch, confirm/deny
   tabs       Back/forward/reload, tabs, windows, frames, dialogs
   react      React tree/inspect/renders/suspense, vitals, pushstate
-  mobile     Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+  mobile     Viewport/device/geolocation/permissions/media, touch, swipe, mouse, keyboard
   all        Every MCP tool, including the full typed CLI parity surface
 
 Common tools include:
@@ -4475,6 +4491,7 @@ Browser Settings:  agent-browser set <setting> [value]
   viewport <w> <h>, device <name>, geo <lat> <lng>
   offline [on|off], headers <json>, credentials <user> <pass>
   media [dark|light] [reduced-motion]
+  permissions <name...> [--origin <url>]
 
 Network:  agent-browser network <action>
   route <url> [--abort|--body <json> [--allow-origin <origin>]] [--resource-type <csv>]

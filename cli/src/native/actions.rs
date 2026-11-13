@@ -9525,9 +9525,17 @@ async fn handle_permissions(cmd: &Value, state: &DaemonState) -> Result<Value, S
                 .collect()
         })
         .unwrap_or_default();
+    let origin = cmd
+        .get("origin")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
 
-    mgr.grant_permissions(&permissions).await?;
-    Ok(json!({ "granted": permissions }))
+    mgr.grant_permissions(&permissions, origin).await?;
+    let mut result = json!({ "granted": permissions });
+    if let Some(origin) = origin {
+        result["origin"] = json!(origin);
+    }
+    Ok(result)
 }
 
 async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

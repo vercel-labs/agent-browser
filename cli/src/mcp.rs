@@ -82,6 +82,7 @@ const TOOL_SET_OFFLINE: &str = "agent_browser_set_offline";
 const TOOL_SET_HEADERS: &str = "agent_browser_set_headers";
 const TOOL_SET_CREDENTIALS: &str = "agent_browser_set_credentials";
 const TOOL_SET_MEDIA: &str = "agent_browser_set_media";
+const TOOL_SET_PERMISSIONS: &str = "agent_browser_set_permissions";
 const TOOL_NETWORK_ROUTE: &str = "agent_browser_network_route";
 const TOOL_NETWORK_UNROUTE: &str = "agent_browser_network_unroute";
 const TOOL_NETWORK_REQUESTS: &str = "agent_browser_network_requests";
@@ -273,7 +274,7 @@ impl ToolProfile {
             Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
             Self::Tabs => "Tab, window, frame, and JavaScript dialog management.",
             Self::React => "React tree inspection, render recording, Suspense inspection, Web Vitals, SPA pushstate, and init-script removal.",
-            Self::Mobile => "Viewport/device/geolocation/media emulation plus touch, swipe, and lower-level mouse tools.",
+            Self::Mobile => "Viewport/device/geolocation/permissions/media emulation plus touch, swipe, and lower-level mouse tools.",
             Self::Webmcp => "Experimental page-provided WebMCP discovery, invocation, detached results, and cancellation.",
             Self::All => "Every MCP tool, including the full typed CLI parity surface.",
         }
@@ -509,6 +510,7 @@ const MOBILE_PROFILE_TOOLS: &[&str] = &[
     TOOL_SET_DEVICE,
     TOOL_SET_GEO,
     TOOL_SET_MEDIA,
+    TOOL_SET_PERMISSIONS,
     TOOL_TAP,
     TOOL_SWIPE,
     TOOL_DEVICE,
@@ -1333,6 +1335,16 @@ fn parity_tools() -> Vec<Value> {
             "Set media emulation.",
             json!({ "colorScheme": { "type": "string", "enum": ["dark", "light", "no-preference"] }, "reducedMotion": { "type": "string", "enum": ["reduce", "no-preference"] } }),
             &[],
+        ),
+        tool(
+            TOOL_SET_PERMISSIONS,
+            "Set permissions",
+            "Grant Chrome permission types (geolocation, notifications, clipboard, camera, microphone). Pair geolocation with set geo. Optional origin scopes the grant.",
+            json!({
+                "permissions": string_array_schema("Chrome permission types. Kebab aliases such as camera and clipboard-read, or CDP names such as videoCapture."),
+                "origin": { "type": "string", "description": "Origin to grant for. Omit to grant for the whole browser context." }
+            }),
+            &["permissions"],
         ),
         tool(
             TOOL_NETWORK_ROUTE,
@@ -2511,6 +2523,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SET_HEADERS => call_set_headers(arguments),
         TOOL_SET_CREDENTIALS => call_set_credentials(arguments),
         TOOL_SET_MEDIA => call_set_media(arguments),
+        TOOL_SET_PERMISSIONS => call_set_permissions(arguments),
         TOOL_NETWORK_ROUTE => call_network_route(arguments),
         TOOL_NETWORK_UNROUTE => call_optional_one(arguments, &["network", "unroute"], "url"),
         TOOL_NETWORK_REQUESTS => call_network_requests(arguments),
@@ -3468,6 +3481,23 @@ fn call_set_credentials(arguments: &Value) -> Result<Value, ProtocolError> {
 
 fn call_set_media(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, set_media_args(arguments)?, None)
+}
+
+fn call_set_permissions(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, set_permissions_args(arguments)?, None)
+}
+
+fn set_permissions_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let permissions = required_string_array(arguments, "permissions")?;
+    let mut args = vec!["set".to_string(), "permissions".to_string()];
+    args.extend(permissions);
+    if let Some(origin) = optional_string(arguments, "origin")? {
+        if !origin.is_empty() {
+            args.push("--origin".to_string());
+            args.push(origin);
+        }
+    }
+    Ok(args)
 }
 
 fn set_media_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
@@ -5628,6 +5658,47 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["set", "media", "dark", "reduced-motion"]);
+    }
+
+    #[test]
+    fn set_permissions_args_map_names_and_origin() {
+        let args = set_permissions_args(&json!({
+            "permissions": ["geolocation"]
+        }))
+        .unwrap();
+        assert_eq!(args, vec!["set", "permissions", "geolocation"]);
+
+        let args = set_permissions_args(&json!({
+            "permissions": ["camera"],
+            "origin": "https://example.com"
+        }))
+        .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "set",
+                "permissions",
+                "camera",
+                "--origin",
+                "https://example.com"
+            ]
+        );
+
+        let args = set_permissions_args(&json!({
+            "permissions": ["geolocation"],
+            "origin": ""
+        }))
+        .unwrap();
+        assert_eq!(args, vec!["set", "permissions", "geolocation"]);
+    }
+
+    #[test]
+    fn parse_mcp_config_mobile_includes_set_permissions() {
+        let config = parse_mcp_config(&["--tools=mobile".into()]).unwrap();
+        assert!(config.allows(TOOL_SET_PERMISSIONS));
+        assert!(config.allows(TOOL_SET_GEO));
+        assert!(config.allows(TOOL_SET_MEDIA));
+        assert!(MOBILE_PROFILE_TOOLS.contains(&TOOL_SET_PERMISSIONS));
     }
 
     #[test]
