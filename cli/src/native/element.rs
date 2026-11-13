@@ -893,7 +893,7 @@ async fn find_node_id_by_role_name(
     let (ax_params, effective_session_id) =
         resolve_ax_session(frame_id, session_id, iframe_sessions);
     let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed(
+        .send_command_typed_raw(
             "Accessibility.getFullAXTree",
             &ax_params,
             Some(effective_session_id),

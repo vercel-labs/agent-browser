@@ -61,6 +61,7 @@ export function DocsMobileNav() {
                     <Link
                       href={item.href}
                       onClick={() => setOpen(false)}
+                      aria-current={pathname === item.href ? "page" : undefined}
                       className={`text-sm block py-2 transition-colors ${
                         pathname === item.href
                           ? "text-primary font-medium"
