@@ -85,7 +85,17 @@ export interface TabsMessage {
   timestamp: number;
 }
 
+export interface PointerMessage {
+  type: "pointer";
+  action: string;
+  /** Viewport CSS pixels. */
+  x: number;
+  y: number;
+  timestamp: number;
+}
+
 export type StreamMessage =
+  | PointerMessage
   | FrameMessage
   | StatusMessage
   | CommandMessage

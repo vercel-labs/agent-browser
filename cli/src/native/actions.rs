@@ -7258,6 +7258,9 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &mut state.mouse_state,
         &state.recording_state.shared_cursor,
     );
+    if let Some(ref server) = state.stream_server {
+        server.broadcast_pointer("click", result.x, result.y);
+    }
 
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;

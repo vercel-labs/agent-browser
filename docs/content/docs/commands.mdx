@@ -536,6 +536,12 @@ agent-browser dashboard start --allowed-origins <origins> # Allow exact HTTPS re
 agent-browser dashboard stop          # Stop the dashboard server
 ```
 
+```bash
+agent-browser pip                     # Watch the active session in a floating window (macOS)
+agent-browser pip --port <n>          # Dashboard port to start when none is running
+agent-browser pip stop                # Close the PiP window
+```
+
 Loopback dashboard origins are accepted by default without an access token. For a reverse-proxied or forwarded URL, pass its exact browser origin with `--allowed-origins` or set `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS`. Every configured origin must be a valid exact HTTPS origin. Ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. Open the normal `http://localhost:<port>` URL for local access. The browser stays on the dashboard origin; per-session tabs, status, and stream traffic are proxied internally, so session ports do not need to be exposed. Stop the running dashboard before changing the port or allowed origins.
 
 ## Doctor

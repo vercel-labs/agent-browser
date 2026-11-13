@@ -24,30 +24,48 @@ import {
 import { basename, dirname, join, relative, resolve } from 'path';
 import { platform } from 'os';
 
+/** Executables shipped beside the native binary in its platform package. */
+const SIBLING_HELPERS = ['agent-browser-pip-darwin'];
+
 /**
  * Ensures the binary lives in this package's own bin/ directory and returns
  * that path. Bin entries must target files inside the package that owns them:
  * npm only removes such links on uninstall, and bun refuses to replace a
- * global bin entry that points into another package.
+ * global bin entry that points into another package. Helpers the CLI looks up
+ * next to its own executable, such as the macOS PiP window, move with it.
  */
 export function materializeBinary(packageRoot, binary, target) {
   const binDir = join(packageRoot, 'bin');
   if (dirname(resolve(binary)) === resolve(binDir)) return binary;
 
   const destination = join(binDir, target.binaryName);
+  placeFile(binary, destination);
+  for (const helper of SIBLING_HELPERS) {
+    const source = join(dirname(binary), helper);
+    if (!existsSync(source)) continue;
+    try {
+      placeFile(source, join(binDir, helper));
+    } catch {
+      // The CLI still runs; only the command that needs the helper fails.
+    }
+  }
+  return destination;
+}
+
+/** Hard links or copies `source` to `destination`, replacing it atomically. */
+function placeFile(source, destination) {
   const staged = `${destination}.install-${process.pid}`;
   try {
     try {
-      linkSync(binary, staged);
+      linkSync(source, staged);
     } catch {
-      copyFileSync(binary, staged);
+      copyFileSync(source, staged);
     }
     if (platform() !== 'win32') chmodSync(staged, 0o755);
     renameSync(staged, destination);
   } finally {
     rmSync(staged, { force: true });
   }
-  return destination;
 }
 
 /** Writes `content` to `path` atomically, leaving the original intact on failure. */

@@ -454,9 +454,13 @@ pub(super) fn serve_embedded_file(url_path: &str) -> (&'static str, &'static str
         clean
     };
 
+    let page = format!("{}.html", key.trim_end_matches('/'));
     let file = DashboardAssets::get(key)
-        .map(|file| (key, file))
-        .or_else(|| DashboardAssets::get("index.html").map(|file| ("index.html", file)));
+        .map(|file| (key.to_string(), file))
+        .or_else(|| DashboardAssets::get(&page).map(|file| (page.clone(), file)))
+        .or_else(|| {
+            DashboardAssets::get("index.html").map(|file| ("index.html".to_string(), file))
+        });
 
     match file {
         Some((key, content)) => {

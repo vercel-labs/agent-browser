@@ -7,8 +7,9 @@
  *
  * The artifacts directory holds the files built by the release workflow
  * (agent-browser-linux-x64, agent-browser-win32-x64.exe, ...), in any layout.
- * Each one is copied to packages/@agent-browser/cli-<key>/bin/. Exits non-zero
- * if any binary is missing or implausibly small.
+ * Each one is copied to packages/@agent-browser/cli-<key>/bin/, and the macOS
+ * PiP helper goes into both darwin packages. Exits non-zero if any binary is
+ * missing or implausibly small.
  */
 
 import { chmodSync, copyFileSync, mkdirSync, readdirSync, statSync } from 'fs';
@@ -27,6 +28,8 @@ const NATIVE_PACKAGES = [
   ['agent-browser-linux-musl-x64', 'cli-linux-x64-musl', 'agent-browser'],
   ['agent-browser-linux-musl-arm64', 'cli-linux-arm64-musl', 'agent-browser'],
   ['agent-browser-win32-x64.exe', 'cli-win32-x64-msvc', 'agent-browser.exe'],
+  ['agent-browser-pip-darwin', 'cli-darwin-arm64', 'agent-browser-pip-darwin'],
+  ['agent-browser-pip-darwin', 'cli-darwin-x64', 'agent-browser-pip-darwin'],
 ];
 
 function findFiles(directory) {
@@ -74,4 +77,4 @@ if (errors > 0) {
   console.error(`Error: ${errors} binary issues found`);
   process.exit(1);
 }
-console.log(`All ${NATIVE_PACKAGES.length} platform packages staged`);
+console.log(`All ${NATIVE_PACKAGES.length} platform binaries staged`);

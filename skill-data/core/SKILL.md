@@ -52,7 +52,7 @@ agent-browser skills get core --ref references/authentication.md --ref templates
 
 | Load | When you need |
 | --- | --- |
-| `references/commands.md` | Any command or flag not shown here, global options, environment variables, `agent-browser.json` keys, the MCP server and its tool profiles, eve integration, network mocking and HAR, accessibility audits, React and Web Vitals, the dashboard, WebMCP commands, `doctor` |
+| `references/commands.md` | Any command or flag not shown here, global options, environment variables, `agent-browser.json` keys, the MCP server and its tool profiles, eve integration, network mocking and HAR, accessibility audits, React and Web Vitals, the dashboard and the PiP window, WebMCP commands, `doctor` |
 | `references/snapshot-refs.md` | How refs are assigned, kept, and invalidated |
 | `references/authentication.md` | Auth vault, `--no-navigate`, credential provider plugins, importing a logged-in browser |
 | `references/session-management.md` | Persistence, `--restore` policies, idle shutdown, tab pinning, parallel sessions |
@@ -236,6 +236,10 @@ agent-browser --session b open https://app.example.com
 ```
 
 When several sessions share one Chrome over `--cdp <port>`, add `--pin-tab` so each session keeps its own tab.
+
+### Let the user watch
+
+When the user wants to see the browser while you work, run `agent-browser pip`. It opens a small always-on-top window on their screen (macOS) that follows your session live and lets them click in to take over. `agent-browser pip stop` closes it. On other platforms it prints the dashboard URL to open instead.
 
 ### Iframes and dialogs
 

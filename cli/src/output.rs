@@ -3834,6 +3834,44 @@ Examples:
 "##
         }
 
+        // === PiP ===
+        "pip" => {
+            r##"
+agent-browser pip - Watch the active session in a floating window
+
+Usage: agent-browser pip [--port <n>]
+       agent-browser pip stop
+
+Open a small always-on-top window that streams the session whose agent acted
+most recently. It shows the agent's last action and where it clicked. Click the
+frame to take over mouse and keyboard; press Esc to hand control back.
+
+The window uses the dashboard's /pip view. If the dashboard is not running, pip
+starts it on --port (default: 4848). The window opens only for a dashboard the
+CLI started and verified; if another process already holds the port, pip fails
+instead of showing it. The window is available on macOS only; on other
+platforms, open http://127.0.0.1:<port>/pip in a browser.
+
+Drag the window by its top edge or with Cmd held anywhere; it snaps to the
+nearest screen corner. Resize it from the bottom corners. Double-click the top
+edge to open the full dashboard, right-click it to close the window.
+
+Subcommands:
+  stop                 Close the PiP window (the dashboard keeps running)
+
+Options:
+  --port <n>           Dashboard port to start when none is running (default: 4848)
+
+Global Options:
+  --json               Output as JSON
+
+Examples:
+  agent-browser pip
+  agent-browser pip --port 8080
+  agent-browser pip stop
+"##
+        }
+
         // === Connect ===
         "connect" => {
             r##"
@@ -4230,7 +4268,7 @@ Tool profiles:
   network    Network routes, request inspection, HAR, headers, credentials, offline
   state      Cookies, storage, auth, saved state, sessions, profiles, skills
   debug      Console/errors, tracing, profiling, recording, accessibility audits,
-             clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff,
+             clipboard, plugins, doctor, dashboard, pip, install, upgrade, chat, diff,
              batch, confirm/deny
   tabs       Back/forward/reload, tabs, windows, frames, dialogs
   react      React tree/inspect/renders/suspense, vitals, pushstate
@@ -4603,6 +4641,8 @@ Dashboard:
   dashboard start --allowed-origins <origins>
                             Allow exact HTTPS reverse-proxied origins
   dashboard stop             Stop the dashboard server
+  pip [--port <n>]           Watch the active session in a floating window (macOS)
+  pip stop                   Close the PiP window
 
 Setup:
   install                    Install browser binaries
