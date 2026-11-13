@@ -474,7 +474,7 @@ agent-browser pip --port 8080     # dashboard port to start when none is running
 agent-browser pip stop            # close the window; the dashboard keeps running
 ```
 
-Opens a small always-on-top window on the user's screen that streams the session whose agent acted most recently, with the last action and a marker where it clicked. The user can click the frame to take over mouse and keyboard and press Esc to hand control back. Running `pip` again while the window is open reports it as already open. The window is a macOS helper that ships next to the CLI binary; on other platforms the command fails with the dashboard URL to open in a browser (`http://localhost:<port>/pip`). From a source checkout, build the helper with `pnpm build:pip`.
+Opens a small always-on-top window on the user's screen that streams the session whose agent acted most recently, with the last action, its target, and a marker where it clicked; command arguments such as typed text are not shown. The user can click the frame to take over mouse and keyboard and press Esc to hand control back. Running `pip` again while the window is open reports it as already open. The window only opens for a dashboard the CLI started and verified; if another process already holds the port, `pip` fails instead of displaying it. The window is a macOS helper that ships next to the CLI binary; on other platforms the command fails with the dashboard URL to open in a browser (`http://localhost:<port>/pip`). From a source checkout, build the helper with `pnpm build:pip`.
 
 ## Browser installation
 

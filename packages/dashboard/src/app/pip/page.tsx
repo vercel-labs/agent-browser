@@ -31,7 +31,6 @@ const CLOSE_DISCONNECTED_MS = 60_000;
 const CLOSE_NO_SESSION_MS = 30_000;
 const PILL_MAX_CHARS = 50;
 const BAR_HEIGHT = 20;
-const TEXT_MAX_CHARS = 12;
 
 type RefMap = Record<string, { role?: string; name?: string }>;
 type PipMessage =
@@ -85,10 +84,8 @@ function middleEllipsis(value: string, max: number): string {
 
 function describeAction(action: string, params: Record<string, unknown>, refs: RefMap): string {
   const target = params.selector ?? params.ref ?? params.url ?? params.key;
-  const text = typeof params.text === "string" ? params.text : typeof params.value === "string" ? params.value : null;
   const parts = [action];
   if (typeof target === "string" && target.length > 0) parts.push(describeTarget(target, refs));
-  if (text) parts.push(`"${text.length > TEXT_MAX_CHARS ? `${text.slice(0, TEXT_MAX_CHARS)}…` : text}"`);
   return middleEllipsis(parts.join(" "), PILL_MAX_CHARS);
 }
 

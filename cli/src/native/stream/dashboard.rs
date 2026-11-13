@@ -647,6 +647,8 @@ pub async fn run_dashboard_server(port: u16) {
         }
     };
 
+    publish_ready_record(bound_port);
+
     if let Some(ipv6_listener) = ipv6_listener {
         tokio::join!(
             run_dashboard_listener(ipv4_listener),
@@ -654,6 +656,50 @@ pub async fn run_dashboard_server(port: u16) {
         );
     } else {
         run_dashboard_listener(ipv4_listener).await;
+    }
+}
+
+/// Announce the port once it is bound. `dashboard start` passes a per-start
+/// token through the environment, so a record cannot be forged by a process
+/// that happens to own the port before the server binds it.
+fn publish_ready_record(port: u16) {
+    use std::io::Write;
+
+    let Ok(token) = std::env::var("AGENT_BROWSER_DASHBOARD_READY_TOKEN") else {
+        return;
+    };
+    if token.is_empty() {
+        return;
+    }
+    let dir = get_socket_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let Ok(contents) = serde_json::to_vec(&json!({
+        "pid": std::process::id(),
+        "port": port,
+        "token": token,
+    })) else {
+        return;
+    };
+
+    // Write a private temp file and rename it over the record, so a link left
+    // at the record path is replaced rather than followed.
+    let temp = dir.join(format!("dashboard.ready.{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let Ok(mut file) = options.open(&temp) else {
+        return;
+    };
+    if file.write_all(&contents).is_ok() {
+        let _ = std::fs::rename(&temp, dir.join("dashboard.ready"));
+    } else {
+        let _ = std::fs::remove_file(&temp);
     }
 }
 

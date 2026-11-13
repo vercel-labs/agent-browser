@@ -3847,8 +3847,10 @@ most recently. It shows the agent's last action and where it clicked. Click the
 frame to take over mouse and keyboard; press Esc to hand control back.
 
 The window uses the dashboard's /pip view. If the dashboard is not running, pip
-starts it on --port (default: 4848). The window is available on macOS only; on
-other platforms, open http://localhost:<port>/pip in a browser.
+starts it on --port (default: 4848). The window opens only for a dashboard the
+CLI started and verified; if another process already holds the port, pip fails
+instead of showing it. The window is available on macOS only; on other
+platforms, open http://localhost:<port>/pip in a browser.
 
 Drag the window by its top edge or with Cmd held anywhere; it snaps to the
 nearest screen corner. Resize it from the bottom corners. Double-click the top

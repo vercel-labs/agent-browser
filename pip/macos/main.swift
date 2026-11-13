@@ -16,6 +16,7 @@ let minHeight: CGFloat = 180
 let maxHeight: CGFloat = 400
 let maxScreenHeightFraction: CGFloat = 0.35
 let initialAspect: CGFloat = 16.0 / 9.0
+let userGestureWindow: TimeInterval = 2.0
 let cornerKey = "corner"
 let widthKey = "width"
 
@@ -151,7 +152,7 @@ final class ResizeHandle: NSView {
   override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate {
   private var panel: PipPanel!
   private var webView: WKWebView!
   private var strip: DragStrip!
@@ -163,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
   private var previousApp: NSRunningApplication?
   private var interacting = false
   private var barVisible = true
+  private var lastUserGesture: TimeInterval = 0
 
   init(url: URL) {
     self.url = url
@@ -201,6 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     webView = PipWebView(frame: container.bounds, configuration: configuration)
     webView.autoresizingMask = [.width, .height]
     webView.underPageBackgroundColor = .black
+    webView.navigationDelegate = self
     webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
     container.addSubview(webView)
 
@@ -232,6 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     panel.contentView = container
     panel.orderFrontRegardless()
     installCommandDrag()
+    installUserGestureTracking()
   }
 
   /// Cmd+drag anywhere moves the panel; the 20 px strip is a small target.
@@ -240,6 +244,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
       guard let self, event.window === panel, event.modifierFlags.contains(.command) else { return event }
       strip.beginDrag(with: event)
       return nil
+    }
+  }
+
+  /// Records clicks and Option-hovers that land on the page, so keyboard focus
+  /// only ever follows something the user did in this window.
+  private func installUserGestureTracking() {
+    NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .mouseMoved]) { [weak self] event in
+      self?.noteUserGesture(event)
+      return event
+    }
+  }
+
+  private func noteUserGesture(_ event: NSEvent) {
+    guard event.window === panel else { return }
+    guard event.type != .mouseMoved || event.modifierFlags.contains(.option) else { return }
+    guard let content = panel.contentView,
+          let hit = content.hitTest(content.convert(event.locationInWindow, from: nil))
+    else { return }
+    var view: NSView? = hit
+    while let current = view {
+      if current === webView {
+        lastUserGesture = ProcessInfo.processInfo.systemUptime
+        return
+      }
+      view = current.superview
     }
   }
 
@@ -281,21 +310,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
   }
 
   /// Takes keyboard focus without activating the app, then hands it back.
+  /// Only the verified dashboard page may ask for it, and only right after a
+  /// gesture the user made on the frame; page script alone cannot move focus.
   private func setInteracting(_ on: Bool) {
     guard on != interacting else { return }
-    interacting = on
     if on {
+      guard isDashboardPage,
+            ProcessInfo.processInfo.systemUptime - lastUserGesture < userGestureWindow
+      else { return }
+      interacting = true
       previousApp = NSWorkspace.shared.frontmostApplication
       panel.becomesKeyOnlyIfNeeded = false
       panel.makeKey()
       panel.makeFirstResponder(webView)
     } else {
+      interacting = false
       panel.becomesKeyOnlyIfNeeded = true
       if let previousApp, previousApp.processIdentifier != ProcessInfo.processInfo.processIdentifier {
         previousApp.activate()
       }
       previousApp = nil
     }
+  }
+
+  // MARK: Navigation
+
+  /// Navigation stays on the dashboard the CLI verified; links open elsewhere.
+  func webView(
+    _ webView: WKWebView,
+    decidePolicyFor navigationAction: WKNavigationAction,
+    decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+  ) {
+    guard let target = navigationAction.request.url else {
+      decisionHandler(.cancel)
+      return
+    }
+    if isDashboardURL(target) {
+      decisionHandler(.allow)
+      return
+    }
+    decisionHandler(.cancel)
+    if navigationAction.navigationType == .linkActivated,
+       let scheme = target.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+      NSWorkspace.shared.open(target)
+    }
+  }
+
+  private var isDashboardPage: Bool {
+    isDashboardURL(webView.url)
+  }
+
+  private func isDashboardURL(_ candidate: URL?) -> Bool {
+    guard let candidate, candidate.scheme == "http", let host = candidate.host?.lowercased() else {
+      return false
+    }
+    return (host == "localhost" || host == "127.0.0.1") && candidate.port == url.port
   }
 
   // MARK: Geometry

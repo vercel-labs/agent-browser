@@ -767,6 +767,20 @@ fn get_dashboard_config_path() -> std::path::PathBuf {
     get_socket_dir().join("dashboard.config")
 }
 
+fn get_dashboard_ready_path() -> std::path::PathBuf {
+    get_socket_dir().join("dashboard.ready")
+}
+
+/// Written by the dashboard server once it has bound its port. The token comes
+/// from the environment of the process this CLI started, so a record can only
+/// exist for a dashboard that owns the port it reports.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct DashboardReady {
+    pid: u32,
+    port: u16,
+    token: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 struct DashboardConfig {
     port: u16,
@@ -919,6 +933,27 @@ fn read_dashboard_config() -> Option<DashboardConfig> {
 fn remove_dashboard_sidecars() {
     let _ = fs::remove_file(get_dashboard_pid_path());
     let _ = fs::remove_file(get_dashboard_config_path());
+    let _ = fs::remove_file(get_dashboard_ready_path());
+}
+
+fn read_dashboard_ready() -> Option<DashboardReady> {
+    let contents = fs::read_to_string(get_dashboard_ready_path()).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
+/// Port of the dashboard that is running right now, once its ready record shows
+/// the live process wrote it.
+fn verified_dashboard_port() -> Option<u16> {
+    let pid = fs::read_to_string(get_dashboard_pid_path())
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()?;
+    if !is_pid_alive(pid) || !is_agent_browser_process(pid) {
+        return None;
+    }
+    let ready = read_dashboard_ready()?;
+    (ready.pid == pid).then_some(ready.port)
 }
 
 fn write_dashboard_config(config: &DashboardConfig) -> std::io::Result<()> {
@@ -1017,10 +1052,8 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
                 return;
             }
         }
-        remove_dashboard_sidecars();
-    } else {
-        let _ = fs::remove_file(get_dashboard_config_path());
     }
+    remove_dashboard_sidecars();
 
     let requested_config = match DashboardConfig::new(port, allowed_origins) {
         Ok(config) => config,
@@ -1055,11 +1088,25 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
         }
     };
 
+    let ready_token = match generate_dashboard_access_token() {
+        Ok(token) => token,
+        Err(error) => {
+            if json_mode {
+                print_json_error(error);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), error);
+            }
+            exit(1);
+        }
+    };
+
     let mut cmd = std::process::Command::new(&exe_path);
-    cmd.env("AGENT_BROWSER_DASHBOARD", "1").env(
-        "AGENT_BROWSER_DASHBOARD_PORT",
-        requested_config.port.to_string(),
-    );
+    cmd.env("AGENT_BROWSER_DASHBOARD", "1")
+        .env(
+            "AGENT_BROWSER_DASHBOARD_PORT",
+            requested_config.port.to_string(),
+        )
+        .env("AGENT_BROWSER_DASHBOARD_READY_TOKEN", &ready_token);
     if requested_config.allowed_origins.is_empty() {
         cmd.env_remove("AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS");
         cmd.env_remove("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN");
@@ -1097,48 +1144,13 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
     }
 
-    match cmd
+    let mut child = match cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
     {
-        Ok(mut child) => {
-            let pid = child.id();
-            let write_result = write_dashboard_config(&requested_config)
-                .and_then(|()| fs::write(&pid_path, pid.to_string()));
-            if let Err(error) = write_result {
-                let _ = child.kill();
-                remove_dashboard_sidecars();
-                if json_mode {
-                    print_json_error(format!("Failed to save dashboard state: {error}"));
-                } else {
-                    eprintln!(
-                        "{} Failed to save dashboard state: {}",
-                        color::error_indicator(),
-                        error
-                    );
-                }
-                exit(1);
-            }
-
-            if json_mode {
-                print_json_value(json!({
-                    "success": true,
-                    "data": { "port": requested_config.port, "pid": pid, "access_urls": requested_config.access_urls() },
-                }));
-            } else {
-                println!(
-                    "Dashboard started{}",
-                    if requested_config.access_urls().is_empty() {
-                        format!(" at http://localhost:{}", requested_config.port)
-                    } else {
-                        "; open one of the private access URLs below".to_string()
-                    }
-                );
-                print_dashboard_access_urls(&requested_config);
-            }
-        }
+        Ok(child) => child,
         Err(e) => {
             remove_dashboard_sidecars();
             if json_mode {
@@ -1152,6 +1164,54 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
             }
             exit(1);
         }
+    };
+
+    let ready = match wait_for_dashboard_ready(&mut child, &ready_token) {
+        Ok(ready) => ready,
+        Err(error) => {
+            let _ = child.kill();
+            remove_dashboard_sidecars();
+            if json_mode {
+                print_json_error(error);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), error);
+            }
+            exit(1);
+        }
+    };
+    let pid = ready.pid;
+    let write_result = write_dashboard_config(&requested_config)
+        .and_then(|()| fs::write(&pid_path, pid.to_string()));
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        remove_dashboard_sidecars();
+        if json_mode {
+            print_json_error(format!("Failed to save dashboard state: {error}"));
+        } else {
+            eprintln!(
+                "{} Failed to save dashboard state: {}",
+                color::error_indicator(),
+                error
+            );
+        }
+        exit(1);
+    }
+
+    if json_mode {
+        print_json_value(json!({
+            "success": true,
+            "data": { "port": ready.port, "pid": pid, "access_urls": requested_config.access_urls() },
+        }));
+    } else {
+        println!(
+            "Dashboard started{}",
+            if requested_config.access_urls().is_empty() {
+                format!(" at http://localhost:{}", ready.port)
+            } else {
+                "; open one of the private access URLs below".to_string()
+            }
+        );
+        print_dashboard_access_urls(&requested_config);
     }
 }
 
@@ -1164,13 +1224,56 @@ fn exit_with_error(message: impl AsRef<str>, json_mode: bool) -> ! {
     exit(1);
 }
 
+const DASHBOARD_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const DASHBOARD_READY_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Wait for the child to prove it bound its port; a port another process owns
+/// leaves no ready record, so startup fails instead of reporting success.
+fn wait_for_dashboard_ready(
+    child: &mut std::process::Child,
+    token: &str,
+) -> Result<DashboardReady, String> {
+    let deadline = std::time::Instant::now() + DASHBOARD_READY_TIMEOUT;
+    loop {
+        if let Some(ready) = read_dashboard_ready() {
+            if ready.pid == child.id() && ready.token == token {
+                return Ok(ready);
+            }
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            return Err(
+                "Failed to start dashboard: the server stopped before it bound its port. Another process may already use that port."
+                    .to_string(),
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(
+                "Failed to start dashboard: the server did not bind its port in time. Another process may already use that port."
+                    .to_string(),
+            );
+        }
+        std::thread::sleep(DASHBOARD_READY_POLL);
+    }
+}
+
+fn unverified_dashboard_message() -> String {
+    "Dashboard is running, but its port could not be verified. Run 'agent-browser dashboard stop' and try again.".to_string()
+}
+
 /// Port of the running dashboard, starting one on `requested` when none runs.
+/// The port is only returned once the dashboard's ready record shows the live
+/// process bound it, so callers never load a port another process answers on.
 fn ensure_dashboard_port(requested: u16) -> Result<u16, String> {
+    if let Some(port) = verified_dashboard_port() {
+        return Ok(port);
+    }
     if let Ok(pid) = fs::read_to_string(get_dashboard_pid_path()) {
-        if pid.trim().parse::<u32>().is_ok_and(is_pid_alive) {
-            return read_dashboard_config()
-                .map(|config| config.port)
-                .ok_or_else(|| "Dashboard is running, but its port could not be read. Run 'agent-browser dashboard stop' and try again.".to_string());
+        if pid
+            .trim()
+            .parse::<u32>()
+            .is_ok_and(is_agent_browser_process)
+        {
+            return Err(unverified_dashboard_message());
         }
     }
 
@@ -1195,7 +1298,7 @@ fn ensure_dashboard_port(requested: u16) -> Result<u16, String> {
             .unwrap_or("Failed to start dashboard.");
         return Err(error.to_string());
     }
-    Ok(requested)
+    verified_dashboard_port().ok_or_else(unverified_dashboard_message)
 }
 
 /// Open a floating window that shows the active session live.
