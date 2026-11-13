@@ -570,6 +570,26 @@ pub(crate) async fn execute_chat_tool(session: &str, command: &str, was_open: bo
     }
 }
 
+/// Decode complete SSE lines only after their bytes have arrived. Network
+/// chunks may end inside a UTF-8 character in text or tool arguments.
+pub(crate) fn take_gateway_lines(buffer: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> {
+    buffer.extend_from_slice(chunk);
+    let mut lines = Vec::new();
+    let mut consumed = 0;
+    for (index, byte) in buffer.iter().enumerate() {
+        if *byte == b'\n' {
+            lines.push(
+                String::from_utf8_lossy(&buffer[consumed..index])
+                    .trim_end_matches('\r')
+                    .to_string(),
+            );
+            consumed = index + 1;
+        }
+    }
+    buffer.drain(..consumed);
+    lines
+}
+
 async fn stream_gateway_response(
     stream: &mut tokio::net::TcpStream,
     gw_response: reqwest::Response,
@@ -582,7 +602,7 @@ async fn stream_gateway_response(
     let mut tool_call_args: std::collections::HashMap<usize, (String, String, String)> =
         std::collections::HashMap::new();
     let mut byte_stream = gw_response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
 
     while let Some(chunk_result) = byte_stream.next().await {
         let chunk = match chunk_result {
@@ -590,12 +610,7 @@ async fn stream_gateway_response(
             Err(_) => break,
         };
 
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
+        for line in take_gateway_lines(&mut buffer, &chunk) {
             if line.is_empty() {
                 continue;
             }
@@ -1020,6 +1035,30 @@ pub(super) async fn handle_chat_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_lines_preserve_utf8_at_every_chunk_boundary() {
+        let line = "data: {\"choices\":[{\"delta\":{\"content\":\"中文 é \u{20000}\"}}]}";
+        let wire = format!("{line}\r\n\r\ndata: [DONE]\n");
+        for split in 0..=wire.len() {
+            let mut buffer = Vec::new();
+            let mut lines = take_gateway_lines(&mut buffer, &wire.as_bytes()[..split]);
+            lines.extend(take_gateway_lines(&mut buffer, &wire.as_bytes()[split..]));
+            assert_eq!(lines, vec![line, "", "data: [DONE]"], "split at {split}");
+            assert!(buffer.is_empty());
+        }
+    }
+
+    #[test]
+    fn gateway_lines_keep_incomplete_tool_arguments_until_the_next_chunk() {
+        let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"中文"}}]}}]}"#;
+        let mut buffer = Vec::new();
+        for byte in line.as_bytes() {
+            assert!(take_gateway_lines(&mut buffer, &[*byte]).is_empty());
+        }
+        assert_eq!(take_gateway_lines(&mut buffer, b"\n"), vec![line]);
+        assert!(buffer.is_empty());
+    }
 
     #[test]
     fn chat_allows_webmcp_command() {
