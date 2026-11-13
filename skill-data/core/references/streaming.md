@@ -60,7 +60,7 @@ Every message is JSON text with a `type` field.
 }
 ```
 
-`seq` is a monotonic frame id, echoed back under ack pacing and stable across browser relaunches. `metadata.timestamp` is the capture time in epoch milliseconds, so `Date.now() - timestamp` is the age of the frame being drawn. The other message types:
+`seq` is a monotonic frame id, echoed back under ack pacing and stable across browser relaunches. `metadata.deviceWidth` and `metadata.deviceHeight` are the page's real CSS size; scale pointer input from the displayed frame by these, not by the status viewport, which is only the configured size. `metadata.timestamp` is the capture time in epoch milliseconds, so `Date.now() - timestamp` is the age of the frame being drawn. The other message types:
 
 - `status`: connection state, screencasting flag, viewport size, engine, recording flag. Sent once on connect and again on change.
 - `tabs`: the current tab list, sent on connect when tabs are known and on change.

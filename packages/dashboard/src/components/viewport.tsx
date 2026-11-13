@@ -41,6 +41,7 @@ import {
   activeUrlAtom,
   sendInputAtom,
 } from "@/store/stream";
+import type { StreamFrame } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
 const SCREENCAST_ENGINES = new Set(["chrome"]);
@@ -233,20 +234,41 @@ export function Viewport() {
     }
   }, [addressValue, navigating, runCmd, url]);
 
-  const drawFrame = useCallback((base64: string) => {
+  // Page size of the frame currently on the canvas. Input is mapped with
+  // this rather than the latest received frame, because decoding is async
+  // and the two can briefly differ while the page is being resized.
+  const drawnSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const decodeSeqRef = useRef(0);
+  const drawnSeqRef = useRef(0);
+
+  const drawFrame = useCallback((next: StreamFrame) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const bin = atob(base64);
+    const seq = ++decodeSeqRef.current;
+    const bin = atob(next.data);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
     createImageBitmap(new Blob([bytes], { type: "image/jpeg" })).then((bmp) => {
+      // Drop a decode that finished after a newer frame was already drawn.
+      // Comparing against the newest drawn frame, not the newest started
+      // decode, keeps the view updating when frames arrive faster than
+      // they decode.
+      if (seq < drawnSeqRef.current) {
+        bmp.close();
+        return;
+      }
+      drawnSeqRef.current = seq;
       canvas.width = bmp.width;
       canvas.height = bmp.height;
       const ctx = canvas.getContext("2d");
       if (ctx) ctx.drawImage(bmp, 0, 0);
       bmp.close();
+      drawnSizeRef.current =
+        next.deviceWidth > 0 && next.deviceHeight > 0
+          ? { width: next.deviceWidth, height: next.deviceHeight }
+          : null;
     });
   }, []);
 
@@ -334,8 +356,14 @@ export function Viewport() {
       const canvas = canvasRef.current;
       if (!canvas) return null;
       const rect = canvas.getBoundingClientRect();
-      const scaleX = viewportWidth / rect.width;
-      const scaleY = viewportHeight / rect.height;
+      // Map into the page's real CSS size as reported with each frame. The
+      // configured viewport can be larger than the actual content area, and
+      // scaling by it stretches every coordinate away from the top-left.
+      const drawn = drawnSizeRef.current;
+      const targetWidth = drawn?.width ?? viewportWidth;
+      const targetHeight = drawn?.height ?? viewportHeight;
+      const scaleX = targetWidth / rect.width;
+      const scaleY = targetHeight / rect.height;
       return {
         x: Math.round((e.clientX - rect.left) * scaleX),
         y: Math.round((e.clientY - rect.top) * scaleY),

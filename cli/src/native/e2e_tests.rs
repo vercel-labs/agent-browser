@@ -10416,18 +10416,6 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
             serde_json::from_str(message.to_text().expect("text message should be readable"))
                 .expect("stream payload should be valid JSON");
         if parsed.get("type") == Some(&json!("frame")) {
-            let meta = &parsed["metadata"];
-            assert_eq!(
-                meta["deviceWidth"], 800,
-                "frame metadata deviceWidth should match custom viewport, got: {}",
-                meta
-            );
-            assert_eq!(
-                meta["deviceHeight"], 600,
-                "frame metadata deviceHeight should match custom viewport, got: {}",
-                meta
-            );
-
             let data_str = parsed
                 .get("data")
                 .and_then(|v| v.as_str())
@@ -10442,6 +10430,22 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
                 continue;
             }
 
+            // The metadata carries the real CDP page size, so check it only
+            // once the frame shows the resized page.
+            let meta = &parsed["metadata"];
+            assert_eq!(
+                meta["deviceWidth"].as_f64(),
+                Some(800.0),
+                "frame metadata deviceWidth should match custom viewport, got: {}",
+                meta
+            );
+            assert_eq!(
+                meta["deviceHeight"].as_f64(),
+                Some(600.0),
+                "frame metadata deviceHeight should match custom viewport, got: {}",
+                meta
+            );
+
             found_frame = true;
             break;
         }
@@ -10452,6 +10456,124 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
     );
 
     // Cleanup
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Stream: frame metadata reports the real page size, not the configured one
+// ---------------------------------------------------------------------------
+
+/// Without an explicit viewport the stream server still assumes 1280x720, but
+/// the page's real content area is whatever the browser window gives it. Stream
+/// clients scale pointer input by the frame metadata, so it must carry the real
+/// size or clicks land off target. The window is sized explicitly so the real
+/// size never matches the assumed one by accident.
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_frame_metadata_matches_real_page_size() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-real-size-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-stream-real-size");
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"]
+        .as_u64()
+        .expect("stream enable should report the bound port");
+
+    let resp = execute_command(
+        &json!({ "id": "launch", "action": "launch", "headless": true, "args": ["--window-size=1000,500"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Real Size</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "[innerWidth, innerHeight]" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let page_size = &get_data(&resp)["result"];
+    let page_w = page_size[0]
+        .as_f64()
+        .expect("innerWidth should be a number");
+    let page_h = page_size[1]
+        .as_f64()
+        .expect("innerHeight should be a number");
+    assert!(
+        (page_w, page_h) != (1280.0, 720.0),
+        "test setup should give the page a size other than the assumed 1280x720"
+    );
+
+    let mut last_meta = Value::Null;
+    let mut matched = false;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("stream payload should be valid JSON");
+        if parsed.get("type") != Some(&json!("frame")) {
+            continue;
+        }
+        last_meta = parsed["metadata"].clone();
+        if last_meta["deviceWidth"].as_f64() == Some(page_w)
+            && last_meta["deviceHeight"].as_f64() == Some(page_h)
+        {
+            matched = true;
+            break;
+        }
+    }
+    assert!(
+        matched,
+        "frame metadata should report the real page size {page_w}x{page_h}, last metadata: {last_meta}"
+    );
+
     let resp = execute_command(
         &json!({ "id": "4", "action": "stream_disable" }),
         &mut state,

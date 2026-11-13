@@ -3915,6 +3915,10 @@ Notes:
     frames already handed to the transport are delivered in order.
   - Both settings can be declared on the URL instead, which is the only way
     to cover the opening frame: ws://127.0.0.1:<port>/?pacing=ack&maxFps=10
+  - Mouse input uses the page's CSS pixels. Scale points on a displayed
+    frame by that frame's metadata.deviceWidth and metadata.deviceHeight,
+    which carry the real page size. The status message's viewportWidth and
+    viewportHeight are the configured viewport and can differ from it.
   - 'screencast_start' and 'screencast_stop' still control explicit CDP screencasts.
   - Streaming is always enabled. Set AGENT_BROWSER_STREAM_PORT to bind to a
     specific port instead of the default OS-assigned port.
