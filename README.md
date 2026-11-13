@@ -110,7 +110,7 @@ Building from source requires Node.js 24 or later, pnpm 11 or later, and Rust:
 ```bash
 pnpm install
 pnpm build:source               # builds the dashboard and the native CLI
-pnpm link --global
+pnpm add -g .
 agent-browser install
 ```
 
