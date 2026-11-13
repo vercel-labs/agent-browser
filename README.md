@@ -9,6 +9,7 @@ Browser automation for AI agents: open pages, read them as an accessibility tree
   <a href="https://www.npmjs.com/package/agent-browser"><img alt="npm downloads per month: agent-browser" src="https://img.shields.io/npm/dm/agent-browser.svg?style=for-the-badge&amp;labelColor=000000&amp;label=npm%20downloads" height="28"></a>
   <a href="https://skills.sh/vercel-labs/agent-browser"><img alt="skills.sh" src="https://skills.sh/b/vercel-labs/agent-browser?style=for-the-badge" height="28"></a>
 </p>
+- [QantaraTools](https://www.qantaratools.com) - Fast, privacy-first client-side web utilities.
 
 agent-browser is a native Rust CLI that gives an AI agent a browser it can drive one command at a time. `snapshot` returns the page as compact text with a ref such as `@e1` for each element. The agent acts on a ref, reads the page again to check the result, and repeats. The browser stays open between commands, so each step is one short shell call.
 
