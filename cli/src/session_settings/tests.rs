@@ -1376,6 +1376,78 @@ fn attached_browser_settings_follow_the_placement_table() {
 }
 
 #[test]
+fn a_user_agent_for_a_new_target_waits_for_the_attach_to_name_its_engine() {
+    let plan = Running::defaults().plan(&patch_of(&[
+        is(Key::Cdp, json!("9550")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    assert!(plan.relaunch);
+    assert_eq!(changed_keys(&plan), vec![Key::Cdp, Key::UserAgent]);
+    assert!(plan.ignored.is_empty());
+    assert_eq!(
+        plan.awaiting_engine
+            .iter()
+            .map(|change| change.key)
+            .collect::<Vec<_>>(),
+        vec![Key::UserAgent]
+    );
+    assert_eq!(plan.next.user_agent().as_deref(), Some("ProbeUA/5"));
+}
+
+#[test]
+fn only_a_cdp_target_waits_for_its_engine() {
+    for target in [
+        is(Key::Provider, json!("browserbase")),
+        is(Key::AutoConnect, json!(true)),
+    ] {
+        let plan =
+            Running::defaults().plan(&patch_of(&[target, is(Key::UserAgent, json!("ProbeUA/5"))]));
+        assert!(plan.awaiting_engine.is_empty());
+        assert_eq!(
+            plan.ignored.iter().map(|c| c.key).collect::<Vec<_>>(),
+            vec![Key::UserAgent]
+        );
+        assert_eq!(plan.next.user_agent(), None, "nothing reaches the provider");
+    }
+}
+
+#[test]
+fn a_new_target_leaves_the_user_agent_to_the_attach_unless_the_patch_names_firefox() {
+    let attached = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let effect = |plan: &super::plan::Plan, key: Key| {
+        plan.changes
+            .iter()
+            .find(|change| change.key == key)
+            .map(|change| change.effect)
+    };
+
+    let moved = attached.plan(&patch_of(&[
+        is(Key::Cdp, json!("http://127.0.0.1:9444")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    assert_eq!(effect(&moved, Key::UserAgent), Some(Effect::Launch));
+    assert_eq!(
+        moved
+            .awaiting_engine
+            .iter()
+            .map(|change| change.key)
+            .collect::<Vec<_>>(),
+        vec![Key::UserAgent]
+    );
+
+    let named = attached.plan(&patch_of(&[
+        is(Key::Cdp, json!("http://127.0.0.1:9444")),
+        is(Key::Engine, json!("firefox")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    assert_eq!(effect(&named, Key::UserAgent), Some(Effect::Live));
+    assert!(named.awaiting_engine.is_empty());
+}
+
+#[test]
 fn only_in_place_changes_survive_a_command_that_never_launches() {
     let attached_firefox = running_with(&[
         (Key::Cdp, json!("http://127.0.0.1:9333")),

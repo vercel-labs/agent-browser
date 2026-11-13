@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::{json, Value};
 
-use super::attach::{reach, Reach, FIREFOX};
+use super::attach::{reach, Engine, Reach, FIREFOX};
 use super::patch::{Patch, Requested};
 use super::running::{Connection, Running};
 use super::spec::{redacted, spec, Effect, Key, SPECS};
@@ -60,6 +60,10 @@ impl Change {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     pub changes: Vec<Change>,
+    /// Changes carried into an attach whose engine is not known yet. The attach keeps them
+    /// when it finds an engine that takes them; otherwise they are put back and reported
+    /// as ignored.
+    pub awaiting_engine: Vec<Change>,
     /// The browser has to be relaunched: a launch setting changed or the
     /// invocation forced it.
     pub relaunch: bool,
@@ -94,6 +98,7 @@ impl Plan {
         }
         Plan {
             changes,
+            awaiting_engine: Vec::new(),
             relaunch: false,
             next,
             ignored: self.ignored.clone(),
@@ -147,10 +152,13 @@ impl Running {
     /// - a value equal to the running one (or to the default when nothing is
     ///   running) is free: no change, no notice, no relaunch;
     /// - a setting an attached browser cannot take is ignored, as `attach` says;
+    /// - a setting only an attached Firefox takes is carried into an attach whose
+    ///   engine is not known yet, as `Plan::awaiting_engine` records;
     /// - setting one connection target displaces the other targets.
     pub fn plan(&self, patch: &Patch) -> Plan {
         let mut next = self.clone();
         let mut changes: Vec<Change> = Vec::new();
+        let mut awaiting_engine: Vec<Change> = Vec::new();
         let mut ignored: Vec<Change> = Vec::new();
         let named_engine = patch.value(Key::Engine).and_then(Value::as_str);
 
@@ -176,7 +184,7 @@ impl Running {
                     {
                         continue;
                     }
-                    let reach = reach_for(&next, key, named_engine);
+                    let reach = reach_for(&next, self, key, named_engine);
                     if reach == Reach::Ignored {
                         ignored.push(change(
                             key,
@@ -186,12 +194,11 @@ impl Running {
                         ));
                         continue;
                     }
-                    changes.push(change(
-                        key,
-                        requested.clone(),
-                        self.get(key).cloned(),
-                        reach,
-                    ));
+                    let recorded = change(key, requested.clone(), self.get(key).cloned(), reach);
+                    if reach == Reach::Awaiting {
+                        awaiting_engine.push(recorded.clone());
+                    }
+                    changes.push(recorded);
                     next.assign(key, value.clone());
                     if CONNECTION_KEYS.contains(&key) {
                         displace_other_targets(&mut next, patch, key, &mut changes);
@@ -232,7 +239,7 @@ impl Running {
                     if default_value(key).as_ref() == Some(current) {
                         continue;
                     }
-                    let reach = reach_for(&next, key, named_engine);
+                    let reach = reach_for(&next, self, key, named_engine);
                     if reach == Reach::Ignored {
                         ignored.push(change(
                             key,
@@ -242,12 +249,11 @@ impl Running {
                         ));
                         continue;
                     }
-                    changes.push(change(
-                        key,
-                        Requested::Default,
-                        Some(current.clone()),
-                        reach,
-                    ));
+                    let recorded = change(key, Requested::Default, Some(current.clone()), reach);
+                    if reach == Reach::Awaiting {
+                        awaiting_engine.push(recorded.clone());
+                    }
+                    changes.push(recorded);
                     next.unassign(key);
                 }
             }
@@ -284,6 +290,7 @@ impl Running {
             patch.forces_relaunch() || changes.iter().any(|change| change.effect == Effect::Launch);
         Plan {
             changes,
+            awaiting_engine,
             relaunch,
             next,
             ignored,
@@ -313,18 +320,26 @@ fn change(key: Key, requested: Requested, running: Option<Value>, reach: Reach) 
         running,
         effect: match reach {
             Reach::InPlace => Effect::Live,
-            Reach::Ignored | Reach::Launch => spec(key).effect,
+            Reach::Ignored | Reach::Launch | Reach::Awaiting => spec(key).effect,
         },
     }
 }
 
 /// How the session `next` takes `key`: a local launch takes every setting as
-/// its own, and an attached browser follows the table.
-fn reach_for(next: &Running, key: Key, named: Option<&str>) -> Reach {
-    match next.connection() {
-        Connection::Local => Reach::Launch,
-        _ => reach(key, next.engine().as_deref(), named),
-    }
+/// its own, and an attached browser follows the table for its engine. Only a
+/// `cdp` target the session has not attached to yet can still turn out to be
+/// Firefox; a recorded engine belongs to the target it was detected on.
+fn reach_for(next: &Running, running: &Running, key: Key, named: Option<&str>) -> Reach {
+    let records_firefox = next.engine().as_deref() == Some(FIREFOX);
+    let names_firefox = named == Some(FIREFOX);
+    let new_target = next.connection() != running.connection();
+    let engine = match next.connection() {
+        Connection::Local => return Reach::Launch,
+        _ if names_firefox || (records_firefox && !new_target) => Engine::Firefox,
+        Connection::Cdp(_) if new_target => Engine::Undetected,
+        _ => Engine::Other,
+    };
+    reach(key, engine, records_firefox || names_firefox)
 }
 
 /// Resets inherited settings that cannot coexist with the one just set. A

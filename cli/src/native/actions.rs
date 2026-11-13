@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
 use crate::session_files::SessionFile;
 use crate::session_settings::{
-    named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running, Store,
+    named, spec, Change, Connection, Effect, Key, Patch, Persist, Requested, Running, Store,
 };
 use crate::validation::{is_valid_session_name, session_name_error};
 
@@ -3606,6 +3606,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 attach_settings_outcome(&mut resp, &settings_outcome);
                 return resp;
             }
+            settle_awaited_settings(state, &mut settings_outcome);
             state.webmcp_enabled = state.settings.webmcp();
             lifecycle_launched = true;
         } else {
@@ -3684,6 +3685,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             };
             match result {
                 Ok(data) => {
+                    settle_awaited_settings(state, &mut settings_outcome);
                     state.webmcp_enabled = state.settings.webmcp();
                     Ok(data)
                 }
@@ -6082,6 +6084,8 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
 struct SettingsOutcome {
     /// Each change, as reported in `lifecycle.settings.changes`.
     changes: Vec<Value>,
+    /// Changes the plan carried into an attach whose engine was not known yet.
+    awaiting_engine: Vec<Change>,
     /// The patch asked for a relaunch whether or not anything changed.
     forced: bool,
     /// A running browser was closed so the next launch uses the new settings.
@@ -6112,11 +6116,13 @@ impl SettingsOutcome {
         self.forced = launch.forced;
         self.relaunched_browser = launch.relaunched_browser;
         self.pending = launch.pending;
+        self.awaiting_engine = launch.awaiting_engine;
     }
 
     /// Called when the launch failed and the launch settings were put back.
     fn mark_rolled_back(&mut self, keys: &[Key]) {
         self.relaunched_browser = false;
+        self.awaiting_engine.clear();
         let names: Vec<&str> = keys.iter().map(|key| spec(*key).name).collect();
         for change in &mut self.changes {
             if change["effect"] == "relaunch"
@@ -6179,6 +6185,26 @@ async fn rollback_launch_settings(
             .map(|e| format!("the stored security settings could not be restored: {}", e));
     }
     None
+}
+
+/// Settles the settings a plan carried into an attach before the engine was known. An attached
+/// Firefox took them; for any other browser they are put back and reported as ignored.
+fn settle_awaited_settings(state: &mut DaemonState, outcome: &mut SettingsOutcome) {
+    let awaited = std::mem::take(&mut outcome.awaiting_engine);
+    if awaited.is_empty() || state.firefox.is_some() {
+        return;
+    }
+    for change in awaited {
+        state.settings.put_back(change.key, change.running.clone());
+        let name = spec(change.key).name;
+        outcome
+            .changes
+            .retain(|reported| reported["option"] != name);
+        outcome.changes.push(change.to_ignored_json());
+    }
+    if state.launch_identity.is_some() {
+        state.launch_identity = Some(state.settings.launch_identity());
+    }
 }
 
 /// The launch error with the rollback problem, if any, appended.
@@ -6322,6 +6348,7 @@ async fn apply_settings_patch(
     } else {
         None
     };
+    let awaiting_engine = plan.awaiting_engine.clone();
     let (next, relaunch) = (plan.next, plan.relaunch);
 
     if !relaunch {
@@ -6410,6 +6437,7 @@ async fn apply_settings_patch(
 
     Ok(SettingsOutcome {
         changes,
+        awaiting_engine,
         forced: launches && patch.forces_relaunch(),
         relaunched_browser,
         pending,
@@ -6503,6 +6531,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             .is_ok_and(|settings| settings.value(Key::StorageState).is_some());
     match auto_launch_with(state, plugins_from_command_or_env(cmd), cmd, strict_state).await {
         Ok(extras) => {
+            settle_awaited_settings(state, &mut outcome);
             let mut result = json!({
                 "launched": true,
                 "relaunchedBrowser": had_browser_before_launch,
@@ -23255,6 +23284,63 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             state.settings.launch_options().profile.as_deref(),
             Some("/tmp/p")
         );
+    }
+
+    #[tokio::test]
+    async fn test_a_user_agent_awaited_for_an_attach_is_ignored_for_anything_but_firefox() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        let patch = patch_with(vec![
+            set_to(Key::Cdp, json!("9553")),
+            set_to(Key::UserAgent, json!("ProbeUA/5")),
+        ]);
+
+        let mut outcome = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        assert_eq!(outcome.awaiting_engine.len(), 1);
+        assert_eq!(
+            state.settings.user_agent().as_deref(),
+            Some("ProbeUA/5"),
+            "the attach carries it"
+        );
+
+        settle_awaited_settings(&mut state, &mut outcome);
+
+        assert_eq!(state.settings.user_agent(), None);
+        let reported: Vec<&Value> = outcome
+            .changes
+            .iter()
+            .filter(|change| change["option"] == "user-agent")
+            .collect();
+        assert_eq!(reported.len(), 1, "{:?}", outcome.changes);
+        assert_eq!(reported[0]["effect"], "ignored");
+    }
+
+    #[tokio::test]
+    async fn test_a_user_agent_awaited_for_an_attach_stays_when_the_attach_found_firefox() {
+        use crate::native::bidi::session::tests::fake_session;
+
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        let patch = patch_with(vec![
+            set_to(Key::Cdp, json!("9550")),
+            set_to(Key::UserAgent, json!("ProbeUA/5")),
+        ]);
+        let mut outcome = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+
+        let (ff, _tx, _calls) = fake_session().await;
+        state.firefox = Some(ff);
+        settle_awaited_settings(&mut state, &mut outcome);
+
+        assert_eq!(state.settings.user_agent().as_deref(), Some("ProbeUA/5"));
+        assert!(outcome.awaiting_engine.is_empty());
+        assert!(outcome
+            .changes
+            .iter()
+            .all(|change| change["option"] != "user-agent" || change["effect"] != "ignored"));
     }
 
     #[tokio::test]
