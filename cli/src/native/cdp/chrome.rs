@@ -717,6 +717,107 @@ fn terminate_launched_chrome(child: &mut Child) {
     let _ = child.wait();
 }
 
+#[cfg(unix)]
+const TEMP_PROFILE_PREFIXES: [&str; 2] = ["agent-browser-chrome-", "agent-browser-profile-"];
+#[cfg(unix)]
+const STALE_PROFILE_MIN_AGE: Duration = Duration::from_secs(2 * 60 * 60);
+#[cfg(unix)]
+const STALE_PROFILE_MAX_PER_SWEEP: usize = 50;
+
+/// What the sweep makes of a temp directory entry. Only `Stale` is removed:
+/// `Active` has a live Chrome on its `SingletonLock`, `Recent` may belong to a
+/// launch still starting, and `Skip` is not a temp profile or cannot be judged.
+#[cfg(unix)]
+#[derive(Debug, PartialEq)]
+enum TempProfileState {
+    Stale,
+    Active,
+    Recent,
+    Skip,
+}
+
+/// Starts removing temp profiles in `root` left by daemons that died before
+/// `ChromeProcess::drop` ran. Runs on a detached thread so no launch waits on
+/// recursive deletes, and returns `None` when that thread cannot start.
+#[cfg(unix)]
+fn spawn_stale_temp_profile_sweep(
+    root: PathBuf,
+    min_age: Duration,
+) -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("temp-profile-sweep".into())
+        .spawn(move || sweep_stale_temp_profiles(&root, min_age))
+        .ok()
+}
+
+/// Removes temp profiles in `root` left by daemons that died before
+/// `ChromeProcess::drop` ran, at most `STALE_PROFILE_MAX_PER_SWEEP` per call.
+#[cfg(unix)]
+fn sweep_stale_temp_profiles(root: &Path, min_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let _ = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| classify_temp_profile(path, min_age) == TempProfileState::Stale)
+        .filter(|path| std::fs::remove_dir_all(path).is_ok())
+        .take(STALE_PROFILE_MAX_PER_SWEEP)
+        .count();
+}
+
+/// Decides the state of one temp directory entry. Only `<prefix><uuid>` names
+/// are ours; the `SingletonLock` symlink (`<hostname>-<pid>`) shows a running Chrome.
+#[cfg(unix)]
+fn classify_temp_profile(path: &Path, min_age: Duration) -> TempProfileState {
+    let is_temp_profile = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| {
+            TEMP_PROFILE_PREFIXES
+                .iter()
+                .find_map(|p| name.strip_prefix(p))
+        })
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+    let age = std::fs::symlink_metadata(path)
+        .ok()
+        .filter(|meta| is_temp_profile && meta.is_dir())
+        .and_then(|meta| meta.modified().ok()?.elapsed().ok());
+    let Some(age) = age else {
+        return TempProfileState::Skip;
+    };
+    if age < min_age {
+        return TempProfileState::Recent;
+    }
+    match std::fs::read_link(path.join("SingletonLock")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TempProfileState::Stale,
+        Err(_) => TempProfileState::Skip,
+        Ok(target) => match local_lock_pid(&target.to_string_lossy()) {
+            Some(pid) if crate::connection::is_pid_alive(pid) => TempProfileState::Active,
+            Some(_) => TempProfileState::Stale,
+            None => TempProfileState::Skip,
+        },
+    }
+}
+
+/// Returns the pid in a `SingletonLock` target when this host wrote it.
+#[cfg(unix)]
+fn local_lock_pid(target: &str) -> Option<u32> {
+    let (host, pid) = target.rsplit_once('-')?;
+    let pid = pid.parse::<i32>().ok().filter(|pid| *pid > 0)?;
+    (host == local_hostname()?).then_some(pid as u32)
+}
+
+#[cfg(unix)]
+fn local_hostname() -> Option<String> {
+    let mut buf = [0 as libc::c_char; 257];
+    if unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len() - 1) } != 0 {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    Some(name.to_string_lossy().into_owned())
+}
+
 pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let chrome_path = match &options.executable_path {
         Some(p) => PathBuf::from(p),
@@ -733,6 +834,9 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
             )
         })?,
     };
+
+    #[cfg(unix)]
+    let _ = spawn_stale_temp_profile_sweep(std::env::temp_dir(), STALE_PROFILE_MIN_AGE);
 
     // Profile name preprocessing: if --profile is a Chrome profile name (not a
     // path), resolve it to a directory, copy the profile to a temp dir, and
@@ -3152,5 +3256,102 @@ exec sleep 60
     fn auto_connect_wait_stays_below_client_read_timeout() {
         let client_floor = crate::connection::read_timeout_for(&serde_json::json!({}));
         assert!(AUTO_CONNECT_WS_VERIFY_TIMEOUT < client_floor);
+    }
+
+    #[cfg(unix)]
+    mod sweep {
+        use super::super::*;
+        use std::os::unix::fs::symlink;
+
+        fn dead_pid() -> u32 {
+            let mut child = Command::new("true").spawn().unwrap();
+            child.wait().unwrap();
+            child.id()
+        }
+
+        fn local_lock(pid: u32) -> Option<String> {
+            Some(format!("{}-{pid}", local_hostname().unwrap()))
+        }
+
+        fn profile(root: &Path, prefix: &str, lock: Option<String>) -> PathBuf {
+            let path = root.join(format!("{prefix}{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            if let Some(target) = lock {
+                symlink(target, path.join("SingletonLock")).unwrap();
+            }
+            path
+        }
+
+        #[test]
+        fn classifies_temp_profiles() {
+            use TempProfileState::*;
+            let root = tempfile::tempdir().unwrap();
+            let chrome = "agent-browser-chrome-";
+            let cases = [
+                (chrome, local_lock(dead_pid()), Stale),
+                ("agent-browser-profile-", None, Stale),
+                (chrome, local_lock(std::process::id()), Active),
+                (chrome, Some("elsewhere-1".into()), Skip),
+                (chrome, Some("garbage".into()), Skip),
+                ("unrelated-", None, Skip),
+            ];
+            for (case, (prefix, lock, expected)) in cases.into_iter().enumerate() {
+                let path = profile(root.path(), prefix, lock);
+                let state = classify_temp_profile(&path, Duration::ZERO);
+                assert_eq!(state, expected, "case {case}");
+            }
+            let stale = profile(root.path(), chrome, None);
+            assert_eq!(classify_temp_profile(&stale, STALE_PROFILE_MIN_AGE), Recent);
+            let link = root
+                .path()
+                .join(format!("{chrome}{}", uuid::Uuid::new_v4()));
+            symlink(&stale, &link).unwrap();
+            assert_eq!(classify_temp_profile(&link, Duration::ZERO), Skip);
+            let named = root.path().join("agent-browser-profile-work");
+            std::fs::create_dir(&named).unwrap();
+            assert_eq!(classify_temp_profile(&named, Duration::ZERO), Skip);
+        }
+
+        #[test]
+        fn sweep_removes_stale_profiles_up_to_the_cap_and_keeps_live_ones() {
+            let root = tempfile::tempdir().unwrap();
+            let count = STALE_PROFILE_MAX_PER_SWEEP + 5;
+            for _ in 0..count {
+                profile(root.path(), "agent-browser-profile-", None);
+                let live = local_lock(std::process::id());
+                profile(root.path(), "agent-browser-chrome-", live);
+            }
+
+            sweep_stale_temp_profiles(root.path(), Duration::ZERO);
+
+            let left = |kind: &str| {
+                std::fs::read_dir(root.path())
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().contains(kind))
+                    .count()
+            };
+            assert_eq!(left("chrome"), count);
+            assert_eq!(left("profile"), 5);
+        }
+
+        #[test]
+        fn spawned_sweep_removes_stale_profiles_without_touching_live_ones() {
+            let root = tempfile::tempdir().unwrap();
+            let stale = profile(root.path(), "agent-browser-profile-", None);
+            let live = profile(
+                root.path(),
+                "agent-browser-chrome-",
+                local_lock(std::process::id()),
+            );
+
+            spawn_stale_temp_profile_sweep(root.path().to_path_buf(), Duration::ZERO)
+                .expect("sweep thread")
+                .join()
+                .unwrap();
+
+            assert!(!stale.exists(), "stale profile should be swept");
+            assert!(live.exists(), "live profile must survive the sweep");
+        }
     }
 }
