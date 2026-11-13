@@ -152,6 +152,17 @@ pub async fn hover(
     Ok((x + offset.0, y + offset.1))
 }
 
+/// `Input.insertText` and key events are delivered to one target. A
+/// cross-origin iframe focuses its element on the child session, so the
+/// parent page session never receives that text.
+fn text_input_session<'a>(parent_session_id: &'a str, focused_session_id: &'a str) -> &'a str {
+    if focused_session_id == parent_session_id {
+        parent_session_id
+    } else {
+        focused_session_id
+    }
+}
+
 pub async fn fill(
     client: &CdpClient,
     session_id: &str,
@@ -204,14 +215,14 @@ pub async fn fill(
         )
         .await?;
 
-    // Insert text (keyboard input dispatched at page level, use parent session_id)
+    let input_session = text_input_session(session_id, &effective_session_id);
     client
         .send_command_typed::<_, Value>(
             "Input.insertText",
             &InsertTextParams {
                 text: value.to_string(),
             },
-            Some(session_id),
+            Some(input_session),
         )
         .await?;
 
@@ -274,7 +285,13 @@ pub async fn type_text(
             .await?;
     }
 
-    type_text_into_active_context(client, session_id, text, delay_ms).await
+    type_text_into_active_context(
+        client,
+        text_input_session(session_id, &effective_session_id),
+        text,
+        delay_ms,
+    )
+    .await
 }
 
 pub async fn type_text_into_active_context(
@@ -1300,6 +1317,12 @@ fn named_key_info(key: &str) -> (String, String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_input_uses_the_focused_iframe_session() {
+        assert_eq!(text_input_session("page", "oopif"), "oopif");
+        assert_eq!(text_input_session("page", "page"), "page");
+    }
 
     /// Verify that `char_to_key_info` returns the correct (key, code,
     /// windowsVirtualKeyCode) triple for every character in Playwright's
