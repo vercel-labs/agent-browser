@@ -4296,7 +4296,8 @@ Subcommands:
   get <name> --full          Include references and templates
   get <name> --ref <ref>     Output only one reference or template (repeatable)
   get --all                  Output every skill
-  path [name]                Print filesystem path to skill directory
+  path [name]                Print filesystem path to skill directory, or
+                             report that skills are embedded
 
 Options:
   --json                     Output as JSON
@@ -4304,8 +4305,8 @@ Options:
 The skills command serves bundled skill content that always matches the
 installed CLI version. Agents should use this to get current instructions
 rather than relying on cached copies.
-When no package root is found, the CLI reads manually installed skills from ~/.agent-browser/skills and ~/.agent-browser/skill-data.
-Package discovery looks for the bundled skill-data/core/SKILL.md file.
+Skills are read from AGENT_BROWSER_SKILLS_DIR, then the package root (found by its skill-data/core/SKILL.md file), then ~/.agent-browser/skills and ~/.agent-browser/skill-data.
+When none exist, the CLI serves the skills compiled into the binary.
 
 Examples:
   agent-browser skills

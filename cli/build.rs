@@ -26,6 +26,7 @@ fn ensure_dashboard_dir() {
 
 fn main() {
     ensure_dashboard_dir();
+    println!("cargo:rerun-if-changed=../skill-data");
 
     let protocol_dir = Path::new("cdp-protocol");
     let out_dir = env::var("OUT_DIR").unwrap();

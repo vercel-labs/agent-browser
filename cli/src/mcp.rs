@@ -1940,14 +1940,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SKILLS_GET,
             "Skills get",
-            "Get skill content, including home-directory skills when no package root is found. Package discovery looks for the bundled skill-data/core/SKILL.md file. Pass refs with one skill name to load only those references or templates, such as [\"commands\"].",
+            "Get skill content, including home-directory skills when no package root is found. Package discovery looks for the bundled skill-data/core/SKILL.md file. Without either, serves the skills compiled into the binary. Pass refs with one skill name to load only those references or templates, such as [\"commands\"].",
             json!({ "names": string_array_schema("Skill names."), "all": { "type": "boolean" }, "full": { "type": "boolean" }, "refs": string_array_schema("References or templates to load from one skill, by path, file name, or stem (references/commands.md, commands.md, or commands). Returns only those files.") }),
             &[],
         ),
         tool(
             TOOL_SKILLS_PATH,
             "Skills path",
-            "Print skill directory path.",
+            "Print skill directory path, or report that skills are embedded in the binary.",
             json!({ "name": { "type": "string" } }),
             &[],
         ),
