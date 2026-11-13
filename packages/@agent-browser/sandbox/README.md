@@ -49,7 +49,7 @@ await mcp.close();
 await sandbox.stop();
 ```
 
-`timeout` applies to each request and has no default. For another runtime, pass a process with `stdin` and `stdout` streams to `connectAgentBrowserMcp` from `@agent-browser/sandbox`.
+`timeout` applies to each request and has no default. Requests canceled or timed out while waiting for stdin are not sent. Canceling a request that has already reached stdin does not undo the server's work. For another runtime, pass a process with `stdin` and `stdout` streams to `connectAgentBrowserMcp` from `@agent-browser/sandbox`.
 
 ## MCP tool catalog
 
