@@ -243,7 +243,7 @@ function ContextMeter({ used, total }: { used: number; total: number }) {
   );
 }
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4.6";
+const DEFAULT_MODEL = "openai/gpt-6-luna-fast";
 
 function useTimeAgo(ts: number | undefined) {
   const [, setTick] = useState(0);
@@ -706,7 +706,7 @@ export function ChatPanel() {
               rows={1}
               placeholder="Ask something..."
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                   e.preventDefault();
                   handleSubmit(e);
                 }

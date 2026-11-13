@@ -1,6 +1,6 @@
 {
   "name": "@agent-browser/eve",
-  "version": "0.39.4",
+  "version": "0.43.0",
   "description": "eve extension that gives agents a full browser automation tool set backed by agent-browser",
   "type": "module",
   "sideEffects": false,
@@ -32,7 +32,8 @@
     "build": "eve extension build && tsc -p tsconfig.sandbox.json",
     "prepare": "pnpm -C ../sandbox run build && pnpm run build",
     "test": "pnpm -C ../sandbox run build && pnpm run build && node --test test/*.test.mjs",
-    "typecheck": "tsc"
+    "typecheck": "tsc-ts",
+    "typecheck:tsc": "tsc"
   },
   "keywords": [
     "agent-browser",
@@ -59,12 +60,13 @@
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "eve": ">=0.81.0"
+    "eve": ">=0.84.0"
   },
   "devDependencies": {
     "@types/node": "24.x",
     "ai": "7.0.102",
-    "eve": "^0.81.0",
+    "eve": "0.84.0",
+    "tsc-ts": "0.1.3",
     "typescript": "7.0.2"
   },
   "engines": {
