@@ -1691,7 +1691,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_LOAD,
             "State load",
-            "Load cookies and storage state. Origins whose page does not stay on the saved origin are skipped and listed in skippedOrigins.",
+            "Load cookies and storage state. The response lists skipped origins in skippedOrigins and gives their reasons in storageFailures.",
             json!({ "path": { "type": "string" } }),
             &["path"],
         ),
@@ -1919,7 +1919,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SESSION_INFO,
             "Session info",
-            "Show session, daemon, launch, and restore diagnostics.",
+            "Show session, daemon, launch, and restore diagnostics, including skipped storage origins and reasons.",
             json!({}),
             &[],
         ),
@@ -4663,20 +4663,6 @@ fn response_text(value: &Value) -> Option<String> {
             if data.get("flows").is_some() && data.get("url").is_none() {
                 return crate::output::format_flow_text(Some("flow_list"), data);
             }
-            if let Some(skipped) = data
-                .get("skippedOrigins")
-                .and_then(|v| v.as_array())
-                .filter(|v| !v.is_empty())
-            {
-                let origins: Vec<&str> = skipped.iter().filter_map(|v| v.as_str()).collect();
-                return Some(format!(
-                    "{}\nSkipped storage for origins (page did not stay on that origin): {}",
-                    data.get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default(),
-                    origins.join(", ")
-                ));
-            }
             for key in [
                 "snapshot", "text", "html", "report", "value", "content", "title", "url", "path",
             ] {
@@ -5470,19 +5456,21 @@ mod tests {
     }
 
     #[test]
-    fn response_text_reports_skipped_state_origins() {
-        let text = response_text(&json!({
-            "success": true,
-            "data": {
-                "loaded": true,
-                "path": "./state.json",
-                "skippedOrigins": ["http://127.0.0.1:8001"]
-            }
-        }))
-        .unwrap();
-
-        assert!(text.starts_with("./state.json\n"));
-        assert!(text.contains("http://127.0.0.1:8001"));
+    fn tool_text_preserves_restore_warnings_for_launch_and_state_load() {
+        let warning = "Skipped storage for http://127.0.0.1:8001: Browser does not support CDP DOMStorage.setDOMStorageItem";
+        for (data, primary) in [
+            (
+                json!({ "url": "http://127.0.0.1:8001" }),
+                "http://127.0.0.1:8001",
+            ),
+            (json!({ "path": "./state.json" }), "./state.json"),
+        ] {
+            let response = json!({ "success": true, "data": data, "warning": warning });
+            assert_eq!(
+                tool_text(Some(&response), "", ""),
+                format!("{primary}\n\nwarning: {warning}")
+            );
+        }
     }
 
     #[test]

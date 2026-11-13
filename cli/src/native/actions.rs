@@ -577,8 +577,8 @@ pub struct DaemonState {
     pub restore_check_fn: Option<String>,
     pub restore_status: String,
     pub restore_status_detail: Option<String>,
-    /// Origins whose storage the last launch-time restore skipped because the page left that origin.
-    pub restore_skipped_origins: Vec<String>,
+    /// Storage that the last restore or explicit state load could not replay.
+    pub restore_storage_failures: Vec<state::StorageRestoreFailure>,
     pub restore_loaded_path: Option<String>,
     pub restore_load_failed: bool,
     pub restore_validation_pending: bool,
@@ -790,7 +790,7 @@ impl DaemonState {
             restore_check_fn: restore.check_fn,
             restore_status: "not_configured".to_string(),
             restore_status_detail: None,
-            restore_skipped_origins: Vec::new(),
+            restore_storage_failures: Vec::new(),
             restore_loaded_path: None,
             restore_load_failed: false,
             restore_validation_pending: false,
@@ -2385,7 +2385,7 @@ fn plugins_from_command_or_env(cmd: &Value) -> Vec<crate::plugins::PluginConfig>
 fn reset_restore_runtime_state(state: &mut DaemonState) {
     state.restore_status = "pending".to_string();
     state.restore_status_detail = None;
-    state.restore_skipped_origins.clear();
+    state.restore_storage_failures.clear();
     state.restore_loaded_path = None;
     state.restore_load_failed = false;
     state.restore_validation_pending = false;
@@ -2429,19 +2429,15 @@ fn reconcile_restore_check_change(
     if restore_checks_are_configured(checks) {
         if matches!(
             state.restore_status.as_str(),
-            "loaded" | "loaded_but_invalid"
+            "loaded" | "loaded_partial" | "loaded_but_invalid"
         ) {
-            state.restore_status = "loaded".to_string();
-            state.restore_status_detail = None;
-            state.restore_load_failed = false;
+            mark_restore_loaded(state);
             state.restore_validation_pending = true;
         }
     } else {
         state.restore_validation_pending = false;
         if state.restore_status == "loaded_but_invalid" {
-            state.restore_status = "loaded".to_string();
-            state.restore_status_detail = None;
-            state.restore_load_failed = false;
+            mark_restore_loaded(state);
         }
     }
 }
@@ -5215,7 +5211,7 @@ async fn apply_launch_mutator_plugins(
 }
 
 async fn try_auto_restore_state(state: &mut DaemonState) {
-    state.restore_skipped_origins.clear();
+    state.restore_storage_failures.clear();
     let session_name = match state.session_name.as_deref() {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => {
@@ -5231,12 +5227,10 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 match state::load_state(&mgr.client, session_id, &path).await {
-                    Ok(skipped) => {
-                        state.restore_status = "loaded".to_string();
-                        state.restore_status_detail = None;
-                        state.restore_skipped_origins = skipped;
+                    Ok(failures) => {
+                        state.restore_storage_failures = failures;
+                        mark_restore_loaded(state);
                         state.restore_loaded_path = Some(path.clone());
-                        state.restore_load_failed = false;
                         state.restore_validation_pending = state.restore_check_url.is_some()
                             || state.restore_check_text.is_some()
                             || state.restore_check_fn.is_some();
@@ -5267,11 +5261,7 @@ async fn validate_restore_if_pending(state: &mut DaemonState) {
     state.restore_validation_pending = false;
 
     match validate_restored_state(state).await {
-        Ok(()) => {
-            state.restore_status = "loaded".to_string();
-            state.restore_status_detail = None;
-            state.restore_load_failed = false;
-        }
+        Ok(()) => mark_restore_loaded(state),
         Err(err) => {
             state.restore_status = "loaded_but_invalid".to_string();
             state.restore_status_detail = Some(err);
@@ -5308,15 +5298,24 @@ async fn validate_restored_state(state: &DaemonState) -> Result<(), String> {
     Ok(())
 }
 
+fn mark_restore_loaded(state: &mut DaemonState) {
+    state.restore_status = if state.restore_storage_failures.is_empty() {
+        "loaded"
+    } else {
+        "loaded_partial"
+    }
+    .to_string();
+    state.restore_status_detail = None;
+    state.restore_load_failed = false;
+}
+
 fn mark_explicit_storage_state_loaded(state: &mut DaemonState, path: &str) {
     if state.session_name.is_none() && state.restore_status == "not_configured" {
         return;
     }
 
-    state.restore_status = "loaded".to_string();
-    state.restore_status_detail = None;
+    mark_restore_loaded(state);
     state.restore_loaded_path = Some(path.to_string());
-    state.restore_load_failed = false;
     state.restore_validation_pending = false;
     state.restore_save_status = "not_attempted".to_string();
     state.restore_saved_path = None;
@@ -5396,7 +5395,7 @@ pub(crate) async fn auto_save_restore_state(
             state.restore_saved_path = None;
             return Ok(None);
         }
-        "auto" if state.restore_load_failed => {
+        "auto" if state.restore_load_failed || !state.restore_storage_failures.is_empty() => {
             state.restore_save_status = "skipped_restore_failed".to_string();
             state.restore_saved_path = None;
             return Ok(None);
@@ -5452,15 +5451,15 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
     if let Some(ref path) = path {
         ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
             .await?;
-        let mut skipped = None;
+        let mut failures = None;
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
-                skipped = Some(state::load_state(&mgr.client, session_id, path).await?);
+                failures = Some(state::load_state(&mgr.client, session_id, path).await?);
             }
         }
-        if let Some(skipped) = skipped {
+        if let Some(failures) = failures {
+            state.restore_storage_failures.extend(failures);
             mark_explicit_storage_state_loaded(state, path);
-            state.restore_skipped_origins.extend(skipped);
         }
     }
 
@@ -8156,7 +8155,8 @@ async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
         "restoreKey": state.session_name,
         "restoreStatus": state.restore_status,
         "restoreStatusDetail": state.restore_status_detail,
-        "restoreSkippedOrigins": state.restore_skipped_origins,
+        "restoreSkippedOrigins": state.restore_storage_failures.iter().map(|f| &f.origin).collect::<Vec<_>>(),
+        "restoreStorageFailures": state.restore_storage_failures,
         "restoreLoadedPath": state.restore_loaded_path,
         "restoreValidationPending": state.restore_validation_pending,
         "restoreSave": state.restore_save,
@@ -8195,9 +8195,16 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .ok_or("Missing 'path' parameter")?;
 
     ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    let skipped = state::load_state(&mgr.client, &session_id, path).await?;
+    let failures = state::load_state(&mgr.client, &session_id, path).await?;
+    let result = json!({
+        "loaded": true,
+        "path": path,
+        "skippedOrigins": failures.iter().map(|f| &f.origin).collect::<Vec<_>>(),
+        "storageFailures": failures,
+    });
+    state.restore_storage_failures = failures;
     mark_explicit_storage_state_loaded(state, path);
-    Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -15548,6 +15555,8 @@ fn inject_lifecycle(
     let effective_reused = reused || data_reused;
     let effective_launched = launched || data_launched;
     let effective_relaunched = relaunched_browser || data_relaunched;
+    let report_failures =
+        effective_launched || effective_relaunched || obj.contains_key("storageFailures");
 
     obj.insert(
         "lifecycle".to_string(),
@@ -15565,6 +15574,18 @@ fn inject_lifecycle(
             }
         }),
     );
+    if report_failures && !state.restore_storage_failures.is_empty() {
+        for failure in &state.restore_storage_failures {
+            append_warning(
+                resp,
+                &format!(
+                    "Skipped storage for {}: {}",
+                    failure.origin.escape_debug(),
+                    failure.reason
+                ),
+            );
+        }
+    }
 }
 
 fn error_response(id: &str, error: &str) -> Value {
@@ -17531,6 +17552,146 @@ mod tests {
         assert!(!state.restore_validation_pending);
         assert_eq!(state.restore_save_status, "not_attempted");
         assert!(state.restore_saved_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_reports_unsupported_dom_storage_and_preserves_snapshot() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        const ORIGIN: &str = "http://127.0.0.1:8765";
+        let dir = tempfile::tempdir().unwrap();
+        let env = EnvGuard::new(&[
+            "HOME",
+            "USERPROFILE",
+            "AGENT_BROWSER_NAMESPACE",
+            "AGENT_BROWSER_ENCRYPTION_KEY",
+        ]);
+        env.set("HOME", dir.path().to_str().unwrap());
+        env.set("USERPROFILE", dir.path().to_str().unwrap());
+        env.remove("AGENT_BROWSER_NAMESPACE");
+        env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+        for supported in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut has_local_storage = true;
+                let mut cookies_restored = false;
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let command: Value = serde_json::from_str(&text).unwrap();
+                    let mut reply = json!({ "id": command["id"], "result": {} });
+                    match command["method"].as_str().unwrap() {
+                        "Network.getAllCookies" => {
+                            reply["result"] = json!({ "cookies": [{
+                                "name": "session", "value": "cookie", "domain": "127.0.0.1", "path": "/"
+                            }] });
+                        }
+                        "Page.getFrameTree" => {
+                            reply["result"] =
+                                json!({ "frameTree": { "frame": { "url": ORIGIN } } });
+                        }
+                        "Runtime.evaluate" => {
+                            let local = if has_local_storage {
+                                json!([{ "name": "key", "value": "stored-value" }])
+                            } else {
+                                json!([])
+                            };
+                            reply["result"] = json!({ "result": { "type": "object", "value": {
+                                "origin": ORIGIN, "localStorage": local, "sessionStorage": []
+                            }}});
+                        }
+                        "Network.setCookies" => {
+                            assert_eq!(command["params"]["cookies"][0]["value"], "cookie");
+                            cookies_restored = true;
+                        }
+                        "Page.navigate" => {
+                            assert_eq!(command["params"]["url"], format!("{ORIGIN}/"));
+                            has_local_storage = false;
+                        }
+                        "DOMStorage.setDOMStorageItem" => {
+                            assert!(cookies_restored);
+                            assert_eq!(
+                                command["params"],
+                                json!({
+                                    "storageId": { "securityOrigin": ORIGIN, "isLocalStorage": true },
+                                    "key": "key", "value": "stored-value",
+                                })
+                            );
+                            if supported {
+                                has_local_storage = true;
+                            } else {
+                                reply = json!({ "id": command["id"], "error": {
+                                    "code": -32601, "message": "'DOMStorage.setDOMStorageItem' wasn't found"
+                                } });
+                            }
+                        }
+                        other => panic!("Unexpected CDP command: {other}"),
+                    }
+                    ws.send(Message::Text(reply.to_string())).await.unwrap();
+                }
+            });
+            let client = CdpClient::connect(&url).await.unwrap();
+            let mut browser = BrowserManager::for_test(client, url);
+            browser.add_page(super::super::browser::PageInfo {
+                tab_id: 1,
+                label: None,
+                target_id: "target".into(),
+                session_id: "page".into(),
+                url: ORIGIN.into(),
+                title: String::new(),
+                target_type: "page".into(),
+            });
+            let mut state = DaemonState::new();
+            state.session_name = Some(format!("restore-test-{supported}"));
+            state.restore_save = "auto".into();
+            state.restore_check_url = None;
+            state.restore_check_text = None;
+            state.restore_check_fn = None;
+            state.browser = Some(browser);
+            let path = auto_save_restore_state(&mut state).await.unwrap().unwrap();
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert!(saved.contains("stored-value"));
+
+            try_auto_restore_state(&mut state).await;
+            let mut launch = success_response("launch", json!({}));
+            inject_lifecycle(&mut launch, &state, false, true, false);
+            state.restore_validation_pending = true;
+            let save = auto_save_restore_state(&mut state).await.unwrap();
+            let after = std::fs::read_to_string(&path).unwrap();
+            server.abort();
+
+            if supported {
+                assert_eq!(launch["data"]["lifecycle"]["restoreStatus"], "loaded");
+                assert!(launch.get("warning").is_none());
+                assert_eq!(save.as_deref(), Some(path.as_str()));
+            } else {
+                assert_eq!(
+                    (launch["data"]["lifecycle"]["restoreStatus"].as_str(),
+                     launch.get("warning").and_then(Value::as_str),
+                     save.as_deref(),
+                     serde_json::from_str::<Value>(&after).unwrap()["origins"].as_array().unwrap().len()),
+                    (Some("loaded_partial"),
+                     Some("Skipped storage for http://127.0.0.1:8765: Browser does not support CDP DOMStorage.setDOMStorageItem"),
+                     None,
+                     1)
+                );
+                assert_eq!(state.restore_save_status, "skipped_restore_failed");
+                let info = handle_session_info(&state).await.unwrap();
+                assert_eq!(info["restoreStatus"], "loaded_partial");
+                assert_eq!(info["restoreSkippedOrigins"], json!([ORIGIN]));
+                assert_eq!(
+                    info["restoreStorageFailures"],
+                    json!([{
+                        "origin": ORIGIN,
+                        "reason": "Browser does not support CDP DOMStorage.setDOMStorageItem",
+                    }])
+                );
+            }
+            assert_eq!(after, saved);
+        }
     }
 
     #[test]

@@ -173,7 +173,7 @@ agent-browser state load ./my-auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
-Saved localStorage and sessionStorage are written through Chrome DevTools, not page JavaScript, and only while the page is on the saved origin. If an origin redirects elsewhere or fails to load, its storage is skipped, the rest still loads, and `state load` lists it under `skippedOrigins`. For `--state` and `--restore` at launch, `session info` lists it under `restoreSkippedOrigins`.
+agent-browser writes saved localStorage and sessionStorage through the Chrome DevTools Protocol (CDP), without running page JavaScript to set the values. If an origin fails to load, redirects elsewhere, or the browser cannot write its storage through CDP, agent-browser warns and continues restoring the rest of the file. In JSON, `state load` lists those origins in `skippedOrigins` and gives their reasons in `storageFailures`. For `--state` and `--restore` at launch, run `session info --json` and check `runtime.restoreSkippedOrigins` and `runtime.restoreStorageFailures`.
 
 Combine with `--session <id> --restore` so the imported auth auto-persists across restarts:
 
@@ -201,7 +201,7 @@ agent-browser --session "$SESSION" --restore click "#login"
 agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open twitter.com
 ```
 
-State files are stored in `~/.agent-browser/sessions/` and automatically loaded before navigation. With the default `--restore-save auto` policy, failed restore or failed validation skips auto-save.
+State files are stored in `~/.agent-browser/sessions/` and automatically loaded before navigation. If the browser loads the file but skips an origin's storage, the restore status is `loaded_partial`. The default `--restore-save auto` policy skips saving after a partial restore, failed restore, or failed validation to preserve the previous file.
 
 When `--restore` or another restore key is configured, state is saved when the browser closes (explicit `close`, idle timeout, or daemon shutdown) and also periodically while the browser is open, so a browser window you close by hand still leaves a recent save behind. A session ID by itself only isolates the daemon and does not enable persistence; without a restore key, shutdown discards transient browser state and open tabs. Periodic autosave waits for commands to settle, then saves at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (default 30000; set to `0` to save only on close). Idle sessions with configured persistence keep saving on the same interval, so changes the page makes on its own (token refreshes, background requests) are captured too. The daemon exits after one hour without commands or dashboard input by default; `--idle-timeout <time>` or `AGENT_BROWSER_IDLE_TIMEOUT_MS` tunes this, and `0` disables it. Headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default timeout; provider-owned cloud browsers are not. State saving respects the `--restore-save` policy.
 
