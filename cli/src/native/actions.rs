@@ -12304,18 +12304,22 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
 
     let result = diff::diff_screenshot(&baseline_bytes, &current_bytes, threshold)?;
 
-    let output_path = cmd.get("output").and_then(|v| v.as_str());
-    if let (Some(out_path), Some(ref diff_data)) = (output_path, &result.diff_image) {
-        std::fs::write(out_path, diff_data)
-            .map_err(|e| format!("Failed to write diff image: {}", e))?;
-    }
+    // Report a path only if this comparison wrote an image.
+    let diff_path = match (cmd.get("output").and_then(Value::as_str), result.diff_image) {
+        (Some(path), Some(image)) => {
+            std::fs::write(path, image)
+                .map_err(|e| format!("Failed to write diff image: {}", e))?;
+            Some(path)
+        }
+        _ => None,
+    };
 
     Ok(json!({
         "match": result.matched,
         "mismatchPercentage": result.mismatch_percentage,
         "totalPixels": result.total_pixels,
         "differentPixels": result.different_pixels,
-        "diffPath": output_path,
+        "diffPath": diff_path,
         "dimensionMismatch": result.dimension_mismatch,
     }))
 }

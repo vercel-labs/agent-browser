@@ -87,7 +87,7 @@ agent-browser diff screenshot --baseline before.png --threshold 0.2 --selector "
   </thead>
   <tbody>
     <tr><td><code>-b, --baseline &lt;file&gt;</code></td><td>Baseline PNG/JPEG image to compare against (required)</td></tr>
-    <tr><td><code>-o, --output &lt;file&gt;</code></td><td>Path for the generated diff image (default: temp dir)</td></tr>
+    <tr><td><code>-o, --output &lt;file&gt;</code></td><td>Optional path for the diff image</td></tr>
     <tr><td><code>-t, --threshold &lt;0-1&gt;</code></td><td>Color distance threshold (default: 0.1). Higher = more tolerant</td></tr>
     <tr><td><code>-s, --selector &lt;sel&gt;</code></td><td>Scope the current screenshot to an element</td></tr>
     <tr><td><code>--full</code></td><td>Take a full-page screenshot</td></tr>
@@ -96,9 +96,11 @@ agent-browser diff screenshot --baseline before.png --threshold 0.2 --selector "
 
 ### Output
 
-Reports the diff image path, number of different pixels, and mismatch percentage. The diff image shows unchanged pixels dimmed with changed pixels in red.
+Reports the number of different pixels and the mismatch percentage. The diff image shows unchanged pixels dimmed and changed pixels in red.
 
-If the baseline and current images have different dimensions, the command reports a dimension mismatch instead of attempting pixel comparison.
+If the image dimensions differ, the command reports both sizes and skips pixel comparison.
+
+When a same-size comparison finds differences, supply `--output` to save the diff image. In JSON, `diffPath` is `null` whenever the command writes no image.
 
 ## URL diff
 

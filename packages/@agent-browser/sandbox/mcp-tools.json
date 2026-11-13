@@ -897,7 +897,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Diff screenshot against a baseline image.",
+      "description": "Compare against a baseline image. The response includes a diff image path only when this comparison writes an image.",
       "inputSchema": {
         "properties": {
           "baseline": {

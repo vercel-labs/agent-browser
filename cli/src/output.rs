@@ -4021,7 +4021,7 @@ Screenshot Diff:
 
   Options:
     -b, --baseline <file>    Baseline image to compare against (required)
-    -o, --output <file>      Path for the diff image (default: temp dir)
+    -o, --output <file>      Save a diff image when pixels differ and dimensions match
     -t, --threshold <0-1>    Color distance threshold (default: 0.1)
     -s, --selector <sel>     Scope screenshot to element
         --full               Full page screenshot
@@ -4935,16 +4935,21 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
     let is_match = data.get("match").and_then(|v| v.as_bool()).unwrap_or(false);
-    let dim_mismatch = data
-        .get("dimensionMismatch")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if dim_mismatch {
+    if let Some(dimensions) = data.get("dimensionMismatch").filter(|v| v.is_object()) {
+        let expected = &dimensions["expected"];
+        let actual = &dimensions["actual"];
         println!(
-            "{} Images have different dimensions",
-            color::error_indicator()
+            "{} Images have different dimensions (expected {}x{}, actual {}x{})",
+            color::error_indicator(),
+            expected["width"],
+            expected["height"],
+            actual["width"],
+            actual["height"],
         );
-    } else if is_match {
+        return;
+    }
+
+    if is_match {
         println!(
             "{} Images match (0% difference)",
             color::success_indicator()
