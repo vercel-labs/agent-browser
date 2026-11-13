@@ -8,6 +8,7 @@
 //! Owned Windows Chrome uses the same private headless desktop and Job Object
 //! lifetime through MCP; headed and external-connection semantics are unchanged.
 
+use crate::output::OutputOptions;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -218,6 +219,7 @@ struct CliRun {
 
 #[derive(Debug, Clone)]
 struct McpConfig {
+    output: OutputOptions,
     profiles: Vec<ToolProfile>,
     enabled_tools: Option<BTreeSet<&'static str>>,
 }
@@ -298,6 +300,7 @@ impl McpConfig {
     fn from_profiles(profiles: Vec<ToolProfile>) -> Self {
         if profiles.contains(&ToolProfile::All) {
             return Self {
+                output: OutputOptions::default(),
                 profiles: vec![ToolProfile::All],
                 enabled_tools: None,
             };
@@ -310,6 +313,7 @@ impl McpConfig {
 
         Self {
             profiles,
+            output: OutputOptions::default(),
             enabled_tools: Some(enabled_tools),
         }
     }
@@ -517,10 +521,11 @@ const MOBILE_PROFILE_TOOLS: &[&str] = &[
 /// Run one MCP tool call without the stdio session, print its `tools/call`
 /// result as JSON, and return the process exit code: 0 on success, 1 when the
 /// tool reports an error, 2 when the call itself is invalid.
-pub fn run_mcp_call(args: &[String]) -> i32 {
+pub fn run_mcp_call(args: &[String], output_options: OutputOptions) -> i32 {
     let mut stdout = io::stdout();
     let output = match parse_mcp_call(args) {
-        Ok((name, arguments, config)) => {
+        Ok((name, arguments, mut config)) => {
+            config.output = output_options;
             match call_tool(
                 Some(&json!({ "name": name, "arguments": arguments })),
                 &config,
@@ -586,8 +591,9 @@ fn parse_mcp_call(args: &[String]) -> Result<(String, Value, McpConfig), String>
 
 /// Run the MCP stdio server until stdin closes or a `shutdown` request is
 /// received.
-pub fn run_mcp(args: &[String]) -> Result<(), String> {
-    let config = parse_mcp_config(args)?;
+pub fn run_mcp(args: &[String], output: OutputOptions) -> Result<(), String> {
+    let mut config = parse_mcp_config(args)?;
+    config.output = output;
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -2440,8 +2446,8 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
 
     reject_unknown_arguments(name, &tool_def, arguments)?;
 
-    match name {
-        TOOL_TOOLS_PROFILES => call_tools_profiles(config),
+    let mut result = match name {
+        TOOL_TOOLS_PROFILES => return call_tools_profiles(config),
         TOOL_OPEN => call_open(arguments),
         TOOL_READ => call_read(arguments),
         TOOL_SNAPSHOT => call_snapshot(arguments),
@@ -2624,7 +2630,9 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_EVAL => call_eval(arguments),
         TOOL_CLOSE => call_close(arguments),
         _ => unreachable!("known MCP tool missing call handler: {}", name),
-    }
+    }?;
+    render_cli_tool_text(&mut result, name, &config.output);
+    Ok(result)
 }
 
 fn call_tools_profiles(config: &McpConfig) -> Result<Value, ProtocolError> {
@@ -2699,7 +2707,7 @@ fn call_cli_tool(
     let run = run_cli(&cli_args, stdin_body, timeout_ms).map_err(|e| {
         ProtocolError::invalid_params(format!("Failed to run agent-browser: {}", e))
     })?;
-    Ok(tool_result_from_run(run))
+    Ok(cli_result_from_run(run))
 }
 
 /// Global flags an MCP caller may pass in extraArgs; every other global flag must come from the server's environment or config.
@@ -4513,7 +4521,7 @@ fn append_timeout_message(stderr: String, timeout_ms: u64) -> String {
 }
 
 /// Convert CLI output into an MCP tool result.
-fn tool_result_from_run(run: CliRun) -> Value {
+fn cli_result_from_run(run: CliRun) -> Value {
     let parsed = serde_json::from_str::<Value>(run.stdout.trim()).ok();
     let cli_success = parsed
         .as_ref()
@@ -4521,10 +4529,7 @@ fn tool_result_from_run(run: CliRun) -> Value {
         .and_then(|v| v.as_bool())
         .unwrap_or_else(|| run.exit_code == Some(0));
     let success = run.exit_code == Some(0) && cli_success;
-    let mut content = vec![json!({
-        "type": "text",
-        "text": tool_text(parsed.as_ref(), &run.stdout, &run.stderr),
-    })];
+    let mut content = Vec::new();
 
     if success {
         if let Some(image) = parsed.as_ref().and_then(image_content_from_response) {
@@ -4548,7 +4553,34 @@ fn tool_result_from_run(run: CliRun) -> Value {
     })
 }
 
-fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
+/// Render the model-facing text with the server's output policy. The
+/// structured response remains the original machine-readable CLI result.
+fn render_cli_tool_text(result: &mut Value, name: &str, opts: &OutputOptions) {
+    let structured = &result["structuredContent"];
+    let parsed = structured
+        .get("stdout")
+        .is_none()
+        .then(|| &structured["response"]);
+    let text = tool_text(
+        parsed,
+        structured["stdout"].as_str().unwrap_or_default(),
+        structured["stderr"].as_str().unwrap_or_default(),
+        name,
+        opts,
+    );
+    result["content"]
+        .as_array_mut()
+        .expect("CLI result content array")
+        .insert(0, json!({"type": "text", "text": text}));
+}
+
+fn tool_text(
+    parsed: Option<&Value>,
+    stdout: &str,
+    stderr: &str,
+    name: &str,
+    opts: &OutputOptions,
+) -> String {
     let mut text = match parsed {
         Some(value) => {
             // Render changed summaries once, through the same untrusted formatter as
@@ -4568,21 +4600,49 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
                     .iter_mut()
                     .enumerate()
                     .filter_map(|(index, result)| {
-                        let context = take_webmcp_context(result.get_mut("result")?)?;
+                        let context = take_webmcp_context(result.get_mut("result")?, opts)?;
                         Some(format!("Batch result {}:\n{}", index + 1, context))
                     })
                     .collect()
             } else {
                 primary
                     .get_mut("data")
-                    .and_then(take_webmcp_context)
+                    .and_then(|data| take_webmcp_context(data, opts))
                     .into_iter()
                     .collect()
             };
-
-            let mut text = response_text(&primary).unwrap_or_else(|| {
-                serde_json::to_string_pretty(&primary).unwrap_or_else(|_| stdout.trim().to_string())
-            });
+            let output_policy = opts.max_output.is_some() || opts.content_boundaries;
+            let mut text = if let Some(results) = primary
+                .as_array()
+                .filter(|_| name == TOOL_BATCH && output_policy)
+            {
+                batch_text(results, opts)
+            } else {
+                response_text(&primary).unwrap_or_else(|| {
+                    serde_json::to_string_pretty(&primary)
+                        .unwrap_or_else(|_| stdout.trim().to_string())
+                })
+            };
+            // Keep warnings, stderr and other CLI diagnostics outside the page boundary.
+            if output_policy
+                && primary.get("success").and_then(Value::as_bool) != Some(false)
+                && matches!(
+                    name,
+                    TOOL_SNAPSHOT
+                        | TOOL_GET_TEXT
+                        | TOOL_GET_HTML
+                        | TOOL_READ
+                        | TOOL_EVAL
+                        | TOOL_CONSOLE
+                        | TOOL_REACT_TREE
+                        | TOOL_WEBMCP_LIST
+                        | TOOL_WEBMCP_INVOKE
+                        | TOOL_WEBMCP_RESULT
+                )
+            {
+                let origin = primary.get("data").and_then(crate::output::boundary_origin);
+                text = crate::output::format_with_boundaries(&text, origin, opts);
+            }
             // Most hosts put text content in the model context; preserving
             // metadata only in structuredContent is not sufficient.
             if let Some(warning) = primary.get("warning").and_then(Value::as_str) {
@@ -4613,14 +4673,39 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
     }
 }
 
-fn take_webmcp_context(data: &mut Value) -> Option<String> {
-    let context = crate::output::format_webmcp_context(
-        data,
-        &crate::output::OutputOptions {
-            content_boundaries: true,
-            ..Default::default()
-        },
-    );
+/// Limit each batch result without hiding command identity, errors or warnings.
+fn batch_text(results: &[Value], opts: &OutputOptions) -> String {
+    results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| {
+            let mut metadata = result.clone();
+            let data = metadata
+                .as_object_mut()
+                .and_then(|record| record.remove("result"));
+            let mut text = format!(
+                "Batch result {}:\n{}",
+                index + 1,
+                serde_json::to_string_pretty(&metadata).unwrap_or_default()
+            );
+            if let Some(data) = data.filter(|value| !value.is_null()) {
+                let response = json!({"data": data});
+                let content = response_text(&response)
+                    .unwrap_or_else(|| serde_json::to_string_pretty(&data).unwrap_or_default());
+                let origin = crate::output::boundary_origin(&data);
+                text.push('\n');
+                text.push_str(&crate::output::format_with_boundaries(
+                    &content, origin, opts,
+                ));
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn take_webmcp_context(data: &mut Value, opts: &OutputOptions) -> Option<String> {
+    let context = crate::output::format_webmcp_context(data, opts);
     if let Some(data) = data.as_object_mut() {
         data.remove("webmcp");
     }
@@ -4741,11 +4826,118 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn tool_result_from_run(run: CliRun) -> Value {
+        let mut result = cli_result_from_run(run);
+        render_cli_tool_text(&mut result, TOOL_OPEN, &OutputOptions::default());
+        result
+    }
+
+    #[test]
+    fn mcp_page_text_obeys_server_output_options() {
+        let opts = OutputOptions {
+            content_boundaries: true,
+            max_output: Some(3),
+            ..Default::default()
+        };
+        for (tool, field) in [
+            (TOOL_SNAPSHOT, "snapshot"),
+            (TOOL_GET_TEXT, "text"),
+            (TOOL_GET_HTML, "html"),
+            (TOOL_READ, "content"),
+        ] {
+            let response = json!({"success": true, "data": {field: "αβγδε", "origin": "https://example.org"}, "warning": "warning text"});
+            let mut result = cli_result_from_run(CliRun {
+                exit_code: Some(0),
+                stdout: response.to_string(),
+                stderr: "diagnostic".into(),
+            });
+            render_cli_tool_text(&mut result, tool, &opts);
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert!(text
+                .contains("origin=https://example.org ---\nαβγ\n[truncated: showing 3 of 5 chars"));
+            assert!(
+                text.find("END_AGENT_BROWSER_PAGE_CONTENT").unwrap()
+                    < text.find("warning text").unwrap()
+            );
+            assert!(text.ends_with("stderr:\ndiagnostic"));
+            assert_eq!(result["structuredContent"]["response"], response);
+        }
+        let error = json!({"success": false, "error": "page failed"});
+        assert_eq!(
+            tool_text(Some(&error), "", "", TOOL_SNAPSHOT, &opts),
+            "page failed"
+        );
+        let path = json!({"success":true, "data":{"path":"image.png"}});
+        assert_eq!(
+            tool_text(Some(&path), "", "", TOOL_SCREENSHOT, &opts),
+            "image.png"
+        );
+    }
+
+    #[test]
+    fn mcp_batch_output_limits_preserve_each_commands_diagnostics() {
+        let opts = OutputOptions {
+            content_boundaries: true,
+            max_output: Some(3),
+            ..Default::default()
+        };
+        for omit_command in [false, true] {
+            let mut response = json!([
+                {"command": ["snapshot"], "success": true,
+                 "result": {"snapshot": "αβγδε", "origin": "https://example.org"},
+                 "warning": "page replaced"},
+                {"command": ["click", "#missing"], "success": false,
+                 "result": {"targetId": "gone"}, "error": "bound tab is gone",
+                 "code": "tab_gone"},
+                {"command": ["unknown"], "success": false, "error": "Unknown command"}
+            ]);
+            if omit_command {
+                for (index, item) in response.as_array_mut().unwrap().iter_mut().enumerate() {
+                    item.as_object_mut().unwrap().remove("command");
+                    item["index"] = json!(index);
+                }
+            }
+            let mut result = cli_result_from_run(CliRun {
+                exit_code: Some(1),
+                stdout: response.to_string(),
+                stderr: "diagnostic".into(),
+            });
+            render_cli_tool_text(&mut result, TOOL_BATCH, &opts);
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert!(
+                text.contains("αβγ\n[truncated: showing 3 of 5 chars"),
+                "{text}"
+            );
+            for diagnostic in [
+                "page replaced",
+                "bound tab is gone",
+                "tab_gone",
+                "Unknown command",
+            ] {
+                assert!(text.contains(diagnostic), "{text}");
+                assert_eq!(text.matches(diagnostic).count(), 1, "{text}");
+                let preceding = &text[..text.find(diagnostic).unwrap()];
+                assert_eq!(
+                    preceding.matches("--- AGENT_BROWSER_PAGE_CONTENT").count(),
+                    preceding
+                        .matches("--- END_AGENT_BROWSER_PAGE_CONTENT")
+                        .count(),
+                    "diagnostic must be outside page boundaries: {text}"
+                );
+            }
+            assert!(text.ends_with("stderr:\ndiagnostic"));
+            assert_eq!(text.contains("\"command\""), !omit_command);
+            assert_eq!(text.contains("\"index\""), omit_command);
+            assert_eq!(result["structuredContent"]["response"], response);
+            assert_eq!(result["isError"], true);
+        }
+    }
+
     #[test]
     fn tool_text_keeps_response_warnings() {
         let value = json!({ "success": true, "data": { "url": "about:blank" },
                             "warning": "page_wedged: the active tab was replaced" });
-        let text = tool_text(Some(&value), "", "");
+        let text = tool_text(Some(&value), "", "", TOOL_OPEN, &OutputOptions::default());
         assert!(text.contains("about:blank"), "{text}");
         assert!(
             text.contains("page_wedged: the active tab was replaced"),

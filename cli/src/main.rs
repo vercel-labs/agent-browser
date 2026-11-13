@@ -1621,9 +1621,12 @@ fn main() {
             env::set_var("AGENT_BROWSER_CONFIG", path);
         }
         if clean.get(1).map(|s| s.as_str()) == Some("call") {
-            exit(mcp::run_mcp_call(&clean[2..]));
+            exit(mcp::run_mcp_call(
+                &clean[2..],
+                OutputOptions::from_flags(&flags),
+            ));
         }
-        if let Err(err) = mcp::run_mcp(&clean[1..]) {
+        if let Err(err) = mcp::run_mcp(&clean[1..], OutputOptions::from_flags(&flags)) {
             eprintln!("{} {}", color::error_indicator(), err);
             exit(1);
         }
