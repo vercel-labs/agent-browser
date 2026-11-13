@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CloseTargetParams, CreateTargetParams,
-    CreateTargetResult, EvaluateParams,
+    CreateTargetResult, EvaluateParams, GetTargetsResult, TargetInfo,
 };
 use super::cookies::{self, Cookie};
 use crate::validation::{is_valid_session_name, sanitize_session_component, session_name_error};
@@ -54,6 +54,26 @@ fn collect_frame_origins(tree: &Value, origins: &mut HashSet<String>) {
             collect_frame_origins(child, origins);
         }
     }
+}
+
+/// Origins of the open page targets in the browser, from a
+/// `Target.getTargets` result. The saving session's `visited_origins` only
+/// records its own navigations, so an origin opened solely by an attached
+/// session would otherwise be missing from the save (#2449).
+fn origins_from_targets(target_infos: &[TargetInfo]) -> HashSet<String> {
+    let mut origins = HashSet::new();
+    for target in target_infos {
+        if !super::browser::should_track_target(target) {
+            continue;
+        }
+        if let Ok(parsed) = url::Url::parse(&target.url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" && !origin.is_empty() {
+                origins.insert(origin);
+            }
+        }
+    }
+    origins
 }
 
 /// Parse the JS-evaluated origin storage data into an OriginStorage struct.
@@ -281,6 +301,17 @@ pub async fn save_state(
         if let Some(tree) = tree_result.get("frameTree") {
             collect_frame_origins(tree, &mut all_origins);
         }
+    }
+
+    // Also merge origins of every page target open in the browser, including
+    // tabs driven by attached sessions, which the saving session never
+    // navigated to (#2449). Fail-open: if the target list cannot be read,
+    // keep the origins we have.
+    if let Ok(targets) = client
+        .send_command_typed::<_, GetTargetsResult>("Target.getTargets", &json!({}), None)
+        .await
+    {
+        all_origins.extend(origins_from_targets(&targets.target_infos));
     }
 
     // 1. Collect localStorage from the current page
@@ -1062,5 +1093,31 @@ mod tests {
         let result = dispatch_state_command(&cmd).unwrap();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Missing 'name' parameter");
+    }
+
+    fn target_info(target_type: &str, url: &str) -> TargetInfo {
+        TargetInfo {
+            target_id: "target-1".to_string(),
+            target_type: target_type.to_string(),
+            title: String::new(),
+            url: url.to_string(),
+            attached: Some(false),
+            browser_context_id: None,
+        }
+    }
+
+    #[test]
+    fn test_origins_from_targets_includes_attached_session_pages() {
+        let targets = vec![
+            target_info("page", "https://example.com/app"),
+            target_info("page", "https://other.example/dashboard"),
+            target_info("page", "about:blank"),
+            target_info("background_page", "https://extension.example/"),
+            target_info("page", "chrome://new-tab-page/"),
+        ];
+        let origins = origins_from_targets(&targets);
+        assert!(origins.contains("https://example.com"));
+        assert!(origins.contains("https://other.example"));
+        assert_eq!(origins.len(), 2);
     }
 }
