@@ -13,7 +13,14 @@ use crate::native::state::{self, OriginStorage, StorageState};
 use crate::native::storage::storage_js_name;
 use crate::validation::{is_valid_session_name, session_name_error};
 
-const ORIGIN_STORAGE_JS: &str = r#"() => {
+const STORAGE_SANDBOX: &str = "agent-browser";
+
+/// Reads one origin's storage through a sandbox and returns `null` unless the page is still on
+/// `expectedOrigin`, checked in the same call so a navigation cannot race the read.
+const ORIGIN_STORAGE_JS: &str = r#"(expectedOrigin) => {
+    if (location.origin !== expectedOrigin) {
+        return null;
+    }
     const result = { origin: location.origin, localStorage: [], sessionStorage: [] };
     try {
         for (let i = 0; i < localStorage.length; i++) {
@@ -368,13 +375,24 @@ fn collect_context_ids(contexts: &[Value], out: &mut Vec<(String, String, bool)>
     }
 }
 
-async fn read_origin(ff: &FirefoxSession, context: &str) -> Result<Option<OriginStorage>, String> {
+/// Reads the storage the browser attributes to `expected_origin` in a sandbox realm, so page
+/// scripts cannot alter the result and a reply claiming another origin is dropped.
+async fn read_origin(
+    ff: &FirefoxSession,
+    context: &str,
+    expected_origin: &str,
+) -> Result<Option<OriginStorage>, String> {
     let data = ff
         .bidi
-        .call_function(context, ORIGIN_STORAGE_JS, None, Vec::new())
+        .call_function_in_sandbox(
+            context,
+            STORAGE_SANDBOX,
+            ORIGIN_STORAGE_JS,
+            vec![json!(expected_origin)],
+        )
         .await
         .map_err(|e| format!("Failed to read storage: {e}"))?;
-    Ok(state::parse_origin_storage(&data))
+    Ok(state::parse_origin_storage(&data).filter(|storage| storage.origin == expected_origin))
 }
 
 fn has_entries(origin: &OriginStorage) -> bool {
@@ -428,10 +446,8 @@ async fn read_origins_in(
             )
             .await
             .map_err(|e| format!("Failed to read storage for {origin}: {e}"))?;
-        if let Some(data) = read_origin(ff, context).await? {
-            if data.origin == *origin {
-                found.push(data);
-            }
+        if let Some(data) = read_origin(ff, context, origin).await? {
+            found.push(data);
         }
     }
     Ok(found)
@@ -459,14 +475,17 @@ async fn collect_origins(
     let mut temporary = HashSet::new();
     let mut origins = Vec::new();
     for (id, url, top_level) in ids {
-        if let Ok(url) = url::Url::parse(&url) {
-            let origin = url.origin().ascii_serialization();
-            if origin != "null" {
-                ff.visited_origins.insert(origin.clone());
-                open.insert(origin);
-            }
-        }
-        let origin = match read_origin(ff, &id).await {
+        let Some(expected_origin) = url::Url::parse(&url)
+            .ok()
+            .map(|url| url.origin())
+            .filter(url::Origin::is_tuple)
+            .map(|origin| origin.ascii_serialization())
+        else {
+            continue;
+        };
+        ff.visited_origins.insert(expected_origin.clone());
+        open.insert(expected_origin.clone());
+        let origin = match read_origin(ff, &id, &expected_origin).await {
             Ok(origin) => origin,
             Err(error) if !top_level => {
                 eprintln!("Skipping unreadable Firefox child context {id}: {error}");
@@ -670,7 +689,7 @@ pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<
             .bidi
             .call_function_in_sandbox(
                 &landing.context,
-                "agent-browser",
+                STORAGE_SANDBOX,
                 RESTORE_STORAGE_JS,
                 vec![json!(origin.origin), json!(payload)],
             )
@@ -838,6 +857,108 @@ mod tests {
 
         assert!(error.contains("storage unavailable"), "{error}");
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "previous");
+    }
+
+    type Requests = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+
+    /// A session whose BiDi socket reports `tree` for `browsingContext.getTree` and
+    /// `script_result` for `script.callFunction`, recording every request it received.
+    async fn fake_storage_session(tree: Value, script_result: Value) -> (FirefoxSession, Requests) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let requests = Requests::default();
+        let log = requests.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let id = request["id"].clone();
+                let result = match request["method"].as_str().unwrap_or_default() {
+                    "browsingContext.getTree" => tree.clone(),
+                    "script.callFunction" => {
+                        json!({"type": "success", "result": script_result.clone()})
+                    }
+                    _ => json!({}),
+                };
+                log.lock().unwrap().push(request);
+                let reply = json!({"type": "success", "id": id, "result": result});
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
+            }
+        });
+        let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
+        ff.bidi = super::super::client::BidiClient::connect(&url)
+            .await
+            .unwrap()
+            .into();
+        (ff, requests)
+    }
+
+    fn storage_reply(origin: &str) -> Value {
+        json!({"type": "object", "value": [
+            ["origin", {"type": "string", "value": origin}],
+            ["localStorage", {"type": "array", "value": [
+                {"type": "object", "value": [
+                    ["name", {"type": "string", "value": "token"}],
+                    ["value", {"type": "string", "value": "secret"}]
+                ]}
+            ]}],
+            ["sessionStorage", {"type": "array", "value": []}]
+        ]})
+    }
+
+    #[tokio::test]
+    async fn collect_origins_drops_a_reply_claiming_another_origin() {
+        let (mut ff, requests) = fake_storage_session(
+            json!({"contexts": [{"context": "ctx-active", "url": "https://real.example/page"}]}),
+            storage_reply("https://bank.example"),
+        )
+        .await;
+
+        let (origins, seen, _) = collect_origins(&mut ff).await.unwrap();
+
+        assert!(origins.is_empty());
+        assert!(!seen.contains("https://bank.example"));
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|request| request["method"] == "script.callFunction")
+                .unwrap()["params"]["target"],
+            json!({"context": "ctx-active", "sandbox": "agent-browser"})
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_origins_reads_in_a_sandbox_with_the_browser_origin() {
+        let (mut ff, requests) = fake_storage_session(
+            json!({"contexts": [{"context": "ctx-active", "url": "https://real.example/page"}]}),
+            storage_reply("https://real.example"),
+        )
+        .await;
+
+        let (origins, _, _) = collect_origins(&mut ff).await.unwrap();
+
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].origin, "https://real.example");
+        assert_eq!(origins[0].local_storage[0].value, "secret");
+        let requests = requests.lock().unwrap();
+        let call = requests
+            .iter()
+            .find(|request| request["method"] == "script.callFunction")
+            .unwrap();
+        assert_eq!(call["params"]["target"]["sandbox"], "agent-browser");
+        assert_eq!(
+            call["params"]["arguments"],
+            json!([{"type": "string", "value": "https://real.example"}])
+        );
     }
 
     #[tokio::test]

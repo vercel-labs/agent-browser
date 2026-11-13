@@ -56,11 +56,46 @@ for (const path of Object.keys(edits.pages))
   if (!pages.some((page) => page.path === path))
     throw new Error(`docs-edits.json: unknown page ${path}`);
 
-/** Pages added after the pinned baseline, listed only for the sitemap and agent indexes. */
-export const addedPages = edits.addedPages ?? [];
-
 /** Baseline pages with intentional edits applied: the floor for live routes. */
 export const currentPages = pages.map(applyEdits);
+
+/**
+ * Pages added after the baseline was pinned. They have no baseline fixture, so
+ * they carry only the metadata the shared path checks read, and they belong to
+ * the public route inventory that the route suite audits.
+ */
+export const addedPages = [
+  {
+    path: "/modern-web-guidance",
+    markdownTitle: "Modern Web Guidance",
+    title: "Modern Web Guidance | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Modern Web Guidance | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Modern Web Guidance - agent-browser",
+    twitterTitle: "Modern Web Guidance | agent-browser",
+  },
+  {
+    path: "/engines/firefox",
+    markdownTitle: "Firefox",
+    title: "Firefox | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Firefox | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Firefox - agent-browser",
+    twitterTitle: "Firefox | agent-browser",
+  },
+];
+
+/** Every public page: the baseline floor plus pages added since. */
+export const publicPages = [...currentPages, ...addedPages];
+
+/**
+ * Public pages with a pinned baseline fixture. `navigation` is a fixture field,
+ * so it separates pages whose original content, Markdown and search results are
+ * recorded from pages added since, which only get the path checks.
+ */
+export const fixturePages = publicPages.filter((page) => page.navigation);
 
 /** Baseline resources with intentionally changed bytes replaced. */
 export const currentResources = baseline.resources.map((resource) => ({

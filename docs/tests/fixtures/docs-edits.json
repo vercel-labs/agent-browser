@@ -418,11 +418,5 @@
       "size": 9824,
       "sha256": "843f3ccc1c53733d751a2d91c518f22734f59125aff081e0592c4b9701482603"
     }
-  },
-  "addedPages": [
-    {
-      "path": "/engines/firefox",
-      "markdownTitle": "Firefox"
-    }
-  ]
+  }
 }

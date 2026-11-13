@@ -1,101 +1,45 @@
 #!/usr/bin/env node
 
 /**
- * Cross-platform CLI wrapper for agent-browser
- * 
- * This wrapper enables npx support on Windows where shell scripts don't work.
- * For global installs, postinstall.js patches the shims to invoke the native
- * binary directly (zero overhead).
+ * Cross-platform CLI launcher for agent-browser
+ *
+ * Runs the native binary from the platform package (an optional dependency
+ * such as @agent-browser/cli-linux-x64-gnu) or from this package's bin/.
+ * On first use it also points the package manager's bin entry at the native
+ * binary, so later invocations skip Node.js entirely, even when install
+ * scripts were blocked.
  */
 
-import { spawn, execSync } from 'child_process';
-import { existsSync, accessSync, chmodSync, constants } from 'fs';
-import { dirname, join } from 'path';
+import { spawn } from 'child_process';
+import { accessSync, chmodSync, constants } from 'fs';
+import { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
+import { findNativeBinary, nativeTarget } from '../scripts/native.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-// Detect if the system uses musl libc (e.g. Alpine Linux)
-function isMusl() {
-  if (platform() !== 'linux') return false;
-  try {
-    const result = execSync('ldd --version 2>&1 || true', { encoding: 'utf8' });
-    return result.toLowerCase().includes('musl');
-  } catch {
-    return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
-  }
-}
+async function main() {
+  const target = nativeTarget();
 
-// Map Node.js platform/arch to binary naming convention
-function getBinaryName() {
-  const os = platform();
-  const cpuArch = arch();
-
-  let osKey;
-  switch (os) {
-    case 'darwin':
-      osKey = 'darwin';
-      break;
-    case 'linux':
-      osKey = isMusl() ? 'linux-musl' : 'linux';
-      break;
-    case 'win32':
-      osKey = 'win32';
-      break;
-    default:
-      return null;
-  }
-
-  let archKey;
-  switch (cpuArch) {
-    case 'x64':
-    case 'x86_64':
-      archKey = 'x64';
-      break;
-    case 'arm64':
-    case 'aarch64':
-      archKey = 'arm64';
-      break;
-    default:
-      return null;
-  }
-
-  // Prefer a source-built native ARM64 executable when present. Otherwise,
-  // use the published x64 binary through Windows' built-in emulation, keeping
-  // the fallback consistent with scripts/postinstall.js's effectiveArch.
-  if (osKey === 'win32' && archKey === 'arm64') {
-    const nativeBinaryName = `agent-browser-${osKey}-${archKey}.exe`;
-    if (!existsSync(join(__dirname, nativeBinaryName))) {
-      archKey = 'x64';
-    }
-  }
-
-  const ext = os === 'win32' ? '.exe' : '';
-  return `agent-browser-${osKey}-${archKey}${ext}`;
-}
-
-function main() {
-  const binaryName = getBinaryName();
-
-  if (!binaryName) {
+  if (!target) {
     console.error(`Error: Unsupported platform: ${platform()}-${arch()}`);
     process.exit(1);
   }
 
-  const binaryPath = join(__dirname, binaryName);
+  const binaryPath = findNativeBinary(packageRoot, target);
 
-  if (!existsSync(binaryPath)) {
+  if (!binaryPath) {
     console.error(`Error: No binary found for ${platform()}-${arch()}`);
-    console.error(`Expected: ${binaryPath}`);
+    console.error(`Expected the ${target.packageName} package to be installed.`);
     console.error('');
-    console.error('Run "npm run build:native" to build for your platform,');
-    console.error('or reinstall the package to trigger the postinstall download.');
+    console.error('Reinstall agent-browser with optional dependencies enabled,');
+    console.error('or run "npm run build:native" to build for your platform.');
     process.exit(1);
   }
 
-  // Ensure binary is executable (fixes EACCES on macOS/Linux when postinstall didn't run,
-  // e.g., when using bun which blocks lifecycle scripts by default)
+  // Ensure binary is executable (fixes EACCES on macOS/Linux when the package
+  // manager didn't preserve the execute bit)
   if (platform() !== 'win32') {
     try {
       accessSync(binaryPath, constants.X_OK);
@@ -111,8 +55,21 @@ function main() {
     }
   }
 
+  let runPath = binaryPath;
+  try {
+    const { linkNative, materializeBinary } = await import('../scripts/link-native.js');
+    try {
+      runPath = materializeBinary(packageRoot, binaryPath, target);
+    } catch {
+      runPath = binaryPath;
+    }
+    linkNative({ packageRoot, binary: runPath, target, entries: [process.argv[1]] });
+  } catch {
+    // Linking is an optimization; this launcher keeps working without it.
+  }
+
   // Spawn the native binary with inherited stdio
-  const child = spawn(binaryPath, process.argv.slice(2), {
+  const child = spawn(runPath, process.argv.slice(2), {
     stdio: 'inherit',
     windowsHide: false,
   });
