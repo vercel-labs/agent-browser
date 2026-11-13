@@ -219,6 +219,22 @@ impl FirefoxSession {
         Ok(!self.contexts.active().is_empty())
     }
 
+    /// Reads the frame tree the browser reports for the active tab and records it, so parent
+    /// relationships come from the browser rather than from page code.
+    pub async fn refresh_frame_tree(&mut self) -> Result<(), String> {
+        let tree = self
+            .bidi
+            .send(
+                "browsingContext.getTree",
+                json!({"root": self.contexts.active_tab()}),
+            )
+            .await?;
+        for info in tree["contexts"].as_array().into_iter().flatten() {
+            self.contexts.record(info);
+        }
+        Ok(())
+    }
+
     /// Removes the user contexts this session created once their last tab is gone.
     pub async fn release_unused_user_contexts(&mut self) {
         for user_context in self.contexts.take_unused_user_contexts() {
