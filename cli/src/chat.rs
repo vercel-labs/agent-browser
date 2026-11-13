@@ -132,18 +132,30 @@ async fn run_interactive(session: &str, model: &str, verbosity: Verbosity, json_
     let url = format!("{}/v1/chat/completions", gateway_url);
     let client = chat::http_client();
 
+    // Tokio keeps its SIGINT handler after a turn. Keep the prompt asynchronous
+    // too, without tying an uninterruptible stdin read to the runtime's pool.
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if input_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
     loop {
         if !json_mode {
             eprint!("{} ", color::cyan(">"));
             let _ = std::io::stderr().flush();
         }
 
-        let mut input = String::new();
-        match std::io::stdin().read_line(&mut input) {
-            Ok(0) => break,
-            Err(_) => break,
-            Ok(_) => {}
-        }
+        let input = tokio::select! {
+            input = input_rx.recv() => match input { Some(input) => input, None => break },
+            _ = tokio::signal::ctrl_c() => break,
+        };
 
         let input = input.trim();
         if input.is_empty() {
@@ -163,9 +175,16 @@ async fn run_interactive(session: &str, model: &str, verbosity: Verbosity, json_
         {
             let split = chat::find_safe_split(&openai_messages, chat::KEEP_RECENT_MESSAGES);
             let to_summarize = &openai_messages[1..split];
-            if let Some(summary) =
-                chat::summarize_for_compaction(client, &url, &api_key, model, to_summarize).await
-            {
+            let summary = tokio::select! {
+                summary = chat::summarize_for_compaction(client, &url, &api_key, model, to_summarize) => summary,
+                _ = tokio::signal::ctrl_c() => {
+                    finish_interactive_turn(&mut openai_messages, false);
+                    if json_mode { println!("{}", json!({"success":false,"error":"Chat canceled before executing this turn."})); }
+                    else { eprintln!("Chat canceled before executing this turn."); }
+                    continue;
+                }
+            };
+            if let Some(summary) = summary {
                 let summary_msg = json!({
                     "role": "system",
                     "content": format!("[Conversation summary]\n{}", summary)
@@ -179,12 +198,83 @@ async fn run_interactive(session: &str, model: &str, verbosity: Verbosity, json_
         let success =
             run_chat_turn(session, model, &mut openai_messages, verbosity, json_mode).await;
 
-        if !success && !json_mode {
-            // Continue the loop on error; don't exit interactive mode
-        }
+        finish_interactive_turn(&mut openai_messages, success);
 
         if !json_mode {
             eprintln!();
+        }
+    }
+}
+
+fn finish_interactive_turn(messages: &mut Vec<Value>, success: bool) {
+    if !success {
+        // Pending tool calls cannot be reused safely after an unknown outcome.
+        // Start the next user turn with a valid history and no implicit retry.
+        messages.truncate(1);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn failed_interactive_turn_discards_unanswered_tool_calls() {
+        let mut messages = vec![
+            json!({"role":"system","content":"browser rules"}),
+            json!({"role":"user","content":"submit"}),
+            json!({"role":"assistant","tool_calls":[{"id":"pending","type":"function","function":{"name":"agent_browser","arguments":"{}"}}]}),
+        ];
+        finish_interactive_turn(&mut messages, false);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "system");
+        messages.push(json!({"role":"user","content":"inspect"}));
+        finish_interactive_turn(&mut messages, true);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_prompt_exits_on_sigint_after_handler_was_installed() {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        if std::env::var_os("AGENT_BROWSER_PROMPT_TEST").is_some() {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let _ =
+                    tokio::time::timeout(Duration::from_millis(1), tokio::signal::ctrl_c()).await;
+                run_interactive("prompt-fixture", DEFAULT_MODEL, Verbosity::Quiet, false).await;
+            });
+            return;
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "chat::cancellation_tests::interactive_prompt_exits_on_sigint_after_handler_was_installed", "--nocapture"])
+            .env("AGENT_BROWSER_PROMPT_TEST", "1")
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped())
+            .spawn().unwrap();
+        let mut prompt = [0; 2];
+        child
+            .stderr
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut prompt)
+            .unwrap();
+        assert_eq!(&prompt, b"> ");
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("interactive prompt ignored SIGINT");
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -193,6 +283,24 @@ async fn run_interactive(session: &str, model: &str, verbosity: Verbosity, json_
 /// executes tools in a loop until the model is done. Appends assistant and tool
 /// messages to `openai_messages`. Returns true on success.
 async fn run_chat_turn(
+    session: &str,
+    model: &str,
+    openai_messages: &mut Vec<Value>,
+    verbosity: Verbosity,
+    json_mode: bool,
+) -> bool {
+    tokio::select! {
+        result = run_chat_turn_inner(session, model, openai_messages, verbosity, json_mode) => result,
+        _ = tokio::signal::ctrl_c() => {
+            let error = "Chat canceled. A browser action may already have completed; inspect the session before retrying.";
+            if json_mode { println!("{}", json!({"success":false,"error":error})); }
+            else { eprintln!("\n{} {}", color::error_indicator(), error); }
+            false
+        }
+    }
+}
+
+async fn run_chat_turn_inner(
     session: &str,
     model: &str,
     openai_messages: &mut Vec<Value>,
@@ -255,6 +363,7 @@ async fn run_chat_turn(
 
         let gw_response = match client
             .post(&url)
+            .timeout(total_deadline.saturating_duration_since(tokio::time::Instant::now()))
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .body(gateway_body.to_string())
@@ -289,8 +398,23 @@ async fn run_chat_turn(
             return false;
         }
 
-        let (text_chunks, tool_calls) =
-            parse_gateway_stream(gw_response, verbosity, json_mode).await;
+        let (text_chunks, tool_calls) = match tokio::time::timeout_at(
+            total_deadline,
+            parse_gateway_stream(gw_response, verbosity, json_mode),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => {
+                let error = "Gateway turn timed out; pending tools were not executed.";
+                if json_mode {
+                    println!("{}", json!({"success":false,"error":error}));
+                } else {
+                    eprintln!("\n{} {}", color::error_indicator(), error);
+                }
+                return false;
+            }
+        };
 
         if !text_chunks.is_empty() {
             let text = text_chunks.join("");
@@ -350,14 +474,18 @@ async fn run_chat_turn(
                 eprintln!("{}", color::dim(&format!("> {}", command)));
             }
 
-            let result = match tokio::time::timeout(
-                tool_timeout,
-                chat::execute_chat_tool(session, command, was_open),
-            )
-            .await
-            {
+            let limit = tool_timeout
+                .min(total_deadline.saturating_duration_since(tokio::time::Instant::now()));
+            let result = match chat::execute_chat_tool(session, command, was_open, limit).await {
                 Ok(r) => r,
-                Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
+                Err(error) => {
+                    if json_mode {
+                        println!("{}", json!({"success":false,"error":error}));
+                    } else {
+                        eprintln!("\n{} {}", color::error_indicator(), error);
+                    }
+                    return false;
+                }
             };
 
             if !json_mode && verbosity == Verbosity::Verbose {
