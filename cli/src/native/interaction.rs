@@ -512,7 +512,14 @@ pub async fn select_option(
                     let scope = role === 'listbox' ? this : null;
                     if (!scope) {
                         const controls = this.getAttribute('aria-controls');
-                        if (controls) scope = document.getElementById(controls);
+                        if (controls) {
+                            // Radix sets aria-controls before the popup mounts, so a
+                            // missing target means "not rendered yet": return nothing
+                            // and let the wait loop retry, instead of collecting another
+                            // listbox's options from the document.
+                            scope = document.getElementById(controls);
+                            if (!scope) return [];
+                        }
                     }
                     const nodes = Array.from((scope || document).querySelectorAll('[role=option]'));
                     return nodes.filter((o) => o.getClientRects().length > 0);
