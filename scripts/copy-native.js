@@ -8,6 +8,7 @@ import { copyFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
+import { nativeTarget } from './native.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
@@ -17,9 +18,8 @@ const sourcePath = join(projectRoot, `cli/target/release/agent-browser${sourceEx
 const binDir = join(projectRoot, 'bin');
 
 // Determine platform suffix
-const platformKey = `${platform()}-${arch()}`;
-const ext = platform() === 'win32' ? '.exe' : '';
-const targetName = `agent-browser-${platformKey}${ext}`;
+const target = nativeTarget();
+const targetName = target?.candidates[0] ?? `agent-browser-${platform()}-${arch()}${sourceExt}`;
 const targetPath = join(binDir, targetName);
 
 if (!existsSync(sourcePath)) {

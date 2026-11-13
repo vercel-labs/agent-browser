@@ -47,9 +47,14 @@ async function writePlatformPackage(packageRoot, packageName, file, marker) {
   return join(directory, 'bin', file);
 }
 
-async function runLauncher(t, { platform, arch, binaries = [], platformPackage, args }) {
+async function runLauncher(t, { platform, arch, binaries = [], platformPackage, sourceLibc, args }) {
   const packageRoot = await createPackage(t);
   const bootstrapPath = join(packageRoot, 'bootstrap.mjs');
+
+  if (sourceLibc) {
+    await copyFile(join(repositoryRoot, 'scripts', 'copy-native.js'), join(packageRoot, 'scripts', 'copy-native.js'));
+    await writeFakeBinary(join(packageRoot, 'cli', 'target', 'release', 'agent-browser'), 'source-binary-ran');
+  }
 
   await writeFile(
     bootstrapPath,
@@ -59,8 +64,13 @@ const require = createRequire(import.meta.url);
 const os = require('node:os');
 os.platform = () => ${JSON.stringify(platform)};
 os.arch = () => ${JSON.stringify(arch)};
+${sourceLibc ? `process.report.getReport = () => ({
+  header: ${sourceLibc === 'glibc' ? "{ glibcVersionRuntime: '2.39' }" : '{}'},
+  sharedObjects: ${sourceLibc === 'musl' ? "['/lib/ld-musl-x86_64.so.1']" : '[]'},
+});` : ''}
 syncBuiltinESMExports();
 
+${sourceLibc ? "await import('./scripts/copy-native.js');" : ''}
 await import('./bin/agent-browser.js');
 `,
   );
@@ -74,6 +84,24 @@ await import('./bin/agent-browser.js');
   return spawnSync(process.execPath, [bootstrapPath, ...args], {
     cwd: packageRoot,
     encoding: 'utf8',
+  });
+}
+
+for (const [sourceLibc, binaryName] of [
+  ['musl', 'agent-browser-linux-musl-x64'],
+  ['glibc', 'agent-browser-linux-x64'],
+]) {
+  test(`launcher finds a source-built Linux ${sourceLibc} executable`, async (t) => {
+    const result = await runLauncher(t, {
+      platform: 'linux',
+      arch: 'x64',
+      sourceLibc,
+      args: ['--version'],
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes(binaryName), result.stdout);
+    assert.deepEqual(result.stdout.trim().split('\n').slice(-2), ['source-binary-ran', '--version']);
   });
 }
 
