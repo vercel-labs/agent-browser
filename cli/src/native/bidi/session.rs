@@ -1539,6 +1539,49 @@ pub(crate) mod tests {
         (session, tx, calls, bidi_messages, rdp_messages)
     }
 
+    /// A session whose DevTools stream replies through `responder` and follows each
+    /// `evaluateJSAsync` reply with an `evaluationResult` event carrying the reply's `result`.
+    pub(crate) async fn fake_session_with_rdp_replies(
+        responder: impl Fn(&Value) -> Value + Send + 'static,
+    ) -> (FirefoxSession, Messages) {
+        let (url, _tx, _calls, _) = fake_bidi_with(|v: &Value| {
+            if v["method"] == "browsingContext.getTree" {
+                json!({"contexts": [{"context": "ctx-active"}]})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+        let events = bidi.subscribe_buffered();
+        let (a, mut b) = tokio::io::duplex(65536);
+        let rdp_messages = Messages::default();
+        let log = rdp_messages.clone();
+        tokio::spawn(async move {
+            put(&mut b, json!({"from": "root"})).await;
+            while let Some(v) = get(&mut b).await {
+                log.lock().unwrap().push(v.clone());
+                let reply = responder(&v);
+                put(&mut b, reply.clone()).await;
+                if v["type"] == "evaluateJSAsync" {
+                    put(
+                        &mut b,
+                        json!({
+                            "from": v["to"],
+                            "type": "evaluationResult",
+                            "resultID": reply["resultID"],
+                            "result": reply.get("result").cloned().unwrap_or(Value::Null),
+                            "exception": reply.get("exception").cloned().unwrap_or(Value::Null),
+                        }),
+                    )
+                    .await;
+                }
+            }
+        });
+        let rdp = RdpClient::from_stream(a).await.unwrap();
+        (test_session(bidi, rdp, events), rdp_messages)
+    }
+
     #[test]
     fn proxy_capability_maps_http_and_socks() {
         let http = proxy_capability("http://proxy:3128", Some("a.com, b.com"));

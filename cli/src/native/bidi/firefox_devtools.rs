@@ -14,6 +14,29 @@ const MAX_FRAME_SIZE: usize = 256 * 1024 * 1024;
 
 type Pending = Arc<Mutex<HashMap<String, VecDeque<(u64, oneshot::Sender<Value>)>>>>;
 
+/// A tab from DevTools `listTabs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Tab {
+    pub actor: String,
+    pub selected: bool,
+    /// False for a tab Firefox has not loaded, which has no page and no BiDi context.
+    pub loaded: bool,
+}
+
+const ACTOR_GONE_CODES: [&str; 2] = ["noSuchActor", "tabDestroyed"];
+
+/// The text `request` returns as the start of an error reply with `code`.
+fn code_prefix(code: &str) -> String {
+    format!("{code}: ")
+}
+
+/// Whether a request failed because its actor is gone, as when a tab closes or unloads mid-request.
+pub(crate) fn actor_is_gone(error: &str) -> bool {
+    ACTOR_GONE_CODES
+        .iter()
+        .any(|code| error.starts_with(&code_prefix(code)))
+}
+
 /// A connected DevTools protocol session; clones share the same connection.
 #[derive(Clone)]
 pub struct RdpClient {
@@ -113,6 +136,24 @@ impl RdpClient {
         self.request_timeout(to, kind, extra, DEFAULT_TIMEOUT).await
     }
 
+    /// Lists the browser's tabs, marking the ones Firefox has not loaded.
+    pub(crate) async fn tabs(&self) -> Result<Vec<Tab>, String> {
+        let reply = self.request("root", "listTabs", json!({})).await?;
+        let tabs = reply["tabs"]
+            .as_array()
+            .ok_or("Firefox DevTools reported no tabs")?;
+        Ok(tabs
+            .iter()
+            .filter_map(|tab| {
+                Some(Tab {
+                    actor: tab["actor"].as_str()?.to_string(),
+                    selected: tab["selected"].as_bool() == Some(true),
+                    loaded: tab["isZombieTab"] != true,
+                })
+            })
+            .collect())
+    }
+
     async fn request_timeout(
         &self,
         to: &str,
@@ -151,8 +192,8 @@ impl RdpClient {
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(reply)) => match reply.get("error") {
                 Some(e) => Err(format!(
-                    "{}: {}",
-                    e.as_str().unwrap_or("error"),
+                    "{}{}",
+                    code_prefix(e.as_str().unwrap_or("error")),
                     reply["message"].as_str().unwrap_or("")
                 )),
                 None => Ok(reply),
@@ -191,6 +232,68 @@ mod tests {
         put(&mut b, json!({"from":"root","applicationType":"browser"})).await;
         let c = RdpClient::from_stream(a).await.unwrap();
         (c, b)
+    }
+
+    #[tokio::test]
+    async fn actor_gone_errors_are_recognized_from_the_reply_code() {
+        let (c, mut s) = pair().await;
+        for (code, gone) in [
+            ("tabDestroyed", true),
+            ("noSuchActor", true),
+            ("unknownError", false),
+        ] {
+            let client = c.clone();
+            let call =
+                tokio::spawn(async move { client.request("root", "getTarget", json!({})).await });
+            assert_eq!(get(&mut s).await["type"], "getTarget");
+            put(
+                &mut s,
+                json!({"from": "root", "error": code, "message": "nope"}),
+            )
+            .await;
+            let error = call.await.unwrap().unwrap_err();
+            assert_eq!(actor_is_gone(&error), gone, "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tabs_report_loaded_and_selected_state() {
+        let (c, mut s) = pair().await;
+        let call = tokio::spawn(async move { c.tabs().await });
+        let request = get(&mut s).await;
+        assert_eq!(request["to"], "root");
+        assert_eq!(request["type"], "listTabs");
+        put(
+            &mut s,
+            json!({"from": "root", "tabs": [
+                {"actor": "tab-unloaded", "selected": false, "isZombieTab": true},
+                {"actor": "tab-other", "selected": false},
+                {"actor": "tab-selected", "selected": true, "isZombieTab": false},
+                {"selected": true},
+            ]}),
+        )
+        .await;
+
+        assert_eq!(
+            call.await.unwrap().unwrap(),
+            vec![
+                Tab {
+                    actor: "tab-unloaded".into(),
+                    selected: false,
+                    loaded: false,
+                },
+                Tab {
+                    actor: "tab-other".into(),
+                    selected: false,
+                    loaded: true,
+                },
+                Tab {
+                    actor: "tab-selected".into(),
+                    selected: true,
+                    loaded: true,
+                },
+            ]
+        );
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
-use super::firefox_devtools::RdpClient;
+use super::firefox_devtools::{actor_is_gone, RdpClient, Tab};
 use super::session::FirefoxSession;
 use super::target::find_element;
 use crate::native::actions::{self as chrome, DaemonState};
@@ -659,7 +659,7 @@ pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Resu
         ff.bidi.call_function(&top, SETTLE_JS, None, vec![]),
     )
     .await;
-    let tabs = ff.rdp.request("root", "listTabs", json!({})).await?;
+    let tabs = ff.rdp.tabs().await?;
     let (tab, target) = active_tab_target(ff, &top, &tabs).await?;
     let (mut doc, source) = document_snapshot(&ff.rdp, &target["frame"]).await?;
     Box::pin(annotate(ff, &top, &mut doc, &source, &tab, deadline)).await?;
@@ -792,7 +792,7 @@ pub async fn diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
 async fn active_tab_target(
     ff: &FirefoxSession,
     top: &str,
-    tabs: &Value,
+    tabs: &[Tab],
 ) -> Result<(String, Value), String> {
     let marker = format!("agent-browser-{}", uuid::Uuid::new_v4());
     ff.bidi.call_function(
@@ -802,14 +802,17 @@ async fn active_tab_target(
         vec![json!(marker)],
     ).await?;
     let result = async {
-        let tabs = tabs["tabs"]
-            .as_array()
-            .ok_or("Firefox DevTools reported no tabs")?;
-        for tab in tabs {
-            let Some(actor) = tab["actor"].as_str() else {
-                continue;
+        let mut loaded: Vec<&Tab> = tabs.iter().filter(|tab| tab.loaded).collect();
+        if let Some(index) = loaded.iter().position(|tab| tab.selected) {
+            let selected = loaded.remove(index);
+            loaded.insert(0, selected);
+        }
+        for tab in loaded {
+            let target = match ff.rdp.request(&tab.actor, "getTarget", json!({})).await {
+                Ok(target) => target,
+                Err(error) if actor_is_gone(&error) => continue,
+                Err(error) => return Err(error),
             };
-            let target = ff.rdp.request(actor, "getTarget", json!({})).await?;
             let console = target["frame"]["consoleActor"]
                 .as_str()
                 .ok_or("Firefox DevTools returned no console actor for the tab")?;
@@ -839,7 +842,7 @@ async fn active_tab_target(
                 return Err("Firefox DevTools could not inspect the tab".to_string());
             }
             if evaluated["result"] == true {
-                return Ok((actor.to_string(), target));
+                return Ok((tab.actor.clone(), target));
             }
         }
         Err("Firefox DevTools could not find the active tab".to_string())
@@ -1247,6 +1250,88 @@ mod tests {
         assert_eq!(ff.next_node_id, 7);
         assert_eq!(ff.shadow_ids, HashSet::from([7]));
         assert_eq!(ff.documents["ctx-active"], "loader-1");
+    }
+
+    fn tab_descriptor(actor: &str, selected: bool, loaded: bool) -> Value {
+        json!({"actor": actor, "selected": selected, "isZombieTab": !loaded})
+    }
+
+    #[tokio::test]
+    async fn tab_lookup_skips_unloaded_tabs_and_asks_the_selected_tab_first() {
+        let (ff, messages) = crate::native::bidi::session::tests::fake_session_with_rdp_replies(
+            |v: &Value| match (v["to"].as_str().unwrap(), v["type"].as_str().unwrap()) {
+                ("root", "listTabs") => json!({"from": "root", "tabs": [
+                    tab_descriptor("tab-unloaded", false, false),
+                    tab_descriptor("tab-other", false, true),
+                    tab_descriptor("tab-selected", true, true),
+                ]}),
+                ("tab-selected", "getTarget") => {
+                    json!({"from": "tab-selected", "frame": {"consoleActor": "console-selected"}})
+                }
+                ("console-selected", "evaluateJSAsync") => {
+                    json!({"from": "console-selected", "resultID": "r1", "result": true})
+                }
+                ("tab-other", "getTarget") => {
+                    json!({"from": "tab-other", "frame": {"consoleActor": "console-other"}})
+                }
+                ("console-other", "evaluateJSAsync") => {
+                    json!({"from": "console-other", "resultID": "r2", "result": false})
+                }
+                _ => json!({"from": v["to"]}),
+            },
+        )
+        .await;
+
+        let tabs = ff.rdp.tabs().await.unwrap();
+        let (actor, target) = active_tab_target(&ff, "ctx-active", &tabs).await.unwrap();
+
+        assert_eq!(actor, "tab-selected");
+        assert_eq!(target["frame"]["consoleActor"], "console-selected");
+        let asked: Vec<String> = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m["type"] == "getTarget")
+            .map(|m| m["to"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(asked, vec!["tab-selected".to_string()], "{asked:?}");
+    }
+
+    #[tokio::test]
+    async fn tab_lookup_continues_past_a_tab_that_closed_mid_lookup() {
+        let (ff, _messages) = crate::native::bidi::session::tests::fake_session_with_rdp_replies(
+            |v: &Value| match (v["to"].as_str().unwrap(), v["type"].as_str().unwrap()) {
+                ("root", "listTabs") => json!({"from": "root", "tabs": [
+                    tab_descriptor("tab-selected", true, true),
+                    tab_descriptor("tab-closed", false, true),
+                    tab_descriptor("tab-marker", false, true),
+                ]}),
+                ("tab-selected", "getTarget") => {
+                    json!({"from": "tab-selected", "frame": {"consoleActor": "console-selected"}})
+                }
+                ("console-selected", "evaluateJSAsync") => {
+                    json!({"from": "console-selected", "resultID": "r1", "result": false})
+                }
+                ("tab-closed", "getTarget") => json!({
+                    "from": "tab-closed",
+                    "error": "noSuchActor",
+                    "message": "No such actor for ID: tab-closed",
+                }),
+                ("tab-marker", "getTarget") => {
+                    json!({"from": "tab-marker", "frame": {"consoleActor": "console-marker"}})
+                }
+                ("console-marker", "evaluateJSAsync") => {
+                    json!({"from": "console-marker", "resultID": "r2", "result": true})
+                }
+                _ => json!({"from": v["to"]}),
+            },
+        )
+        .await;
+
+        let tabs = ff.rdp.tabs().await.unwrap();
+        let (actor, _) = active_tab_target(&ff, "ctx-active", &tabs).await.unwrap();
+
+        assert_eq!(actor, "tab-marker");
     }
 
     #[tokio::test]

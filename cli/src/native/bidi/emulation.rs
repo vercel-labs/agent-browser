@@ -205,18 +205,13 @@ pub(crate) async fn update_tab_configuration(
 ) -> Result<(), String> {
     bidi.send("browsingContext.activate", json!({"context": context}))
         .await?;
-    let tabs = rdp.request("root", "listTabs", json!({})).await?;
-    let tab = tabs["tabs"]
-        .as_array()
-        .and_then(|tabs| {
-            tabs.iter()
-                .find(|tab| tab["selected"].as_bool() == Some(true))
-                .or_else(|| tabs.first())
-        })
+    let tabs = rdp.tabs().await?;
+    let descriptor = tabs
+        .iter()
+        .find(|tab| tab.selected)
+        .or_else(|| tabs.iter().find(|tab| tab.loaded))
+        .map(|tab| tab.actor.as_str())
         .ok_or("Firefox reported no tabs for target configuration")?;
-    let descriptor = tab["actor"]
-        .as_str()
-        .ok_or("Firefox reported a tab without a descriptor actor")?;
     let watcher = rdp.request(descriptor, "getWatcher", json!({})).await?;
     let watcher_actor = watcher["actor"]
         .as_str()
@@ -706,6 +701,50 @@ mod tests {
                 .unwrap()
                 .features,
             vec![("prefers-color-scheme".to_string(), "dark".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn tab_configuration_skips_an_unloaded_first_tab() {
+        let (ff, rdp) = crate::native::bidi::session::tests::fake_session_with_rdp_replies(
+            |v: &Value| match (v["to"].as_str().unwrap(), v["type"].as_str().unwrap()) {
+                ("root", "listTabs") => json!({"from": "root", "tabs": [
+                    {"actor": "tab-unloaded", "selected": false, "isZombieTab": true},
+                    {"actor": "tab-loaded", "selected": false},
+                ]}),
+                ("tab-loaded", "getWatcher") => {
+                    json!({"from": "tab-loaded", "actor": "watcher1"})
+                }
+                ("watcher1", "getTargetConfigurationActor") => {
+                    json!({"from": "watcher1", "configuration": {"actor": "cfg1"}})
+                }
+                ("cfg1", "updateConfiguration") => {
+                    json!({"from": "cfg1", "configuration": {}})
+                }
+                _ => json!({"from": v["to"]}),
+            },
+        )
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        set_media(&json!({"colorScheme": "dark"}), &mut state)
+            .await
+            .unwrap();
+
+        let messages = rdp.lock().unwrap().clone();
+        let sent: Vec<(&str, &str)> = messages
+            .iter()
+            .map(|m| (m["to"].as_str().unwrap(), m["type"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            sent,
+            vec![
+                ("root", "listTabs"),
+                ("tab-loaded", "getWatcher"),
+                ("watcher1", "getTargetConfigurationActor"),
+                ("cfg1", "updateConfiguration"),
+            ]
         );
     }
 
