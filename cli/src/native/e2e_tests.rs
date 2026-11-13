@@ -15243,6 +15243,129 @@ async fn e2e_dialog_blocked_tab_is_not_treated_as_wedged() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_auto_dialog_accepts_alert_without_wedging_tab() {
+    let mut state = DaemonState::new();
+    assert!(state.auto_dialog, "auto_dialog should be on by default");
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<title>live</title>live" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let target_before = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_target_id()
+        .unwrap()
+        .to_string();
+
+    // alert() is auto-accepted: the eval must return instead of timing out,
+    // and the tab must survive instead of being replaced as wedged (#2511).
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "alert('hi'); 'after-alert'" }),
+        &mut state,
+    )
+    .await;
+    assert_ne!(
+        resp["code"], "page_wedged",
+        "an auto-dismissed alert is not a wedge: {}",
+        resp
+    );
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "after-alert");
+    assert_eq!(
+        state.browser.as_ref().unwrap().active_target_id().unwrap(),
+        target_before,
+        "the alert must not replace the tab"
+    );
+
+    let resp = execute_command(&json!({ "id": "4", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "live");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_title_fails_fast_while_dialog_open() {
+    let mut state = DaemonState::new();
+    state.auto_dialog = false;
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<title>live</title><button id=zz onclick=\"confirm('keep me')\">zz</button>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The click opens a confirm dialog and returns; the dialog stays open.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#zz" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "dialog", "response": "status" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["hasDialog"],
+        true,
+        "the confirm dialog must be tracked: {}",
+        resp
+    );
+
+    // title evaluates JS in the page, so a dialog-blocked renderer would hang
+    // it until the CDP timeout. It must fail fast with the blocking hint
+    // instead (#2511).
+    let resp = execute_command(&json!({ "id": "5", "action": "title" }), &mut state).await;
+    assert_eq!(
+        resp.get("success").and_then(Value::as_bool),
+        Some(false),
+        "title must fail while a dialog blocks the page: {}",
+        resp
+    );
+    let error = resp.get("error").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        error.contains("dialog is blocking"),
+        "title must fail fast with the dialog hint, got: {}",
+        error
+    );
+
+    // The dialog can still be resolved and the tab keeps working.
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "dialog", "response": "dismiss" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "7", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "live");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_slow_finite_script_keeps_its_tab() {
     let mut state = DaemonState::new();
     let resp = execute_command(

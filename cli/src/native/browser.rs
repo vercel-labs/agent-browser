@@ -2333,12 +2333,21 @@ impl BrowserManager {
         Ok(())
     }
 
+    /// Resolve a JavaScript dialog on the session it opened on. A dialog on
+    /// a background tab must be answered on that tab's session: answering on
+    /// the active session targets the wrong tab (or no dialog at all).
+    /// A `None` session falls back to the active session, for dialogs with
+    /// no recorded session (top-level page dialogs).
     pub async fn handle_dialog(
         &self,
         accept: bool,
         prompt_text: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<(), String> {
-        let session_id = self.active_session_id()?;
+        let session_id = match session_id {
+            Some(sid) => sid.to_string(),
+            None => self.active_session_id()?.to_string(),
+        };
         let mut params = json!({ "accept": accept });
         if let Some(text) = prompt_text {
             params["promptText"] = Value::String(text.to_string());
@@ -2347,7 +2356,7 @@ impl BrowserManager {
             .send_command(
                 "Page.handleJavaScriptDialog",
                 Some(params),
-                Some(session_id),
+                Some(&session_id),
             )
             .await?;
         Ok(())
@@ -5196,9 +5205,14 @@ mod tests {
     /// dialog: it never answers Runtime.evaluate (its main thread is paused)
     /// but still answers domain-enable and other browser-served commands.
     /// Returns a counter of Target.activateTarget calls so a test can assert a
-    /// blocked tab is treated as live without reactivation.
-    async fn start_mock_cdp_browser_with_dialog_blocked_tab(
-    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    /// blocked tab is treated as live without reactivation, plus the session
+    /// ids that received Page.handleJavaScriptDialog, so a test can assert a
+    /// dialog is answered on its own tab's session.
+    async fn start_mock_cdp_browser_with_dialog_blocked_tab() -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
         use futures_util::{SinkExt, StreamExt};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
@@ -5206,6 +5220,8 @@ mod tests {
 
         let activations = Arc::new(AtomicUsize::new(0));
         let activations_task = activations.clone();
+        let dialog_sessions = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let dialog_sessions_task = dialog_sessions.clone();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!(
@@ -5241,6 +5257,12 @@ mod tests {
                 if method == "Target.activateTarget" {
                     activations_task.fetch_add(1, Ordering::SeqCst);
                 }
+                if method == "Page.handleJavaScriptDialog" {
+                    dialog_sessions_task
+                        .lock()
+                        .unwrap()
+                        .push(session.to_string());
+                }
 
                 let reply = match method {
                     "Target.getTargets" => Some(respond(json!({
@@ -5269,7 +5291,7 @@ mod tests {
             }
         });
 
-        (url, activations)
+        (url, activations, dialog_sessions)
     }
 
     /// A live tab blocked by a JavaScript dialog must not be misread as
@@ -5278,7 +5300,7 @@ mod tests {
     /// without reactivation and without hanging on script evaluation.
     #[tokio::test]
     async fn test_tab_switch_does_not_misclassify_dialog_blocked_tab() {
-        let (url, activations) = start_mock_cdp_browser_with_dialog_blocked_tab().await;
+        let (url, activations, _) = start_mock_cdp_browser_with_dialog_blocked_tab().await;
         let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
         assert_eq!(mgr.pages.len(), 2);
 
@@ -5305,6 +5327,41 @@ mod tests {
             "a dialog-blocked live tab must not be reactivated"
         );
         assert_eq!(mgr.active_page_index, 1);
+    }
+
+    /// `dialog accept` / `dialog dismiss` must answer the dialog on the
+    /// session it opened on, not the active tab (#2528): a dialog on a
+    /// background tab would otherwise be resolved against the wrong tab.
+    #[tokio::test]
+    async fn test_handle_dialog_targets_tracked_dialog_session() {
+        let (url, _activations, dialog_sessions) =
+            start_mock_cdp_browser_with_dialog_blocked_tab().await;
+        let mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
+        assert_eq!(mgr.pages.len(), 2);
+        assert_eq!(mgr.active_page_index, 0);
+
+        // The dialog is on the background tab (S-T-BLOCKED); answering it
+        // must target that session even though T-ALIVE is active.
+        mgr.handle_dialog(true, None, Some("S-T-BLOCKED"))
+            .await
+            .expect("resolving a background-tab dialog must succeed");
+        assert_eq!(
+            *dialog_sessions.lock().unwrap(),
+            vec!["S-T-BLOCKED".to_string()],
+            "the dialog must be answered on its own session, not the active tab"
+        );
+
+        // No recorded session falls back to the active tab, as before.
+        mgr.handle_dialog(false, None, None)
+            .await
+            .expect("resolving with no session must fall back to the active tab");
+        let sessions = dialog_sessions.lock().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions[1],
+            mgr.active_session_id().expect("active session"),
+            "no session must fall back to the active tab"
+        );
     }
 
     /// Closing the active tab must not hang when the tab that becomes active is
