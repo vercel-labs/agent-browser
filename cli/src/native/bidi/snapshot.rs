@@ -963,9 +963,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_stalled_tab_does_not_block_finding_the_active_tab() {
-        use crate::native::firefox::rdp::tests::{get, pair, put};
+        use crate::native::bidi::firefox_devtools::tests::{get, pair, put};
 
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         let (rdp, mut peer) = pair().await;
         ff.rdp = rdp;
         tokio::spawn(async move {
