@@ -82,6 +82,8 @@ Security settings (`--allowed-domains`, `--action-policy`, `--confirm-actions`) 
 
 ## Session State Persistence
 
+State saves fail on incomplete cookie or storage capture. A failed autosave preserves the previous usable state. Storage for other live origins is captured from existing pages, including session storage. This applies to CLI and MCP state commands.
+
 ### Automatic Restore
 
 ```bash

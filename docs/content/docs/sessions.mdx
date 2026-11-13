@@ -32,6 +32,8 @@ agent-browser session info --json
 
 ## Session isolation
 
+State saves fail if cookies, page storage, or a required origin cannot be captured completely. A failed autosave leaves the previous usable save in place. Storage for other live origins is read from their existing pages so their session storage is not replaced by an empty temporary tab.
+
 Each session has its own:
 
 - Browser instance
