@@ -1227,16 +1227,36 @@ fn is_read_only(cmd: &Value) -> bool {
         .is_some_and(|action| READ_ONLY_ACTIONS.contains(&action))
 }
 
+/// Sends one command to the daemon and applies retries that are safe for its action.
+///
+/// # Arguments
+/// * `cmd` - The command payload sent to the daemon.
+/// * `session` - The browser session identifier.
+///
+/// # Returns
+/// The daemon response, or an error when the request cannot be completed.
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
-    send_with_retry(is_read_only(&cmd), || send_command_once(&cmd, session))
+    let action = cmd.get("action").and_then(Value::as_str);
+    send_with_retry(is_read_only(&cmd), action, || {
+        send_command_once(&cmd, session)
+    })
 }
 
 /// Retry transient errors (EAGAIN/EWOULDBLOCK/connection issues). Once a
 /// request was written, only read-only actions are re-sent; a mutating one
 /// (click, fill, eval, navigation) could otherwise run twice, so it fails with
 /// code `outcome_unknown` instead.
+///
+/// # Arguments
+/// * `read_only` - Whether retrying the request can safely repeat its action.
+/// * `action` - The daemon action, used to tailor timeout guidance.
+/// * `send_once` - Sends one request attempt.
+///
+/// # Returns
+/// A successful response, or the final request error/unknown-outcome response.
 fn send_with_retry(
     read_only: bool,
+    action: Option<&str>,
     mut send_once: impl FnMut() -> Result<Response, SendError>,
 ) -> Result<Response, String> {
     const MAX_RETRIES: u32 = 5;
@@ -1252,13 +1272,24 @@ fn send_with_retry(
         let e = match send_once() {
             Ok(response) => return Ok(response),
             Err(SendError::OutcomeUnknown(e)) if !read_only => {
-                return Ok(Response {
-                    success: false,
-                    error: Some(format!(
+                let timed_out =
+                    e.to_ascii_lowercase().contains("timed out") || has_os_error(&e, 10060);
+                let error = if timed_out && matches!(action, Some("navigate") | Some("launch")) {
+                    format!(
+                        "Browser launch or navigation timed out before a response arrived: {} \
+                         (the command may still be in progress; run `get url` before retrying)",
+                        e
+                    )
+                } else {
+                    format!(
                         "{} (the command reached the daemon but no response came back; \
                          it may or may not have run, so it was not retried)",
                         e
-                    )),
+                    )
+                };
+                return Ok(Response {
+                    success: false,
+                    error: Some(error),
                     code: Some("outcome_unknown".to_string()),
                     ..Default::default()
                 });
@@ -1529,7 +1560,7 @@ mod tests {
         ] {
             assert!(is_transient_error(err));
             let mut calls = 0;
-            let resp = send_with_retry(false, || {
+            let resp = send_with_retry(false, Some("click"), || {
                 calls += 1;
                 Err(SendError::OutcomeUnknown(err.to_string()))
             })
@@ -1543,7 +1574,7 @@ mod tests {
     #[test]
     fn read_only_command_is_resent_after_lost_response() {
         let mut calls = 0;
-        let resp = send_with_retry(true, || {
+        let resp = send_with_retry(true, Some("url"), || {
             calls += 1;
             if calls < 3 {
                 Err(SendError::OutcomeUnknown(
@@ -1560,7 +1591,7 @@ mod tests {
     #[test]
     fn unsent_request_is_retried_for_any_command() {
         let mut calls = 0;
-        let resp = send_with_retry(false, || {
+        let resp = send_with_retry(false, Some("click"), || {
             calls += 1;
             if calls < 3 {
                 Err(SendError::NotSent(
@@ -1574,7 +1605,7 @@ mod tests {
         assert_eq!(calls, 3);
 
         let mut calls = 0;
-        let refused = send_with_retry(false, || {
+        let refused = send_with_retry(false, Some("click"), || {
             calls += 1;
             Err(SendError::NotSent(
                 "Failed to connect: Connection refused (os error 111)".to_string(),
@@ -1600,6 +1631,24 @@ mod tests {
             read_timeout_for(&json!({"action":"mousemove", "duration": 35_000})),
             Duration::from_secs(45)
         );
+    }
+
+    #[test]
+    fn navigation_timeout_explains_cold_browser_start_and_is_not_retried() {
+        let mut calls = 0;
+        let response = send_with_retry(false, Some("navigate"), || {
+            calls += 1;
+            Err(SendError::OutcomeUnknown(
+                "Failed to read: The operation timed out (os error 10060)".to_string(),
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(calls, 1);
+        assert_eq!(response.code.as_deref(), Some("outcome_unknown"));
+        let error = response.error.unwrap();
+        assert!(error.contains("Browser launch or navigation timed out"));
+        assert!(error.contains("run `get url` before retrying"));
     }
 
     #[test]
