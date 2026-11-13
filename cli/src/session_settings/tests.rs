@@ -656,16 +656,19 @@ fn timeout_views() {
 
 #[test]
 fn security_view() {
+    let policy_path = std::env::current_dir()
+        .map(|cwd| cwd.join("policy.json").to_str().unwrap().to_string())
+        .unwrap_or_else(|_| "policy.json".into());
     let r = seeded(&[
         ("AGENT_BROWSER_ALLOWED_DOMAINS", " a.test , ,*.b.test "),
         ("AGENT_BROWSER_CONFIRM_ACTIONS", "click,fill"),
-        ("AGENT_BROWSER_ACTION_POLICY", "/policy.json"),
+        ("AGENT_BROWSER_ACTION_POLICY", "policy.json"),
     ]);
     assert_eq!(
         r.security(),
         SecurityView {
             allowed_domains: Some(vec!["a.test".into(), "*.b.test".into()]),
-            action_policy_path: Some("/policy.json".into()),
+            action_policy_path: Some(policy_path),
             confirm_actions: Some("click,fill".into()),
         }
     );
@@ -712,18 +715,24 @@ fn provider_view_ignores_connection_precedence() {
 
 #[test]
 fn legacy_policy_variable_applies_only_when_the_current_one_is_unset() {
-    let legacy = seeded(&[("AGENT_BROWSER_POLICY", "/old.json")]);
+    let old_path = std::env::current_dir()
+        .map(|cwd| cwd.join("old.json").to_str().unwrap().to_string())
+        .unwrap_or_else(|_| "old.json".into());
+    let new_path = std::env::current_dir()
+        .map(|cwd| cwd.join("new.json").to_str().unwrap().to_string())
+        .unwrap_or_else(|_| "new.json".into());
+    let legacy = seeded(&[("AGENT_BROWSER_POLICY", "old.json")]);
     assert_eq!(
         legacy.security().action_policy_path.as_deref(),
-        Some("/old.json")
+        Some(old_path.as_str())
     );
     let both = seeded(&[
-        ("AGENT_BROWSER_POLICY", "/old.json"),
-        ("AGENT_BROWSER_ACTION_POLICY", "/new.json"),
+        ("AGENT_BROWSER_POLICY", "old.json"),
+        ("AGENT_BROWSER_ACTION_POLICY", "new.json"),
     ]);
     assert_eq!(
         both.security().action_policy_path.as_deref(),
-        Some("/new.json")
+        Some(new_path.as_str())
     );
 }
 
