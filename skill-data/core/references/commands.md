@@ -116,6 +116,8 @@ agent-browser get box @e1         # Get bounding box
 agent-browser get styles @e1      # Get computed styles (font, color, bg, etc.)
 ```
 
+`get attr` prints the attribute value. A missing attribute prints `null`. An empty attribute prints a blank line. `--json` reports `"value": null` or `"value": ""`.
+
 A batch containing only `get cdp-url` commands also skips browser launch. A mixed batch can launch a browser for its other commands.
 
 ## Check State

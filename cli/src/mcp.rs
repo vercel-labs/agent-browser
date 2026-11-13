@@ -4677,6 +4677,13 @@ fn response_text(value: &Value) -> Option<String> {
                     origins.join(", ")
                 ));
             }
+            // `get attr` returns JSON null when the attribute is absent.
+            // Print the same `null` token as the CLI instead of the whole object.
+            if data.get("value").is_some_and(|value| value.is_null()) {
+                if let Some(text) = crate::output::format_attribute_text(None, data) {
+                    return Some(text);
+                }
+            }
             for key in [
                 "snapshot", "text", "html", "report", "value", "content", "title", "url", "path",
             ] {
@@ -5483,6 +5490,55 @@ mod tests {
 
         assert!(text.starts_with("./state.json\n"));
         assert!(text.contains("http://127.0.0.1:8001"));
+    }
+
+    #[test]
+    fn response_text_distinguishes_missing_attribute_from_empty() {
+        let origin = json!("https://example.test/page");
+        let missing = response_text(&json!({
+            "success": true,
+            "data": { "value": null, "origin": origin }
+        }))
+        .unwrap();
+        let empty = response_text(&json!({
+            "success": true,
+            "data": { "value": "", "origin": origin }
+        }))
+        .unwrap();
+        let present = response_text(&json!({
+            "success": true,
+            "data": { "value": "1", "origin": origin }
+        }))
+        .unwrap();
+
+        assert_eq!(missing, "null");
+        assert_eq!(empty, "");
+        assert_eq!(present, "1");
+        assert_ne!(missing, empty);
+
+        let missing_text = tool_text(
+            Some(&json!({
+                "success": true,
+                "data": { "value": null, "origin": origin }
+            })),
+            "",
+            "",
+        );
+        let empty_text = tool_text(
+            Some(&json!({
+                "success": true,
+                "data": { "value": "", "origin": origin }
+            })),
+            "",
+            "",
+        );
+        assert_eq!(missing_text, "null");
+        assert_eq!(empty_text, "(no output)");
+        assert!(response_text(&json!({
+            "success": true,
+            "data": { "key": "token", "value": null }
+        }))
+        .is_none());
     }
 
     #[test]
