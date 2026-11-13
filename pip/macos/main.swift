@@ -274,8 +274,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
   // MARK: Page messages
 
+  /// The bridge is visible to every frame the page loads, so each message has
+  /// to come from the dashboard document itself.
+  private func isDashboardFrame(_ frame: WKFrameInfo) -> Bool {
+    guard frame.isMainFrame else { return false }
+    let origin = frame.securityOrigin
+    return origin.protocol.lowercased() == "http"
+      && isLoopbackHost(origin.host)
+      && origin.port == dashboardPort
+  }
+
   func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-    guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+    guard isDashboardFrame(message.frameInfo),
+          let body = message.body as? [String: Any],
+          let type = body["type"] as? String
+    else { return }
     switch type {
     case "aspect":
       if let value = body["value"] as? Double, value > 0 { scheduleAspect(CGFloat(value)) }
@@ -315,8 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
   private func setInteracting(_ on: Bool) {
     guard on != interacting else { return }
     if on {
-      guard isDashboardPage,
-            ProcessInfo.processInfo.systemUptime - lastUserGesture < userGestureWindow
+      guard ProcessInfo.processInfo.systemUptime - lastUserGesture < userGestureWindow
       else { return }
       interacting = true
       previousApp = NSWorkspace.shared.frontmostApplication
@@ -356,15 +368,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     }
   }
 
-  private var isDashboardPage: Bool {
-    isDashboardURL(webView.url)
+  private var dashboardPort: Int { url.port ?? 80 }
+
+  private func isLoopbackHost(_ host: String?) -> Bool {
+    guard let host = host?.lowercased() else { return false }
+    return host == "localhost" || host == "127.0.0.1"
   }
 
   private func isDashboardURL(_ candidate: URL?) -> Bool {
-    guard let candidate, candidate.scheme == "http", let host = candidate.host?.lowercased() else {
+    guard let candidate, candidate.scheme == "http", let host = candidate.host else {
       return false
     }
-    return (host == "localhost" || host == "127.0.0.1") && candidate.port == url.port
+    return isLoopbackHost(host) && (candidate.port ?? 80) == dashboardPort
   }
 
   // MARK: Geometry
