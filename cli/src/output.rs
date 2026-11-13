@@ -2089,7 +2089,7 @@ The `goto` and `navigate` aliases still require a URL.
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
-  --headers <json>     Set HTTP headers (scoped to this origin)
+  --headers <json>     JSON object of string values, scoped to the URL's origin
   --headed             Show browser window
   --enable react-devtools   Inject the React DevTools hook before any page JS
   --init-script <path>      Register a page init script (repeatable)
@@ -2187,7 +2187,7 @@ Options:
 
 Global Options:
   --json               Output metadata and content as JSON
-  --headers <json>     Additional HTTP headers, such as Authorization
+  --headers <json>     JSON object of string values sent with the read request
   --allowed-domains <list>  Restrict read fetches and redirects to allowed domains
   --content-boundaries Wrap read output in boundary markers
   --max-output <chars> Truncate read output to N chars
@@ -3023,7 +3023,8 @@ Settings:
   device <name>              Emulate device (e.g., "iPhone 12")
   geo <lat> <lng>            Set geolocation (coordinates must be finite)
   offline [on|off]           Toggle offline mode; off restores the new-tab default
-  headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
+  headers <json>             Set global HTTP headers from string values
+                              Use {} to clear them on current and future tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
         [reduced-motion]     Enable reduced motion
@@ -4637,7 +4638,8 @@ Authentication:
                              (or AGENT_BROWSER_STATE env)
   --auto-connect             Connect to a running Chrome to reuse its auth state
                              Tip: agent-browser --auto-connect state save ./auth.json
-  --headers <json>           HTTP headers scoped to URL's origin (e.g., Authorization bearer token)
+  --headers <json>           JSON object of string values; origin-scoped for navigation,
+                              sent only with a read request
 
 Options:
   --session <name>           Isolated session: Unicode letters/numbers, hyphens, and underscores only (or AGENT_BROWSER_SESSION env)

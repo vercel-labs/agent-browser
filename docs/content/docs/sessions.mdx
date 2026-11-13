@@ -290,6 +290,8 @@ agent-browser click @e2
 agent-browser open other-site.com
 ```
 
+For `open` and navigation, pass `--headers` as a JSON object whose values are strings; these headers stay scoped to that URL's origin. An empty map leaves the current origin-scoped headers unchanged. `read --headers` accepts the same JSON shape but applies it only to that request. Use `agent-browser set headers '{}'` to clear global headers on current and future tabs.
+
 Useful for:
 
 - **Skipping login flows** - Authenticate via headers
@@ -311,6 +313,8 @@ For headers on all domains:
 ```bash
 agent-browser set headers '{"X-Custom-Header": "value"}'
 ```
+
+`set headers` requires a JSON object whose values are strings. Passing `{}` clears the global headers on current and future tabs.
 
 ## Environment variables
 

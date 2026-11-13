@@ -10,8 +10,11 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::env;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::test_utils::EnvGuard;
@@ -7981,6 +7984,177 @@ async fn start_echo_server() -> (String, tokio::task::JoinHandle<()>) {
     (base_url, handle)
 }
 
+struct RecordedHeaderRequest {
+    path: String,
+    headers: HashMap<String, String>,
+}
+
+struct HeaderRecorder {
+    base_url: String,
+    requests: Arc<Mutex<Vec<RecordedHeaderRequest>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl HeaderRecorder {
+    fn count(&self, path: &str) -> usize {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.path == path)
+            .count()
+    }
+
+    /// The outer option means the request exists; the inner option preserves
+    /// the distinction between an absent field and an explicitly empty value.
+    fn last_header(&self, path: &str, name: &str) -> Option<Option<String>> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|request| request.path == path)
+            .map(|request| request.headers.get(&name.to_ascii_lowercase()).cloned())
+    }
+}
+
+impl Drop for HeaderRecorder {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn start_header_recorder() -> HeaderRecorder {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded_requests = Arc::clone(&requests);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let request = tokio::time::timeout(
+                Duration::from_secs(5),
+                read_recorded_header_request(&mut stream),
+            )
+            .await
+            .ok()
+            .flatten();
+            let Some((path, headers)) = request else {
+                continue;
+            };
+            recorded_requests
+                .lock()
+                .unwrap()
+                .push(RecordedHeaderRequest { path, headers });
+
+            let body = "<!doctype html><title>Header fixture</title><h1>Header fixture</h1>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    HeaderRecorder {
+        base_url,
+        requests,
+        task,
+    }
+}
+
+async fn read_recorded_header_request(
+    stream: &mut tokio::net::TcpStream,
+) -> Option<(String, HashMap<String, String>)> {
+    let mut request = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 1024];
+    loop {
+        let bytes_read = stream.read(&mut chunk).await.ok()?;
+        if bytes_read == 0 {
+            return None;
+        }
+        request.extend_from_slice(&chunk[..bytes_read]);
+        if request.len() > 16 * 1024 {
+            return None;
+        }
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    let request = String::from_utf8_lossy(&request);
+    let mut lines = request.lines();
+    let path = lines.next()?.split_whitespace().nth(1)?.to_string();
+    let mut headers = HashMap::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    Some((path, headers))
+}
+
+fn header_e2e_launch_command(id: &str) -> Value {
+    let mut command = json!({ "id": id, "action": "launch", "headless": true });
+    if let Ok(executable_path) = env::var("AGENT_BROWSER_TEST_CHROME") {
+        command["executablePath"] = json!(executable_path);
+    }
+    command
+}
+
+fn header_e2e_test_environment() -> EnvGuard<'static> {
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_CDP_HEADERS",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_BYPASS",
+        "AGENT_BROWSER_PROXY_USERNAME",
+        "AGENT_BROWSER_PROXY_PASSWORD",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ]);
+    for key in [
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_CDP_HEADERS",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_BYPASS",
+        "AGENT_BROWSER_PROXY_USERNAME",
+        "AGENT_BROWSER_PROXY_PASSWORD",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ] {
+        env.remove(key);
+    }
+    env
+}
+
 async fn start_webmcp_server() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -8786,6 +8960,337 @@ async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
 // ---------------------------------------------------------------------------
 // Origin-scoped --headers tests
 // ---------------------------------------------------------------------------
+
+/// Invalid raw-daemon global header values leave the configured headers in
+/// place, and the on-wire recorder distinguishes an empty value from absence.
+#[tokio::test]
+#[ignore]
+async fn e2e_headers_invalid_global_values_preserve_existing_header() {
+    let _env = header_e2e_test_environment();
+    let recorder = start_header_recorder().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(&header_e2e_launch_command("headers-launch"), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "headers-set-before",
+            "action": "headers",
+            "headers": { "X-Global": "retained" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let invalid_headers = [
+        json!(["header-secret-array"]),
+        json!(17),
+        json!({ "X-Global": "candidate", "header-secret-member": false }),
+    ];
+    for (index, headers) in invalid_headers.into_iter().enumerate() {
+        let resp = execute_command(
+            &json!({
+                "id": format!("headers-invalid-{index}"),
+                "action": "headers",
+                "headers": headers,
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            resp["success"], false,
+            "invalid headers should fail: {resp}"
+        );
+        assert!(resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("headers"));
+        assert!(!resp.to_string().contains("header-secret"), "{resp}");
+
+        let path = format!("/after-invalid-{index}");
+        let resp = execute_command(
+            &json!({
+                "id": format!("headers-after-invalid-{index}"),
+                "action": "navigate",
+                "url": format!("{}{}", recorder.base_url, path),
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(
+            recorder.last_header(&path, "X-Global"),
+            Some(Some("retained".to_string())),
+            "invalid global input must leave the prior header active for {path}"
+        );
+    }
+
+    let resp = execute_command(
+        &json!({
+            "id": "headers-set-empty-value",
+            "action": "headers",
+            "headers": { "X-Empty": "" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "headers-empty-value-wire",
+            "action": "navigate",
+            "url": format!("{}/empty-value", recorder.base_url),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        recorder.last_header("/empty-value", "x-empty"),
+        Some(Some(String::new())),
+        "an explicitly empty header value must be sent, not omitted"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "headers-close", "action": "close" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+}
+
+/// Invalid navigation/read input is rejected before changing the URL, scoped
+/// header state, or sending an HTTP request to the supplied URL.
+#[tokio::test]
+#[ignore]
+async fn e2e_headers_invalid_navigation_and_read_preserve_scope_and_skip_requests() {
+    let _env = header_e2e_test_environment();
+    let origin_a = start_header_recorder().await;
+    let origin_b = start_header_recorder().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(&header_e2e_launch_command("scope-launch"), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "scope-first",
+            "action": "navigate",
+            "url": format!("{}/first", origin_a.base_url),
+            "headers": { "X-Scoped": "retained" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        origin_a.last_header("/first", "x-scoped"),
+        Some(Some("retained".to_string()))
+    );
+
+    let rejected_navigation_path = "/rejected-navigation";
+    let resp = execute_command(
+        &json!({
+            "id": "scope-invalid-navigation",
+            "action": "navigate",
+            "url": format!("{}{}", origin_a.base_url, rejected_navigation_path),
+            "headers": { "X-Scoped": "candidate", "X-Invalid": false },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "invalid navigation should fail: {resp}"
+    );
+    assert!(!resp.to_string().contains("candidate"), "{resp}");
+
+    let current_url = execute_command(
+        &json!({ "id": "scope-current-url", "action": "url" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&current_url);
+    assert_eq!(
+        current_url["data"]["url"],
+        format!("{}/first", origin_a.base_url)
+    );
+    assert_eq!(origin_a.count(rejected_navigation_path), 0);
+
+    let resp = execute_command(
+        &json!({
+            "id": "scope-after-invalid-navigation",
+            "action": "navigate",
+            "url": format!("{}/same-origin", origin_a.base_url),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        origin_a.last_header("/same-origin", "x-scoped"),
+        Some(Some("retained".to_string())),
+        "rejected navigation must preserve the previous origin-scoped header"
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "scope-empty-navigation-headers",
+            "action": "navigate",
+            "url": format!("{}/empty-map", origin_a.base_url),
+            "headers": {},
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        origin_a.last_header("/empty-map", "x-scoped"),
+        Some(Some("retained".to_string())),
+        "navigation with an empty map keeps the existing scoped-header behavior"
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "scope-cross-origin",
+            "action": "navigate",
+            "url": format!("{}/cross-origin", origin_b.base_url),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        origin_b.last_header("/cross-origin", "x-scoped"),
+        Some(None)
+    );
+
+    let rejected_read_path = "/rejected-read";
+    let resp = execute_command(
+        &json!({
+            "id": "scope-invalid-read",
+            "action": "read",
+            "url": format!("{}{}", origin_b.base_url, rejected_read_path),
+            "headers": { "X-Invalid": ["header-secret-read"] },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "invalid read should fail: {resp}");
+    assert!(!resp.to_string().contains("header-secret-read"), "{resp}");
+    assert_eq!(origin_b.count(rejected_read_path), 0);
+
+    let resp = execute_command(
+        &json!({ "id": "scope-close", "action": "close" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+}
+
+/// A global empty object still clears headers on the current and future tabs.
+#[tokio::test]
+#[ignore]
+async fn e2e_set_headers_empty_object_clears_current_and_future_tabs() {
+    let _env = header_e2e_test_environment();
+    let recorder = start_header_recorder().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(&header_e2e_launch_command("clear-launch"), &mut state).await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "clear-first-page",
+            "action": "navigate",
+            "url": format!("{}/before-clear", recorder.base_url),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "clear-set-global",
+            "action": "headers",
+            "headers": { "X-Global": "present", "X-Empty": "" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "clear-empty-wire-control",
+            "action": "navigate",
+            "url": format!("{}/empty-value", recorder.base_url),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        recorder.last_header("/empty-value", "x-empty"),
+        Some(Some(String::new()))
+    );
+    assert_eq!(
+        recorder.last_header("/empty-value", "x-global"),
+        Some(Some("present".to_string()))
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "clear-global", "action": "headers", "headers": {} }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "clear-current-tab-wire",
+            "action": "navigate",
+            "url": format!("{}/current-cleared", recorder.base_url),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        recorder.last_header("/current-cleared", "x-global"),
+        Some(None)
+    );
+    assert_eq!(
+        recorder.last_header("/current-cleared", "x-empty"),
+        Some(None)
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "clear-future-tab-wire",
+            "action": "tab_new",
+            "url": format!("{}/future-cleared", recorder.base_url),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        recorder.last_header("/future-cleared", "x-global"),
+        Some(None)
+    );
+    assert_eq!(
+        recorder.last_header("/future-cleared", "x-empty"),
+        Some(None)
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "clear-close", "action": "close" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+}
 
 /// Headers passed via --headers on open persist for subsequent same-origin
 /// navigations (the core regression from the Rust rewrite).

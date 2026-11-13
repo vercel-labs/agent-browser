@@ -15,7 +15,7 @@ use crate::session_files::SessionFile;
 use crate::session_settings::{
     named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running, Store,
 };
-use crate::validation::{is_valid_session_name, session_name_error};
+use crate::validation::{is_valid_session_name, session_name_error, validate_headers};
 
 use super::a11y;
 use super::auth;
@@ -3039,6 +3039,19 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
 
 async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let id = cmd
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Raw daemon callers bypass CLI parsing, so validate before dispatch side effects.
+    if matches!(action, "headers" | "navigate" | "read") {
+        if let Some(headers) = cmd.get("headers") {
+            if let Err(error) = validate_headers(headers) {
+                return error_response(&id, &error);
+            }
+        }
+    }
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
     let auth_login_no_navigate = is_auth_login_no_navigate(cmd);
@@ -3049,12 +3062,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         // for this command, including --human and MCP's human argument.
         state.input_mode = mode.to_string();
     }
-    let id = cmd
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
     let cmd_start = std::time::Instant::now();
 
     // A retry of the request that wedged the tab must not run on its blank
@@ -6282,6 +6289,7 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
+    let page_headers = cmd.get("headers").map(validate_headers).transpose()?;
 
     {
         let df = state.domain_filter.read().await;
@@ -6313,20 +6321,24 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     // If --headers was passed, store them keyed by origin and enable Fetch
     // interception. The background fetch_handler_task (started on launch)
     // injects them into matching requests in real-time.
-    let scoped_headers = cmd
-        .get("headers")
-        .and_then(|v| v.as_object())
-        .filter(|m| !m.is_empty());
+    let scoped_headers = page_headers.filter(|headers| !headers.is_empty());
 
     if let Some(headers_map) = scoped_headers {
         if let Some(origin) = url::Url::parse(url)
             .ok()
             .map(|u| u.origin().ascii_serialization())
         {
-            let headers: HashMap<String, String> = headers_map
+            let headers = headers_map
                 .iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect();
+                .map(|(key, value)| {
+                    value
+                        .as_str()
+                        .map(|value| (key.clone(), value.to_string()))
+                        .ok_or_else(|| {
+                            "headers must be a JSON object with string values".to_string()
+                        })
+                })
+                .collect::<Result<HashMap<_, _>, _>>()?;
 
             let first_origin_header = {
                 let mut map = state.origin_headers.write().await;
@@ -8088,15 +8100,17 @@ async fn handle_headers(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let session_id = mgr.active_session_id()?.to_string();
 
     let headers_value = cmd.get("headers").ok_or("Missing 'headers' parameter")?;
+    let headers_map = validate_headers(headers_value)?;
 
-    let headers: HashMap<String, String> = headers_value
-        .as_object()
-        .map(|m| {
-            m.iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                .collect()
+    let headers = headers_map
+        .iter()
+        .map(|(key, value)| {
+            value
+                .as_str()
+                .map(|value| (key.clone(), value.to_string()))
+                .ok_or_else(|| "headers must be a JSON object with string values".to_string())
         })
-        .unwrap_or_default();
+        .collect::<Result<HashMap<_, _>, _>>()?;
 
     network::set_extra_headers(&mgr.client, &session_id, &headers).await?;
     // A fresh target already has no extra headers, so an empty map clears the
@@ -21798,6 +21812,64 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "Unexpected error: {}",
             error_msg
         );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_raw_invalid_page_headers_before_state_changes() {
+        for action in ["headers", "navigate", "read"] {
+            for prepopulated in [false, true] {
+                for headers in [
+                    json!(null),
+                    json!({
+                        "DAEMON_HEADER_SECRET_KEY": {
+                            "credential": "DAEMON_HEADER_SECRET_VALUE"
+                        }
+                    }),
+                ] {
+                    let mut state = DaemonState::new();
+                    state.settings.set(Key::Cdp, json!("invalid-cdp-target"));
+                    state.input_mode = "instant".to_string();
+                    if prepopulated {
+                        state.session_setup.extra_headers = Some(HashMap::from([(
+                            "X-Existing".to_string(),
+                            "retained".to_string(),
+                        )]));
+                        state.origin_headers.write().await.insert(
+                            "https://existing.example".to_string(),
+                            HashMap::from([("X-Existing".to_string(), "retained".to_string())]),
+                        );
+                    }
+                    let previous_extra_headers = state.session_setup.extra_headers.clone();
+                    let previous_origin_headers = state.origin_headers.read().await.clone();
+                    let mut command = json!({
+                        "action": action,
+                        "id": "raw-invalid-page-headers",
+                        "headers": headers,
+                        "defaultInputMode": "human"
+                    });
+                    if action == "navigate" {
+                        command["url"] = json!("https://example.com");
+                    }
+
+                    let response = execute_command(&command, &mut state).await;
+
+                    assert_eq!(
+                        response["success"], false,
+                        "{action}, prepopulated={prepopulated}"
+                    );
+                    let error = response["error"].as_str().unwrap();
+                    assert!(
+                        error.contains("headers must be a JSON object with string values"),
+                        "{action}, prepopulated={prepopulated}: {error}"
+                    );
+                    assert!(!error.contains("DAEMON_HEADER_SECRET"), "{error}");
+                    assert!(state.browser.is_none(), "{action} launched a browser");
+                    assert_eq!(state.input_mode, "instant");
+                    assert_eq!(state.session_setup.extra_headers, previous_extra_headers);
+                    assert_eq!(*state.origin_headers.read().await, previous_origin_headers);
+                }
+            }
+        }
     }
 
     #[test]
