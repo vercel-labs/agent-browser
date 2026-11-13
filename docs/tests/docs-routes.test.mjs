@@ -716,7 +716,7 @@ test("Modern Web Guidance page renders its workflows, metadata and Markdown repr
     );
 });
 
-test("sitemap contains exactly the 40 canonical production URLs", async () => {
+test("sitemap contains exactly the 41 canonical production URLs", async () => {
   const response = await get("/sitemap.xml", { headers: agent });
   responseType(response, "application/xml");
   indexing(response);
@@ -737,7 +737,7 @@ test("sitemap contains exactly the 40 canonical production URLs", async () => {
 });
 
 for (const path of ["/llms.txt", "/sitemap.md"]) {
-  test(`${path}: agent index exposes all 40 public pages and Markdown alternatives exactly once`, async () => {
+  test(`${path}: agent index exposes all 41 public pages and Markdown alternatives exactly once`, async () => {
     const response = await get(path, { headers: agent });
     responseType(
       response,

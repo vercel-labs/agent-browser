@@ -24,9 +24,10 @@ use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
-    ExceptionThrownEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent, TargetCreatedEvent,
-    TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
+    ExceptionThrownEvent, FrameNavigatedEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent,
+    TargetCreatedEvent, TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
 };
+use super::codegen::{self, CodegenState};
 use super::cookies;
 use super::diff;
 use super::downloads::{DownloadLedger, DownloadState};
@@ -273,6 +274,9 @@ struct DrainedEvents {
     /// while HAR recording; bodies are fetched for these in
     /// `apply_drained_events` before Chrome evicts them (e.g. on navigation).
     har_finished_requests: Vec<(String, Option<String>)>,
+    /// Main-frame and same-document navigation observations. The tuple is
+    /// (session ID, frame ID, URL, main-frame event).
+    codegen_navigations: Vec<(String, String, String, bool)>,
 }
 
 fn is_active_iframe_network_event(
@@ -598,6 +602,7 @@ pub struct DaemonState {
     store: Arc<dyn Store>,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
+    pub codegen: CodegenState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
     /// Downloads seen on the attached browser, for `wait --download`.
     downloads: DownloadLedger,
@@ -798,7 +803,7 @@ impl DaemonState {
             restore_saved_path: None,
             last_command_finished: None,
             last_autosave_attempt: None,
-            session_id,
+            session_id: session_id.clone(),
             engine: settings.engine().unwrap_or_else(|| "chrome".to_string()),
             // Intentionally below the CLI's 30s IPC read timeout (see
             // `DEFAULT_TIMEOUT_MS`).
@@ -806,6 +811,7 @@ impl DaemonState {
             auto_dialog: !settings.no_auto_dialog(),
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
+            codegen: CodegenState::restore(&session_id),
             event_rx: None,
             downloads: DownloadLedger::default(),
             webmcp: webmcp::RuntimeState::default(),
@@ -1437,6 +1443,7 @@ impl DaemonState {
                     // session follows it.
                     mgr.register_discovered_page(
                         &target_info.target_id,
+                        target_info.opener_id.clone(),
                         page_sid,
                         page_url,
                         target_info.title.clone(),
@@ -1583,6 +1590,7 @@ impl DaemonState {
                     // `click --new-tab`) activate via their own paths.
                     mgr.register_discovered_page(
                         &te.target_info.target_id,
+                        te.target_info.opener_id.clone(),
                         &attach.session_id,
                         page_url,
                         te.target_info.title.clone(),
@@ -1718,6 +1726,13 @@ impl DaemonState {
             }
         }
 
+        if self.codegen.is_active() {
+            for (session_id, frame_id, url, main_frame_event) in &drained.codegen_navigations {
+                self.codegen
+                    .observe_cdp_navigation(session_id, frame_id, url, *main_frame_event);
+            }
+        }
+
         Ok(())
     }
 
@@ -1738,6 +1753,7 @@ impl DaemonState {
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
         let mut har_finished_requests: Vec<(String, Option<String>)> = Vec::new();
+        let mut codegen_navigations = Vec::new();
 
         loop {
             match rx.try_recv() {
@@ -1897,6 +1913,35 @@ impl DaemonState {
                             continue;
                         }
                         _ => {}
+                    }
+
+                    if event.method == "Page.frameNavigated" {
+                        if let (Some(session_id), Ok(navigation)) = (
+                            event.session_id.as_deref(),
+                            serde_json::from_value::<FrameNavigatedEvent>(event.params.clone()),
+                        ) {
+                            if navigation.frame.parent_id.is_none() {
+                                codegen_navigations.push((
+                                    session_id.to_string(),
+                                    navigation.frame.id,
+                                    navigation.frame.url,
+                                    true,
+                                ));
+                            }
+                        }
+                    } else if event.method == "Page.navigatedWithinDocument" {
+                        if let (Some(session_id), Some(frame_id), Some(url)) = (
+                            event.session_id.as_deref(),
+                            event.params.get("frameId").and_then(Value::as_str),
+                            event.params.get("url").and_then(Value::as_str),
+                        ) {
+                            codegen_navigations.push((
+                                session_id.to_string(),
+                                frame_id.to_string(),
+                                url.to_string(),
+                                false,
+                            ));
+                        }
                     }
 
                     let session_matches = if let Some(ref browser) = self.browser {
@@ -2314,6 +2359,7 @@ impl DaemonState {
             attached_other_sessions,
             detached_iframe_sessions,
             har_finished_requests,
+            codegen_navigations,
         }
     }
 }
@@ -2715,6 +2761,307 @@ pub(crate) fn command_launches_browser(cmd: &Value) -> bool {
     (!skip_launch_action(action) || action == "launch") && !is_auth_login_no_navigate(cmd)
 }
 
+/// The logical codegen page that `tab close` was asked to close. Returns `None`
+/// when the command names no tab, so the active page stays the recorded page.
+fn requested_close_page(cmd: &Value, state: &DaemonState) -> Option<codegen::PageIdentity> {
+    let tab = cmd.get("tabId").and_then(Value::as_str)?;
+    let manager = state.browser.as_ref()?;
+    let tab_ref = super::browser::TabRef::parse(tab).ok()?;
+    let tab_id = manager.resolve_tab_ref(&tab_ref).ok()?;
+    let page = manager
+        .pages_list()
+        .into_iter()
+        .find(|page| page.tab_id == tab_id)?;
+    let page_id = state.codegen.page_for_target(&page.target_id)?;
+    Some(codegen::PageIdentity {
+        page_id,
+        target_id: page.target_id,
+        session_id: page.session_id,
+        url: page.url,
+    })
+}
+
+/// The page state that codegen reads before a command is dispatched.
+struct CodegenBeforeAction {
+    /// Whether the browser was attached through CDP, not launched.
+    browser_external: bool,
+    /// The page that will receive the command.
+    page: Option<codegen::PageIdentity>,
+    /// The page that `tab close` named, when it is not the active page.
+    requested_close_page: Option<codegen::PageIdentity>,
+}
+
+/// Prepares codegen for a command before dispatch. Boxed here, inside the
+/// callee, so the future never sits in the stack frame of `execute_command`.
+fn codegen_before_action<'a>(
+    action: &'a str,
+    cmd: &'a Value,
+    state: &'a mut DaemonState,
+    lifecycle_relaunched_browser: bool,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = CodegenBeforeAction> + Send + 'a>> {
+    Box::pin(async move {
+        // A command that codegen cannot attribute can move the page. Apply the
+        // events that are already available first, so a real late navigation still
+        // reaches the action that caused it.
+        let breaks_navigation_attribution =
+            state.codegen.is_active() && codegen::action_breaks_navigation_attribution(action);
+        if breaks_navigation_attribution {
+            let _ = state.drain_cdp_events_background().await;
+        }
+
+        // Capture the page that will receive the command before dispatch. A tab
+        // command can change the active page before codegen sees the result.
+        let pre_browser_external = state
+            .browser
+            .as_ref()
+            .is_some_and(BrowserManager::is_cdp_connection);
+        let pre_action_page = if state.codegen.is_active() {
+            if let Some(browser) = state.browser.as_ref() {
+                let pages = browser.pages_list();
+                let active_target = browser.active_target_id().ok().map(str::to_string);
+                let local_relaunch = lifecycle_relaunched_browser && !browser.is_cdp_connection();
+                let page = state.codegen.sync_runtime_pages(
+                    &pages,
+                    active_target.as_deref(),
+                    local_relaunch,
+                );
+                if let Some(page) = page.as_ref() {
+                    state
+                        .codegen
+                        .ensure_initial_page_state(page, state.viewport);
+                }
+                page
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if breaks_navigation_attribution {
+            if let Some(page) = pre_action_page.as_ref() {
+                state.codegen.discard_pending_steps(&page.page_id);
+            }
+        }
+
+        // `tab close <id>` acts on the named page, which is not always the active
+        // page. Resolve it before the command removes it.
+        let requested_close_page = if state.codegen.is_active() && action == "tab_close" {
+            requested_close_page(cmd, state)
+        } else {
+            None
+        };
+
+        CodegenBeforeAction {
+            browser_external: pre_browser_external,
+            page: pre_action_page,
+            requested_close_page,
+        }
+    })
+}
+
+/// Records a dispatched command in the active codegen flow. Boxed here,
+/// inside the callee, so the future never sits in the stack frame of
+/// `execute_command`.
+fn codegen_after_action<'a>(
+    action: &'a str,
+    cmd: &'a Value,
+    state: &'a mut DaemonState,
+    result: &'a Result<Value, String>,
+    element_capture: Option<&'a codegen::probe::ElementCapture>,
+    before: CodegenBeforeAction,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        let CodegenBeforeAction {
+            browser_external: pre_browser_external,
+            page: pre_action_page,
+            requested_close_page,
+        } = before;
+
+        // A command that codegen cannot express can still move the page. Check the
+        // URL on both result arms, because the move can happen before the command
+        // fails.
+        if state.codegen.is_active() && codegen::action_is_omitted(action) {
+            if let (Some(browser), Some(page)) = (state.browser.as_ref(), pre_action_page.as_ref())
+            {
+                if let Ok(url) = codegen::probe::probe_url(&browser.client, &page.session_id).await
+                {
+                    if url != page.url {
+                        state
+                            .codegen
+                            .observe_unrecorded_navigation(&page.page_id, &url, action);
+                    }
+                }
+            }
+
+            // A detached invocation returns before the page tool runs, so the check
+            // above cannot see its effect yet.
+            if action == "webmcp_invoke"
+                && result.is_ok()
+                && cmd.get("detach").and_then(Value::as_bool).unwrap_or(false)
+            {
+                if let Some(page) = pre_action_page.as_ref() {
+                    state.codegen.expect_unattributed_page_effect(&page.page_id);
+                }
+            }
+        }
+
+        if let Ok(ref data) = result {
+            if state.codegen.is_active() {
+                let capture_start = state.codegen.steps.len();
+                let post_action_page = if let Some(browser) = state.browser.as_ref() {
+                    let pages = browser.pages_list();
+                    let active_target = browser.active_target_id().ok().map(str::to_string);
+                    state
+                        .codegen
+                        .sync_action_result_pages(&pages, active_target.as_deref())
+                } else {
+                    None
+                };
+                if let Some(page) = post_action_page.as_ref() {
+                    state
+                        .codegen
+                        .ensure_initial_page_state(page, state.viewport);
+                }
+
+                let before_scope = requested_close_page
+                    .as_ref()
+                    .or(pre_action_page.as_ref())
+                    .map(codegen::CodegenState::scope_for_page)
+                    .or_else(|| {
+                        post_action_page
+                            .as_ref()
+                            .map(codegen::CodegenState::scope_for_page)
+                    })
+                    .unwrap_or_default();
+                let after_scope = post_action_page
+                    .as_ref()
+                    .map(codegen::CodegenState::scope_for_page);
+                if let Err(error) = codegen::record_action(
+                    action,
+                    cmd,
+                    data,
+                    &state.ref_map,
+                    state.viewport,
+                    codegen::ActionContext {
+                        before: before_scope,
+                        after: after_scope,
+                    },
+                    element_capture,
+                    &mut state.codegen,
+                ) {
+                    state
+                        .codegen
+                        .capture_warning("capture-failed", &error, None);
+                }
+
+                // The action is now pending, so events from this command can bind
+                // to it without being assigned to an earlier action.
+                let _ = state.drain_cdp_events_background().await;
+                if let Some(browser) = state.browser.as_ref() {
+                    let pages = browser.pages_list();
+                    let active_target = browser.active_target_id().ok().map(str::to_string);
+                    state
+                        .codegen
+                        .sync_runtime_pages(&pages, active_target.as_deref(), false);
+                }
+                state.codegen.bind_unattributed_popups();
+
+                if state.codegen.steps.len() > capture_start {
+                    if element_capture.is_none() {
+                        if let (Some(browser), Some(page)) =
+                            (state.browser.as_ref(), pre_action_page.as_ref())
+                        {
+                            let selector = cmd.get("selector").and_then(Value::as_str);
+                            let client = browser.client.clone();
+                            let _ = codegen::enrich_recent_steps(
+                                &mut state.codegen.steps[capture_start..],
+                                selector,
+                                &state.ref_map,
+                                &client,
+                                &page.session_id,
+                            )
+                            .await;
+                            // A snapshot ref carries the frame it was captured in.
+                            // An assertion on a ref inside an iframe checks that
+                            // iframe, even while the main frame is selected, so the
+                            // active frame is the wrong scope for it.
+                            let referenced =
+                                selector
+                                    .and_then(super::element::parse_ref)
+                                    .map(|reference| {
+                                        state
+                                            .ref_map
+                                            .get(&reference)
+                                            .and_then(|entry| entry.frame_id.clone())
+                                    });
+                            let frame_id = match referenced {
+                                Some(frame_id) => frame_id,
+                                None => state.active_frame_id.clone(),
+                            };
+                            if let Some(frame_id) = frame_id.as_deref() {
+                                match codegen::probe::frame_index_path(
+                                    &client,
+                                    &page.session_id,
+                                    frame_id,
+                                )
+                                .await
+                                {
+                                    Ok(frame) => codegen::set_frame_scope(
+                                        &mut state.codegen.steps[capture_start..],
+                                        frame,
+                                    ),
+                                    // Without the path the step keeps the page
+                                    // scope, which points at the main document
+                                    // rather than the frame the command used.
+                                    Err(error) => state.codegen.capture_warning(
+                                        "frame-scope-failed",
+                                        &format!(
+                                            "Codegen could not place the action in its frame, so the step targets the page: {error}"
+                                        ),
+                                        None,
+                                    ),
+                                }
+                            }
+                        }
+                    }
+
+                    if codegen::action_can_navigate(action)
+                        && !(action == "click"
+                            && cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false))
+                    {
+                        if let (Some(browser), Some(page)) =
+                            (state.browser.as_ref(), pre_action_page.as_ref())
+                        {
+                            match codegen::probe::probe_url(&browser.client, &page.session_id).await {
+                                Ok(url) if url != page.url => {
+                                    state.codegen.observe_navigation(&page.page_id, &url);
+                                }
+                                Ok(_) => {}
+                                Err(_) => state.codegen.capture_warning(
+                                    "navigation-check-failed",
+                                    "Codegen could not read the post-action URL from the action page.",
+                                    None,
+                                ),
+                            }
+                        }
+                    }
+                }
+
+                if action == "tab_close" {
+                    if let Some(page) = requested_close_page.as_ref().or(pre_action_page.as_ref()) {
+                        state.codegen.mark_page_closed(&page.page_id);
+                    }
+                }
+                if action == "close" {
+                    state.codegen.clear_runtime_bindings(pre_browser_external);
+                }
+                let _ = codegen::persist(&mut state.codegen);
+            }
+        }
+    })
+}
+
 fn skip_launch_action(action: &str) -> bool {
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
         return true;
@@ -2750,6 +3097,10 @@ fn skip_launch_action(action: &str) -> bool {
             | "stream_disable"
             | "stream_status"
             | "session_info"
+            | "codegen_start"
+            | "codegen_stop"
+            | "codegen_status"
+            | "codegen_discard"
             | "cdp_url"
             | "webmcp_result"
             | "webmcp_cancel"
@@ -3494,6 +3845,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    let CodegenBeforeAction {
+        browser_external: pre_browser_external,
+        page: pre_action_page,
+        requested_close_page,
+    } = codegen_before_action(action, cmd, state, lifecycle_relaunched_browser).await;
+
     let mut result = match action {
         "launch" => {
             let applied = match launch_patch.as_ref() {
@@ -3573,6 +3930,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "recording_start" => handle_recording_start(cmd, state).await,
         "recording_stop" => handle_recording_stop(state).await,
         "recording_restart" => handle_recording_restart(cmd, state).await,
+        "codegen_start" | "codegen_stop" | "codegen_status" | "codegen_discard" => {
+            handle_codegen_command(action, cmd, state).await
+        }
         "pdf" => handle_pdf(cmd, state).await,
         "tab_list" => handle_tab_list(state).await,
         "tab_new" => handle_tab_new(cmd, state).await,
@@ -3691,6 +4051,22 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "mouseup" => handle_mouseup(cmd, state).await,
         _ => Err(format!("Not yet implemented: {}", action)),
     };
+
+    let element_capture = result.as_mut().ok().and_then(codegen::take_private_capture);
+
+    codegen_after_action(
+        action,
+        cmd,
+        state,
+        &result,
+        element_capture.as_ref(),
+        CodegenBeforeAction {
+            browser_external: pre_browser_external,
+            page: pre_action_page,
+            requested_close_page,
+        },
+    )
+    .await;
 
     if result.is_ok() && should_validate_restore_after_action(action) {
         validate_restore_if_pending(state).await;
@@ -7132,8 +7508,8 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
 
     if new_tab {
-        use super::element::resolve_element_object_id;
-        let (object_id, effective_session_id) = resolve_element_object_id(
+        use super::element::resolve_element;
+        let resolved = resolve_element(
             &mgr.client,
             &session_id,
             &state.ref_map,
@@ -7141,8 +7517,15 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &state.iframe_sessions,
         )
         .await?;
+        let capture = if state.codegen.is_active() {
+            Some(
+                codegen::probe::capture_resolved_element(&mgr.client, &session_id, &resolved).await,
+            )
+        } else {
+            None
+        };
         let call_params = json!({
-            "objectId": object_id,
+            "objectId": resolved.object_id,
             "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
             "returnByValue": true
         });
@@ -7151,7 +7534,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             .send_command(
                 "Runtime.callFunctionOn",
                 Some(call_params),
-                Some(&effective_session_id),
+                Some(&resolved.session_id),
             )
             .await?;
         let href = call_result
@@ -7181,11 +7564,12 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         state.active_iframe_sessions.clear();
         state.active_frame_id = None;
         state.webmcp.clear_invocations();
-        let new_session_id = {
+        let (mut new_page, new_session_id) = {
             let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-            mgr.tab_new(if defer_url { None } else { Some(&href) }, None)
+            let new_page = mgr
+                .tab_new(if defer_url { None } else { Some(&href) }, None)
                 .await?;
-            mgr.active_session_id()?.to_string()
+            (new_page, mgr.active_session_id()?.to_string())
         };
 
         apply_session_setup(state, &new_session_id).await?;
@@ -7194,12 +7578,27 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
         if defer_url {
             let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-            mgr.navigate(&href, WaitUntil::Load).await?;
+            let navigation = mgr.navigate(&href, WaitUntil::Load).await?;
+            if let Some(object) = new_page.as_object_mut() {
+                if let Some(url) = navigation.get("url") {
+                    object.insert("url".to_string(), url.clone());
+                }
+                if let Some(title) = navigation.get("title") {
+                    object.insert("title".to_string(), title.clone());
+                }
+            }
         }
 
         state.refresh_active_iframe_sessions().await;
 
-        return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
+        let mut data = json!({
+            "clicked": selector,
+            "newTab": true,
+            "url": href,
+            "tabId": new_page.get("tabId").cloned().unwrap_or(Value::Null),
+        });
+        codegen::attach_private_capture(&mut data, capture);
+        return Ok(data);
     }
 
     let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left");
@@ -7243,7 +7642,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .await?;
     }
 
-    let result = interaction::click(
+    let mut result = interaction::click_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7251,8 +7650,11 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         button,
         click_count,
         &state.iframe_sessions,
+        state.codegen.is_active(),
+        true,
     )
     .await?;
+    let capture = result.capture.take();
     record_click_animation(
         &result,
         &mut state.mouse_state,
@@ -7261,9 +7663,13 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
-        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
+        let mut data = json!({ "clicked": selector, "dialogOpened": true });
+        codegen::attach_private_capture(&mut data, capture);
+        return Ok(data);
     }
-    Ok(json!({ "clicked": selector }))
+    let mut data = json!({ "clicked": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7274,14 +7680,19 @@ async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let result = interaction::dblclick(
+    let mut result = interaction::click_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
+        "left",
+        2,
         &state.iframe_sessions,
+        state.codegen.is_active(),
+        true,
     )
     .await?;
+    let capture = result.capture.take();
     record_click_animation(
         &result,
         &mut state.mouse_state,
@@ -7289,9 +7700,13 @@ async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     );
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
-        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
+        let mut data = json!({ "clicked": selector, "dialogOpened": true });
+        codegen::attach_private_capture(&mut data, capture);
+        return Ok(data);
     }
-    Ok(json!({ "clicked": selector }))
+    let mut data = json!({ "clicked": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7314,16 +7729,19 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::fill(
+    let capture = interaction::fill_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         value,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "filled": selector }))
+    let mut data = json!({ "filled": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7340,7 +7758,7 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     let delay = cmd.get("delay").and_then(|v| v.as_u64());
 
-    interaction::type_text(
+    let capture = interaction::type_text_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7349,9 +7767,12 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         clear,
         delay,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "typed": text }))
+    let mut data = json!({ "typed": text });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7417,19 +7838,22 @@ async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let position = interaction::hover(
+    let (capture, position) = interaction::hover_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
     (state.mouse_state.x, state.mouse_state.y) = position;
     if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
         cursor.record(position.0, position.1, state.mouse_state.buttons);
     }
-    Ok(json!({ "hovered": selector }))
+    let mut data = json!({ "hovered": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7453,7 +7877,7 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         }
     }
 
-    interaction::scroll(
+    let capture = interaction::scroll_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7461,9 +7885,12 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         dx,
         dy,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "scrolled": true }))
+    let mut data = json!({ "scrolled": true });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7487,16 +7914,19 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .unwrap_or_default(),
     };
 
-    interaction::select_option(
+    let capture = interaction::select_option_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &values,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "selected": values }))
+    let mut data = json!({ "selected": values });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7507,21 +7937,25 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    if let Some(position) = interaction::check(
+    let (capture, position) = interaction::set_checked_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
+        true,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
-    .await?
-    {
+    .await?;
+    if let Some(position) = position {
         (state.mouse_state.x, state.mouse_state.y) = position;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(json!({ "checked": selector }))
+    let mut data = json!({ "checked": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7532,21 +7966,25 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    if let Some(position) = interaction::uncheck(
+    let (capture, position) = interaction::set_checked_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
+        false,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
-    .await?
-    {
+    .await?;
+    if let Some(position) = position {
         (state.mouse_state.x, state.mouse_state.y) = position;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(json!({ "unchecked": selector }))
+    let mut data = json!({ "unchecked": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -9062,6 +9500,106 @@ async fn handle_recording_stop(state: &mut DaemonState) -> Result<Value, String>
     result
 }
 
+/// Boxed here, inside the callee, so the codegen futures never sit in the
+/// stack frame of `execute_command`.
+fn handle_codegen_command<'a>(
+    action: &'a str,
+    cmd: &'a Value,
+    state: &'a mut DaemonState,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>> {
+    Box::pin(async move {
+        match action {
+            "codegen_start" => handle_codegen_start(cmd, state).await,
+            "codegen_stop" => handle_codegen_stop(cmd, state).await,
+            "codegen_status" => handle_codegen_status(state),
+            "codegen_discard" => handle_codegen_discard(state),
+            _ => Err(format!("Not yet implemented: {}", action)),
+        }
+    })
+}
+
+async fn handle_codegen_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let result = codegen::codegen_start(
+        &mut state.codegen,
+        cmd.get("title").and_then(Value::as_str),
+        &state.session_id,
+    )?;
+    if let Some(browser) = state.browser.as_ref() {
+        let pages = browser.pages_list();
+        let active_target = browser.active_target_id().ok().map(str::to_string);
+        let current_url = browser.get_url().await.ok();
+        if let Some(mut page) =
+            state
+                .codegen
+                .sync_runtime_pages(&pages, active_target.as_deref(), false)
+        {
+            if let Some(url) = current_url {
+                page.url = url.clone();
+                state.codegen.update_page_url(&page.page_id, &url);
+            }
+            state
+                .codegen
+                .ensure_initial_page_state(&page, state.viewport);
+        }
+        let _ = codegen::persist(&mut state.codegen);
+    }
+    Ok(result)
+}
+
+async fn handle_codegen_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if state.codegen.is_active() {
+        if !state.codegen.pending_navigation_sessions().is_empty() {
+            // Input dispatch can finish shortly before Chrome publishes the
+            // related navigation event. Give the event stream one bounded
+            // finalization window before the last URL probe.
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let _ = state.drain_cdp_events_background().await;
+        }
+        if let Some(browser) = state.browser.as_ref() {
+            let pages = browser.pages_list();
+            let active_target = browser.active_target_id().ok().map(str::to_string);
+            state
+                .codegen
+                .sync_runtime_pages(&pages, active_target.as_deref(), false);
+            let client = browser.client.clone();
+            let pending = state.codegen.pending_navigation_sessions();
+            for (page_id, session_id) in pending {
+                match codegen::probe::probe_url(&client, &session_id).await {
+                    Ok(url) => {
+                        state.codegen.observe_navigation(&page_id, &url);
+                    }
+                    Err(_) => {
+                        state.codegen.capture_warning(
+                            "navigation-check-failed",
+                            "Codegen could not finalize the URL for a live page.",
+                            None,
+                        );
+                        state.codegen.capture_warning(
+                            "missing-navigation-assertion",
+                            "A pending action can navigate, but codegen could not confirm its final URL.",
+                            None,
+                        );
+                    }
+                }
+            }
+            let _ = codegen::persist(&mut state.codegen);
+        }
+    }
+    codegen::codegen_stop(
+        &mut state.codegen,
+        cmd.get("path").and_then(Value::as_str),
+        cmd.get("format").and_then(Value::as_str).unwrap_or("json"),
+    )
+}
+
+fn handle_codegen_status(state: &DaemonState) -> Result<Value, String> {
+    Ok(codegen::codegen_status(&state.codegen))
+}
+
+fn handle_codegen_discard(state: &mut DaemonState) -> Result<Value, String> {
+    codegen::codegen_discard(&mut state.codegen, &state.session_id)
+}
+
 async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let path = cmd
         .get("path")
@@ -9319,15 +9857,18 @@ async fn handle_tap(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::tap_touch(
+    let capture = interaction::tap_touch_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         sel,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "tapped": sel }))
+    let mut data = json!({ "tapped": sel });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_boundingbox(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -9418,16 +9959,23 @@ async fn handle_setvalue(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'value' parameter")?;
 
-    super::element::set_element_value(
+    let resolved = super::element::resolve_element(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
-        value,
         &state.iframe_sessions,
     )
     .await?;
-    Ok(json!({ "set": selector, "value": value }))
+    let capture = if state.codegen.is_active() {
+        Some(codegen::probe::capture_resolved_element(&mgr.client, &session_id, &resolved).await)
+    } else {
+        None
+    };
+    super::element::set_resolved_element_value(&mgr.client, &resolved, value).await?;
+    let mut data = json!({ "set": selector, "value": value });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_count(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -9582,6 +10130,7 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
 async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -9602,9 +10151,32 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         })
         .unwrap_or_default();
 
-    mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
+    let resolved = super::element::resolve_element(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        &state.iframe_sessions,
+    )
+    .await?;
+    let capture = if state.codegen.is_active() {
+        Some(codegen::probe::capture_resolved_element(&mgr.client, &session_id, &resolved).await)
+    } else {
+        None
+    };
+    mgr.client
+        .send_command(
+            "DOM.setFileInputFiles",
+            Some(json!({
+                "files": files.clone(),
+                "objectId": resolved.object_id,
+            })),
+            Some(&resolved.session_id),
+        )
         .await?;
-    Ok(json!({ "uploaded": files.len(), "selector": selector }))
+    let mut data = json!({ "uploaded": files.len(), "selector": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_addscript(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -12216,6 +12788,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             tab_id,
             label: None,
             target_id: create_result.target_id,
+            opener_id: None,
             session_id: attach.session_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
@@ -18099,6 +18672,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_codegen_actions_do_not_require_browser() {
+        let directory = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR"]);
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            directory.path().to_str().unwrap(),
+        );
+        let mut state = DaemonState::new();
+        state.codegen = CodegenState::new();
+        state.session_id = format!(
+            "codegen-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let started = execute_command(
+            &json!({ "id": "0", "action": "codegen_start", "title": "test" }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(started["success"], true);
+        let status = execute_command(
+            &json!({ "id": "1", "action": "codegen_status" }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(status["data"]["active"], true);
+        let stop =
+            execute_command(&json!({ "id": "2", "action": "codegen_stop" }), &mut state).await;
+        assert_eq!(stop["success"], true);
+    }
+
+    #[tokio::test]
+    async fn test_failed_action_is_not_captured_by_codegen() {
+        let mut state = DaemonState::new();
+        state.codegen.status = codegen::CodegenStatus::Active;
+        let response =
+            execute_command(&json!({ "id": "1", "action": "codegen_start" }), &mut state).await;
+        assert_eq!(response["success"], false);
+        assert!(state.codegen.steps.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_recording_restart_rejects_disallowed_url_before_state_changes() {
         let mut state = DaemonState::new();
         {
@@ -19875,6 +20492,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 tab_id: 1,
                 label: None,
                 target_id: "target-1".to_string(),
+                opener_id: None,
                 session_id: "session-1".to_string(),
                 url: "about:blank".to_string(),
                 title: String::new(),
@@ -19884,6 +20502,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 tab_id: 2,
                 label: None,
                 target_id: "target-2".to_string(),
+                opener_id: None,
                 session_id: "session-2".to_string(),
                 url: "about:blank".to_string(),
                 title: String::new(),
@@ -19893,6 +20512,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 tab_id: 3,
                 label: None,
                 target_id: "target-3".to_string(),
+                opener_id: None,
                 session_id: "session-1".to_string(),
                 url: "about:blank".to_string(),
                 title: String::new(),
@@ -19912,6 +20532,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             tab_id: 1,
             label: None,
             target_id: "provider-page".to_string(),
+            opener_id: None,
             session_id: String::new(),
             url: String::new(),
             title: String::new(),

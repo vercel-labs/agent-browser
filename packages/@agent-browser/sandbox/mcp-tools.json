@@ -483,6 +483,103 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
+      "description": "Discard an active, restored, damaged, or cleanup-pending codegen recording.",
+      "inputSchema": {
+        "properties": {
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_codegen_discard",
+      "profiles": [
+        "debug"
+      ],
+      "title": "Codegen discard"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Start capturing supported successful browser actions. Unsafe targets and unsupported actions become warnings.",
+      "inputSchema": {
+        "properties": {
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_codegen_start",
+      "profiles": [
+        "debug"
+      ],
+      "title": "Codegen start"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Show codegen recovery state, capture counts, warnings, and cleanup status.",
+      "inputSchema": {
+        "properties": {
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_codegen_status",
+      "profiles": [
+        "debug"
+      ],
+      "title": "Codegen status"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Stop capture and emit a Chrome Recorder JSON flow or Playwright spec with capture warnings.",
+      "inputSchema": {
+        "properties": {
+          "format": {
+            "enum": [
+              "json",
+              "playwright"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_codegen_stop",
+      "profiles": [
+        "debug"
+      ],
+      "title": "Codegen stop"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Approve a pending action.",
       "inputSchema": {
         "properties": {

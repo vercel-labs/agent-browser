@@ -75,6 +75,16 @@ export const addedPages = [
     ogAlt: "Modern Web Guidance - agent-browser",
     twitterTitle: "Modern Web Guidance | agent-browser",
   },
+  {
+    path: "/codegen",
+    markdownTitle: "Codegen",
+    title: "Codegen | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Codegen | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Codegen - agent-browser",
+    twitterTitle: "Codegen | agent-browser",
+  },
 ];
 
 /** Every public page: the baseline floor plus pages added since. */

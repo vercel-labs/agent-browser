@@ -532,6 +532,22 @@ fn canonical_path(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
 }
 
+/// The daemon can outlive the client process, so paths for codegen artifacts
+/// must be anchored before the command crosses the daemon boundary.
+fn resolve_codegen_output_path(cmd: &mut serde_json::Value) {
+    if cmd.get("action").and_then(|value| value.as_str()) != Some("codegen_stop") {
+        return;
+    }
+    let Some(path) = cmd.get("path").and_then(|value| value.as_str()) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    if path.is_relative() {
+        let cwd = canonical_path(env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        cmd["path"] = json!(cwd.join(path));
+    }
+}
+
 fn git_toplevel() -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -1689,6 +1705,7 @@ fn main() {
             exit(1);
         }
     };
+    resolve_codegen_output_path(&mut cmd);
     attach_input_mode(&mut cmd, &flags);
     // Stdin batches are read before launch decisions so a batch of `read`
     // commands is recognized as browserless, like one given as arguments.
@@ -2098,6 +2115,7 @@ fn run_batch(
                 continue;
             }
         };
+        resolve_codegen_output_path(&mut parsed);
         attach_input_mode(&mut parsed, flags);
         match parsed.get("action").and_then(|v| v.as_str()) {
             Some("read") => parsed["tls"] = json!(tls::session_options(flags, &flags.session)),

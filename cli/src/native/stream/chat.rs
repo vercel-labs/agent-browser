@@ -421,6 +421,7 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "trace",
     "profiler",
     "record",
+    "codegen",
     "har",
     "network",
     "title",

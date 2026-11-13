@@ -32,7 +32,8 @@
     "postinstall": "node scripts/postinstall.js",
     "test:launcher": "node --test test/launcher.test.mjs",
     "build:dashboard": "cd packages/dashboard && pnpm build",
-    "build:source": "pnpm install --frozen-lockfile --filter dashboard && pnpm run build:dashboard && pnpm run build:native"
+    "build:source": "pnpm install --frozen-lockfile --filter dashboard && pnpm run build:dashboard && pnpm run build:native",
+    "test:codegen-formats": "pnpm --dir tests test"
   },
   "keywords": [
     "browser",

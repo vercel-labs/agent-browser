@@ -58,6 +58,7 @@ agent-browser skills get core --ref references/authentication.md --ref templates
 | `references/session-management.md` | Persistence, `--restore` policies, idle shutdown, tab pinning, parallel sessions |
 | `references/trust-boundaries.md` | Untrusted content, WebMCP metadata, secrets, `--allowed-domains`, project config trust |
 | `references/video-recording.md` | `record start` options, cursor overlay, contact sheets, frame rate |
+| `references/codegen.md` | `codegen` capture of a session as Chrome DevTools Recorder JSON or a Playwright spec, format limits, warnings, recovery |
 | `references/profiling.md` | Chrome DevTools tracing and profiling |
 | `references/streaming.md` | Live viewport streaming and remote input |
 | `references/proxy-support.md` | Proxies and CA certificates |

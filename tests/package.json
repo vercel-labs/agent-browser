@@ -1,0 +1,14 @@
+{
+  "name": "@agent-browser/codegen-format-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Checks that generated codegen artifacts satisfy the tools that consume them. Kept out of the published package so its tools stay out of the release manifest.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-force-exit codegen-format-conformance.test.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@puppeteer/replay": "4.0.2"
+  }
+}

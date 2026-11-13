@@ -1,0 +1,67 @@
+{
+  "steps": [
+    {
+      "deviceScaleFactor": 1.0,
+      "hasTouch": false,
+      "height": 720,
+      "isLandscape": false,
+      "isMobile": false,
+      "type": "setViewport",
+      "width": 1280
+    },
+    {
+      "type": "navigate",
+      "url": "https://example.com/start"
+    },
+    {
+      "assertedEvents": [
+        {
+          "type": "navigation",
+          "url": "https://example.com/done"
+        }
+      ],
+      "button": "secondary",
+      "clickCount": 1,
+      "offsetX": 4.0,
+      "offsetY": 8.0,
+      "selectors": [
+        [
+          "#submit"
+        ]
+      ],
+      "type": "click"
+    },
+    {
+      "frame": [
+        0,
+        1
+      ],
+      "selectors": [
+        [
+          "#submit"
+        ]
+      ],
+      "target": "https://example.com/other",
+      "type": "change",
+      "value": "line one\nline two"
+    },
+    {
+      "offsetX": 0,
+      "offsetY": 0,
+      "selectors": [
+        [
+          "aria/Save \"now\""
+        ],
+        [
+          "#save"
+        ]
+      ],
+      "type": "hover"
+    },
+    {
+      "target": "https://example.com/other",
+      "type": "close"
+    }
+  ],
+  "title": "hostile \"flow\"\nname"
+}
