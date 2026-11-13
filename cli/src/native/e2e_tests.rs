@@ -18799,6 +18799,51 @@ async fn e2e_firefox_relaunch_keeps_engine_when_options_change() {
     firefox_close(&mut state).await;
 }
 
+/// A grant made before the first page loads reaches that origin and every origin navigated to later.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_permissions_follow_navigation() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "permissions", "action": "permissions", "permissions": ["geolocation"] }),
+        )
+        .await,
+    );
+
+    let permission_state = "navigator.permissions.query({name:'geolocation'}).then(p => p.state)";
+    firefox_open(&mut state, &fixture.url).await;
+    assert_eq!(
+        firefox_eval(&mut state, permission_state).await,
+        json!("granted")
+    );
+
+    firefox_open(&mut state, &fixture.other).await;
+    assert_eq!(
+        firefox_eval(&mut state, permission_state).await,
+        json!("granted")
+    );
+
+    let unsupported = firefox_command(
+        &mut state,
+        json!({ "id": "permissions", "action": "permissions", "permissions": ["clipboard-read"] }),
+    )
+    .await;
+    assert_eq!(
+        unsupported.get("success").and_then(Value::as_bool),
+        Some(false),
+        "{unsupported}"
+    );
+    firefox_close(&mut state).await;
+}
+
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_full_page_screenshot_larger_than_64mb() {

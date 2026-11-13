@@ -15,6 +15,7 @@ pub mod interact;
 pub mod navigation;
 pub mod network;
 pub mod page;
+pub mod permissions;
 pub mod query;
 pub mod session;
 pub mod snapshot;

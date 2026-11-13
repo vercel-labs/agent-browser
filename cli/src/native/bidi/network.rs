@@ -283,6 +283,7 @@ pub fn spawn_dispatcher(
     net: NetContext,
     mut rx: tokio::sync::mpsc::Receiver<Value>,
     emulation: Arc<std::sync::RwLock<super::emulation::Settings>>,
+    permissions: Arc<Mutex<super::permissions::Grants>>,
 ) -> AbortOnDrop {
     AbortOnDrop(tokio::spawn(async move {
         let mut legacy_downloads = LegacyDownloadIds::default();
@@ -318,6 +319,11 @@ pub fn spawn_dispatcher(
                     .lock()
                     .await
                     .observe(e["method"].as_str().unwrap_or_default(), &e["params"]);
+            }
+            if let Some(url) = super::permissions::document_request_url(&e) {
+                if let Err(error) = permissions.lock().await.cover(&bidi, url).await {
+                    eprintln!("Warning: failed to grant Firefox permissions for {url}: {error}");
+                }
             }
             if e["params"]["isBlocked"] == true {
                 tokio::spawn(resolve(bidi.clone(), net.clone(), e));
@@ -1677,6 +1683,7 @@ mod tests {
             net,
             ff.bidi.subscribe_buffered(),
             ff.emulation.clone(),
+            ff.permissions.clone(),
         );
         let blocked = "network.beforeRequestSent";
         tx.send(request_event(
@@ -1729,6 +1736,7 @@ mod tests {
             net,
             ff.bidi.subscribe_buffered(),
             ff.emulation.clone(),
+            ff.permissions.clone(),
         );
         for filename in ["first.txt", "second.txt"] {
             tx.send(json!({
@@ -1789,6 +1797,7 @@ mod tests {
             net,
             ff.bidi.subscribe_buffered(),
             ff.emulation.clone(),
+            ff.permissions.clone(),
         );
         for filename in ["first.txt", "second.txt"] {
             tx.send(json!({
