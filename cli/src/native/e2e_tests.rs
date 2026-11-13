@@ -15349,6 +15349,13 @@ fn firefox_serve(
             if path == "/har-post" {
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             }
+            if path == "/stall" {
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"conftest.py\"\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(b"partial").await;
+                tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+                continue;
+            }
             let status = if path == "/auth" {
                 "401 Unauthorized"
             } else {
@@ -15403,6 +15410,11 @@ fn firefox_serve(
                     "text/plain",
                     "Content-Disposition: attachment; filename=\"download.txt\"\r\n",
                     "downloaded".to_string(),
+                ),
+                "/payload" => (
+                    "text/plain",
+                    "Content-Disposition: attachment; filename=\"conftest.py\"\r\n",
+                    "page chose this name".to_string(),
                 ),
                 _ => ("text/plain", "", "ok".to_string()),
             };
@@ -17654,6 +17666,71 @@ async fn e2e_firefox_download() {
     assert_success(&resp);
     assert_eq!(std::fs::read_to_string(&inline_dest).unwrap(), "real");
     firefox_close(&mut state).await;
+}
+
+/// A download never leaves a page-chosen file name in the directory the user asked for.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_download_never_writes_a_page_chosen_name() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let out = tempfile::tempdir().unwrap();
+    let dest = out.path().join("report.bin");
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "const hostile = document.createElement('a'); hostile.id = 'dl-hostile'; hostile.href = '/payload';
+         const stall = document.createElement('a'); stall.id = 'dl-stall'; stall.href = '/stall';
+         document.body.append(hostile, stall); 0",
+    )
+    .await;
+
+    let resp = firefox_act(
+        &mut state,
+        "download",
+        "#dl-hostile",
+        json!({ "path": dest.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        std::fs::read_to_string(&dest).unwrap(),
+        "page chose this name"
+    );
+    assert_eq!(
+        file_names(out.path()),
+        ["report.bin"],
+        "the destination holds only the requested file"
+    );
+
+    let stalled = out.path().join("stalled");
+    let resp = firefox_act(
+        &mut state,
+        "download",
+        "#dl-stall",
+        json!({ "path": stalled.join("report.bin").to_str().unwrap() }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(
+        file_names(&stalled),
+        Vec::<String>::new(),
+        "a failed download leaves nothing in the destination"
+    );
+    firefox_close(&mut state).await;
+}
+
+fn file_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }
 
 /// PR3: console and page errors are recorded, a route serves its mock until unrouted, and offline blocks fetches.
