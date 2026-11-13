@@ -3765,6 +3765,20 @@
           "session": {
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
+          },
+          "source": {
+            "default": "ax",
+            "description": "Experimental for apc. Tree source: ax (accessibility tree) or apc (Chrome Annotated Page Content; Chrome and Chromium only, internal schema that can change between releases). apc falls back to ax with a warning when its payload is unavailable or fails its checks.",
+            "enum": [
+              "ax",
+              "apc"
+            ],
+            "type": "string"
+          },
+          "viewport": {
+            "default": false,
+            "description": "Only include nodes visible in the viewport. Requires source apc.",
+            "type": "boolean"
           }
         },
         "type": "object"

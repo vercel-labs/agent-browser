@@ -181,6 +181,17 @@ agent-browser snapshot @e9
 @e10 [radio] selected                    # Selected radio
 ```
 
+## Experimental source: apc
+
+`snapshot --source apc` is experimental. It builds the tree from Chrome's Annotated Page Content instead of the accessibility tree, so it works in Chrome and Chromium only and depends on an internal schema that can change between releases. It falls back to `ax` automatically. Refs and every ref command work the same. Use it when the default tree lists many hidden or zero-size elements. `--viewport` (with `--source apc`) keeps only what is visible on screen.
+
+```bash
+agent-browser snapshot -i --source apc
+agent-browser snapshot -i --source apc --viewport
+```
+
+Every iframe gets a ref, so `frame @ref` works. Same-origin frame content has APC refs. Cross-origin frame content comes from that frame's accessibility tree, nested under the iframe line, and its refs work with the normal ref commands. After `frame @ref`, snapshots read that frame's accessibility tree and start with a `# note:` line. A `# warning:` first line means apc was unavailable or failed its checks, and the accessibility tree was used; the line names the reason and the Chrome version.
+
 ## Iframes
 
 Presentational iframes use the same `Iframe` role for snapshots and stale-ref recovery.
