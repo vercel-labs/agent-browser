@@ -1239,7 +1239,7 @@ async fn obscura_command(state: &mut DaemonState, command: Value) -> Value {
     .expect("Obscura command must not hang")
 }
 
-const ENGINE_TEST_ENV_KEYS: [&str; 15] = [
+const ENGINE_TEST_ENV_KEYS: [&str; 17] = [
     "AGENT_BROWSER_CDP",
     "AGENT_BROWSER_AUTO_CONNECT",
     "AGENT_BROWSER_PROVIDER",
@@ -1247,6 +1247,8 @@ const ENGINE_TEST_ENV_KEYS: [&str; 15] = [
     "AGENT_BROWSER_EXECUTABLE_PATH",
     "AGENT_BROWSER_PROXY",
     "AGENT_BROWSER_PROXY_BYPASS",
+    "AGENT_BROWSER_PROXY_USERNAME",
+    "AGENT_BROWSER_PROXY_PASSWORD",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
