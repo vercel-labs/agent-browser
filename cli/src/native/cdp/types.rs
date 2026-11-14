@@ -272,6 +272,29 @@ pub struct ExceptionDetails {
     pub column_number: Option<i64>,
 }
 
+impl ExceptionDetails {
+    /// Error objects carry their message and stack in `description`. Thrown
+    /// primitives (strings, booleans, null, undefined) have no description, so
+    /// append the value to `text` the way DevTools does: "Uncaught plain string".
+    pub fn message(&self) -> String {
+        let Some(exception) = &self.exception else {
+            return self.text.clone();
+        };
+        if let Some(description) = &exception.description {
+            return description.clone();
+        }
+        let value = match &exception.value {
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => v.to_string(),
+            // serde reads `"value": null` as None, so null is told apart by its subtype.
+            None if exception.subtype.as_deref() == Some("null") => "null".to_string(),
+            None if exception.object_type == "undefined" => "undefined".to_string(),
+            None => return self.text.clone(),
+        };
+        format!("{} {}", self.text, value)
+    }
+}
+
 // Runtime.consoleAPICalled
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -583,4 +606,51 @@ pub struct BrowserVersionInfo {
 #[allow(clippy::upper_case_acronyms)]
 pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/cdp_generated.rs"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExceptionDetails;
+    use serde_json::json;
+
+    // Payloads captured from Chrome 155 `Runtime.exceptionThrown` events.
+    #[test]
+    fn test_exception_details_message() {
+        let cases = [
+            (
+                json!({ "text": "Uncaught", "exception": { "type": "string", "value": "plain string" } }),
+                "Uncaught plain string",
+            ),
+            (
+                json!({ "text": "Uncaught (in promise)", "exception": { "type": "string", "value": "rejected string" } }),
+                "Uncaught (in promise) rejected string",
+            ),
+            (
+                json!({ "text": "Uncaught", "exception": { "type": "boolean", "value": true } }),
+                "Uncaught true",
+            ),
+            (
+                json!({ "text": "Uncaught", "exception": { "type": "object", "subtype": "null", "value": null } }),
+                "Uncaught null",
+            ),
+            (
+                json!({ "text": "Uncaught", "exception": { "type": "undefined" } }),
+                "Uncaught undefined",
+            ),
+            (
+                json!({ "text": "Uncaught", "exception": { "type": "number", "value": 42, "description": "42" } }),
+                "42",
+            ),
+            (
+                json!({ "text": "Uncaught", "exception": { "type": "object", "subtype": "error", "description": "Error: boom\n    at <anonymous>:1:26", "className": "Error" } }),
+                "Error: boom\n    at <anonymous>:1:26",
+            ),
+            (json!({ "text": "Script error." }), "Script error."),
+        ];
+
+        for (payload, want) in cases {
+            let details: ExceptionDetails = serde_json::from_value(payload.clone()).unwrap();
+            assert_eq!(details.message(), want, "payload: {payload}");
+        }
+    }
 }
