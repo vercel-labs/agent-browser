@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use super::daemon::session;
 use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
-use crate::native::actions::{route_url_matches, DaemonState};
+use crate::native::actions::{eval_data, route_url_matches, DaemonState};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -104,9 +104,9 @@ pub async fn evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(Value::as_str)
         .ok_or("Missing 'script' parameter")?;
     let ff = session(state)?;
-    let result = ff.eval(script).await?;
+    let (result, unserializable) = ff.eval_result(script, false).await?;
     let origin = ff.url().await.unwrap_or_default();
-    Ok(json!({ "result": result, "origin": origin }))
+    Ok(eval_data(result, origin, unserializable))
 }
 
 /// The expression Chrome polls for a `--load` state, or `None` when the state is `none`.

@@ -6741,11 +6741,20 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .clone()
         .or_else(|| (result.object_type == "undefined").then(|| "undefined".to_string()));
     let url = mgr.get_url().await.unwrap_or_default();
-    let mut data = json!({ "result": result.value.unwrap_or(Value::Null), "origin": url });
+    Ok(eval_data(
+        result.value.unwrap_or(Value::Null),
+        url,
+        unserializable,
+    ))
+}
+
+/// Builds the `evaluate` reply, carrying the JavaScript token for a value JSON cannot represent.
+pub(crate) fn eval_data(result: Value, origin: String, unserializable: Option<String>) -> Value {
+    let mut data = json!({ "result": result, "origin": origin });
     if let Some(token) = unserializable {
         data["unserializable"] = json!(token);
     }
-    Ok(data)
+    data
 }
 
 /// A user `close`: the session is over, so its stored security settings go.

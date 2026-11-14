@@ -16029,6 +16029,23 @@ async fn e2e_firefox_smoke() {
     firefox_open(&mut state, &fixture.url).await;
     assert_eq!(firefox_title(&mut state).await, "Firefox adapter probe");
     assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+    for (script, token) in [
+        ("undefined", "undefined"),
+        ("NaN", "NaN"),
+        ("Infinity", "Infinity"),
+        ("-Infinity", "-Infinity"),
+        ("-0", "-0"),
+        ("10n", "10n"),
+    ] {
+        let resp = firefox_command(
+            &mut state,
+            json!({ "id": "eval", "action": "evaluate", "script": script }),
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["result"], Value::Null, "{script}");
+        assert_eq!(get_data(&resp)["unserializable"], token, "{script}");
+    }
     firefox_eval(
         &mut state,
         "setTimeout(() => { document.body.innerHTML = '<p id=ready>Done</p>'; }, 300); 0",

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast::{self, error::TryRecvError};
 use tokio::sync::Notify;
 
-use super::bidi::{remote_to_json, BidiClient};
+use super::bidi::{remote_to_json, unserializable, BidiClient};
 use super::contexts::Contexts;
 use super::process::{check_firefox_version, find_firefox, FirefoxProcess};
 use crate::native::actions::PendingDialog;
@@ -342,15 +342,20 @@ impl FirefoxSession {
 
     /// Evaluates `expression` in the active context and returns the decoded value.
     pub async fn eval(&self, expression: &str) -> Result<Value, String> {
-        self.eval_inner(expression, false).await
+        self.eval_result(expression, false).await.map(|r| r.0)
     }
 
     /// Like `eval`, but a script exception yields `null` so callers can keep polling.
     pub async fn eval_lenient(&self, expression: &str) -> Result<Value, String> {
-        self.eval_inner(expression, true).await
+        self.eval_result(expression, true).await.map(|r| r.0)
     }
 
-    async fn eval_inner(&self, expression: &str, lenient: bool) -> Result<Value, String> {
+    /// Evaluates `expression`, also returning the JavaScript token JSON cannot carry.
+    pub async fn eval_result(
+        &self,
+        expression: &str,
+        lenient: bool,
+    ) -> Result<(Value, Option<String>), String> {
         let r = self
             .bidi
             .send(
@@ -365,7 +370,7 @@ impl FirefoxSession {
             .await?;
         if r["type"] == "exception" {
             if lenient {
-                return Ok(Value::Null);
+                return Ok((Value::Null, None));
             }
             let d = &r["exceptionDetails"];
             let msg = d["exception"]["value"]
@@ -374,7 +379,7 @@ impl FirefoxSession {
                 .unwrap_or("script exception");
             return Err(format!("Evaluation error: {msg}"));
         }
-        Ok(remote_to_json(&r["result"]))
+        Ok((remote_to_json(&r["result"]), unserializable(&r["result"])))
     }
 
     /// URL of the active context, read from the browsing context tree.
