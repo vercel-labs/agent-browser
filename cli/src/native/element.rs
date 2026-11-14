@@ -320,10 +320,169 @@ pub(super) async fn frame_owner_object_id(
         .ok_or_else(|| format!("No objectId for the owner element of frame {}", frame_id))
 }
 
+/// Execution context for JavaScript in a frame's own document. A
+/// same-process frame shares the page's CDP session, and a cross-origin
+/// frame's document is unreachable through its owner's contentDocument, so
+/// an isolated world is the only way to run selector lookups inside it.
+async fn isolated_frame_context_id(
+    client: &CdpClient,
+    session_id: &str,
+    frame_id: &str,
+) -> Result<i64, String> {
+    let result = client
+        .send_command(
+            "Page.createIsolatedWorld",
+            Some(serde_json::json!({
+                "frameId": frame_id,
+                "worldName": "agent-browser-frame",
+            })),
+            Some(session_id),
+        )
+        .await?;
+    result
+        .get("executionContextId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("Could not create an isolated world for frame {}", frame_id))
+}
+
+/// Top-level viewport origin of a frame's content box, from the frame
+/// owner's box model. Translates frame-local coordinates (from an
+/// isolated-world evaluation inside the frame) into top-level coordinates.
+/// Also returns the owner's backend node id, for a top-level hit test.
+async fn frame_owner_content_origin(
+    client: &CdpClient,
+    session_id: &str,
+    frame_id: &str,
+) -> Result<(f64, f64, i64), String> {
+    let owner = client
+        .send_command(
+            "DOM.getFrameOwner",
+            Some(serde_json::json!({ "frameId": frame_id })),
+            Some(session_id),
+        )
+        .await?;
+    let backend_node_id = owner
+        .get("backendNodeId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("Could not resolve the owner element of frame {}", frame_id))?;
+    let result: DomGetBoxModelResult = client
+        .send_command_typed(
+            "DOM.getBoxModel",
+            &DomGetBoxModelParams {
+                backend_node_id: Some(backend_node_id),
+                node_id: None,
+                object_id: None,
+            },
+            Some(session_id),
+        )
+        .await?;
+    let content = &result.model.content;
+    if content.len() >= 2 {
+        Ok((content[0], content[1], backend_node_id))
+    } else {
+        Err(format!(
+            "No content box for the owner element of frame {}",
+            frame_id
+        ))
+    }
+}
+
+/// A parent-page overlay can cover the frame after the frame-local hit test
+/// passed: the frame's document cannot see it. Re-check the click point in
+/// the top-level document, where the frame owner is the element that must be
+/// on top for the click to reach the frame. Fails open when the owner
+/// cannot be resolved.
+async fn check_frame_owner_interception(
+    client: &CdpClient,
+    session_id: &str,
+    owner_backend_node_id: i64,
+    target: &str,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let resolved: Result<DomResolveNodeResult, String> = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(owner_backend_node_id),
+                node_id: None,
+                object_group: Some("agent-browser".to_string()),
+            },
+            Some(session_id),
+        )
+        .await;
+    let Ok(resolved) = resolved else {
+        return Ok(());
+    };
+    let Some(object_id) = resolved.object.object_id else {
+        return Ok(());
+    };
+    // `this` is the frame owner element. The hit test descends from the top
+    // document through accessible frames; it stops at the owner, so a click
+    // that reaches the frame passes. An iframe it cannot descend into only
+    // blocks the click when it does not contain the target frame.
+    let function = r#"function(x, y) {
+            const describe = (node) => {
+                let desc = node.tagName.toLowerCase();
+                if (node.id) desc += '#' + node.id;
+                else if (typeof node.className === 'string' && node.className.trim())
+                    desc += '.' + node.className.trim().split(/\s+/).slice(0, 2).join('.');
+                if (!node.id && node.closest) {
+                    const anchored = node.closest('[id]');
+                    if (anchored && anchored !== node)
+                        desc += ' inside ' + anchored.tagName.toLowerCase() + '#' + anchored.id;
+                }
+                return desc;
+            };
+            let doc = document, lx = x, ly = y;
+            let hit = doc.elementFromPoint(lx, ly);
+            while (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && hit !== this) {
+                if (!hit.contentDocument) {
+                    let contains = false;
+                    for (let f = this; f; f = f.ownerDocument.defaultView?.frameElement) {
+                        if (f === hit) { contains = true; break; }
+                    }
+                    return contains ? null : describe(hit);
+                }
+                const r = hit.getBoundingClientRect();
+                lx -= r.x + hit.clientLeft;
+                ly -= r.y + hit.clientTop;
+                doc = hit.contentDocument;
+                hit = doc.elementFromPoint(lx, ly);
+            }
+            if (!hit || hit === this) return null;
+            return describe(hit);
+        }"#
+    .to_string();
+    let result = client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object_id,
+                "functionDeclaration": function,
+                "arguments": [{ "value": x }, { "value": y }],
+                "returnByValue": true,
+            })),
+            Some(session_id),
+        )
+        .await;
+    if let Ok(value) = result {
+        if let Some(blocker) = value
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+        {
+            return Err(intercepted_error(target, blocker));
+        }
+    }
+    Ok(())
+}
+
 /// Find a selector inside a same-process iframe and return its center in
 /// top-level viewport coordinates (input events dispatch in that space).
-/// Same-origin access to contentDocument is what makes this possible; a
-/// cross-origin frame never takes this path because it has its own session.
+/// The frame may be cross-origin, so the selector runs in an isolated world
+/// created for the frame and the frame-local center is translated with the
+/// frame owner's box model.
 async fn resolve_center_in_same_process_frame(
     client: &CdpClient,
     session_id: &str,
@@ -331,28 +490,26 @@ async fn resolve_center_in_same_process_frame(
     selector: &str,
     require_actionable: bool,
 ) -> Result<(f64, f64), String> {
-    let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
-    let find_expr = build_find_element_js_in("doc", selector);
-    let function = format!(
-        r#"async function() {{
-            const doc = this.contentDocument;
-            if (!doc) return null;
+    let context_id = isolated_frame_context_id(client, session_id, frame_id).await?;
+    let find_expr = build_find_element_js_in("document", selector);
+    let expression = format!(
+        r#"(async () => {{
             const el = {find_expr};
             if (!el) return null;
             const clickPoint = {CLICK_POINT_JS};
-            const point = await clickPoint(el, doc);
+            const point = await clickPoint(el, document);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            const topDoc = (point.view && point.view.document) || doc;
-            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(doc, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
-        }}"#,
+            const topDoc = (point.view && point.view.document) || document;
+            return {{ x: point.lx, y: point.ly, reason: notActionable(el, point.inView), blocker: blockerAt(document, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
+        }})()"#,
     );
     let result = client
         .send_command(
-            "Runtime.callFunctionOn",
+            "Runtime.evaluate",
             Some(serde_json::json!({
-                "objectId": owner_object_id,
-                "functionDeclaration": function,
+                "contextId": context_id,
+                "expression": expression,
                 "returnByValue": true,
                 "awaitPromise": true,
             })),
@@ -373,33 +530,47 @@ async fn resolve_center_in_same_process_frame(
     }
     let x = value.and_then(|v| v.get("x")).and_then(|v| v.as_f64());
     let y = value.and_then(|v| v.get("y")).and_then(|v| v.as_f64());
-    match (x, y) {
-        (Some(x), Some(y)) => Ok((x, y)),
-        _ => Err(format!(
-            "Element not found in the selected frame: {}",
-            selector
-        )),
-    }
+    let (x, y) = match (x, y) {
+        (Some(x), Some(y)) => (x, y),
+        _ => {
+            return Err(format!(
+                "Element not found in the selected frame: {}",
+                selector
+            ));
+        }
+    };
+    let (ox, oy, owner_backend_node_id) =
+        frame_owner_content_origin(client, session_id, frame_id).await?;
+    let (page_x, page_y) = (x + ox, y + oy);
+    check_frame_owner_interception(
+        client,
+        session_id,
+        owner_backend_node_id,
+        selector,
+        page_x,
+        page_y,
+    )
+    .await?;
+    Ok((page_x, page_y))
 }
 
 /// Find a selector inside a same-process iframe and return its object handle.
+/// The frame may be cross-origin, so the lookup runs in an isolated world
+/// created for the frame instead of through the owner's contentDocument.
 async fn resolve_object_in_same_process_frame(
     client: &CdpClient,
     session_id: &str,
     frame_id: &str,
     selector: &str,
 ) -> Result<String, String> {
-    let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
-    let find_expr = build_find_element_js_in("doc", selector);
-    let function = format!(
-        "function() {{ const doc = this.contentDocument; if (!doc) return null; return {find_expr}; }}",
-    );
+    let context_id = isolated_frame_context_id(client, session_id, frame_id).await?;
+    let find_expr = build_find_element_js_in("document", selector);
     let result = client
         .send_command(
-            "Runtime.callFunctionOn",
+            "Runtime.evaluate",
             Some(serde_json::json!({
-                "objectId": owner_object_id,
-                "functionDeclaration": function,
+                "contextId": context_id,
+                "expression": find_expr,
                 "returnByValue": false,
             })),
             Some(session_id),
@@ -431,7 +602,41 @@ pub async fn resolve_element_center(
 
         // Try cached backend_node_id first (fast path)
         if let Some(backend_node_id) = entry.backend_node_id {
-            if let Some(object_id) =
+            // A ref inside a same-process frame keeps the #2490 box-model
+            // path: its box model is already in top-level viewport space,
+            // and the hit test translates the point into the frame's own
+            // coordinates. Every other ref uses the press point, whose
+            // click-point walk cannot cross a cross-origin frame boundary.
+            if entry.frame_id.is_some() && effective_session_id == session_id {
+                scroll_node_into_view(client, effective_session_id, backend_node_id).await;
+                let result: Result<DomGetBoxModelResult, String> = client
+                    .send_command_typed(
+                        "DOM.getBoxModel",
+                        &DomGetBoxModelParams {
+                            backend_node_id: Some(backend_node_id),
+                            node_id: None,
+                            object_id: None,
+                        },
+                        Some(effective_session_id),
+                    )
+                    .await;
+
+                if let Ok(r) = result {
+                    let (x, y) = box_model_center(&r.model);
+                    check_node_interception(
+                        client,
+                        effective_session_id,
+                        backend_node_id,
+                        selector_or_ref,
+                        x,
+                        y,
+                        require_actionable,
+                        effective_session_id == session_id,
+                    )
+                    .await?;
+                    return Ok((x, y, effective_session_id.to_string()));
+                }
+            } else if let Some(object_id) =
                 resolve_node_object_id(client, effective_session_id, backend_node_id).await
             {
                 if let Some((x, y)) = node_click_point(
@@ -463,6 +668,33 @@ pub async fn resolve_element_center(
             iframe_sessions,
         )
         .await?;
+        if entry.frame_id.is_some() && effective_session_id == session_id {
+            scroll_node_into_view(client, effective_session_id, fresh_id).await;
+            let result: DomGetBoxModelResult = client
+                .send_command_typed(
+                    "DOM.getBoxModel",
+                    &DomGetBoxModelParams {
+                        backend_node_id: Some(fresh_id),
+                        node_id: None,
+                        object_id: None,
+                    },
+                    Some(effective_session_id),
+                )
+                .await?;
+            let (x, y) = box_model_center(&result.model);
+            check_node_interception(
+                client,
+                effective_session_id,
+                fresh_id,
+                selector_or_ref,
+                x,
+                y,
+                require_actionable,
+                effective_session_id == session_id,
+            )
+            .await?;
+            return Ok((x, y, effective_session_id.to_string()));
+        }
         let object_id = resolve_node_object_id(client, effective_session_id, fresh_id)
             .await
             .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
@@ -571,6 +803,116 @@ pub async fn session_viewport_offset(
         current = owner.ok_or("Cannot locate recording cursor frame owner")?;
     }
     Err("Cyclic recording cursor frame ownership".to_string())
+}
+
+/// Hit-test a ref-resolved node at its computed click point and error if an
+/// unrelated element (overlay, banner, sticky header) would receive the input
+/// instead. Best effort: resolution failures skip the check rather than block
+/// the interaction.
+///
+/// `top_level_coords` is true when the click point came from a box model in
+/// the page session's viewport space (same-process frames have no dedicated
+/// session). For a cross-origin frame in the page's process the frameElement
+/// walk stops at the frame's own document, so the point is translated into
+/// the frame's coordinates using the element's own rect before hit-testing.
+#[allow(clippy::too_many_arguments)]
+async fn check_node_interception(
+    client: &CdpClient,
+    session_id: &str,
+    backend_node_id: i64,
+    target: &str,
+    x: f64,
+    y: f64,
+    require_actionable: bool,
+    top_level_coords: bool,
+) -> Result<(), String> {
+    let resolved: Result<DomResolveNodeResult, String> = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(backend_node_id),
+                node_id: None,
+                object_group: Some("agent-browser".to_string()),
+            },
+            Some(session_id),
+        )
+        .await;
+    let Ok(resolved) = resolved else {
+        return Ok(());
+    };
+    let Some(object_id) = resolved.object.object_id else {
+        return Ok(());
+    };
+    // Box-model coordinates are in the top-level viewport space, so the
+    // hit-test starts from the top document. For an OOPIF node the
+    // frameElement walk stops at the process boundary, where the frame's own
+    // document and session-local coordinates are already consistent.
+    // A same-site cross-origin frame has no dedicated session, so its box
+    // model is also top-level while the walk still stops at the frame's
+    // document; in that case translate the point into the frame's own
+    // coordinates with the element's rect, which marks the same point.
+    let function = format!(
+        r#"function(x, y, topLevel) {{
+            let topDoc = this.ownerDocument || document;
+            while (topDoc.defaultView && topDoc.defaultView.frameElement) {{
+                topDoc = topDoc.defaultView.frameElement.ownerDocument;
+            }}
+            let doc = topDoc, px = x, py = y;
+            const win = this.ownerDocument.defaultView;
+            if (topLevel && win && win !== win.top && !win.frameElement) {{
+                const rect = this.getBoundingClientRect();
+                px = rect.x + rect.width / 2;
+                py = rect.y + rect.height / 2;
+                doc = this.ownerDocument;
+            }}
+            const blockerAt = {BLOCKER_AT_JS};
+            const notActionable = {ACTIONABILITY_JS};
+            const view = doc.defaultView;
+            const inView = !view || (px >= 0 && py >= 0 && px < view.innerWidth && py < view.innerHeight);
+            return {{ blocker: blockerAt(doc, this, px, py), reason: notActionable(this, inView) }};
+        }}"#,
+    );
+    let result = client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object_id,
+                "functionDeclaration": function,
+                "arguments": [{ "value": x }, { "value": y }, { "value": top_level_coords }],
+                "returnByValue": true,
+            })),
+            Some(session_id),
+        )
+        .await;
+    if let Ok(value) = result {
+        let value = value.get("result").and_then(|r| r.get("value"));
+        if require_actionable {
+            if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
+                return Err(not_actionable_error(target, reason));
+            }
+        }
+        if let Some(blocker) = value
+            .and_then(|v| v.get("blocker"))
+            .and_then(|v| v.as_str())
+        {
+            return Err(intercepted_error(target, blocker));
+        }
+    }
+    Ok(())
+}
+
+/// Coordinates from DOM.getBoxModel are viewport-relative, and input events
+/// only land inside the viewport, so make sure the node is visible first.
+/// Best effort: a node that cannot be scrolled (display:none, detached) will
+/// fail in DOM.getBoxModel with a clearer error anyway.
+async fn scroll_node_into_view(client: &CdpClient, session_id: &str, backend_node_id: i64) {
+    let _ = client
+        .send_command(
+            "DOM.scrollIntoViewIfNeeded",
+            Some(serde_json::json!({ "backendNodeId": backend_node_id })),
+            Some(session_id),
+        )
+        .await;
 }
 
 /// Resolve a backend node id to an object handle, or None when the node is
@@ -1107,6 +1449,17 @@ const ACTIONABILITY_JS: &str = r#"(el, inView) => {
     } catch (e) {}
     return null;
 }"#;
+
+fn box_model_center(model: &BoxModel) -> (f64, f64) {
+    // content quad: [x1,y1, x2,y2, x3,y3, x4,y4]
+    if model.content.len() >= 8 {
+        let x = (model.content[0] + model.content[2] + model.content[4] + model.content[6]) / 4.0;
+        let y = (model.content[1] + model.content[3] + model.content[5] + model.content[7]) / 4.0;
+        (x, y)
+    } else {
+        (0.0, 0.0)
+    }
+}
 
 fn build_selector_js(selector: &str) -> String {
     let find_expr = build_find_element_js(selector);
@@ -1923,6 +2276,23 @@ mod tests {
         let js = build_count_elements_js("xpath=//li");
         assert!(js.contains("document.evaluate(\"//li\", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"));
         assert!(!js.contains("querySelectorAll"));
+    }
+
+    fn test_box_model_center() {
+        let response: DomGetBoxModelResult = serde_json::from_value(serde_json::json!({
+            "model": {
+                "content": [10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
+                "padding": [9.0, 19.0, 111.0, 19.0, 111.0, 61.0, 9.0, 61.0],
+                "border": [8.0, 18.0, 112.0, 18.0, 112.0, 62.0, 8.0, 62.0],
+                "margin": [7.0, 17.0, 113.0, 17.0, 113.0, 63.0, 7.0, 63.0],
+                "width": 100.5,
+                "height": 40.25
+            }
+        }))
+        .unwrap();
+        let (x, y) = box_model_center(&response.model);
+        assert!((x - 60.0).abs() < 0.01);
+        assert!((y - 40.0).abs() < 0.01);
     }
 
     // -----------------------------------------------------------------------

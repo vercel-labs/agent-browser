@@ -1988,6 +1988,220 @@ async fn e2e_presentational_cross_origin_iframe_refs_support_fill_and_inputvalue
     server.abort();
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_same_site_cross_origin_iframe_refs_click_and_frame_selectors() {
+    // Issue #2472: a same-site cross-origin iframe (same host, different
+    // port) stays in the page's process, so it has no dedicated CDP session.
+    // Its refs must still click, and selectors must resolve after `frame`.
+    let parent_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let parent_port = parent_listener.local_addr().unwrap().port();
+    let frame_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let frame_port = frame_listener.local_addr().unwrap().port();
+
+    let parent_server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = parent_listener.accept().await {
+            let frame_port = frame_port;
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let _ = &buffer[..read];
+                let body = format!(
+                    "<!doctype html><h1>Page A</h1><div style=\"height:400px\"></div>\
+                     <iframe id=\"frame\" src=\"http://localhost:{frame_port}/frame.html\" width=\"400\" height=\"200\"></iframe>"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    let frame_server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = frame_listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let _ = &buffer[..read];
+                let body = "<!doctype html><p id=\"state\">frame idle</p>\
+                    <button id=\"inner\" onclick=\"document.getElementById('state').textContent+=' clicked'\">Inner button</button>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    let url = format!("http://localhost:{parent_port}/");
+    for (id, command) in [
+        ("1", json!({"action": "launch", "headless": true})),
+        ("2", json!({"action": "navigate", "url": url})),
+    ] {
+        let mut command = command;
+        command["id"] = json!(id);
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+
+    let snapshot = execute_command(&json!({"id": "3", "action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let refs = get_data(&snapshot)["refs"].as_object().unwrap();
+    let button_ref = refs
+        .iter()
+        .find(|(_, node)| node["role"] == "button" && node["name"] == "Inner button")
+        .map(|(reference, _)| reference.clone())
+        .expect("snapshot should list the frame's Inner button");
+
+    // Ref click: the button sits below the frame's own height on the page,
+    // so top-level coordinates fall outside the frame's 400x200 box.
+    let click = execute_command(
+        &json!({"id": "4", "action": "click", "selector": format!("@{button_ref}")}),
+        &mut state,
+    )
+    .await;
+    assert_success(&click);
+
+    // Frame-scoped selectors: `frame` selects the iframe, then the inner
+    // button and state text must resolve inside it.
+    let frame = execute_command(
+        &json!({"id": "5", "action": "frame", "selector": "#frame"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&frame);
+    let click_inner = execute_command(
+        &json!({"id": "6", "action": "click", "selector": "#inner"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&click_inner);
+    let text = execute_command(
+        &json!({"id": "7", "action": "gettext", "selector": "#state"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&text);
+    // Each click appends once, so this proves both the ref click and the
+    // frame-scoped selector click landed inside the frame.
+    assert_eq!(get_data(&text)["text"], "frame idle clicked clicked");
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    parent_server.abort();
+    frame_server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_same_origin_iframe_click_reports_parent_overlay_interception() {
+    // Vercel Agent review on #2490: for a same-origin iframe covered by a
+    // parent-page overlay, the frame-local hit test runs in the frame's own
+    // document, so it cannot see the overlay and the click silently landed
+    // on the overlay instead of reporting interception.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.contains("/frame.html") {
+                    "<!doctype html><p id=\"state\">frame idle</p>\n                     <button id=\"inner\" onclick=\"document.getElementById('state').textContent+=' clicked'\">Inner button</button>"
+                } else {
+                    "<!doctype html><h1>Page</h1>\n                     <div id=\"overlay\" style=\"position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.5)\">\n                     <button id=\"dismiss\" style=\"position:absolute;right:20px;top:20px\" onclick=\"document.getElementById('overlay').remove()\">Dismiss</button></div>\n                     <iframe id=\"frame\" src=\"/frame.html\" width=\"400\" height=\"200\"></iframe>"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    let url = format!("http://localhost:{port}/");
+    for (id, command) in [
+        (
+            "1",
+            json!({"action": "launch", "headless": true, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}),
+        ),
+        ("2", json!({"action": "navigate", "url": url})),
+    ] {
+        let mut command = command;
+        command["id"] = json!(id);
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+
+    let frame = execute_command(
+        &json!({"id": "3", "action": "frame", "selector": "#frame"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&frame);
+
+    // The overlay covers the frame, so the click must report interception
+    // instead of landing on the overlay.
+    let click = execute_command(
+        &json!({"id": "4", "action": "click", "selector": "#inner"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        click["success"], false,
+        "covered frame click should fail: {click}"
+    );
+    let error = click["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("covered by <div#overlay>"),
+        "expected overlay interception, got: {error}"
+    );
+    let text = execute_command(
+        &json!({"id": "5", "action": "gettext", "selector": "#state"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&text);
+    assert_eq!(get_data(&text)["text"], "frame idle");
+
+    // Dismiss the overlay from the top document, then the same click lands.
+    assert_success(&execute_command(&json!({"id": "6", "action": "mainframe"}), &mut state).await);
+    let dismiss = execute_command(
+        &json!({"id": "7", "action": "click", "selector": "#dismiss"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&dismiss);
+    let frame = execute_command(
+        &json!({"id": "8", "action": "frame", "selector": "#frame"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&frame);
+    let click = execute_command(
+        &json!({"id": "9", "action": "click", "selector": "#inner"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&click);
+    let text = execute_command(
+        &json!({"id": "10", "action": "gettext", "selector": "#state"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&text);
+    assert_eq!(get_data(&text)["text"], "frame idle clicked");
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    server.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
