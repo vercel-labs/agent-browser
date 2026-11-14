@@ -2622,7 +2622,7 @@ Waits for an element to appear, a timeout, or other conditions.
 Modes:
   <selector>           Wait for element to appear
   <ms>                 Wait for specified milliseconds
-  --url <pattern>      Wait for URL to match pattern
+  --url <pattern>      Wait for URL to match pattern, then for the page to finish loading (up to 3s)
   --load <state>       Wait for load state (load, domcontentloaded, networkidle)
   --fn <expression>    Wait for JavaScript expression to be truthy
   --text <text>        Wait for text to appear on page (substring match)

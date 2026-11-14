@@ -7839,12 +7839,31 @@ async fn wait_for_selector(
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
+/// How long `wait --url` keeps waiting for the page to finish loading once the URL matched.
+const URL_WAIT_LOAD_SETTLE: tokio::time::Duration = tokio::time::Duration::from_secs(3);
+
 async fn wait_for_url(mgr: &BrowserManager, pattern: &str, timeout_ms: u64) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
     loop {
         let url = mgr.get_url().await?;
         if route_url_matches(pattern, &url) {
+            // The URL changes when the navigation commits, before the new document has
+            // finished loading. Like Playwright's waitForURL, return once the page has
+            // loaded, but give up after a few seconds so a page with a stalled subresource
+            // does not turn a URL that matched into a timeout.
+            let ready_deadline = tokio::time::Instant::now() + URL_WAIT_LOAD_SETTLE;
+            while tokio::time::Instant::now() < ready_deadline {
+                match mgr
+                    .evaluate("document.readyState === 'complete'", None)
+                    .await
+                {
+                    Ok(v) if v.as_bool() == Some(false) => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await
+                    }
+                    _ => break,
+                }
+            }
             return Ok(());
         }
 
