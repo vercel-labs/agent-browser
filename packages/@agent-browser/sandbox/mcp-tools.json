@@ -329,13 +329,38 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Click an element by @ref or CSS selector.",
+      "description": "Click an element by @ref or CSS selector, optionally with another mouse button or held modifier keys.",
       "inputSchema": {
         "properties": {
+          "button": {
+            "default": "left",
+            "description": "Mouse button. Defaults to left.",
+            "enum": [
+              "left",
+              "right",
+              "middle",
+              "back",
+              "forward"
+            ],
+            "type": "string"
+          },
           "human": {
             "default": false,
             "description": "Approach the target with seeded, curved mouse movement.",
             "type": "boolean"
+          },
+          "modifiers": {
+            "description": "Modifier keys held during the click.",
+            "items": {
+              "enum": [
+                "alt",
+                "control",
+                "meta",
+                "shift"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "newTab": {
             "default": false,
@@ -750,9 +775,39 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Double-click an element.",
+      "description": "Double-click an element, optionally with another mouse button or held modifier keys.",
       "inputSchema": {
         "properties": {
+          "button": {
+            "default": "left",
+            "description": "Mouse button. Defaults to left.",
+            "enum": [
+              "left",
+              "right",
+              "middle",
+              "back",
+              "forward"
+            ],
+            "type": "string"
+          },
+          "human": {
+            "default": false,
+            "description": "Approach the target with seeded, curved mouse movement.",
+            "type": "boolean"
+          },
+          "modifiers": {
+            "description": "Modifier keys held during the click.",
+            "items": {
+              "enum": [
+                "alt",
+                "control",
+                "meta",
+                "shift"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "selector": {
             "description": "Element @ref from snapshot, or a CSS selector.",
             "type": "string"
@@ -2085,10 +2140,13 @@
         "properties": {
           "button": {
             "default": "left",
+            "description": "Mouse button. Defaults to left.",
             "enum": [
               "left",
               "right",
-              "middle"
+              "middle",
+              "back",
+              "forward"
             ],
             "type": "string"
           },
@@ -2167,10 +2225,13 @@
         "properties": {
           "button": {
             "default": "left",
+            "description": "Mouse button. Defaults to left.",
             "enum": [
               "left",
               "right",
-              "middle"
+              "middle",
+              "back",
+              "forward"
             ],
             "type": "string"
           },
