@@ -16070,6 +16070,53 @@ async fn e2e_firefox_smoke() {
         .as_str()
         .unwrap()
         .contains("Active page read marker"));
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "l", "action": "launch", "headless": true, "engine": "firefox", "initScripts": ["x.js"] }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("--init-script")),
+        "{resp}"
+    );
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(&mut state, "localStorage.setItem('visited', 'from-a')").await;
+    firefox_open(&mut state, &fixture.other).await;
+    let saved_path = super::firefox::storage::save_auto_state(
+        state.firefox.as_ref().unwrap(),
+        "firefox-smoke",
+        "autosave",
+    )
+    .await
+    .unwrap();
+    let state_data: Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
+    assert!(state_data["origins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
+    let current = firefox_command(&mut state, json!({"id": "url", "action": "url"})).await;
+    assert_eq!(
+        url::Url::parse(get_data(&current)["url"].as_str().unwrap()).unwrap(),
+        url::Url::parse(&fixture.other).unwrap()
+    );
+    let saved = firefox_command(
+        &mut state,
+        json!({ "id": "save-b", "action": "state_save", "path": saved_path }),
+    )
+    .await;
+    assert_success(&saved);
+    let state_data: Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
+    assert!(state_data["origins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
     firefox_close(&mut state).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(
