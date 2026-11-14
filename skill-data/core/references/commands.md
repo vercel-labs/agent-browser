@@ -95,6 +95,8 @@ agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
 ```
 
+`fill` on a date, time, datetime-local, month, week, color or range input sets the value directly and fires `input` and `change`; give it the control's format (`YYYY-MM-DD`, `HH:MM`, `YYYY-MM-DDTHH:MM`, `YYYY-MM`, `YYYY-Www`, `#rrggbb`, a number within min and max). A value the browser would silently drop, a disabled input and a read-only input fail with an error that says why.
+
 For `fill` and `type`, put options before the optional `--` marker. Text after the marker is literal, including values that look like flags. For example, `agent-browser fill @e2 -- --json` fills with `--json`, and `agent-browser type @e2 --clear --delay 10 -- --clear` clears the field, then types `--clear`. MCP `agent_browser_fill` and `agent_browser_type` pass typed `text` values literally, so they do not need the marker.
 
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
