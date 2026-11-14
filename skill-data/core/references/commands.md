@@ -416,6 +416,8 @@ agent-browser plugin run <name> <type> --payload <json>
 
 `auth login` filters matching controls by their layout size, computed visibility and opacity, and disabled/readonly state, including custom CSS selectors. If a selected credential field is replaced or redirects focus before entry, the command fails without submitting.
 
+For the submit control, disabled also covers `aria-disabled="true"`, an `inert` ancestor, and `pointer-events: none`. A submit that is still disabled while the form validates is waited on rather than skipped for another button, and the error says so if it never enables. Without `--submit-selector`, `auth login` tries `button[type=submit]`, then `input[type=submit]`, then a control after the password field whose `aria-label`, text, or value is Log in, Sign in, Submit, Continue, or Next, then `button:not([type])`. That labelled control can be a button, a `[role=button]`, a link that does not navigate, or a plain element with no child elements, and text inside a button counts as that button. This covers component libraries that render submit as a plain element with a click handler. Controls in other forms are never used, and when the password field is in a form, its submit buttons and labelled controls are tried before any control outside it, while untyped buttons come last. When the login fields are not inside a `<form>`, only controls after the password field are considered, outside any nav and any page-level header or footer that does not contain the password field, and links that navigate are never clicked. `auth login` reports success once submit is clicked; it does not check that the login was accepted, so verify the resulting page (for example with `get url`) when it matters.
+
 `auth login` normally navigates to the effective credential URL. `--no-navigate` requires an existing active top-level HTTP(S) page, checks that its scheme, host, and effective port match the effective credential URL, then uses the normal selector waits, fills, and submit click without replacing the document. Paths, queries, and fragments may differ, and submit-triggered navigation remains enabled. Command-level `--url` takes precedence over stored or provider metadata and becomes the expected-origin constraint in this mode.
 
 Credential provider plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and must declare `credential.read`. Use `--confirm-actions plugin:<name>:credential.read` to require explicit approval before a plugin resolves secrets.
@@ -673,6 +675,7 @@ AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init scr
 AGENT_BROWSER_HIDE_SCROLLBARS="false"        # Keep native scrollbars visible in headless Chromium screenshots
 AGENT_BROWSER_WEBGPU="1"                     # Enable the WebGPU launch preset (see references/webgpu.md)
 AGENT_BROWSER_NO_XVFB="1"                    # Disable automatic Xvfb for headed mode on displayless Linux
+AGENT_BROWSER_KEEP_SANDBOX="1"               # Keep the Chrome sandbox in containers/CI (no auto --no-sandbox)
 AGENT_BROWSER_NO_VERSION_CHECK="1"           # Skip the outdated-Chrome CVE check and its request to Google
 AGENT_BROWSER_PROVIDER="browserbase"         # Browser provider or configured provider plugin
 BROWSER_USE_API_KEY="your-api-key"           # Browser Use Cloud API key

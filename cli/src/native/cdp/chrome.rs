@@ -1724,9 +1724,16 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 
 /// Returns true if Chrome's sandbox should be disabled because the environment
 /// doesn't support it (containers, VMs, CI runners, running as root).
+/// AGENT_BROWSER_KEEP_SANDBOX=1 (or `true`) skips this auto-detection for
+/// deployments that provide a working sandbox (e.g. a container with a
+/// seccomp profile that allows user namespaces).
 fn should_disable_sandbox(existing_args: &[String]) -> bool {
     if existing_args.iter().any(|a| a == "--no-sandbox") {
         return false; // already set by user
+    }
+
+    if keep_sandbox_requested() {
+        return false;
     }
 
     // CI environments (GitHub Actions, GitLab CI, etc.) often lack user namespace
@@ -1761,6 +1768,13 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
     }
 
     false
+}
+
+/// True when AGENT_BROWSER_KEEP_SANDBOX is `1` or `true` (case-insensitive).
+fn keep_sandbox_requested() -> bool {
+    std::env::var("AGENT_BROWSER_KEEP_SANDBOX")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -2178,6 +2192,32 @@ exec sleep 60
     fn test_should_disable_sandbox_skips_if_already_set() {
         let args = vec!["--headless=new".to_string(), "--no-sandbox".to_string()];
         assert!(!should_disable_sandbox(&args));
+    }
+
+    #[test]
+    fn test_should_disable_sandbox_keep_sandbox_overrides_ci() {
+        let guard = EnvGuard::new(&["CI", "AGENT_BROWSER_KEEP_SANDBOX"]);
+        guard.set("CI", "true");
+        guard.set("AGENT_BROWSER_KEEP_SANDBOX", "1");
+        assert!(!should_disable_sandbox(&[]));
+        guard.set("AGENT_BROWSER_KEEP_SANDBOX", "TRUE");
+        assert!(!should_disable_sandbox(&[]));
+    }
+
+    #[test]
+    fn test_should_disable_sandbox_ci_without_keep_sandbox() {
+        let guard = EnvGuard::new(&["CI", "AGENT_BROWSER_KEEP_SANDBOX"]);
+        guard.set("CI", "true");
+        guard.remove("AGENT_BROWSER_KEEP_SANDBOX");
+        assert!(should_disable_sandbox(&[]));
+    }
+
+    #[test]
+    fn test_should_disable_sandbox_keep_sandbox_zero_is_off() {
+        let guard = EnvGuard::new(&["CI", "AGENT_BROWSER_KEEP_SANDBOX"]);
+        guard.set("CI", "true");
+        guard.set("AGENT_BROWSER_KEEP_SANDBOX", "0");
+        assert!(should_disable_sandbox(&[]));
     }
 
     #[test]

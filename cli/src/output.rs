@@ -3329,6 +3329,14 @@ Login behavior:
   Matches are checked for size, computed visibility/opacity, and disabled/readonly
   state, including custom selectors.
   Replaced or focus-redirected credential fields fail without submitting.
+  Submit is clicked once enabled (also not aria-disabled, inert, or
+  pointer-events: none). Without --submit-selector, auth login tries
+  button[type=submit], input[type=submit], a control after the password field
+  labelled Log in, Sign in, Submit, Continue, or Next, then button:not([type]).
+  Submit buttons and labelled controls in the password's form come first;
+  untyped buttons come last. Controls in other forms, and on formless pages
+  those in a nav or page header/footer or links that navigate, are never used.
+  Success means submit was clicked, not that the login was accepted.
   Selector wait timeout follows the default action timeout.
   Plugin credentials are resolved just-in-time and are not saved locally.
 
@@ -4787,6 +4795,7 @@ Environment:
   AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_NO_XVFB          Disable automatic Xvfb for headed mode on displayless Linux hosts
+  AGENT_BROWSER_KEEP_SANDBOX     Keep the Chrome sandbox in containers/CI/root (no auto --no-sandbox)
   AGENT_BROWSER_NO_VERSION_CHECK Skip the outdated-Chrome CVE check (it fetches chromereleases.googleblog.com)
   AGENT_BROWSER_WEBGPU           Enable WebGPU (SwiftShader software Vulkan on Linux)
   AGENT_BROWSER_JSON             JSON output
