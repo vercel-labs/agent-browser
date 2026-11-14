@@ -89,6 +89,9 @@ agent-browser check @e1           # Check checkbox
 agent-browser uncheck @e1         # Uncheck checkbox
 agent-browser select @e1 "value"  # Select by value or visible label
 agent-browser select @e1 "a" "b"  # Select multiple options
+# On a custom ARIA combobox/listbox (Radix, Headless UI), select opens it and clicks the
+# role=option whose name or value matches; no match errors with the available options,
+# and a matched aria-disabled option errors instead of being clicked.
 agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
@@ -457,7 +460,8 @@ Experimental. Browser responses announce brief tool summaries (names, short desc
 ```bash
 agent-browser webmcp list <tool> --frame <frame-id> --json   # One tool's schema
 agent-browser webmcp list --json                             # Full catalog, or recover context after compaction
-agent-browser webmcp invoke <tool> --frame <frame-id> --params '{"key":"value"}'
+agent-browser webmcp invoke <tool> --frame <frame-id> '{"key":"value"}'
+agent-browser webmcp invoke <tool> --params '{"key":"value"}'      # Same as the line above
 agent-browser webmcp invoke <tool> --params @input.json --detach
 agent-browser webmcp result <invocation-id>
 agent-browser webmcp cancel <invocation-id>
@@ -587,7 +591,7 @@ agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
 ```
 
-Firefox rejects `--cdp`, `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. Authenticated proxies work through `--proxy` with credentials.
+Firefox rejects `--cdp`, `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. Authenticated proxies work through `--proxy` with credentials. Firefox takes `http://`, `socks4://`, and `socks5://` proxies and rejects `https://` proxies instead of connecting to them without TLS.
 
 ## Debugging
 

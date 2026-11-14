@@ -198,7 +198,7 @@ async fn frame_offset(
         let parent = parent_context(&tree["contexts"], &current)?;
         let rows = ff
             .bidi
-            .call_function(&parent, FRAME_RECTS_JS, None, vec![])
+            .call_function_in_sandbox(&parent, super::bidi::SANDBOX, FRAME_RECTS_JS, vec![])
             .await
             .ok()?;
         let row = rows.as_array()?.iter().find(|r| r[0] == current.as_str())?;

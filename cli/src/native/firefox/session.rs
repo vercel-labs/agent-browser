@@ -70,14 +70,20 @@ pub struct FirefoxSession {
 }
 
 /// Builds the BiDi `proxy` capability from a `--proxy` value such as `http://host:3128`.
-fn proxy_capability(proxy: &str, bypass: Option<&str>) -> Value {
+/// The capability cannot ask for TLS to the proxy, so a scheme it cannot honour is rejected.
+pub(super) fn proxy_capability(proxy: &str, bypass: Option<&str>) -> Result<Value, String> {
     let (scheme, hostport) = proxy.split_once("://").unwrap_or(("http", proxy));
-    let mut cap = match scheme {
+    let mut cap = match scheme.to_ascii_lowercase().as_str() {
+        "http" => json!({"proxyType": "manual", "httpProxy": hostport, "sslProxy": hostport}),
         "socks5" | "socks5h" | "socks" => {
             json!({"proxyType": "manual", "socksProxy": hostport, "socksVersion": 5})
         }
         "socks4" => json!({"proxyType": "manual", "socksProxy": hostport, "socksVersion": 4}),
-        _ => json!({"proxyType": "manual", "httpProxy": hostport, "sslProxy": hostport}),
+        other => {
+            return Err(format!(
+                "{other}:// proxy is not supported with --engine firefox; use http://, socks4://, or socks5://"
+            ))
+        }
     };
     let no_proxy: Vec<&str> = bypass
         .unwrap_or("")
@@ -88,7 +94,7 @@ fn proxy_capability(proxy: &str, bypass: Option<&str>) -> Value {
     if !no_proxy.is_empty() {
         cap["noProxy"] = json!(no_proxy);
     }
-    cap
+    Ok(cap)
 }
 
 async fn connect_devtools(endpoint: &DevtoolsEndpoint) -> Result<RdpClient, String> {
@@ -154,7 +160,7 @@ impl FirefoxSession {
             "unhandledPromptBehavior": {"default": "ignore"},
         });
         if let Some(proxy) = options.proxy.as_deref() {
-            caps["proxy"] = proxy_capability(proxy, options.proxy_bypass.as_deref());
+            caps["proxy"] = proxy_capability(proxy, options.proxy_bypass.as_deref())?;
         }
         let created = bidi
             .send(
@@ -952,11 +958,11 @@ pub(crate) mod tests {
 
     #[test]
     fn proxy_capability_maps_http_and_socks() {
-        let http = proxy_capability("http://proxy:3128", Some("a.com, b.com"));
+        let http = proxy_capability("http://proxy:3128", Some("a.com, b.com")).unwrap();
         assert_eq!(http["httpProxy"], "proxy:3128");
         assert_eq!(http["sslProxy"], "proxy:3128");
         assert_eq!(http["noProxy"], json!(["a.com", "b.com"]));
-        let socks = proxy_capability("socks5://proxy:1080", None);
+        let socks = proxy_capability("socks5://proxy:1080", None).unwrap();
         assert_eq!(socks["socksProxy"], "proxy:1080");
         assert_eq!(socks["socksVersion"], 5);
         assert!(socks.get("noProxy").is_none());
