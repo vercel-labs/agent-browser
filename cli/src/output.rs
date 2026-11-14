@@ -2388,6 +2388,12 @@ Usage: agent-browser select <selector> <value...>
 Selects one or more options in a <select> dropdown by value or visible label.
 Label matching normalizes whitespace such as non-breaking spaces.
 
+On a custom ARIA widget (role=combobox or role=listbox, as in Radix or Headless UI),
+select opens it when collapsed, waits for the visible role=option items, and clicks
+the ones whose accessible name or value matches. If none match, the error lists the
+available options, and a matched option marked aria-disabled is an error instead of
+a click. An option that is already selected in a multi-select listbox is left alone.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
