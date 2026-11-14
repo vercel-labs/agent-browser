@@ -7132,7 +7132,12 @@ async fn handle_click(
                     wb.click(selector).await?;
                     return Ok(json!({ "clicked": selector }));
                 }
-                _ => return Err("This backend only supports a plain left click".to_string()),
+                _ => {
+                    return Err(
+                        "The Safari and iOS backends only support a plain left click; --button, --modifiers, and dblclick need a Chrome session"
+                            .to_string(),
+                    )
+                }
             }
         }
     }
