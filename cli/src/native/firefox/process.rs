@@ -106,6 +106,9 @@ pub fn validate_launch(options: &LaunchOptions, flags: LaunchFlags<'_>) -> Resul
     if options.proxy_username.is_some() || options.proxy_password.is_some() {
         return unsupported("authenticated proxy");
     }
+    if let Some(proxy) = options.proxy.as_deref() {
+        super::session::proxy_capability(proxy, None)?;
+    }
     if options.user_agent.is_some() {
         return unsupported("--user-agent");
     }
@@ -443,6 +446,9 @@ mod tests {
         let mut o = ok();
         o.proxy_username = Some("user".into());
         assert!(err_of(&o).contains("authenticated proxy"));
+        let mut o = ok();
+        o.proxy = Some("https://proxy:443".into());
+        assert!(err_of(&o).contains("https:// proxy is not supported"));
         let mut o = ok();
         o.user_agent = Some("custom".into());
         assert!(err_of(&o).contains("--user-agent"));
