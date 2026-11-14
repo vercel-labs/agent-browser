@@ -70,6 +70,7 @@ function CopyPromptButton({
   showAgentIcons: boolean;
 }) {
   const [status, setStatus] = useState<'idle' | 'copied' | 'error'>('idle');
+  const [settled, setSettled] = useState(0);
   const attempt = useRef(0);
   useEffect(
     () => () => {
@@ -81,16 +82,19 @@ function CopyPromptButton({
     if (status === 'idle') return;
     const timer = setTimeout(() => setStatus('idle'), 2000);
     return () => clearTimeout(timer);
-  }, [status]);
+  }, [status, settled]);
 
   async function copy() {
     const current = ++attempt.current;
+    let next: 'copied' | 'error' = 'copied';
     try {
       await navigator.clipboard.writeText(prompt);
-      if (current === attempt.current) setStatus('copied');
     } catch {
-      if (current === attempt.current) setStatus('error');
+      next = 'error';
     }
+    if (current !== attempt.current) return;
+    setStatus(next);
+    setSettled((n) => n + 1);
   }
 
   const visibleLabel =
