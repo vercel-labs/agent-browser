@@ -100,3 +100,7 @@ Not every launch option applies to Firefox. These are rejected when combined wit
 ## Security
 
 The daemon enables Firefox's DevTools server only for its owned profile; it listens on a private Unix socket inside a `0700` directory on macOS/Linux and on a random loopback port on Windows.
+
+## When to Use Firefox
+
+Use the Firefox engine when you need to test against Firefox rendering, JavaScript, or accessibility behavior with the same CLI and refs you use for Chrome. Use Chrome when you need Chrome-only commands, Chrome extensions, persistent profiles, or the exact Chrome fingerprint.
