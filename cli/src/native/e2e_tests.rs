@@ -16554,7 +16554,7 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
     );
 }
 
-/// A cookie set without a path is stored at `/`, so it stays visible site-wide; an explicit path stays scoped.
+/// A cookie set without a path uses the source URL's default path, so it stays scoped to that directory; an explicit path stays scoped.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_cookie_default_path() {
@@ -16572,13 +16572,13 @@ async fn e2e_firefox_cookie_default_path() {
     )
     .await;
     assert_success(&resp);
-    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    firefox_open(&mut state, &format!("{}app/two", fixture.url)).await;
     assert!(
         firefox_eval(&mut state, "document.cookie")
             .await
             .as_str()
             .is_some_and(|cookies| cookies.contains("default_path=1")),
-        "a cookie set without a path must be visible outside the page directory"
+        "a cookie set without a path must be visible under the page directory"
     );
 
     let resp = firefox_command(
@@ -16609,7 +16609,7 @@ async fn e2e_firefox_cookie_default_path() {
 
     let cookies =
         firefox_cookies_get(&mut state, Some(json!([format!("{}foobar", fixture.url)]))).await;
-    assert!(has_cookie(&cookies, "default_path"));
+    assert!(!has_cookie(&cookies, "default_path"));
     assert!(!has_cookie(&cookies, "path_boundary"));
     assert!(!has_cookie(&cookies, "secure_cookie"));
 
