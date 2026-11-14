@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast::{self, error::TryRecvError};
 use tokio::sync::Notify;
 
-use super::bidi::{remote_to_json, BidiClient};
+use super::bidi::{remote_to_json, unserializable, BidiClient};
 use super::contexts::{Contexts, Removed};
 use super::process::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
 use super::rdp::RdpClient;
@@ -436,17 +436,30 @@ impl FirefoxSession {
     pub async fn eval(&self, expression: &str) -> Result<Value, String> {
         self.eval_in_context(expression, self.contexts.active(), false)
             .await
+            .map(|result| result.0)
     }
 
     /// Evaluates `expression` in the active top-level tab and returns the decoded value.
     pub async fn eval_top(&self, expression: &str) -> Result<Value, String> {
         self.eval_in_context(expression, self.contexts.active_tab(), false)
             .await
+            .map(|result| result.0)
     }
 
     /// Like `eval`, but a script exception yields `null` so callers can keep polling.
     pub async fn eval_lenient(&self, expression: &str) -> Result<Value, String> {
         self.eval_in_context(expression, self.contexts.active(), true)
+            .await
+            .map(|result| result.0)
+    }
+
+    /// Evaluates `expression`, also returning the JavaScript token JSON cannot carry.
+    pub async fn eval_result(
+        &self,
+        expression: &str,
+        lenient: bool,
+    ) -> Result<(Value, Option<String>), String> {
+        self.eval_in_context(expression, self.contexts.active(), lenient)
             .await
     }
 
@@ -455,7 +468,7 @@ impl FirefoxSession {
         expression: &str,
         context: &str,
         lenient: bool,
-    ) -> Result<Value, String> {
+    ) -> Result<(Value, Option<String>), String> {
         let r = self
             .bidi
             .send(
@@ -470,7 +483,7 @@ impl FirefoxSession {
             .await?;
         if r["type"] == "exception" {
             if lenient {
-                return Ok(Value::Null);
+                return Ok((Value::Null, None));
             }
             let d = &r["exceptionDetails"];
             let msg = d["exception"]["value"]
@@ -479,7 +492,7 @@ impl FirefoxSession {
                 .unwrap_or("script exception");
             return Err(format!("Evaluation error: {msg}"));
         }
-        Ok(remote_to_json(&r["result"]))
+        Ok((remote_to_json(&r["result"]), unserializable(&r["result"])))
     }
 
     /// URL of the active top-level tab, read from the browsing context tree.
@@ -831,7 +844,10 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn race_prompt_waits_for_auto_alert_but_returns_for_manual_confirm() {
-        let (session, events, _) = fake_session().await;
+        let (mut session, events, _) = fake_session().await;
+        session
+            .contexts
+            .record(&json!({"context": "frame-parent", "parent": "ctx-active"}));
         session.auto_dialog.store(true, Ordering::Release);
         let waiting =
             session.race_prompt("ctx-active", std::future::pending::<Result<(), String>>());
@@ -863,27 +879,21 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap()
             .is_none());
-    }
 
-    #[tokio::test]
-    async fn race_prompt_returns_none_when_a_prompt_opens_on_the_active_context() {
-        let (mut s, tx, _) = fake_session().await;
-        s.contexts
-            .record(&json!({"context": "frame-parent", "parent": "ctx-active"}));
-        let hang = std::future::pending::<Result<(), String>>();
-        let racer = s.race_prompt("ctx-active", hang);
+        session.auto_dialog.store(false, Ordering::Release);
+        let racer = session.race_prompt("ctx-active", std::future::pending::<Result<(), String>>());
         tokio::pin!(racer);
         assert!(tokio::time::timeout(Duration::from_millis(50), &mut racer)
             .await
             .is_err());
         let background = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"other"}});
-        tx.send(background).unwrap();
+        events.send(background).unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(100), &mut racer)
             .await
             .is_err());
-        tx.send(json!({"type":"event","method":"browsingContext.contextCreated","params":{"context":"frame-child","parent":"frame-parent"}})).unwrap();
+        events.send(json!({"type":"event","method":"browsingContext.contextCreated","params":{"context":"frame-child","parent":"frame-parent"}})).unwrap();
         let ours = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"frame-child"}});
-        tx.send(ours).unwrap();
+        events.send(ours).unwrap();
         assert!(racer.await.unwrap().is_none());
     }
 }

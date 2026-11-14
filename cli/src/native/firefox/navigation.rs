@@ -51,13 +51,6 @@ pub struct Landing {
     pub prompt: bool,
 }
 
-impl Landing {
-    /// The message Firefox shows when the tab landed on a network error page.
-    pub fn failure(&self) -> Option<String> {
-        neterror_message(&self.url)
-    }
-}
-
 /// Loads the active tab, dropping refs and frame scope first, and records the origin it reached.
 /// Fails with the load's name when Firefox rejects it.
 pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, String> {
@@ -122,7 +115,7 @@ fn landed_url(result: &Value, current: Result<String, String>, requested: &str) 
 }
 
 /// Turns an `about:neterror?e=...&d=...` URL into the message Firefox shows for the failure.
-fn neterror_message(url: &str) -> Option<String> {
+pub(super) fn neterror_message(url: &str) -> Option<String> {
     if !url.starts_with("about:neterror") {
         return None;
     }
@@ -225,7 +218,7 @@ mod tests {
         assert_eq!(landing.context, "ctx-active");
         assert_eq!(landing.url, "https://landed.example/page");
         assert!(!landing.prompt);
-        assert!(landing.failure().is_none());
+        assert!(neterror_message(&landing.url).is_none());
         assert!(state.active_frame_id.is_none());
         assert!(state.firefox.as_ref().unwrap().refs.is_empty());
         assert!(state

@@ -1239,46 +1239,39 @@ async fn obscura_command(state: &mut DaemonState, command: Value) -> Value {
     .expect("Obscura command must not hang")
 }
 
+const ENGINE_TEST_ENV_KEYS: [&str; 15] = [
+    "AGENT_BROWSER_CDP",
+    "AGENT_BROWSER_AUTO_CONNECT",
+    "AGENT_BROWSER_PROVIDER",
+    "AGENT_BROWSER_ENGINE",
+    "AGENT_BROWSER_EXECUTABLE_PATH",
+    "AGENT_BROWSER_PROXY",
+    "AGENT_BROWSER_PROXY_BYPASS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
 fn obscura_test_environment() -> EnvGuard<'static> {
-    let env = EnvGuard::new(&[
-        "AGENT_BROWSER_CDP",
-        "AGENT_BROWSER_AUTO_CONNECT",
-        "AGENT_BROWSER_PROVIDER",
-        "AGENT_BROWSER_ENGINE",
-        "AGENT_BROWSER_EXECUTABLE_PATH",
-        "OBSCURA_ALLOW_PRIVATE_NETWORK",
-        "AGENT_BROWSER_OBSCURA_STEALTH",
-        "AGENT_BROWSER_PROXY",
-        "AGENT_BROWSER_PROXY_BYPASS",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-    ]);
-    for key in [
-        "AGENT_BROWSER_CDP",
-        "AGENT_BROWSER_AUTO_CONNECT",
-        "AGENT_BROWSER_PROVIDER",
-        "AGENT_BROWSER_ENGINE",
-        "AGENT_BROWSER_EXECUTABLE_PATH",
-        "AGENT_BROWSER_OBSCURA_STEALTH",
-        "AGENT_BROWSER_PROXY",
-        "AGENT_BROWSER_PROXY_BYPASS",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-    ] {
+    let env = EnvGuard::new(
+        &[
+            &ENGINE_TEST_ENV_KEYS[..],
+            &[
+                "OBSCURA_ALLOW_PRIVATE_NETWORK",
+                "AGENT_BROWSER_OBSCURA_STEALTH",
+            ],
+        ]
+        .concat(),
+    );
+    for key in ENGINE_TEST_ENV_KEYS {
         env.remove(key);
     }
+    env.remove("AGENT_BROWSER_OBSCURA_STEALTH");
     env.set("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     env
 }
@@ -15822,24 +15815,10 @@ fn required_firefox_binary() -> String {
     path
 }
 
-type FirefoxHits = Arc<Mutex<Vec<String>>>;
-
 struct FirefoxFixture {
     url: String,
     other: String,
-    hits: FirefoxHits,
     servers: Vec<tokio::task::JoinHandle<()>>,
-}
-
-impl FirefoxFixture {
-    fn hit_count(&self, needle: &str) -> usize {
-        self.hits
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|hit| hit.contains(needle))
-            .count()
-    }
 }
 
 impl Drop for FirefoxFixture {
@@ -15850,12 +15829,7 @@ impl Drop for FirefoxFixture {
     }
 }
 
-fn firefox_serve(
-    listener: tokio::net::TcpListener,
-    other: String,
-    hits: FirefoxHits,
-) -> tokio::task::JoinHandle<()> {
-    let port = listener.local_addr().unwrap().port();
+fn firefox_serve(listener: tokio::net::TcpListener, other: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -15863,7 +15837,6 @@ fn firefox_serve(
             let n = stream.read(&mut request).await.unwrap_or(0);
             let head = String::from_utf8_lossy(&request[..n]);
             let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
-            hits.lock().unwrap().push(format!("{port}{path}"));
             let (content_type, extra, body) = match path.as_str() {
                 "/" => (
                     "text/html; charset=utf-8",
@@ -15913,15 +15886,13 @@ async fn firefox_fixture() -> FirefoxFixture {
     let side = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://localhost:{}/", main.local_addr().unwrap().port());
     let other = format!("http://127.0.0.1:{}", side.local_addr().unwrap().port());
-    let hits: FirefoxHits = Arc::default();
     let servers = vec![
-        firefox_serve(main, other.clone(), hits.clone()),
-        firefox_serve(side, other.clone(), hits.clone()),
+        firefox_serve(main, other.clone()),
+        firefox_serve(side, other.clone()),
     ];
     FirefoxFixture {
         url,
         other,
-        hits,
         servers,
     }
 }
@@ -15952,31 +15923,14 @@ fn has_cookie(cookies: &Value, name: &str) -> bool {
 }
 
 fn firefox_test_environment(tmp: &std::path::Path) -> EnvGuard<'static> {
-    const KEYS: [&str; 15] = [
-        "AGENT_BROWSER_CDP",
-        "AGENT_BROWSER_AUTO_CONNECT",
-        "AGENT_BROWSER_PROVIDER",
-        "AGENT_BROWSER_ENGINE",
-        "AGENT_BROWSER_EXECUTABLE_PATH",
-        "AGENT_BROWSER_PROXY",
-        "AGENT_BROWSER_PROXY_BYPASS",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-    ];
     let env = EnvGuard::new(
         &[
-            &KEYS[..],
+            &ENGINE_TEST_ENV_KEYS[..],
             &["TMPDIR", "HOME", "AGENT_BROWSER_ENCRYPTION_KEY"],
         ]
         .concat(),
     );
-    for key in KEYS {
+    for key in ENGINE_TEST_ENV_KEYS {
         env.remove(key);
     }
     env.set("TMPDIR", tmp.to_str().unwrap());
@@ -16828,14 +16782,23 @@ async fn e2e_firefox_smoke() {
     firefox_open(&mut state, &fixture.url).await;
     assert_eq!(firefox_title(&mut state).await, "Firefox adapter probe");
     assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
-    let resp = firefox_command(&mut state, json!({ "id": "t", "action": "trace_start" })).await;
-    assert_eq!(resp["success"], false, "{resp}");
-    assert!(
-        resp["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("Chrome")),
-        "{resp}"
-    );
+    for (script, token) in [
+        ("undefined", "undefined"),
+        ("NaN", "NaN"),
+        ("Infinity", "Infinity"),
+        ("-Infinity", "-Infinity"),
+        ("-0", "-0"),
+        ("10n", "10n"),
+    ] {
+        let resp = firefox_command(
+            &mut state,
+            json!({ "id": "eval", "action": "evaluate", "script": script }),
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["result"], Value::Null, "{script}");
+        assert_eq!(get_data(&resp)["unserializable"], token, "{script}");
+    }
     firefox_eval(
         &mut state,
         "setTimeout(() => { document.body.innerHTML = '<p id=ready>Done</p>'; }, 300); 0",
@@ -16847,6 +16810,19 @@ async fn e2e_firefox_smoke() {
     )
     .await;
     assert_success(&resp);
+    firefox_eval(
+        &mut state,
+        "document.body.innerHTML = '<h1>Active page read marker</h1>'",
+    )
+    .await;
+    let resp = firefox_command(&mut state, json!({ "id": "read", "action": "read" })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["finalUrl"], fixture.url);
+    assert_eq!(get_data(&resp)["source"], "active-tab-html");
+    assert!(get_data(&resp)["content"]
+        .as_str()
+        .unwrap()
+        .contains("Active page read marker"));
     let resp = firefox_command(
         &mut state,
         json!({ "id": "l", "action": "launch", "headless": true, "engine": "firefox", "initScripts": ["x.js"] }),
@@ -18137,7 +18113,7 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
     );
 }
 
-/// A cookie set without a path is stored at `/`, so it stays visible site-wide; an explicit path stays scoped.
+/// A cookie set without a path uses the source URL's default path, so it stays scoped to that directory; an explicit path stays scoped.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_cookie_default_path() {
@@ -18155,13 +18131,13 @@ async fn e2e_firefox_cookie_default_path() {
     )
     .await;
     assert_success(&resp);
-    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    firefox_open(&mut state, &format!("{}app/two", fixture.url)).await;
     assert!(
         firefox_eval(&mut state, "document.cookie")
             .await
             .as_str()
             .is_some_and(|cookies| cookies.contains("default_path=1")),
-        "a cookie set without a path must be visible outside the page directory"
+        "a cookie set without a path must be visible under the page directory"
     );
 
     let resp = firefox_command(
@@ -18192,7 +18168,7 @@ async fn e2e_firefox_cookie_default_path() {
 
     let cookies =
         firefox_cookies_get(&mut state, Some(json!([format!("{}foobar", fixture.url)]))).await;
-    assert!(has_cookie(&cookies, "default_path"));
+    assert!(!has_cookie(&cookies, "default_path"));
     assert!(!has_cookie(&cookies, "path_boundary"));
     assert!(!has_cookie(&cookies, "secure_cookie"));
 
