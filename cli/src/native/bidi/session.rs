@@ -477,12 +477,6 @@ impl FirefoxSession {
         self.process.is_none()
     }
 
-    /// Whether downloaded files land on this machine, which only a browser this
-    /// session launched guarantees.
-    pub fn downloads_are_local(&self) -> bool {
-        self.process.is_some()
-    }
-
     /// Whether the default idle timeout must leave this browser running: the daemon
     /// never stops a headed browser or one it does not own on a timer.
     pub fn blocks_default_idle_shutdown(&self) -> bool {

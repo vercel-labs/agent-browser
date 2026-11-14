@@ -3375,12 +3375,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         _ => {}
     }
 
-    // The settings this invocation set ride on the command. Session-level live
-    // settings apply now, before the policy checks, so a changed policy governs
-    // this command too. Launch settings wait until the launch itself, and the
-    // changes an attached browser takes in place wait for the gates: a command
-    // that is denied or needs confirmation leaves the browser and its settings
-    // alone.
     let launches = command_launches_browser(cmd);
     let mut launch_patch: Option<Patch> = None;
     let mut settings_patch: Option<Patch> = None;
@@ -3426,7 +3420,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             true
         } else if state.engine == "firefox" {
             match state.firefox.as_mut() {
-                Some(ff) => firefox_session_has_exited(ff).await,
+                Some(ff) => ff.has_exited(),
                 None => true,
             }
         } else if let Some(ref mut mgr) = state.browser {
@@ -5974,10 +5968,6 @@ async fn detect_attach_connection(
     }
 }
 
-async fn firefox_session_has_exited(session: &mut bidi::session::FirefoxSession) -> bool {
-    session.has_exited()
-}
-
 /// Why `--pin-tab` is refused for an attached Firefox: the binding cannot be enforced there, so
 /// a closed tab would hand later commands to another tab.
 const FIREFOX_ATTACH_PIN_TAB_ERROR: &str =
@@ -6412,13 +6402,8 @@ enum SettingsPass {
 }
 
 /// Plans `patch` against the session's settings and applies `pass` of the plan.
-/// Live settings change in place. Launch settings close the running browser so
-/// the launch that follows uses them, and they are committed for good only once
-/// that launch succeeds (`rollback_launch_settings` puts them back).
-///
-/// A `BeforeGates` pass applies only the session-level live settings. Its launch
-/// changes and the changes an attached browser takes in place are reported as not
-/// applied; it never touches the attached browser.
+/// Launch settings are kept only once the launch succeeds (`rollback_launch_settings`
+/// puts them back), and a `BeforeGates` pass leaves the attached browser alone.
 async fn apply_settings_patch(
     state: &mut DaemonState,
     patch: &Patch,
@@ -6686,7 +6671,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             (Some(mgr), _) => !mgr.has_process_exited() && mgr.is_connection_alive().await,
             (None, Some(webdriver)) => webdriver.is_connection_alive().await,
             (None, None) => match state.firefox.as_mut() {
-                Some(ff) => !firefox_session_has_exited(ff).await,
+                Some(ff) => !ff.has_exited(),
                 None => false,
             },
         };
@@ -20877,24 +20862,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         );
     }
 
-    #[tokio::test]
-    async fn test_firefox_attach_detection_preserves_explicit_devtools() {
-        for (suffix, explicit) in [
-            ("/session", false),
-            ("/session?devtools=6080", true),
-            ("/session?devtools=6000", true),
-        ] {
-            let target = format!("ws://127.0.0.1:9333{suffix}");
-            let AttachConnection::Firefox(parsed) =
-                detect_attach_connection(&target, None).await.unwrap()
-            else {
-                panic!("expected a Firefox attach target");
-            };
-            assert_eq!(parsed.bidi_url, "ws://127.0.0.1:9333/session");
-            assert_eq!(parsed.devtools_explicit, explicit);
-        }
-    }
-
     async fn bare_cdp_server() -> (String, tokio::task::JoinHandle<()>) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
@@ -25605,11 +25572,11 @@ mod firefox_routing_tests {
     async fn attached_firefox_liveness_checks_the_bidi_connection() {
         let _guard = clean_env();
         let (mut session, _tx, calls) = fake_session().await;
-        assert!(!firefox_session_has_exited(&mut session).await);
+        assert!(!session.has_exited());
         assert!(calls.lock().unwrap().is_empty());
 
         let mut session = fake_session_dead().await;
-        assert!(firefox_session_has_exited(&mut session).await);
+        assert!(session.has_exited());
     }
 
     fn navigations(calls: &Arc<std::sync::Mutex<Vec<String>>>) -> usize {

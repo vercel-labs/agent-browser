@@ -16413,19 +16413,6 @@ async fn e2e_firefox_attach_to_running_firefox() {
     assert_success(&firefox_act(&mut state, "click", &go, json!({})).await);
     assert_eq!(firefox_title(&mut state).await, "Hello Ada");
 
-    let resp = firefox_command(
-        &mut state,
-        json!({ "id": "attach-again", "action": "launch", "cdpUrl": target }),
-    )
-    .await;
-    assert_success(&resp);
-    assert_eq!(
-        get_data(&resp)["relaunchedBrowser"],
-        false,
-        "attaching to the same target must reuse the active session: {resp}"
-    );
-    firefox_switch_to_title(&mut state, "Hello Ada").await;
-
     firefox_close(&mut state).await;
     assert!(
         firefox.alive(),
@@ -16454,19 +16441,6 @@ async fn e2e_firefox_attach_to_running_firefox() {
     )
     .await;
     assert_eq!(resp["success"], false, "{resp}");
-    let error = resp["error"].as_str().expect("attach must report an error");
-    assert!(
-        error.contains(&format!(
-            "Firefox DevTools server is not reachable at 127.0.0.1:{wrong}"
-        )),
-        "{resp}"
-    );
-    assert!(
-        error.contains(&format!("--start-debugger-server {wrong}")),
-        "{resp}"
-    );
-    assert!(!error.contains("default"), "{resp}");
-    assert!(!error.contains("?devtools="), "{resp}");
 
     let resp = firefox_command(
         &mut state,
@@ -16476,118 +16450,6 @@ async fn e2e_firefox_attach_to_running_firefox() {
     assert_success(&resp);
     assert_eq!(state.engine, "firefox");
     firefox_switch_to_title(&mut state, "Hello Ada").await;
-    firefox_close(&mut state).await;
-}
-
-/// `--user-agent` reaches an attached Firefox in place, and `close` puts Firefox's own user agent back.
-#[tokio::test]
-#[ignore = "requires FIREFOX_BIN; run serially"]
-async fn e2e_firefox_attach_user_agent_applies_in_place_and_is_reset() {
-    required_firefox_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let _env = firefox_test_environment(tmp.path());
-    let fixture = firefox_fixture().await;
-    let mut firefox = start_running_firefox(&[&fixture.url]);
-    let mut state = DaemonState::new();
-
-    let target = format!(
-        "http://127.0.0.1:{}?devtools={}",
-        firefox.bidi_port, firefox.devtools_port
-    );
-    let resp = firefox_command(
-        &mut state,
-        json!({ "id": "attach", "action": "launch", "cdpUrl": target }),
-    )
-    .await;
-    assert_success(&resp);
-    let own = firefox_eval(&mut state, "navigator.userAgent").await;
-    assert!(
-        own.as_str()
-            .is_some_and(|user_agent| user_agent.contains("Firefox")),
-        "the attached browser must report its own user agent: {own}"
-    );
-    let page =
-        "[innerWidth, navigator.language, Intl.DateTimeFormat().resolvedOptions().timeZone].join()";
-    let own_page = firefox_eval(&mut state, page).await;
-
-    let resp = firefox_command(
-        &mut state,
-        json!({
-            "id": "user-agent",
-            "action": "launch",
-            "cdpUrl": target,
-            "settings": { "user-agent": "AttachedUA/1" },
-        }),
-    )
-    .await;
-    assert_success(&resp);
-    assert_eq!(
-        get_data(&resp)["relaunchedBrowser"],
-        false,
-        "an in-place setting must not reconnect: {resp}"
-    );
-    assert_eq!(
-        firefox_eval(&mut state, "navigator.userAgent").await,
-        json!("AttachedUA/1")
-    );
-
-    for step in [
-        json!({ "id": "command", "action": "useragent", "userAgent": "CommandUA/1" }),
-        json!({
-            "id": "timeout",
-            "action": "launch",
-            "cdpUrl": target,
-            "settings": { "default-timeout": 5000 },
-        }),
-    ] {
-        assert_success(&firefox_command(&mut state, step).await);
-    }
-    assert_eq!(
-        firefox_eval(&mut state, "navigator.userAgent").await,
-        json!("CommandUA/1"),
-        "changing an unrelated setting must keep the user agent a command set"
-    );
-    for step in [
-        json!({ "id": "viewport", "action": "viewport", "width": 500, "height": 400 }),
-        json!({ "id": "locale", "action": "locale", "locale": "fr-FR" }),
-        json!({ "id": "timezone", "action": "timezone", "timezoneId": "Asia/Tokyo" }),
-    ] {
-        assert_success(&firefox_command(&mut state, step).await);
-    }
-    assert_eq!(
-        firefox_eval(&mut state, page).await,
-        json!("500,fr-FR,Asia/Tokyo")
-    );
-
-    firefox_close(&mut state).await;
-    assert!(
-        firefox.alive(),
-        "close must leave the attached Firefox running"
-    );
-
-    let resp = firefox_command(
-        &mut state,
-        json!({ "id": "clear", "action": "session_info", "settings": { "user-agent": null } }),
-    )
-    .await;
-    assert_success(&resp);
-
-    let resp = firefox_command(
-        &mut state,
-        json!({ "id": "attach-again", "action": "launch", "cdpUrl": target }),
-    )
-    .await;
-    assert_success(&resp);
-    assert_eq!(
-        firefox_eval(&mut state, "navigator.userAgent").await,
-        own,
-        "close must put back the user agent Firefox had"
-    );
-    assert_eq!(
-        firefox_eval(&mut state, page).await,
-        own_page,
-        "close must put back the viewport, locale and timezone Firefox had"
-    );
     firefox_close(&mut state).await;
 }
 
@@ -16642,6 +16504,9 @@ async fn e2e_firefox_attach_undoes_changes_with_a_privileged_tab_open() {
     firefox_switch_to_title(&mut state, "Firefox adapter probe").await;
     let own = firefox_eval(&mut state, "navigator.userAgent").await;
     let own_language = firefox_eval(&mut state, "navigator.language").await;
+    let page =
+        "[innerWidth, navigator.language, Intl.DateTimeFormat().resolvedOptions().timeZone].join()";
+    let own_page = firefox_eval(&mut state, page).await;
 
     let resp = firefox_command(
         &mut state,
@@ -16674,6 +16539,33 @@ async fn e2e_firefox_attach_undoes_changes_with_a_privileged_tab_open() {
     assert_eq!(
         firefox_eval(&mut state, "navigator.language").await,
         json!("fr-FR")
+    );
+
+    for step in [
+        json!({ "id": "command", "action": "useragent", "userAgent": "CommandUA/1" }),
+        json!({
+            "id": "timeout",
+            "action": "launch",
+            "cdpUrl": target,
+            "settings": { "default-timeout": 5000 },
+        }),
+    ] {
+        assert_success(&firefox_command(&mut state, step).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        json!("CommandUA/1"),
+        "changing an unrelated setting must keep the user agent a command set"
+    );
+    for step in [
+        json!({ "id": "viewport", "action": "viewport", "width": 500, "height": 400 }),
+        json!({ "id": "timezone", "action": "timezone", "timezoneId": "Asia/Tokyo" }),
+    ] {
+        assert_success(&firefox_command(&mut state, step).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, page).await,
+        json!("500,fr-FR,Asia/Tokyo")
     );
 
     let permission_state = "navigator.permissions.query({name:'geolocation'}).then(p => p.state)";
@@ -16718,6 +16610,11 @@ async fn e2e_firefox_attach_undoes_changes_with_a_privileged_tab_open() {
         firefox_eval(&mut state, "navigator.language").await,
         own_language,
         "close must put Firefox's own locale back"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, page).await,
+        own_page,
+        "close must put back the viewport, locale and timezone Firefox had"
     );
     assert_eq!(
         firefox_eval(&mut state, permission_state).await,

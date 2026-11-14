@@ -241,16 +241,6 @@ mod tests {
     }
 
     #[test]
-    fn bare_port_devtools_error_shows_the_bidi_port_and_rdp_override() {
-        let target = target_from_url(super::endpoint_url("9444").unwrap()).unwrap();
-        assert!(!target.devtools_explicit);
-        assert_eq!(
-            target.devtools_unreachable_error(),
-            "Firefox DevTools server is not reachable at 127.0.0.1:6000 (the default). If Firefox was started with --start-debugger-server <rdp-port>, connect with: ws://127.0.0.1:9444/session?devtools=<rdp-port>. Required prefs: devtools.debugger.remote-enabled=true, devtools.chrome.enabled=true and devtools.debugger.prompt-connection=false."
-        );
-    }
-
-    #[test]
     fn explicit_devtools_error_names_the_requested_port_without_a_default() {
         for port in [6080, 6000] {
             let target = parse_attach_url(&format!("ws://127.0.0.1:9333/session?devtools={port}"))

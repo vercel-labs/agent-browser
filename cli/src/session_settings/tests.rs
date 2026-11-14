@@ -1393,27 +1393,7 @@ fn a_user_agent_for_a_new_target_waits_for_the_attach_to_name_its_engine() {
         vec![Key::UserAgent]
     );
     assert_eq!(plan.next.user_agent().as_deref(), Some("ProbeUA/5"));
-}
 
-#[test]
-fn only_a_cdp_target_waits_for_its_engine() {
-    for target in [
-        is(Key::Provider, json!("browserbase")),
-        is(Key::AutoConnect, json!(true)),
-    ] {
-        let plan =
-            Running::defaults().plan(&patch_of(&[target, is(Key::UserAgent, json!("ProbeUA/5"))]));
-        assert!(plan.awaiting_engine.is_empty());
-        assert_eq!(
-            plan.ignored.iter().map(|c| c.key).collect::<Vec<_>>(),
-            vec![Key::UserAgent]
-        );
-        assert_eq!(plan.next.user_agent(), None, "nothing reaches the provider");
-    }
-}
-
-#[test]
-fn a_new_target_leaves_the_user_agent_to_the_attach_unless_the_patch_names_firefox() {
     let attached = running_with(&[
         (Key::Cdp, json!("http://127.0.0.1:9333")),
         (Key::Engine, json!("firefox")),
@@ -1449,6 +1429,23 @@ fn a_new_target_leaves_the_user_agent_to_the_attach_unless_the_patch_names_firef
 }
 
 #[test]
+fn only_a_cdp_target_waits_for_its_engine() {
+    for target in [
+        is(Key::Provider, json!("browserbase")),
+        is(Key::AutoConnect, json!(true)),
+    ] {
+        let plan =
+            Running::defaults().plan(&patch_of(&[target, is(Key::UserAgent, json!("ProbeUA/5"))]));
+        assert!(plan.awaiting_engine.is_empty());
+        assert_eq!(
+            plan.ignored.iter().map(|c| c.key).collect::<Vec<_>>(),
+            vec![Key::UserAgent]
+        );
+        assert_eq!(plan.next.user_agent(), None, "nothing reaches the provider");
+    }
+}
+
+#[test]
 fn a_patch_for_an_attached_firefox_splits_into_session_and_in_place_changes() {
     let attached_firefox = running_with(&[
         (Key::Cdp, json!("http://127.0.0.1:9333")),
@@ -1457,6 +1454,7 @@ fn a_patch_for_an_attached_firefox_splits_into_session_and_in_place_changes() {
     let plan = attached_firefox.plan(&patch_of(&[
         is(Key::UserAgent, json!("AttachedUA/1")),
         is(Key::DownloadPath, json!("/tmp/downloads")),
+        is(Key::ColorScheme, json!("dark")),
         is(Key::DefaultTimeout, json!(5000)),
     ]));
 
@@ -1464,6 +1462,9 @@ fn a_patch_for_an_attached_firefox_splits_into_session_and_in_place_changes() {
     assert_eq!(changed_keys(&live), vec![Key::DefaultTimeout]);
     assert_eq!(live.next.user_agent(), None);
     assert_eq!(live.next.launch_options().download_path, None);
+    assert_eq!(live.next.color_scheme(), None);
+    assert_eq!(live.next.default_timeout_ms(), 5000);
+    assert!(!live.relaunch);
 
     let in_place = plan.in_place_only(&attached_firefox);
     assert_eq!(
@@ -1476,26 +1477,6 @@ fn a_patch_for_an_attached_firefox_splits_into_session_and_in_place_changes() {
         Some("/tmp/downloads")
     );
     assert!(!in_place.relaunch);
-}
-
-#[test]
-fn only_a_session_level_live_change_precedes_the_gates() {
-    let attached_firefox = running_with(&[
-        (Key::Cdp, json!("http://127.0.0.1:9333")),
-        (Key::Engine, json!("firefox")),
-    ]);
-    let plan = attached_firefox
-        .plan(&patch_of(&[
-            is(Key::UserAgent, json!("AttachedUA/1")),
-            is(Key::ColorScheme, json!("dark")),
-            is(Key::DefaultTimeout, json!(5000)),
-        ]))
-        .live_only(&attached_firefox);
-    assert_eq!(changed_keys(&plan), vec![Key::DefaultTimeout]);
-    assert_eq!(plan.next.user_agent(), None, "an in-place change waits");
-    assert_eq!(plan.next.color_scheme(), None, "a launch setting waits");
-    assert_eq!(plan.next.default_timeout_ms(), 5000);
-    assert!(!plan.relaunch);
 }
 
 #[test]
