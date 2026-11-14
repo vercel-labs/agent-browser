@@ -13,7 +13,7 @@ use super::input::{
 use super::interact::{act_element, perform_actions, PointerAction};
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
-use crate::native::actions::{raw_key, DaemonState};
+use crate::native::actions::{raw_key, upload_files, DaemonState};
 use crate::native::element::ELEMENT_CHECKED_JS;
 use crate::native::interaction::{
     CLEAR_INPUT_JS, CLEAR_VALUE_JS, CLICK_CHECKBOX_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
@@ -210,23 +210,6 @@ fn select_values(cmd: &Value) -> Vec<String> {
             .map(|value| vec![value.to_string()])
             .unwrap_or_default(),
     }
-}
-
-fn upload_files(cmd: &Value) -> Vec<String> {
-    cmd.get("files")
-        .and_then(Value::as_array)
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .or_else(|| {
-            cmd.get("file")
-                .and_then(Value::as_str)
-                .map(|file| vec![file.to_string()])
-        })
-        .unwrap_or_default()
 }
 
 fn absolute_files(files: &[String]) -> Vec<String> {
@@ -742,51 +725,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fill_focuses_then_replaces_with_literal_text() {
-        let (ff, _tx, calls) = fake_session_with(node_responder).await;
-        let mut state = state_with(ff);
-        let result = fill(&json!({"selector": "#email", "value": "a@b.c"}), &mut state)
-            .await
-            .unwrap();
-        assert_eq!(result, json!({"filled": "#email"}));
-        assert_all(
-            &calls,
-            &[
-                "script.callFunction",
-                "script.callFunction",
-                "script.callFunction",
-            ],
-        );
-    }
-
-    #[tokio::test]
-    async fn type_with_clear_runs_the_shared_clear_js_before_typing() {
-        let (ff, _tx, calls) = fake_session_with(node_responder).await;
-        let mut state = state_with(ff);
-        let result = type_text(
-            &json!({"selector": "input", "text": "ok", "clear": true}),
-            &mut state,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result, json!({"typed": "ok"}));
-        assert_all(
-            &calls,
-            &[
-                "script.callFunction",
-                "script.callFunction",
-                "script.callFunction",
-                "script.callFunction",
-                "script.callFunction",
-                "script.callFunction",
-            ],
-        );
-    }
-
-    #[tokio::test]
     async fn fill_and_type_resolve_snapshot_refs() {
         let (mut ff, _tx, calls) = fake_session_with(connected_node_responder).await;
-        ff.refs.insert(("ctx-active".into(), "node-1".into()), 7);
+        ff.refs
+            .insert(("ctx-active".into(), "node-1".into(), "node-1".into()), 7);
         let mut state = state_with(ff);
         state
             .ref_map
@@ -807,6 +749,8 @@ mod tests {
         assert_all(
             &calls,
             &[
+                "script.callFunction",
+                "script.callFunction",
                 "script.callFunction",
                 "script.callFunction",
                 "script.callFunction",

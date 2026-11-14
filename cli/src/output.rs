@@ -4736,7 +4736,7 @@ Options:
                              (default: 1h; 0 disables; dashboard input resets the timer)
                              Values too large to convert to milliseconds produce a warning and are ignored
   --engine <name>            Browser engine: chrome (default), lightpanda, obscura, firefox
-                             (or AGENT_BROWSER_ENGINE); firefox requires Firefox 150 or newer;
+                             (or AGENT_BROWSER_ENGINE)
                              Obscura rejects --proxy-bypass,
                              proxyBypass config, AGENT_BROWSER_PROXY_BYPASS, NO_PROXY/no_proxy,
                              --webgpu, --ca-cert, --args, profiles, state, extensions,

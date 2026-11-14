@@ -59,8 +59,16 @@ pub enum RemoteValue {
         #[serde(default)]
         value: Vec<(RemoteKey, RemoteValue)>,
     },
-    #[serde(alias = "boolean", alias = "bigint", alias = "date", alias = "number")]
+    #[serde(alias = "boolean", alias = "date")]
     String {
+        #[serde(default)]
+        value: Value,
+    },
+    Number {
+        #[serde(default)]
+        value: Value,
+    },
+    Bigint {
         #[serde(default)]
         value: Value,
     },
@@ -97,6 +105,8 @@ impl From<RemoteValue> for Value {
                     Some((key, Value::from(v)))
                 })
                 .collect(),
+            RemoteValue::Number { value } if value.is_number() => value,
+            RemoteValue::Number { .. } | RemoteValue::Bigint { .. } => Value::Null,
             RemoteValue::String { value } => value,
             RemoteValue::Other => Value::Null,
         }

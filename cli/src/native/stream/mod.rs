@@ -198,7 +198,7 @@ pub struct StreamServer {
     port: u16,
     session_name: String,
     frame_tx: broadcast::Sender<String>,
-    screencast_config: Arc<ScreencastConfig>,
+    pub(crate) screencast_config: Arc<ScreencastConfig>,
     /// Latest-value channel for screencast frames. Slow clients skip straight
     /// to the newest frame instead of draining a stale ordered backlog.
     frame_watch: watch::Sender<Option<Arc<StreamFrame>>>,
@@ -292,19 +292,6 @@ impl StreamServer {
     /// True while at least one dashboard client is connected.
     pub async fn has_clients(&self) -> bool {
         *self.client_count.lock().await > 0
-    }
-
-    /// JPEG quality (1-100) the stream is configured to use.
-    /// The configured cap on frame width and height, each `None` when unset.
-    pub fn screencast_max_size(&self) -> (Option<u32>, Option<u32>) {
-        (
-            self.screencast_config.max_width,
-            self.screencast_config.max_height,
-        )
-    }
-
-    pub fn screencast_quality(&self) -> i32 {
-        self.screencast_config.quality
     }
 
     /// Check whether the server currently has active screencast running.
