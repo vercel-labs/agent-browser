@@ -7968,6 +7968,14 @@ mod tests {
         tab_hangs: bool,
         /// Why the browser cannot start, if it cannot.
         launch_error: Option<String>,
+        /// A request that the command with this index starts, but that the
+        /// page reports only on the next round trip to its session (`eval`),
+        /// and that finishes a few capture reads after that.
+        reported_late: Option<(usize, HarEntry)>,
+        unreported: Option<HarEntry>,
+        finishes_in: Option<usize>,
+        /// How many captured requests had finished when each command ran.
+        finished_at_run: Vec<usize>,
     }
 
     impl ScriptBrowser {
@@ -7982,7 +7990,16 @@ mod tests {
                 delay: Duration::ZERO,
                 tab_hangs: false,
                 launch_error: None,
+                reported_late: None,
+                unreported: None,
+                finishes_in: None,
+                finished_at_run: Vec::new(),
             }
+        }
+
+        fn reporting_late(mut self, command: usize, request: HarEntry) -> ScriptBrowser {
+            self.reported_late = Some((command, request));
+            self
         }
 
         fn failing_launch(mut self, reason: &str) -> ScriptBrowser {
@@ -8027,6 +8044,10 @@ mod tests {
         }
         async fn eval(&mut self, _: &str) -> Result<Value, String> {
             tokio::time::sleep(self.delay).await;
+            if let Some(request) = self.unreported.take() {
+                self.entries.push(request);
+                self.finishes_in = Some(3);
+            }
             self.page.clone()
         }
         async fn ensure_browser(&mut self) -> Result<(), String> {
@@ -8042,6 +8063,19 @@ mod tests {
                 .get(self.ran.len())
                 .cloned()
                 .unwrap_or_else(|| json!({ "success": true }));
+            self.finished_at_run.push(
+                self.entries
+                    .iter()
+                    .filter(|e| e.loading_finished_timestamp.is_some())
+                    .count(),
+            );
+            if self
+                .reported_late
+                .as_ref()
+                .is_some_and(|(command, _)| *command == self.ran.len())
+            {
+                self.unreported = self.reported_late.take().map(|(_, request)| request);
+            }
             self.ran.push(cmd.clone());
             if let Some(url) = &self.poll_each_run {
                 self.entries.push(entry("p", url, "Fetch", "", ""));
@@ -8049,6 +8083,16 @@ mod tests {
             reply
         }
         async fn captured_since(&mut self, _: usize) -> Vec<HarEntry> {
+            match self.finishes_in {
+                Some(0) => {
+                    self.finishes_in = None;
+                    if let Some(last) = self.entries.last_mut() {
+                        last.loading_finished_timestamp = Some(1.0);
+                    }
+                }
+                Some(n) => self.finishes_in = Some(n - 1),
+                None => {}
+            }
             self.entries.clone()
         }
         async fn end_capture(&mut self) {}
@@ -8172,6 +8216,36 @@ mod tests {
                 "{:?}",
                 started.elapsed()
             );
+        }
+
+        #[test]
+        fn a_replayed_command_waits_for_a_request_the_page_reports_after_answering() {
+            // navigate (start), click #a, click #b: #a starts a first-party
+            // fetch that the page reports only after the click has answered.
+            let flow = click_flow();
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new()).reporting_late(
+                1,
+                entry(
+                    "s",
+                    "https://a.test/api/session",
+                    "Fetch",
+                    "application/json",
+                    "",
+                ),
+            );
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(5),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            // #b runs only once the request #a started has finished.
+            assert_eq!(browser.finished_at_run, vec![0, 0, 1]);
         }
 
         #[test]
