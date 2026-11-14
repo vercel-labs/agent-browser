@@ -2146,6 +2146,351 @@ async fn e2e_screenshot() {
 // Form interaction: fill, type, select, check
 // ---------------------------------------------------------------------------
 
+// Regression for #1105: `select` on a custom ARIA combobox (div-based, options
+// hidden until opened) must open it and click the matching option, and must
+// error (not silently succeed) on a value that does not exist.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="false" aria-controls="lb">Choose</div>
+<ul role="listbox" id="lb" style="display:none">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="banana">Banana</li>
+</ul>
+<output id="result">none</output>
+<select id="native"><option value="">--</option><option value="x">Xylophone</option><option value="y">Yak</option></select>
+<script>
+var cb=document.getElementById('cb'),lb=document.getElementById('lb'),r=document.getElementById('result');
+function setOpen(open){lb.style.display=open?'block':'none';cb.setAttribute('aria-expanded',String(open));}
+cb.addEventListener('click',function(){setOpen(lb.style.display==='none');});
+lb.querySelectorAll('[role=option]').forEach(function(o){o.addEventListener('click',function(){cb.textContent=o.textContent;r.textContent=o.getAttribute('data-value');setOpen(false);});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple");
+
+    // Already-open combobox must not be toggled shut before matching.
+    let resp = execute_command(&eval("5", "document.getElementById('cb').click(); document.getElementById('cb').getAttribute('aria-expanded')"), &mut state).await;
+    assert_eq!(get_data(&resp)["result"], "true");
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "select", "selector": "#cb", "values": ["Banana"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("7", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "banana");
+
+    // Unknown option errors and lists what is available.
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "select", "selector": "#cb", "values": ["Dragonfruit"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    assert!(
+        serde_json::to_string(&resp)
+            .unwrap_or_default()
+            .contains("Available options"),
+        "error should list options: {resp}"
+    );
+
+    // Native <select> path is unchanged.
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "select", "selector": "#native", "values": ["Yak"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("10", "document.getElementById('native').value"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "y");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// A combobox whose popup mounts a tick after aria-controls is set must wait for
+// that popup, not pick up options from another listbox that is already visible.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_async_popup() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<ul role="listbox" id="sidebar">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="pro">Pro</li>
+</ul>
+<div role="combobox" id="cb" tabindex="0" aria-expanded="false">Choose</div>
+<div id="host"></div>
+<output id="result">none</output>
+<output id="sidebar-clicks">0</output>
+<script>
+var cb=document.getElementById('cb'),host=document.getElementById('host'),r=document.getElementById('result'),sc=document.getElementById('sidebar-clicks');
+document.querySelectorAll('#sidebar [role=option]').forEach(function(o){o.addEventListener('click',function(){sc.textContent=String(Number(sc.textContent)+1);});});
+function close(){host.innerHTML='';cb.setAttribute('aria-expanded','false');}
+function open(){
+  cb.setAttribute('aria-controls','popup');
+  setTimeout(function(){
+    host.innerHTML='<ul role="listbox" id="popup"><li role="option" data-value="apple">Apple</li><li role="option" data-value="banana">Banana</li></ul>';
+    host.querySelectorAll('[role=option]').forEach(function(o){o.addEventListener('click',function(){r.textContent=o.getAttribute('data-value');close();});});
+    cb.setAttribute('aria-expanded','true');
+  },0);
+}
+cb.addEventListener('click',function(){if(cb.getAttribute('aria-expanded')==='true'){close();}else{open();}});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple");
+    let resp = execute_command(
+        &eval("5", "document.getElementById('sidebar-clicks').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        get_data(&resp)["result"],
+        "0",
+        "the widget's option must be clicked, not the sidebar's"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// An option whose accessible name comes from aria-labelledby must match that
+// name, even when its text content also carries an indicator and a description.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_labelled_option() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="true" aria-controls="popup">Choose</div>
+<ul role="listbox" id="popup">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="car" aria-labelledby="car-label"><span aria-hidden="true">new</span><span id="car-label">Car</span><span class="hint"> compact, +$500</span></li>
+</ul>
+<output id="result">none</output>
+<script>
+var r=document.getElementById('result');
+document.querySelectorAll('#popup [role=option]').forEach(function(o){o.addEventListener('click',function(){r.textContent=o.getAttribute('data-value');});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Car"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('result').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "car");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// A matched option that is aria-disabled must fail the command instead of
+// clicking a dead target and reporting success.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_disabled_option() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="true" aria-controls="popup">Choose</div>
+<ul role="listbox" id="popup">
+<li role="option" data-value="basic">Basic</li>
+<li role="option" data-value="pro" aria-disabled="true">Pro</li>
+</ul>
+<output id="result">none</output>
+<script>
+var r=document.getElementById('result');
+document.querySelectorAll('#popup [role=option]').forEach(function(o){o.addEventListener('click',function(){if(o.getAttribute('aria-disabled')==='true')return;r.textContent=o.getAttribute('data-value');});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Pro"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "disabled option must fail: {resp}");
+    let error = resp["error"].as_str().unwrap_or_default().to_string();
+    assert!(
+        error.contains("disabled"),
+        "error should name the disabled option: {error}"
+    );
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('result').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "none");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// Selecting an option that is already selected in a multi-select listbox is a
+// no-op; the click toggles, so without the guard the option would be cleared.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_listbox_multiselect() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<ul role="listbox" id="multi" aria-multiselectable="true">
+<li role="option" data-value="apple" aria-selected="true">Apple</li>
+<li role="option" data-value="banana" aria-selected="false">Banana</li>
+</ul>
+<output id="state"></output>
+<script>
+var s=document.getElementById('state'),options=document.querySelectorAll('#multi [role=option]');
+function render(){s.textContent=Array.prototype.map.call(options,function(o){return o.getAttribute('data-value')+'='+o.getAttribute('aria-selected');}).join(',');}
+options.forEach(function(o){o.addEventListener('click',function(){o.setAttribute('aria-selected',o.getAttribute('aria-selected')==='true'?'false':'true');render();});});
+render();
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#multi", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('state').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        get_data(&resp)["result"],
+        "apple=true,banana=false",
+        "an already selected option must stay selected"
+    );
+
+    // Selecting a different option still toggles it on.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "select", "selector": "#multi", "values": ["Banana"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("6", "document.getElementById('state').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple=true,banana=true");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_form_interaction() {
@@ -15579,6 +15924,19 @@ fn firefox_serve(
                     )
                 }
                 "/api" => ("text/plain", "", "real".to_string()),
+                "/whoami" => {
+                    let agent = head
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+                        .map(|(_, value)| value.trim().to_string())
+                        .unwrap_or_default();
+                    (
+                        "text/html; charset=utf-8",
+                        "",
+                        format!("<script>document.title = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'</script><pre>{agent}</pre>"),
+                    )
+                }
                 "/auth" => (
                     "text/plain",
                     "WWW-Authenticate: Basic realm=\"origin\"\r\n",
@@ -16365,6 +16723,68 @@ async fn e2e_firefox_frame_by_name_and_url() {
 
 /// `frame` reads the frame window in the BiDi sandbox and trusts only a frame the browser reports,
 /// so a page that shadows `contentWindow` cannot forge a browsing context.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_snapshot_refs_ignore_a_page_forged_content_window() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        r#"new Promise((resolve) => {
+            document.body.innerHTML = '<button onclick="document.title = \'parent-clicked\'">Parent control</button><iframe id=f></iframe>';
+            const frame = document.querySelector('#f');
+            frame.addEventListener('load', () => resolve(true));
+            frame.srcdoc = '<button onclick="parent.document.title = \'frame-clicked\'">Frame control</button>';
+            Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', { configurable: true, get: () => window });
+            Object.defineProperty(frame, 'contentWindow', { configurable: true, get: () => window });
+        })"#,
+    )
+    .await;
+
+    let control = firefox_ref(&mut state, "Frame control").await;
+    assert_success(&firefox_act(&mut state, "click", &control, json!({})).await);
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert_eq!(firefox_title(&mut state).await, "frame-clicked");
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_snapshot_ignores_a_background_tab_that_forges_the_marker() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        r#"document.body.innerHTML = '<button>Forged control</button>';
+        window.Boolean = () => true;
+        true"#,
+    )
+    .await;
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "new", "action": "tab_new", "url": "data:text/html,<button>Real control</button>" }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = firefox_command(&mut state, json!({ "id": "snap", "action": "snapshot" })).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap().to_string();
+    assert!(snapshot.contains("Real control"), "{snapshot}");
+    assert!(!snapshot.contains("Forged control"), "{snapshot}");
+    firefox_close(&mut state).await;
+}
+
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_frame_ignores_a_page_forged_content_window() {
@@ -18912,6 +19332,167 @@ async fn e2e_firefox_relaunch_keeps_engine_when_options_change() {
     assert_eq!(
         firefox_eval(&mut state, "navigator.userAgent.includes('Firefox')").await,
         json!(true)
+    );
+    firefox_close(&mut state).await;
+}
+
+/// A tab the page opens itself sends the session's user agent on its first request and reports
+/// the emulated color scheme while it loads, before the daemon ever switches to it.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_popup_has_the_session_emulation_before_it_loads() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "ua", "action": "useragent", "userAgent": "PopupCoverage/1.0" }),
+        )
+        .await,
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "m", "action": "set_media", "colorScheme": "dark" }),
+        )
+        .await,
+    );
+    firefox_eval(
+        &mut state,
+        r#"document.body.innerHTML = '<button id=pop onclick="window.open(\'/whoami\')">Open</button>'; true"#,
+    )
+    .await;
+    let original = state
+        .firefox
+        .as_ref()
+        .unwrap()
+        .contexts
+        .active_tab()
+        .to_string();
+    assert_success(&firefox_act(&mut state, "click", "#pop", json!({})).await);
+
+    let bidi = state.firefox.as_ref().unwrap().bidi.clone();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let probe = loop {
+        let tree = bidi
+            .send("browsingContext.getTree", json!({ "maxDepth": 0 }))
+            .await
+            .unwrap();
+        let popup = tree["contexts"].as_array().unwrap().iter().find_map(|c| {
+            let loaded = c["url"].as_str().is_some_and(|u| u.ends_with("/whoami"));
+            loaded.then(|| c["context"].as_str().unwrap().to_string())
+        });
+        if let Some(popup) = popup {
+            let probe = bidi
+                .call_function(
+                    &popup,
+                    "() => [document.title, document.querySelector('pre')?.textContent ?? null]",
+                    None,
+                    vec![],
+                )
+                .await
+                .unwrap();
+            if !probe[1].is_null() {
+                break probe;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the popup never loaded"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(probe, json!(["dark", "PopupCoverage/1.0"]));
+    assert_eq!(
+        state.firefox.as_ref().unwrap().contexts.active_tab(),
+        original
+    );
+    firefox_close(&mut state).await;
+}
+
+/// An origin that rejects the credentials the session sends answers at once instead of leaving
+/// Firefox's auth prompt open until the navigation times out.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_rejected_credentials_do_not_wait_on_an_auth_prompt() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "c", "action": "credentials", "username": "user", "password": "wrong" }),
+        )
+        .await,
+    );
+
+    let started = std::time::Instant::now();
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "nav", "action": "navigate", "url": format!("{}auth", fixture.url) }),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "navigation took {elapsed:?}: {resp}"
+    );
+    assert!(fixture.hit_count("/auth#authorization") > 0);
+    assert_eq!(
+        firefox_eval(&mut state, "document.body.innerText").await,
+        json!("denied")
+    );
+    firefox_close(&mut state).await;
+}
+
+/// A frame of another origin holds the granted permissions, like the page that embeds it.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_permissions_cover_a_cross_origin_frame() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "permissions", "action": "permissions", "permissions": ["geolocation"] }),
+        )
+        .await,
+    );
+    firefox_open(&mut state, &fixture.url).await;
+    let frame_url = format!("{}/frame.html", fixture.other);
+    firefox_eval(
+        &mut state,
+        &format!(
+            "new Promise(resolve => {{ document.body.innerHTML = '<iframe id=other allow=geolocation src=\"{frame_url}\"></iframe>'; document.querySelector('#other').addEventListener('load', () => resolve(true)); }})"
+        ),
+    )
+    .await;
+
+    assert_success(&firefox_act(&mut state, "frame", "#other", json!({})).await);
+    assert_eq!(
+        firefox_eval(&mut state, "location.origin").await,
+        json!(fixture.other)
+    );
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "navigator.permissions.query({name:'geolocation'}).then(p => p.state)"
+        )
+        .await,
+        json!("granted")
     );
     firefox_close(&mut state).await;
 }

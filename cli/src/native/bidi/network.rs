@@ -291,8 +291,9 @@ pub fn spawn_dispatcher(
             if e["method"] == "browsingContext.contextCreated" && e["params"]["parent"].is_null() {
                 if let Some(context) = e["params"]["context"].as_str() {
                     let settings = emulation.read().unwrap().clone();
+                    let jar = e["params"]["userContext"].as_str().unwrap_or("default");
                     if let Err(error) =
-                        super::emulation::apply_overrides(&bidi, &settings, context).await
+                        super::emulation::apply_overrides(&bidi, &settings, context, jar).await
                     {
                         eprintln!(
                             "Warning: failed to apply Firefox emulation to {context}: {error}"
@@ -451,7 +452,8 @@ async fn before_request(
     Ok(())
 }
 
-/// Answers a proxy auth challenge; origin challenges keep the browser's default handling.
+/// Answers an auth challenge: a proxy one with the configured credentials, an origin one by
+/// cancelling it when the request already carried credentials, as asking again cannot help.
 async fn auth_required(
     bidi: &BidiClient,
     net: &NetContext,
@@ -472,7 +474,16 @@ async fn auth_required(
     } else {
         false
     };
-    let params = auth_response(id, status, credentials, may_retry);
+    let sent_authorization = event["request"]["headers"]
+        .as_array()
+        .is_some_and(|headers| {
+            headers.iter().any(|header| {
+                header["name"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("authorization"))
+            })
+        });
+    let params = auth_response(id, status, sent_authorization, credentials, may_retry);
     bidi.send("network.continueWithAuth", params).await?;
     Ok(())
 }
@@ -480,11 +491,17 @@ async fn auth_required(
 fn auth_response(
     id: &str,
     status: i64,
+    sent_authorization: bool,
     credentials: Option<(String, String)>,
     may_retry: bool,
 ) -> Value {
     if status != 407 {
-        return json!({"request": id, "action": "default"});
+        let action = if sent_authorization {
+            "cancel"
+        } else {
+            "default"
+        };
+        return json!({"request": id, "action": action});
     }
     match credentials {
         Some((username, password)) if may_retry => json!({
@@ -1418,6 +1435,7 @@ mod tests {
         let response = auth_response(
             "request",
             401,
+            false,
             Some(("proxy-user".into(), "proxy-pass".into())),
             true,
         );
@@ -1426,10 +1444,17 @@ mod tests {
     }
 
     #[test]
+    fn origin_auth_is_cancelled_once_the_request_carried_credentials() {
+        let response = auth_response("request", 401, true, None, false);
+        assert_eq!(response["action"], "cancel");
+    }
+
+    #[test]
     fn proxy_auth_still_uses_configured_credentials() {
         let response = auth_response(
             "request",
             407,
+            false,
             Some(("proxy-user".into(), "proxy-pass".into())),
             true,
         );
@@ -1440,6 +1465,7 @@ mod tests {
             auth_response(
                 "request",
                 407,
+                false,
                 Some(("proxy-user".into(), "proxy-pass".into())),
                 false,
             )["action"],

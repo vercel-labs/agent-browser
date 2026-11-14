@@ -240,7 +240,7 @@ async fn map_mouse_position(
         for (parent, child) in path {
             let frames = ff
                 .bidi
-                .call_function(&parent, FRAME_OFFSETS_JS, None, vec![])
+                .call_function_in_sandbox(&parent, super::client::SANDBOX, FRAME_OFFSETS_JS, vec![])
                 .await?;
             let frame = frames
                 .as_array()

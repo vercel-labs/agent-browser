@@ -112,13 +112,17 @@ fn grantable_origin(url: &str) -> Option<String> {
     }
 }
 
-/// The top-level document URL a `network.beforeRequestSent` event announces, when it is one.
+/// The URL of the page or frame document a `network.beforeRequestSent` event announces, when it
+/// is one. A frame of another origin holds its own grants, so it is covered like a page.
 pub(crate) fn document_request_url(event: &Value) -> Option<&str> {
     if event["method"] != "network.beforeRequestSent" {
         return None;
     }
     let request = &event["params"]["request"];
-    if request["destination"] != "document" {
+    if !matches!(
+        request["destination"].as_str(),
+        Some("document" | "iframe" | "frame")
+    ) {
         return None;
     }
     request["url"].as_str()

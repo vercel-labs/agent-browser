@@ -102,6 +102,9 @@ pub fn validate_launch(options: &LaunchOptions, flags: LaunchFlags<'_>) -> Resul
     if options.ca_cert.is_some() {
         return unsupported("--ca-cert");
     }
+    if let Some(proxy) = options.proxy.as_deref() {
+        super::session::proxy_capability(proxy, None)?;
+    }
     Ok(())
 }
 
@@ -452,6 +455,9 @@ mod tests {
         let mut o = ok();
         o.proxy_username = Some("user".into());
         assert!(validate_launch(&o, LaunchFlags::default()).is_ok());
+        let mut o = ok();
+        o.proxy = Some("https://proxy:443".into());
+        assert!(err_of(&o).contains("https:// proxy is not supported"));
         let flags = |cdp, auto_connect, provider| LaunchFlags {
             cdp,
             auto_connect,
