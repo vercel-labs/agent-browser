@@ -22,6 +22,9 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     if let Some(label) = label {
         validate_tab_label(session(state)?, label)?;
     }
+    if let Some(url) = url {
+        state.ensure_navigation_allowed(url).await?;
+    }
 
     let ff = session(state)?;
     let user_context = ff
@@ -275,7 +278,10 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .bidi
         .send("browsingContext.close", json!({"context": context}))
         .await?;
-    let was_active = super::daemon::forget_context(state, &context)?;
+    let was_active = {
+        let ff = state.firefox.as_mut().ok_or("Browser not launched")?;
+        ff.forget_context(&context, &mut state.pending_dialog)
+    };
     session(state)?.release_unused_user_contexts().await;
     if was_active {
         match successor {
@@ -403,19 +409,20 @@ fn resolve_tab_ref(tabs: &[Value], input: &str) -> Result<String, String> {
 /// The tab that becomes active after closing `closed_index`: the next tab to the right,
 /// or the last remaining tab when the closed one was last, as Chrome does.
 fn successor_tab(tabs: &[Value], closed_index: usize) -> Option<String> {
-    let mut remaining = tabs.to_vec();
-    if closed_index >= remaining.len() {
-        return None;
-    }
-    remaining.remove(closed_index);
-    let next = closed_index.min(remaining.len().checked_sub(1)?);
-    remaining[next]["targetId"].as_str().map(str::to_string)
+    let next = if closed_index + 1 < tabs.len() {
+        closed_index + 1
+    } else {
+        closed_index.checked_sub(1)?
+    };
+    tabs.get(next)?["targetId"].as_str().map(str::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::bidi::session::tests::fake_session_with;
+    use crate::native::bidi::session::tests::{
+        fake_session, fake_session_with, fake_session_with_replies, FakeReply,
+    };
 
     #[tokio::test]
     async fn stream_and_cli_lists_share_ids_labels_titles_and_active_context() {
@@ -634,7 +641,22 @@ mod tests {
         server.shutdown().await;
     }
 
-    use crate::native::bidi::session::tests::{fake_session_with_replies, FakeReply};
+    #[tokio::test]
+    async fn a_blocked_tab_new_creates_no_tab() {
+        let (ff, _events, calls) = fake_session().await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        *state.domain_filter.write().await =
+            Some(crate::native::network::DomainFilter::new("example.com"));
+        let error = tab_new(&json!({ "url": "https://evil.example/" }), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Domain 'evil.example' is not in the allowed domains list"
+        );
+        assert!(calls.lock().unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn tab_new_returns_with_a_pending_navigation_prompt() {

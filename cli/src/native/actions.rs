@@ -91,7 +91,7 @@ struct ActiveProviderSession {
 }
 
 /// Captured request/response metadata used to export HAR 1.2 files.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct HarEntry {
     pub request_id: String,
     /// Seconds since Unix epoch from CDP `wallTime` or a BiDi event timestamp.
@@ -908,7 +908,7 @@ impl DaemonState {
     /// configured `default_timeout_ms` (from `AGENT_BROWSER_DEFAULT_TIMEOUT`).
     /// All wait-family handlers should use this instead of reading the
     /// timeout field and providing their own fallback.
-    fn timeout_ms(&self, cmd: &Value) -> u64 {
+    pub(crate) fn timeout_ms(&self, cmd: &Value) -> u64 {
         cmd.get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.default_timeout_ms)
@@ -6858,11 +6858,20 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .clone()
         .or_else(|| (result.object_type == "undefined").then(|| "undefined".to_string()));
     let url = mgr.get_url().await.unwrap_or_default();
-    let mut data = json!({ "result": result.value.unwrap_or(Value::Null), "origin": url });
+    Ok(eval_data(
+        result.value.unwrap_or(Value::Null),
+        url,
+        unserializable,
+    ))
+}
+
+/// Builds the `evaluate` reply, carrying the JavaScript token for a value JSON cannot represent.
+pub(crate) fn eval_data(result: Value, origin: String, unserializable: Option<String>) -> Value {
+    let mut data = json!({ "result": result, "origin": origin });
     if let Some(token) = unserializable {
         data["unserializable"] = json!(token);
     }
-    Ok(data)
+    data
 }
 
 /// A user `close`: the session is over, so its stored security settings go.
@@ -8070,30 +8079,19 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 // Wait helpers
 // ---------------------------------------------------------------------------
 
-async fn wait_for_selector(
-    client: &super::cdp::client::CdpClient,
-    session_id: &str,
-    selector: &str,
-    state: &str,
-    timeout_ms: u64,
-) -> Result<(), String> {
-    let check_fn = match state {
-        "attached" => format!(
-            "!!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
-        "detached" => format!(
-            "!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
+/// The expression Chrome polls for a selector in one of its `wait` states.
+pub(crate) fn selector_state_expression(selector: &str, state: &str) -> String {
+    let sel = serde_json::to_string(selector).unwrap_or_default();
+    match state {
+        "attached" => format!("!!document.querySelector({sel})"),
+        "detached" => format!("!document.querySelector({sel})"),
         "hidden" => format!(
             r#"(() => {{
                 const el = document.querySelector({sel});
                 if (!el) return true;
                 const s = window.getComputedStyle(el);
                 return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
-            }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
+            }})()"#
         ),
         _ => format!(
             r#"(() => {{
@@ -8102,11 +8100,19 @@ async fn wait_for_selector(
                 const r = el.getBoundingClientRect();
                 const s = window.getComputedStyle(el);
                 return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-            }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
+            }})()"#
         ),
-    };
+    }
+}
 
+async fn wait_for_selector(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    selector: &str,
+    state: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let check_fn = selector_state_expression(selector, state);
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
@@ -25054,24 +25060,22 @@ mod firefox_routing_tests {
     }
 
     #[tokio::test]
-    async fn implicit_launch_uses_the_firefox_branch_and_a_live_session_is_reused() {
+    async fn explicit_launch_reuses_a_live_session_with_the_same_options() {
         let guard = clean_env();
         guard.set("AGENT_BROWSER_EXECUTABLE_PATH", "/nonexistent/firefox");
-        let mut state = DaemonState::new();
-        let resp = execute_command(&json!({"id":"1","action":"url"}), &mut state).await;
+        let mut implicit_state = DaemonState::new();
+        let resp = execute_command(&json!({"id":"1","action":"url"}), &mut implicit_state).await;
         let error = resp["error"].as_str().unwrap();
         assert!(error.contains("Firefox executable not found"), "{error}");
 
-        let (mut state, _calls) = firefox_state().await;
-        let resp = execute_command(&json!({"id":"2","action":"tab_list"}), &mut state).await;
+        let (mut implicit_state, _calls) = firefox_state().await;
+        let resp =
+            execute_command(&json!({"id":"2","action":"tab_list"}), &mut implicit_state).await;
         assert_eq!(resp["success"], true, "{resp}");
         assert_eq!(resp["data"]["lifecycle"]["reused"], true);
         assert_eq!(resp["data"]["lifecycle"]["launched"], false);
-    }
 
-    #[tokio::test]
-    async fn explicit_launch_reuses_a_live_session_with_the_same_options() {
-        let _guard = clean_env();
+        guard.remove("AGENT_BROWSER_EXECUTABLE_PATH");
         let (mut state, _calls) = firefox_state().await;
         state
             .settings

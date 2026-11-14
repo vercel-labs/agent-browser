@@ -274,6 +274,17 @@ pub fn remote_to_json(v: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Returns the JavaScript token for a value JSON cannot carry, such as `undefined`, `NaN` or `10n`.
+pub fn unserializable(v: &Value) -> Option<String> {
+    let val = &v["value"];
+    match v["type"].as_str() {
+        Some("undefined") => Some("undefined".to_string()),
+        Some("bigint") => val.as_str().map(|n| format!("{n}n")),
+        Some("number") => val.as_str().map(str::to_string),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +395,18 @@ mod tests {
                 ["a",{"type":"array","value":[{"type":"null"}]}]]}
         ]});
         assert_eq!(remote_to_json(&nested), json!([1, {"k":"v","a":[null]}]));
+
+        let non_json = json!({"type":"array","value":[
+            {"type":"number","value":"NaN"},
+            {"type":"number","value":"Infinity"},
+            {"type":"number","value":"-Infinity"},
+            {"type":"number","value":"-0"},
+            {"type":"bigint","value":"10"},
+            {"type":"object","value":[["nested",{"type":"bigint","value":"20"}]]}
+        ]});
+        assert_eq!(
+            remote_to_json(&non_json),
+            json!([null, null, null, null, null, {"nested": null}])
+        );
     }
 }

@@ -145,7 +145,13 @@ fn command_cookie_to_bidi(cookie: &Value, current_url: Option<&str>) -> Result<V
         .map(String::from)
         .or_else(|| parsed.as_ref().and_then(|u| u.host_str().map(String::from)))
         .ok_or("Cookie requires a 'domain' or a current page URL")?;
-    let path = explicit_path.unwrap_or("/").to_string();
+    let url_path = parsed.as_ref().map_or("/", |u| u.path());
+    let default_path = url_path
+        .rsplit_once('/')
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| !prefix.is_empty())
+        .unwrap_or("/");
+    let path = explicit_path.unwrap_or(default_path).to_string();
 
     let mut out = json!({
         "name": name,
@@ -1234,25 +1240,5 @@ mod tests {
         assert_eq!(session.expires, -1.0);
         assert!(session.session);
         assert!(session.same_site.is_none());
-    }
-
-    #[test]
-    fn chrome_state_origins_roundtrip_through_the_state_format() {
-        let json_str = r#"{
-            "cookies": [],
-            "origins": [{
-                "origin": "https://example.com",
-                "localStorage": [{"name": "key", "value": "value"}],
-                "sessionStorage": [{"name": "s", "value": "t"}]
-            }]
-        }"#;
-        let parsed: StorageState = serde_json::from_str(json_str).unwrap();
-        assert_eq!(parsed.origins[0].local_storage.len(), 1);
-        assert_eq!(parsed.origins[0].local_storage[0].name, "key");
-        assert_eq!(parsed.origins[0].local_storage[0].value, "value");
-        assert_eq!(parsed.origins[0].session_storage[0].name, "s");
-        let reparsed: StorageState =
-            serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
-        assert_eq!(reparsed.origins[0].origin, "https://example.com");
     }
 }

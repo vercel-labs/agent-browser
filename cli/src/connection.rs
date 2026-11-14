@@ -592,20 +592,14 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(p) = opts.proxy {
         cmd.env("AGENT_BROWSER_PROXY", p);
-        match opts.proxy_username {
-            Some(proxy_username) => {
-                cmd.env("AGENT_BROWSER_PROXY_USERNAME", proxy_username);
-            }
-            None => {
-                cmd.env_remove("AGENT_BROWSER_PROXY_USERNAME");
-            }
-        }
-        match opts.proxy_password {
-            Some(proxy_password) => {
-                cmd.env("AGENT_BROWSER_PROXY_PASSWORD", proxy_password);
-            }
-            None => {
-                cmd.env_remove("AGENT_BROWSER_PROXY_PASSWORD");
+        for (name, value) in [
+            ("AGENT_BROWSER_PROXY_USERNAME", opts.proxy_username),
+            ("AGENT_BROWSER_PROXY_PASSWORD", opts.proxy_password),
+        ] {
+            if let Some(value) = value {
+                cmd.env(name, value);
+            } else {
+                cmd.env_remove(name);
             }
         }
     }
