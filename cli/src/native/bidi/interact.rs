@@ -20,6 +20,7 @@ use crate::native::interaction::PendingRelease;
 use crate::native::interaction::{
     dispatch_event_js, CLICK_HREF_JS, FOCUS_JS, HIGHLIGHT_JS, SCROLL_BY_JS, SCROLL_INTO_VIEW_JS,
 };
+use crate::native::pointer::{ClickPlan, Modifiers, MouseButton};
 
 /// Reports BiDi's in-view center plus the shared actionability and blocker verdicts.
 fn prepare_js() -> String {
@@ -318,7 +319,9 @@ fn defer_release(
             session_id: context.to_string(),
             x: position.0,
             y: position.1,
-            button: mouse_button_name(button).to_string(),
+            button: MouseButton::parse(mouse_button_name(button)).unwrap_or_default(),
+            click_count: 1,
+            modifiers: Modifiers::default(),
         });
     }
 }
@@ -398,7 +401,10 @@ async fn perform_pointer(
                             session_id: context.clone(),
                             x: position.0,
                             y: position.1,
-                            button: mouse_button_name(button as u8).to_string(),
+                            button: MouseButton::parse(mouse_button_name(button as u8))
+                                .unwrap_or_default(),
+                            click_count: 1,
+                            modifiers: Modifiers::default(),
                         });
                     }
                 }
@@ -527,38 +533,65 @@ async fn act_raw(
 
 /// Clicks a ref or selector, returning Chrome's `{clicked}` shape.
 pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    click_with_count(cmd, state, 1).await
+}
+
+/// Runs a click or double click, holding any requested modifiers for the whole gesture.
+async fn click_with_count(
+    cmd: &Value,
+    state: &mut DaemonState,
+    default_count: u8,
+) -> Result<Value, String> {
     let selector = cmd
         .get("selector")
         .and_then(Value::as_str)
         .ok_or("Missing 'selector' parameter")?;
 
-    if cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false) {
-        return click_new_tab(selector, state).await;
-    }
+    let spec = match ClickPlan::from_command(cmd, default_count)? {
+        ClickPlan::NewTab => return click_new_tab(selector, state).await,
+        ClickPlan::Pointer(spec) => spec,
+    };
 
     let target = resolve_target(state, selector).await?;
-    let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
-    let click_count = cmd
-        .get("clickCount")
-        .and_then(Value::as_i64)
-        .unwrap_or(1)
-        .max(0) as u32;
-    let actions = pointer_click(
-        &Origin::Element(target.shared_id.clone()),
-        button,
-        click_count,
-    );
-    Ok(act_pointer(
+    let keys = spec.modifiers.key_names();
+    hold_modifiers(state, &target.context, &keys, "keyDown").await?;
+    let outcome = act_pointer(
         state,
         cmd,
         &target,
         selector,
-        PointerAction::Click,
-        actions,
+        if spec.count > 1 {
+            PointerAction::DoubleClick
+        } else {
+            PointerAction::Click
+        },
+        pointer_click(
+            &Origin::Element(target.shared_id.clone()),
+            spec.button,
+            u32::from(spec.count),
+        ),
         json!({ "clicked": selector }),
     )
-    .await?
-    .value)
+    .await;
+    let released = hold_modifiers(state, &target.context, &keys, "keyUp").await;
+    let outcome = outcome?;
+    released?;
+    Ok(outcome.value)
+}
+
+/// Presses or releases the modifier keys for one gesture so they stay held across it.
+async fn hold_modifiers(
+    state: &mut DaemonState,
+    context: &str,
+    keys: &[&str],
+    event_type: &str,
+) -> Result<(), String> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
+    perform_actions(ff, context, modifier_actions(event_type, keys)).await?;
+    Ok(())
 }
 
 /// Opens the target link in a new tab, returning Chrome's `{clicked, newTab, url}` shape.
@@ -584,23 +617,7 @@ async fn click_new_tab(selector: &str, state: &mut DaemonState) -> Result<Value,
 
 /// Double-clicks a ref or selector.
 pub async fn dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
-    let target = resolve_target(state, selector).await?;
-    let actions = pointer_click(&Origin::Element(target.shared_id.clone()), "left", 2);
-    Ok(act_pointer(
-        state,
-        cmd,
-        &target,
-        selector,
-        PointerAction::DoubleClick,
-        actions,
-        json!({ "clicked": selector }),
-    )
-    .await?
-    .value)
+    click_with_count(cmd, state, 2).await
 }
 
 /// Moves the mouse over a ref or selector.
@@ -1183,7 +1200,7 @@ pub async fn dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
             let _ = perform_actions(
                 ff,
                 &release.session_id,
-                pointer_up(&origin, &release.button),
+                pointer_up(&origin, release.button.name()),
             )
             .await;
         }
