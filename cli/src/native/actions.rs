@@ -7210,7 +7210,9 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(Value::as_str)
         .unwrap_or(&state.input_mode);
     if input_mode != "instant" {
-        let (x, y, target_session_id) = super::element::resolve_element_center(
+        // An element that cannot be resolved here fails the same way in `interaction::click`
+        // below, which is where a hidden checkbox or radio is handled.
+        if let Ok((x, y, target_session_id)) = super::element::resolve_element_center(
             &mgr.client,
             &session_id,
             &state.ref_map,
@@ -7218,32 +7220,34 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &state.iframe_sessions,
             true,
         )
-        .await?;
-        let offset = super::element::session_viewport_offset(
-            &mgr.client,
-            &session_id,
-            &target_session_id,
-            &state.iframe_sessions,
-        )
-        .await?;
-        move_mouse_interpolated(
-            &mgr.client,
-            &target_session_id,
-            &mut state.mouse_state,
-            x,
-            y,
-            if input_mode == "smooth" { 200 } else { 0 },
-            None,
-            input_mode == "human",
-            cmd.get("seed").and_then(Value::as_u64).unwrap_or(0),
-            0,
-            offset,
-            &state.recording_state.shared_cursor,
-        )
-        .await?;
+        .await
+        {
+            let offset = super::element::session_viewport_offset(
+                &mgr.client,
+                &session_id,
+                &target_session_id,
+                &state.iframe_sessions,
+            )
+            .await?;
+            move_mouse_interpolated(
+                &mgr.client,
+                &target_session_id,
+                &mut state.mouse_state,
+                x,
+                y,
+                if input_mode == "smooth" { 200 } else { 0 },
+                None,
+                input_mode == "human",
+                cmd.get("seed").and_then(Value::as_u64).unwrap_or(0),
+                0,
+                offset,
+                &state.recording_state.shared_cursor,
+            )
+            .await?;
+        }
     }
 
-    let result = interaction::click(
+    let result = match interaction::click(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7252,7 +7256,28 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         click_count,
         &state.iframe_sessions,
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            // A styled checkbox or radio is usually a hidden input next to a visible label, so
+            // a pointer click on it fails as not visible. Click the label, as a person would.
+            if button == "left" && click_count == 1 {
+                if let Ok(Some(note)) = interaction::click_hidden_checkable(
+                    &mgr.client,
+                    &session_id,
+                    &state.ref_map,
+                    selector,
+                    &state.iframe_sessions,
+                )
+                .await
+                {
+                    return Ok(json!({ "clicked": selector, "note": note }));
+                }
+            }
+            return Err(err);
+        }
+    };
     record_click_animation(
         &result,
         &mut state.mouse_state,
