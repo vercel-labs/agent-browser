@@ -579,7 +579,7 @@ agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
 ```
 
-Firefox rejects `--allowed-domains`, authenticated proxies, `--user-agent`, `--color-scheme`, and `networkidle` waits.
+Firefox rejects `--allowed-domains`, authenticated proxies, `--user-agent`, `--color-scheme`, and `networkidle` waits. Firefox takes `http://`, `socks4://`, and `socks5://` proxies and rejects `https://` proxies instead of connecting to them without TLS.
 
 ## Debugging
 

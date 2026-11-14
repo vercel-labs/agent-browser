@@ -4718,7 +4718,9 @@ Options:
                              bypass settings, even with an existing daemon; stale daemon
                              environment values are not reused when bypass is cleared.
                              Firefox rejects --allowed-domains, authenticated proxies, --user-agent,
-                             --color-scheme, and networkidle waits.
+                             --color-scheme, and networkidle waits. Firefox takes http://,
+                             socks4://, and socks5:// proxies and rejects https:// proxies
+                             instead of connecting to them without TLS.
                              Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --relaunch                 Relaunch the session's browser even when no setting changed
