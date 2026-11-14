@@ -1,0 +1,122 @@
+/* The browser's pages: production and the Preview of one page (a nav line,
+   a headline beside an image's box), and the pull request on GitHub, flat and light. Stageshow's window and controls
+   stay untouched; everything that matters sits inside browser scope's crop
+   (--ab-visible of the page's width, about 250px of its height); filler runs past. */
+.ab-hero-demo {
+  /* Tabs: production, the preview, the pull request, then the new-tab button.
+     A tab opens or closes by width and fade, never popping. One width in wide,
+     so no × moves when a neighbor opens or closes. */
+  & .ab-browser .ss-window__tab { position: relative; width: 120px; max-width: 120px; overflow: hidden; transition: width .45s cubic-bezier(.4, 0, .2, 1), max-width .45s cubic-bezier(.4, 0, .2, 1), opacity .25s ease-out, padding .45s cubic-bezier(.4, 0, .2, 1); }
+  /* Favicons, at 12px beside the tab's 11px title. Production: Acme Corp's own mark, a plain
+     circle in ink (gray-1000, so it turns light on a dark tab strip). The Preview: the favicon Vercel's docs template serves on preview
+     deployments (@vercel/geistdocs template/public/favicon.preview.ico, traced
+     from its 48px bitmap: a #7928ca disc, a white triangle with its apex at
+     (24.25, 11.65) and its base at y 32.5 from x 12.35 to 36.15;
+     rasterized at 48px it differs from the bitmap by 0.6/255 on average). GitHub: its mark
+     (@vercel/geistcn-assets logo-github) as a mask filled with ink, so it follows the theme too. */
+  & .ab-browser .ss-window__tab .ss-window__favicon { width: 12px; height: 12px; flex: none; border-radius: 50%; background: var(--ds-gray-1000) center / 100% 100% no-repeat; }
+  & .ab-browser .ss-window__tab:nth-child(3) .ss-window__favicon { background-color: transparent; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Ccircle cx='24' cy='24' r='24' fill='%237928ca'/%3E%3Cpath d='M24.25 11.65 36.15 32.5H12.35z' fill='%23fff'/%3E%3C/svg%3E"); }
+  & .ab-browser .ss-window__tab:nth-child(4) .ss-window__favicon { border-radius: 0; background: var(--ds-gray-1000); -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 .13c-4.42 0-8 3.6-8 8.07 0 3.57 2.3 6.58 5.47 7.65.4.08.55-.17.55-.39L6 13.96c-2.23.49-2.7-.95-2.7-.95-.35-.94-.88-1.18-.88-1.18-.73-.5.05-.5.05-.5.8.06 1.23.84 1.23.84.72 1.22 1.87.88 2.33.66.07-.52.28-.88.5-1.08-1.77-.19-3.64-.88-3.64-3.98 0-.88.32-1.6.82-2.16-.07-.2-.35-1.03.08-2.14 0 0 .68-.21 2.2.83a7.7 7.7 0 0 1 4 0c1.53-1.04 2.2-.83 2.2-.83.45 1.11.17 1.94.09 2.14.52.56.82 1.28.82 2.16 0 3.1-1.87 3.78-3.66 3.98.3.26.54.74.54 1.5v2.21c0 .22.14.47.54.4A8.1 8.1 0 0 0 16 8.2 8 8 0 0 0 8 .13'/%3E%3C/svg%3E") center / contain no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 .13c-4.42 0-8 3.6-8 8.07 0 3.57 2.3 6.58 5.47 7.65.4.08.55-.17.55-.39L6 13.96c-2.23.49-2.7-.95-2.7-.95-.35-.94-.88-1.18-.88-1.18-.73-.5.05-.5.05-.5.8.06 1.23.84 1.23.84.72 1.22 1.87.88 2.33.66.07-.52.28-.88.5-1.08-1.77-.19-3.64-.88-3.64-3.98 0-.88.32-1.6.82-2.16-.07-.2-.35-1.03.08-2.14 0 0 .68-.21 2.2.83a7.7 7.7 0 0 1 4 0c1.53-1.04 2.2-.83 2.2-.83.45 1.11.17 1.94.09 2.14.52.56.82 1.28.82 2.16 0 3.1-1.87 3.78-3.66 3.98.3.26.54.74.54 1.5v2.21c0 .22.14.47.54.4A8.1 8.1 0 0 0 16 8.2 8 8 0 0 0 8 .13'/%3E%3C/svg%3E") center / contain no-repeat; }
+  & .ab-tab-title { font: 500 11px/1 var(--ss-font); color: var(--ds-gray-1000, #171717); transition: opacity .2s ease-out; }
+  /* Flat chrome: strip, tabs and toolbar are one color. The strip draws a
+     hairline along its foot; the active tab is outlined on three sides and
+     covers that hairline, so it joins the toolbar as a real tab does. */
+  & .ab-browser .ss-window__tabs { box-shadow: inset 0 calc(-1 * var(--ss-hairline, 1px)) 0 var(--ss-line); }
+  & .ab-browser .ss-window__tab { background: transparent; }
+  & .ab-browser .ss-window__tab[data-active] { background: var(--ss-chrome); box-shadow: inset var(--ss-hairline, 1px) 0 0 var(--ss-line), inset calc(-1 * var(--ss-hairline, 1px)) 0 0 var(--ss-line), inset 0 var(--ss-hairline, 1px) 0 var(--ss-line); }
+  & .ab-browser > .ss-window__bar { border-bottom-width: var(--ss-hairline, 1px); }
+  /* The address pill: a white control with a hairline, the host in it */
+  & .ab-browser .ss-window__url { background: var(--ds-background-100, #fff); box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ss-line); }
+  & .ab-browser:not([data-preview-tab]) .ss-window__tab:nth-child(3),
+  & .ab-browser:not([data-github-tab]) .ss-window__tab:nth-child(4) { max-width: 0; padding-inline: 0; opacity: 0; }
+  /* The new-tab button: a plain glyph after the tabs, no tab shape */
+  & .ab-browser .ss-window__tab:nth-child(5) { width: auto; max-width: none; flex: none; background: transparent; box-shadow: none; padding-inline: 6px; }
+  & .ab-browser .ss-window__tab:nth-child(5) .ss-window__favicon { display: none; }
+  /* Title left, × at the tab's right end, as a browser tab draws it */
+  & .ab-browser .ss-window__tab-label { flex: 1; min-width: 0; }
+  & .ab-tab-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; width: 100%; }
+  & .ab-tab-title { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  & .ab-tab-close { display: grid; place-items: center; width: 14px; height: 14px; flex: none; border-radius: 4px; color: var(--ss-icon); }
+  /* + beside one tab and two: the strip starts at 79.5px, tabs are 120 wide */
+  & .ab-plus-home { position: absolute; left: 79.5px; top: -62px; width: 18px; height: 18px; pointer-events: none; }
+  & .ab-plus-one { left: 199.5px; }
+  & .ab-plus-two { left: 319.5px; }
+  & .ab-tab-plus { display: grid; place-items: center; width: 18px; height: 18px; color: var(--ss-icon); }
+  & .ab-address-content { display: flex; align-items: center; height: 15px; font: 11px/1 var(--ss-font); color: var(--ds-gray-1000, #171717); white-space: nowrap; }
+
+  /* Pages crossfade: each fades up in its tab, the session's pages leave on close */
+  & .ab-browser-body { position: relative; }
+  & .ab-page { position: absolute; inset: 0; overflow: hidden; opacity: 0; visibility: hidden; transition: opacity .25s ease-out, visibility .25s; }
+  & .ab-page[data-on] { opacity: 1; visibility: visible; }
+  & .ab-anchor { position: absolute; left: 0; top: 0; width: 1px; height: 1px; pointer-events: none; }
+
+  /* The page: where the nav bar ends, a hairline; the hero, left-aligned in
+     the captured region (SHOT_REGION): the headline, set as the homepage's own
+     H1 is (Geist 450, -0.06em, line-height 1) so it never out-weighs it, and
+     two quiet buttons, a gray fill and an outline (no words) */
+  & .ab-page-nav { position: absolute; left: 0; right: 0; top: 32px; height: var(--ss-hairline, 1px); background: var(--ss-line); }
+  & .ab-mock-hero { position: absolute; left: 40px; top: 74px; display: flex; flex-direction: column; align-items: flex-start; }
+  & .ab-headline { font: 450 30px/1 var(--ss-font); letter-spacing: -.06em; color: var(--ds-gray-1000, #171717); white-space: nowrap; }
+  & .ab-mock-actions { display: flex; gap: 8px; margin-top: 20px; }
+  & .ab-mock-actions > * { display: block; height: 28px; border-radius: 999px; }
+  & .ab-mock-primary { width: 92px; background: var(--ds-gray-300); }
+  & .ab-mock-secondary { width: 72px; box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400); }
+  & .ab-home { left: 250px; top: 200px; }
+
+  /* A screenshot: the headline region in a frame of the page's color, so
+     every copy is the same picture. */
+  & .ab-shot { position: absolute; left: 0; top: 0; overflow: hidden; background: var(--ss-surface); transform-origin: 0 0; }
+  & .ab-shot-page { position: absolute; width: 560px; height: 288px; }
+
+  /* The pull request: the title with its number, and the description under it.
+     No box, no tabs, no sidebar: the screenshot is the content. */
+  & .ab-pr-title { position: absolute; left: 12px; top: 18px; font: 600 17px/24px var(--ss-font); letter-spacing: -.02em; color: var(--ds-gray-1000, #171717); white-space: nowrap; }
+  & .ab-pr-number { font-weight: 400; color: var(--ds-gray-700, #8f8f8f); }
+  /* The description: a placeholder until the paste, then Before and After side
+     by side, each image under a small caption */
+  & .ab-pr-field { position: absolute; left: 12px; top: 58px; display: flex; align-items: flex-start; gap: 12px; }
+  /* The placeholder goes the instant the paste begins; each caption appears
+     the instant its image lands: no fades */
+  & .ab-pr-placeholder { position: absolute; left: 0; top: 0; font: 12px/16px var(--ss-font); color: var(--ds-gray-700, #8f8f8f); white-space: nowrap; }
+  & .ab-pr-placeholder[data-hidden] { visibility: hidden; }
+  & .ab-caret { display: inline-block; width: 1px; height: 13px; margin-left: 1px; vertical-align: -2px; background: var(--ds-gray-1000, #171717); }
+  /* Before the placeholder, out of flow, so focusing never moves its text */
+  & .ab-caret-lead { position: absolute; left: -1px; top: 1.5px; margin: 0; }
+  & .ab-pr-shot { display: grid; justify-items: start; gap: 6px; }
+  & .ab-pr-caption { font: 500 11px/14px var(--ss-font); color: var(--ds-gray-700, #8f8f8f); visibility: hidden; }
+  & .ab-pr-caption[data-on] { visibility: visible; }
+  & .ab-pr-attach { position: relative; overflow: hidden; border-radius: 6px; box-shadow: 0 0 0 var(--ss-hairline, 1px) var(--ss-line); opacity: 0; }
+  & .ab-pr-attach[data-on] { opacity: 1; }
+  & .ab-pr-attach-shot { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  & .ab-pr-rest { left: 330px; top: 190px; }
+
+  /* The copies riding with the cursor, and their flights: placed by their
+     centers, so scale and turn never move them; corners, ring and shadow are
+     set inline against the scale */
+  & .ab-carry { position: absolute; left: 0; top: 0; z-index: 19; overflow: hidden; transform-origin: 50% 50%; pointer-events: none; will-change: transform; }
+  & .ab-shot-flash { position: absolute; z-index: 18; border-radius: 8px; background: var(--ds-background-100, #fff); pointer-events: none; }
+
+  & [data-playing='false'] :is(.ab-page, .ab-tab-title, .ss-window__tab) { transition: none !important; }
+
+  & .ss-stage[data-layout='compact'] {
+    /* The narrow strip: production alone keeps its title; from the preview's
+       opening every tab narrows to its favicon and × and holds that width to the end */
+    & .ab-browser .ss-window__tab:is(:nth-child(2), :nth-child(3), :nth-child(4)) { width: 140px; max-width: 140px; }
+    & .ab-browser[data-many-tabs] .ss-window__tab:is(:nth-child(2), :nth-child(3), :nth-child(4)) { width: 56px; max-width: 56px; padding-inline: 9px; }
+    & .ab-browser[data-many-tabs] .ab-tab-title { opacity: 0; }
+    /* Closed tabs stay closed over the widths above */
+    & .ab-browser.ab-browser:not([data-preview-tab]) .ss-window__tab.ss-window__tab:nth-child(3),
+    & .ab-browser.ab-browser:not([data-github-tab]) .ss-window__tab.ss-window__tab:nth-child(4) { max-width: 0; padding-inline: 0; opacity: 0; }
+    & .ab-plus-one { left: 219.5px; }
+    & .ab-plus-two { left: 191.5px; }
+    & .ab-mock-hero { left: 22px; top: 79px; }
+    & .ab-headline { font-size: 23px; }
+    & .ab-mock-actions { margin-top: 16px; }
+    & .ab-mock-actions > * { height: 24px; }
+    & .ab-mock-primary { width: 76px; }
+    & .ab-mock-secondary { width: 60px; }
+    & .ab-home { left: 200px; top: 200px; }
+    & .ab-pr-title { font-size: 15px; }
+    & .ab-pr-rest { left: 220px; top: 196px; }
+  }
+}

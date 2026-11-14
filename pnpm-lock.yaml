@@ -86,6 +86,9 @@ importers:
       just-bash:
         specifier: ^2.9.6
         version: 2.14.0
+      lucide-react:
+        specifier: ^1.7.0
+        version: 1.7.0(react@19.2.3)
       next:
         specifier: 16.3.4
         version: 16.3.4(patch_hash=a620718f9d934500c4f0364aa9312b2539559e0ac911cdc37c97b92e1e9b4550)(@opentelemetry/api@1.9.0)(@types/node@20.19.28)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)

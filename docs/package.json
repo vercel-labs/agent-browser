@@ -42,7 +42,8 @@
     "react-dom": "19.2.3",
     "shiki": "^3.21.0",
     "streamdown": "^2.1.0",
-    "tailwind-merge": "^3.4.0"
+    "tailwind-merge": "^3.4.0",
+    "lucide-react": "^1.7.0"
   },
   "devDependencies": {
     "@babel/parser": "7.29.2",

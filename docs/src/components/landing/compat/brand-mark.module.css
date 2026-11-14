@@ -1,0 +1,5 @@
+/* Marks are inline SVG (brand-mark.tsx), filled with currentColor. */
+.mark {
+  display: inline-block;
+  flex-shrink: 0;
+}

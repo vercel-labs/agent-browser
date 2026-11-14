@@ -8,6 +8,8 @@ import {
   hash,
   canonical,
   markdownPath,
+  docsCanonical,
+  docsMarkdownPath,
   apiPath,
   text,
   normalize,
@@ -20,7 +22,9 @@ import {
   responseType,
   representationHeaders,
   indexing,
+  assertContainsLines,
   assertModernMarkdown,
+  assertHomeMarkdown,
   assertLegacyMarkdown,
   absoluteDestination,
   imageSourceUrls,
@@ -69,6 +73,20 @@ for (const page of publicPages) {
       tags(html, "html").map((tag) => tag.lang),
       ["en"],
     );
+    const og =
+      page.path === "/"
+        ? {
+            image: `${origin}/landing/home-og.png`,
+            width: "2400",
+            height: "1256",
+            alt: "Browser automation for any agent",
+          }
+        : {
+            image: `${origin}/og${page.path}`,
+            width: "1200",
+            height: "630",
+            alt: page.ogAlt,
+          };
     for (const [key, expected] of Object.entries({
       "og:title": page.ogTitle,
       "og:description": page.ogDescription,
@@ -76,14 +94,14 @@ for (const page of publicPages) {
       "og:type": "website",
       "og:site_name": "agent-browser",
       "og:locale": "en_US",
-      "og:image": `${origin}/og${page.path === "/" ? "" : page.path}`,
-      "og:image:width": "1200",
-      "og:image:height": "630",
-      "og:image:alt": page.ogAlt,
+      "og:image": og.image,
+      "og:image:width": og.width,
+      "og:image:height": og.height,
+      "og:image:alt": og.alt,
       "twitter:card": "summary_large_image",
       "twitter:title": page.twitterTitle,
       "twitter:description": page.description,
-      "twitter:image": `${origin}/og${page.path === "/" ? "" : page.path}`,
+      "twitter:image": og.image,
     }))
       assert.deepEqual(meta(html, key), [expected], `${page.path}: ${key}`);
     assert.deepEqual(
@@ -105,7 +123,8 @@ for (const page of publicPages) {
 
 for (const page of fixturePages) {
   test(`${page.path}: original prose, every table cell, code example and link are server rendered`, async () => {
-    const html = await htmlFor(page);
+    // The introduction lives at /introduction after the homepage split.
+    const html = page.path === "/" ? await (await get("/introduction")).text() : await htmlFor(page);
     assert.equal(tags(html, "main").length, 1);
     const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
     assert.ok(
@@ -177,7 +196,8 @@ for (const page of fixturePages) {
         `<${canonical(page.path)}>; rel="canonical"`,
       );
       const body = await response.text();
-      assertModernMarkdown(body, page);
+      if (page.path === "/") assertHomeMarkdown(body);
+      else assertModernMarkdown(body, page);
       bodies.push(body);
     }
     assert.equal(bodies[0], bodies[1]);
@@ -215,6 +235,61 @@ for (const page of publicPages) {
     }
   });
 }
+
+test("docs introduction keeps its own Markdown route after the homepage split", async () => {
+  const bodies = [];
+  for (const [path, headers] of [
+    ["/api/docs-md/introduction", {}],
+    ["/introduction.md", {}],
+    ["/introduction", { accept: "text/markdown" }],
+  ]) {
+    const response = await get(path, { headers });
+    responseType(response, "text/markdown");
+    representationHeaders(response);
+    assert.equal(
+      response.headers.get("link"),
+      `<${origin}/introduction>; rel="canonical"`,
+    );
+    const body = await response.text();
+    assert.ok(
+      body.startsWith(
+        `---\ntitle: "agent-browser"\ndescription: "Browser automation CLI for AI agents"\ncanonical_url: "${origin}/introduction"\n---\n\n`,
+      ),
+      `${path}: docs canonical frontmatter`,
+    );
+    assertContainsLines(
+      body,
+      pageAt("/").modernMarkdown,
+      `${path}: docs introduction`,
+    );
+    bodies.push(body);
+  }
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(bodies[1], bodies[2]);
+
+  const html = await (await get("/introduction")).text();
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "canonical")
+      .map((tag) => tag.href),
+    [`${origin}/introduction`],
+  );
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "alternate" && tag.type === "text/markdown")
+      .map((tag) => tag.href),
+    [`${origin}/introduction.md`],
+  );
+  for (const id of [
+    "features",
+    "works-with",
+    "example",
+    "why-refs",
+    "architecture",
+    "platforms",
+  ])
+    assert.ok(html.includes(`id="${id}"`), `introduction lost #${id}`);
+});
 
 for (const [name, headers, type] of [
   [
@@ -341,7 +416,8 @@ test("alternating representations and queries never contaminate one another", as
       representationHeaders(response);
       const body = await response.text();
       if (accept === "text/markdown") {
-        assertModernMarkdown(body, page);
+        if (path === "/") assertHomeMarkdown(body);
+        else assertModernMarkdown(body, page);
         assert.ok(
           !body.includes("utm_source") && !body.includes("route-test"),
           "tracking must not leak into Markdown",
@@ -409,7 +485,7 @@ test("trailing slashes keep permanent public paths and query strings", async () 
 for (const path of [
   "/missing-page",
   "/docs",
-  "/docs/commands",
+  "/introduction/commands",
   "/fr/commands",
   "/providers/missing",
   "/engines/missing",
@@ -716,7 +792,7 @@ test("Modern Web Guidance page renders its workflows, metadata and Markdown repr
     );
 });
 
-test("sitemap contains exactly the 40 canonical production URLs", async () => {
+test("sitemap lists the marketing root and every docs canonical exactly once", async () => {
   const response = await get("/sitemap.xml", { headers: agent });
   responseType(response, "application/xml");
   indexing(response);
@@ -727,8 +803,12 @@ test("sitemap contains exactly the 40 canonical production URLs", async () => {
   );
   assert.deepEqual(
     locations.sort(),
-    publicPages.map((page) => canonical(page.path)).sort(),
+    [
+      canonical("/"),
+      ...publicPages.map((page) => docsCanonical(page.path)),
+    ].sort(),
   );
+  assert.equal(new Set(locations).size, locations.length);
   assert.ok(
     !xml.includes("/en/") &&
       !xml.includes("localhost") &&
@@ -751,7 +831,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     assert.deepEqual(
       links.sort((a, b) => a[1].localeCompare(b[1])),
       publicPages
-        .map((page) => [page.markdownTitle, canonical(page.path)])
+        .map((page) => [page.markdownTitle, docsCanonical(page.path)])
         .sort((a, b) => a[1].localeCompare(b[1])),
     );
     const markdownLinks = [...body.matchAll(/\[Markdown\]\(([^)]+)\)/g)].map(
@@ -759,7 +839,9 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       markdownLinks.sort(),
-      publicPages.map((page) => `${origin}${markdownPath(page.path)}`).sort(),
+      publicPages
+        .map((page) => `${origin}${docsMarkdownPath(page.path)}`)
+        .sort(),
     );
     assert.ok(
       !body.includes("/en/") &&
@@ -869,4 +951,67 @@ test("Next static CSS, JavaScript and fonts remain binary/static resources for a
     assert.ok((await resource.arrayBuffer()).byteLength > 0);
     assert.equal(resource.headers.get("set-cookie"), null);
   }
+});
+
+test('homepage introduces both tools while keeping the original introduction reachable', async () => {
+  const html = await htmlFor(pageAt('/'));
+  const headings = [...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map((match) =>
+    text(match[1])
+  );
+  assert.equal(headings.length, 1);
+  assert.equal(headings[0], 'Browser automation built for any agent');
+  for (const section of ['AgentUseCaseTabs', 'AgentTweetWall', 'AgentClosing'])
+    assert.ok(html.includes(`data-element="${section}"`), section);
+  assert.ok(!html.includes('data-element="GridSection"'));
+  assert.ok(!html.includes('data-element="FeatureSection"'));
+  assert.ok(!text(html).includes('The next step is in another app'));
+  assert.ok(!text(html).includes('From a code change to a checked result'));
+  // Real tweet bodies and attribution must be in the HTML without client fetching.
+  assert.equal([...html.matchAll(/<article\b[^>]*data-tweet-id=/g)].length, 8);
+  assert.ok(
+    text(html).includes('If you are not using agent-browser to close the loop on frontend')
+  );
+  assert.ok(
+    tags(html, 'a').some((a) => a.href === 'https://x.com/onusoz/status/2032700396955697218')
+  );
+  assert.ok(!html.includes('platform.twitter.com/widgets.js'));
+  assert.ok(text(html).includes('Teach your agent'));
+  assert.ok(tags(html, 'a').some((a) => a.href === '/introduction'));
+  assert.ok(
+    text(html).includes('Desktop')
+  );
+  const docs = await get('/introduction');
+  responseType(docs, 'text/html');
+  const intro = await docs.text();
+  assert.ok(
+    tags(intro, 'link').some((link) => link.rel === 'canonical' && link.href === `${origin}/introduction`)
+  );
+  assert.ok(text(intro).includes('Browser automation CLI designed for AI agents'));
+  const search = await get('/api/search?query=agent-browser&locale=en');
+  assert.ok(
+    (await search.json()).some((result) => result.type === 'page' && result.url === '/introduction')
+  );
+});
+
+for (const path of ['/components', '/components/hero', '/components/hero/browser', '/components/hero/desktop']) {
+  test(`${path}: removed design playground is not a public route`, async () => {
+    const response = await get(path);
+    assert.equal(response.status, 404);
+  });
+}
+
+test('marketing layout stays independent of a persisted docs chat session', async () => {
+  const response = await get('/', {
+    headers: { Cookie: 'docs-chat-open=true; docs-chat-width=600' },
+  });
+  responseType(response, 'text/html');
+  const html = await response.text();
+  assert.ok(!html.includes('body{padding-right:600px}'));
+  assert.ok(!html.includes('aria-label="Ask AI"'));
+  assert.ok(html.includes('data-geist-button'));
+  const docs = await get('/introduction', {
+    headers: { Cookie: 'docs-chat-open=true; docs-chat-width=600' },
+  });
+  responseType(docs, 'text/html');
+  assert.ok((await docs.text()).includes('body{padding-right:600px}'));
 });

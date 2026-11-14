@@ -1,0 +1,194 @@
+/* The button centered in the card's upper 54%, the terminal in its bottom
+   part and off the foot, both on the card's center line. The terminal is
+   kept small so the button, the thing that changes, gets the room. Kept
+   outside the upstream kit. */
+.ab-feature-scene .ab-network {
+  /* The terminal runs off the foot; the stage owns that crop. */
+  & .ss-stage { overflow: hidden; }
+
+  /* The performance terminal's panel, centered: 320px (its longest line,
+     231px, plus 28px sides, with room to spare), 40px from each side at 400
+     and 23px at 358. Its top sits 135px down (TERM_TOP in the scene), and it
+     runs off the foot, its newest line ending 12px above it. */
+  & .ab-net-term {
+    position: absolute;
+    top: 135px;
+    left: 0;
+    right: 0;
+    width: 320px;
+    height: 135px;
+    margin-inline: auto;
+    padding: 16px 28px;
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--ss-term-bg, #0a0a0a);
+    /* A hairline of --ds-gray-alpha-400, the outline Geist gives surfaces:
+       on a dark page it is what sets the black panel off the near-black
+       card; on a light page it is a faint dark line on black, invisible.
+       Inset, so it adds no size and sits inside the panel's corners. */
+    box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, transparent), var(--ss-shadow-card);
+    font: 11px/20px var(--ss-mono);
+    font-variant-ligatures: none;
+  }
+  & .ss-stage[data-layout='compact'] .ab-net-term { width: 312px; padding-inline: 24px; }
+
+  /* The text area (VIEW in the scene). It does not clip: as the column
+     scrolls, earlier lines run on up through the panel's top padding, under
+     the scrim, and out through the panel's top edge, which cuts them. */
+  /* Paint-only motion in here, on purpose. Any compositor animation inside
+     the terminal (an opacity fade, a transform scroll, will-change) gets a
+     layer, and on a stage scaled to a fractional card size that layer smears
+     a dark 1px seam across the card's whole bottom edge while it runs. So
+     the column scrolls by `top` and lines fade in through their text color. */
+  & .ab-net-view { position: relative; }
+  & .ab-net-lines {
+    position: absolute;
+    left: 0;
+    right: 0;
+    transition: top .4s cubic-bezier(.45, 0, .1, 1);
+  }
+  /* The top scrim, shared with the performance terminal: the panel's own
+     ground, opaque at its top edge, clear 28px down. Static paint over the
+     text, inside the hairline so the dark-mode border shows above it. */
+  & .ab-net-scrim {
+    position: absolute;
+    top: var(--ss-hairline, 1px);
+    left: var(--ss-hairline, 1px);
+    right: var(--ss-hairline, 1px);
+    height: 28px;
+    border-radius: 11px 11px 0 0;
+    background: linear-gradient(var(--ss-term-bg, #0a0a0a) 0, transparent 28px);
+    pointer-events: none;
+  }
+  & .ab-net-line {
+    position: absolute;
+    left: 0;
+    height: 20px;
+    white-space: pre;
+    --ab-net-ink: var(--ss-term-text, #ededed);
+    --ab-net-on: 0;
+    transition: --ab-net-on .14s ease-out;
+  }
+  & .ab-net-line[data-on] { --ab-net-on: 1; transition-duration: .22s; }
+  & :is(.ab-net-line, .ab-net-line span) {
+    color: color-mix(in srgb, var(--ab-net-ink) calc(var(--ab-net-on) * 100%), transparent);
+  }
+
+  /* The performance terminal's styles, so the two read as one component:
+     commands bright, syntax gray (its output color), and its one blue
+     (--ss-term-agent) on what matters, here the quoted glob and body that
+     each mock changes. */
+  & .ab-net-str { --ab-net-ink: var(--ss-term-agent, #47a8ff); }
+  /* The continuation is syntax, not content: gray, so the command reads */
+  & .ab-net-cont { --ab-net-ink: var(--ss-term-dim, #8f8f8f); }
+
+  /* Geist's medium Button (40px, 6px radius, 14px medium), centered in the
+     135px above the terminal: 48px of air above it, 47px below. Every state
+     shares one cell, so the button is as wide as the widest and never
+     resizes. */
+  & .ab-net-button {
+    position: absolute;
+    top: 48px;
+    left: 0;
+    right: 0;
+    width: max-content;
+    margin-inline: auto;
+    display: grid;
+    font: 500 14px/20px var(--ss-font);
+  }
+  /* One whole button per state, Geist's own variants (geistdocs Button):
+     default gray-1000 on background-100; secondary background-100 with a
+     1px gray-400 ring; disabled gray-100, gray-700 text, the same ring.
+     Paint-only like the terminal: a face fades through --ab-net-face-on in
+     its colors, never `opacity`, which would take a compositor layer. */
+  & .ab-net-face {
+    grid-area: 1 / 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 40px;
+    padding: 0 10px;
+    border-radius: 6px;
+    --ab-net-bg: var(--ds-gray-1000, #171717);
+    --ab-net-fg: var(--ds-background-100, #fff);
+    --ab-net-ring: transparent;
+    --ab-net-face-on: 0;
+    background: color-mix(in srgb, var(--ab-net-bg) calc(var(--ab-net-face-on) * 100%), transparent);
+    box-shadow: 0 0 0 var(--ss-hairline, 1px) color-mix(in srgb, var(--ab-net-ring) calc(var(--ab-net-face-on) * 100%), transparent);
+    /* Leaving: stays whole under the newcomer, then goes once covered */
+    transition: --ab-net-face-on 0s .24s;
+  }
+  & .ab-net-face:is([data-state='cart'], [data-state='error']) {
+    --ab-net-bg: var(--ds-background-100, #fff);
+    --ab-net-fg: var(--ds-gray-1000, #171717);
+    --ab-net-ring: var(--ds-gray-400, #eaeaea);
+  }
+  & .ab-net-face[data-state='sold'] {
+    --ab-net-bg: var(--ds-gray-100, #f2f2f2);
+    --ab-net-fg: var(--ds-gray-700, #8f8f8f);
+    --ab-net-ring: var(--ds-gray-400, #eaeaea);
+  }
+  /* Arriving: on top, fading in over the old state */
+  & .ab-net-face[data-on] {
+    z-index: 1;
+    --ab-net-face-on: 1;
+    transition: --ab-net-face-on .22s ease-out;
+  }
+  /* Geist's label and prefix slots: 6px label sides on 10px button sides,
+     a 20px icon slot 3px before the label */
+  & .ab-net-roll { display: flex; align-items: center; }
+  & .ab-net-label { padding: 0 6px; }
+  & .ab-net-icon {
+    display: flex;
+    justify-content: center;
+    min-width: 20px;
+    margin-right: 3px;
+  }
+
+  /* The label roll: the old label eases up and out as the new one rises in
+     from half a line below, each on its own face. */
+  /* Moves by `top` and fades through its text color, both paint-only. */
+  & .ab-net-roll {
+    position: relative;
+    top: -.5em;
+    --ab-net-roll: 0;
+    color: color-mix(in srgb, var(--ab-net-fg) calc(var(--ab-net-face-on) * var(--ab-net-roll) * 100%), transparent);
+    transition: --ab-net-roll .16s ease-out, top .22s ease-in;
+  }
+  & .ab-net-face[data-on] .ab-net-roll {
+    top: 0;
+    --ab-net-roll: 1;
+  }
+  /* The entrance only once the script changes the button (data-live): the
+     face a scene opens on is whole from its first frame. Fill backwards
+     only, so a leaving label fades instead of being cut. */
+  & .ab-net-button[data-live] .ab-net-face[data-on] .ab-net-roll {
+    animation: ab-net-roll-in .4s cubic-bezier(.22, 1, .36, 1) backwards;
+  }
+}
+
+/* Fade amounts, registered so they can transition and animate (and inherit:
+   a line's into its highlighted spans, a face's into its label). */
+@property --ab-net-on {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+@property --ab-net-face-on {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+@property --ab-net-roll {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
+@keyframes ab-net-roll-in {
+  from { --ab-net-roll: 0; top: .5em; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ab-feature-scene .ab-network :is(.ab-net-face, .ab-net-roll, .ab-net-line, .ab-net-lines) { transition: none; animation: none; }
+}

@@ -1,0 +1,22 @@
+.ab-feature-scene {
+  position: relative;
+  margin: 0;
+  color: var(--ds-gray-1000);
+  background: var(--ds-background-200);
+  user-select: none;
+
+  & .ss-stage { background: var(--ds-background-200); }
+  & .ab-feature-caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* One icon fixed to the kit pointer's own transform. */
+  /* The agent's label: a 22px ink circle around its 12px avatar (5px each
+     side), no ring; below and right of the arrow's wing */
+  /* Cursor and label at true screen pixels, whatever the card's fit: scaled
+     from the hotspot by the inverse of the stage's measured scale */
+  & .ss-cursor__press { scale: var(--ss-unscale, 1); transform-origin: 0 0; }
+  & .ab-agent-presence { scale: var(--ss-unscale, 1); transform-origin: -12px -16px; position: absolute; z-index: 1; left: 12px; top: 16px; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--ds-gray-1000, #171717); color: var(--ds-background-100, #fff); box-shadow: var(--ds-shadow-small, 0 2px 2px rgba(0, 0, 0, .04)); }
+  & .ab-agent-presence svg { flex: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    & *, & *::before, & *::after { transition: none !important; animation: none !important; }
+  }
+}

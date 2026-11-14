@@ -369,6 +369,12 @@
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
       }
+    ],
+    "/native-mode": [
+      {
+        "from": "See the main [documentation](/) for current architecture and usage.",
+        "to": "See the main [documentation](/introduction) for current architecture and usage."
+      }
     ]
   },
   "resources": {

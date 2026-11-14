@@ -1,0 +1,76 @@
+/* An abstract page's text lines on the card's own ground, a solid gray
+   outline around part of it with a wash outside, and a token count on the
+   right. Kept outside the upstream kit. */
+.ab-feature-scene .ab-snapshots {
+  /* The page runs off the foot, and the wash's shadow past every edge; the
+     stage owns that crop. */
+  & .ss-stage { overflow: hidden; }
+
+  /* No surface, frame or shadow: only the lines, set in from the card's
+     edge by the gutter plus the outline's pad, so the outline itself keeps a
+     full 24px gutter. The column (--col) stops well short of the count. */
+  & .ab-snap-page {
+    --col: 196px;
+    position: absolute;
+    left: 32px;
+    top: 32px;
+    width: var(--col);
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  & .ab-snap-page > .ss-bar { flex-shrink: 0; }
+  & .ab-snap-body { width: 100%; display: flex; flex-direction: column; gap: 18px; }
+  /* Each paragraph is as wide as its longest line, so the outline hugs it. */
+  & .ab-snap-para { display: flex; flex-direction: column; gap: 10px; }
+
+  /* The outline and the wash in one box: a plain solid Geist gray border, and
+     outside it a soft wash drawn as its spread shadow. The box follows the
+     script every frame; nothing here transitions. */
+  & .ab-snap-scope {
+    position: absolute;
+    box-sizing: border-box;
+    border: 1.5px solid var(--ds-gray-600, #a8a8a8);
+    border-radius: 8px;
+    box-shadow: 0 0 0 800px color-mix(in srgb, var(--ds-background-200, #fafafa) 58%, transparent);
+    pointer-events: none;
+  }
+
+  /* The count: a small dark panel in the terminals' material and 12px radius
+     (.ab-perf-term, .ab-net-term), vertically centered on the right, anchored
+     at its right so it narrows from the left as a digit leaves. */
+  & .ab-snap-count {
+    position: absolute;
+    top: calc(50% - 20px);
+    right: 24px;
+    height: 40px;
+    padding: 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-radius: 12px;
+    background: var(--ss-term-bg, #0a0a0a);
+    color: var(--ss-term-text, #ededed);
+    box-shadow: var(--ss-shadow-satellite);
+  }
+  & .ab-snap-num {
+    display: flex;
+    font: 500 14px/20px var(--ss-mono);
+    font-variant-numeric: tabular-nums;
+    font-variant-ligatures: none;
+  }
+  /* One digit per fixed cell: the value can change every frame without the
+     panel moving. The ten-thousands cell's width is set inline each frame. */
+  & .ab-snap-cell {
+    width: 1ch;
+    overflow: hidden;
+    display: flex;
+    justify-content: center;
+  }
+  /* The mono comma's cell is a full digit wide; tighten it so 1,284 reads as one number. */
+  & .ab-snap-comma { width: .6ch; display: flex; justify-content: center; }
+  & .ab-snap-unit { font: 400 13px/20px var(--ss-font); color: var(--ds-gray-700, #8f8f8f); }
+
+  & .ss-stage[data-layout='compact'] .ab-snap-page { --col: 168px; left: 28px; }
+  & .ss-stage[data-layout='compact'] .ab-snap-count { right: 20px; }
+}
