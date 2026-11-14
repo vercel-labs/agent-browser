@@ -364,6 +364,12 @@
         "to": "pnpm install\npnpm build:source\npnpm link --global\nagent-browser install"
       }
     ],
+    "/snapshots": [
+      {
+        "from": "Filter output to reduce size:",
+        "to": "Filter output to reduce size:\n\nOn CDP-backed browsers, interactive snapshots include clickable elements inside open shadow roots, including nested components. Use their refs with the same interaction commands as other elements."
+      }
+    ],
     "/dashboard": [
       {
         "from": "anthropic/claude-sonnet-4.6",

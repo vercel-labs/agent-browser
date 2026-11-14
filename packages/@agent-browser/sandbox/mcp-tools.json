@@ -3725,7 +3725,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref.",
+      "description": "Return an accessibility-tree snapshot with reusable element refs. On CDP-backed browsers, interactive snapshots include clickable elements inside open shadow roots, including nested components. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref.",
       "inputSchema": {
         "properties": {
           "compact": {

@@ -9,6 +9,8 @@ The `snapshot` command returns a compact accessibility tree with refs for elemen
 
 Filter output to reduce size:
 
+On CDP-backed browsers, interactive snapshots include clickable elements inside open shadow roots, including nested components. Use their refs with the same interaction commands as other elements.
+
 Compact snapshots (`-c`) keep visible text, status text, and their direct ancestors. Empty sibling branches are removed. Interactive snapshots (`-i`) filter out noninteractive content. MCP snapshots default to interactive; set `interactive: false` to retain visible text and status text.
 
 ```bash

@@ -823,19 +823,107 @@ async fn resolve_iframe_frame_id(
         .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
 }
 
+async fn find_marked_cursor_nodes(
+    client: &CdpClient,
+    session_id: &str,
+    marker: &str,
+    has_shadow_matches: bool,
+) -> Result<Vec<i64>, String> {
+    let doc: Value = client
+        .send_command(
+            "DOM.getDocument",
+            Some(serde_json::json!({ "depth": 0 })),
+            Some(session_id),
+        )
+        .await?;
+
+    let root_node_id = doc
+        .get("root")
+        .and_then(|r| r.get("nodeId"))
+        .and_then(|v| v.as_i64())
+        .ok_or("DOM.getDocument did not return root nodeId")?;
+
+    let selector = format!("[{marker}]");
+    let query_result: Value = if has_shadow_matches {
+        // DOM.querySelectorAll is scoped to one root. DevTools search also
+        // reaches author shadow trees, including nested ones.
+        let search = client
+            .send_command(
+                "DOM.performSearch",
+                Some(serde_json::json!({ "query": selector })),
+                Some(session_id),
+            )
+            .await?;
+        let search_id = search["searchId"]
+            .as_str()
+            .ok_or("DOM.performSearch returned no searchId")?;
+        let count = search["resultCount"].as_u64().unwrap_or(0);
+        let matches = if count == 0 {
+            Ok(Value::Null)
+        } else {
+            client
+                .send_command(
+                    "DOM.getSearchResults",
+                    Some(serde_json::json!({
+                        "searchId": search_id, "fromIndex": 0, "toIndex": count
+                    })),
+                    Some(session_id),
+                )
+                .await
+        };
+        let _ = client
+            .send_command(
+                "DOM.discardSearchResults",
+                Some(serde_json::json!({"searchId": search_id})),
+                Some(session_id),
+            )
+            .await;
+        matches?
+    } else {
+        client
+            .send_command(
+                "DOM.querySelectorAll",
+                Some(serde_json::json!({
+                    "nodeId": root_node_id,
+                    "selector": selector
+                })),
+                Some(session_id),
+            )
+            .await?
+    };
+
+    Ok(query_result
+        .get("nodeIds")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
+        .unwrap_or_default())
+}
+
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
 ) -> Result<HashMap<i64, CursorElementInfo>, String> {
     // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
-    // - Uses querySelectorAll('*') to walk all elements
+    // - Walks the light DOM and open shadow roots
     // - Checks getComputedStyle(el).cursor === 'pointer'
     // - Checks onclick attribute/handler and tabindex
     // - Skips interactiveTags (a, button, input, select, textarea, details, summary)
     // - Skips elements with interactive ARIA roles
     // - Deduplicates inherited cursor:pointer from parent
     // - Skips empty text and zero-size elements
-    // - Tags each matched element with data-__ab-ci for batch backendNodeId resolution
+    // - Tags matches with a per-snapshot attribute for batch backendNodeId resolution
+    let marker = format!("data-__ab-ci-{}", uuid::Uuid::new_v4().simple());
+    let walk = r#"function* elements(root, includeHidden = false) {
+        const roots = [root];
+        for (const current of roots) {
+            for (const el of current.querySelectorAll('*')) {
+                yield el;
+                if (el.shadowRoot && (includeHidden || !el.closest('[hidden], [aria-hidden="true"]'))) {
+                    roots.push(el.shadowRoot);
+                }
+            }
+        }
+    }"#;
     let js = r#"
 (function() {
     var results = [];
@@ -850,9 +938,8 @@ async fn find_cursor_interactive_elements(
         'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
     };
 
-    var allElements = document.body.querySelectorAll('*');
-    for (var i = 0; i < allElements.length; i++) {
-        var el = allElements[i];
+    WALK_ELEMENTS
+    for (const el of elements(document.body)) {
 
         if (el.closest && el.closest('[hidden], [aria-hidden="true"]')) continue;
 
@@ -874,7 +961,7 @@ async fn find_cursor_interactive_elements(
 
         // Skip elements that only inherit cursor:pointer from an ancestor
         if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
-            var parent = el.parentElement;
+            var parent = el.parentElement || el.getRootNode().host;
             if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
         }
 
@@ -900,8 +987,9 @@ async fn find_cursor_interactive_elements(
             }
         }
 
-        el.setAttribute('data-__ab-ci', String(results.length));
+        el.setAttribute('MARKER', String(results.length));
         results.push({
+            shadow: el.getRootNode() !== document,
             text: text,
             tagName: tagName,
             hasOnClick: hasOnClick,
@@ -914,13 +1002,13 @@ async fn find_cursor_interactive_elements(
     }
     return results;
 })()
-"#;
+"#.replace("WALK_ELEMENTS", walk).replace("MARKER", &marker);
 
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.evaluate",
             &EvaluateParams {
-                expression: js.to_string(),
+                expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
@@ -938,38 +1026,11 @@ async fn find_cursor_interactive_elements(
         return Ok(HashMap::new());
     }
 
-    // Batch-resolve backendNodeIds: use DOM.getDocument to get the root nodeId,
-    // then DOM.querySelectorAll to get all tagged elements in a single call.
-    let doc: Value = client
-        .send_command(
-            "DOM.getDocument",
-            Some(serde_json::json!({ "depth": 0 })),
-            Some(session_id),
-        )
-        .await?;
-
-    let root_node_id = doc
-        .get("root")
-        .and_then(|r| r.get("nodeId"))
-        .and_then(|v| v.as_i64())
-        .ok_or("DOM.getDocument did not return root nodeId")?;
-
-    let query_result: Value = client
-        .send_command(
-            "DOM.querySelectorAll",
-            Some(serde_json::json!({
-                "nodeId": root_node_id,
-                "selector": "[data-__ab-ci]"
-            })),
-            Some(session_id),
-        )
-        .await?;
-
-    let node_ids: Vec<i64> = query_result
-        .get("nodeIds")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
-        .unwrap_or_default();
+    let has_shadow_matches = elements.iter().any(|el| el["shadow"] == true);
+    let cursor_nodes =
+        find_marked_cursor_nodes(client, session_id, &marker, has_shadow_matches).await;
+    // Remove the scan markers even if the CDP lookup fails.
+    let node_ids = cursor_nodes.as_deref().unwrap_or_default();
 
     // Resolve backendNodeIds for each DOM node using concurrent CDP calls.
     let describe_futures: Vec<_> = node_ids
@@ -985,7 +1046,7 @@ async fn find_cursor_interactive_elements(
 
     let describe_results = futures_util::future::join_all(describe_futures).await;
 
-    // Build a map from data-__ab-ci index to backendNodeId.
+    // Build a map from scan index to backendNodeId.
     let mut idx_to_backend: HashMap<usize, i64> = HashMap::new();
     for desc in describe_results.into_iter().flatten() {
         let backend_id = desc
@@ -1001,7 +1062,7 @@ async fn find_cursor_interactive_elements(
                 attrs
                     .iter()
                     .enumerate()
-                    .find(|(_, v)| v.as_str() == Some("data-__ab-ci"))
+                    .find(|(_, v)| v.as_str() == Some(marker.as_str()))
                     .and_then(|(i, _)| attrs.get(i + 1))
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<usize>().ok())
@@ -1012,8 +1073,20 @@ async fn find_cursor_interactive_elements(
     }
 
     // Clean up the data attributes we injected for backendNodeId resolution.
-    let cleanup_js =
-        r#"(function(){ var els = document.querySelectorAll('[data-__ab-ci]'); for (var i = 0; i < els.length; i++) els[i].removeAttribute('data-__ab-ci'); return els.length; })()"#.to_string();
+    let cleanup_js = if has_shadow_matches {
+        format!(
+            r#"(function() {{
+            {walk}
+            for (const el of elements(document.body, true)) {{
+                if (el.hasAttribute('{marker}')) el.removeAttribute('{marker}');
+            }}
+        }})()"#
+        )
+    } else {
+        format!(
+            "document.querySelectorAll('[{marker}]').forEach(el => el.removeAttribute('{marker}'))"
+        )
+    };
     if let Err(e) = client
         .send_command_typed::<EvaluateParams, EvaluateResult>(
             "Runtime.evaluate",
@@ -1028,6 +1101,8 @@ async fn find_cursor_interactive_elements(
     {
         eprintln!("[agent-browser] Warning: failed to clean up data-__ab-ci attributes: {e}");
     }
+
+    cursor_nodes?;
 
     // Build the map
     let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();

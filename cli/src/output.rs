@@ -2763,6 +2763,8 @@ Options:
 Compact snapshots keep visible text, status text, and their direct ancestors.
 Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
 interactive to false to retain visible text and status text.
+On CDP-backed browsers, interactive snapshots include clickable elements inside
+open shadow roots, including nested components. Use their refs as usual.
 
 Hints:
 Controls with an empty or duplicated accessible name print hint="..." after
