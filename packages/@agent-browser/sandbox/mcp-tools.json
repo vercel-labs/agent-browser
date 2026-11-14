@@ -1304,7 +1304,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Experimental. Run a saved task directly over HTTP, without driving the page. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
+      "description": "Experimental. Run a saved task by sending its requests directly, falling back to the page, then to a replay of the recorded commands. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
       "inputSchema": {
         "properties": {
           "allowWrite": {
@@ -1334,6 +1334,11 @@
           "session": {
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
+          },
+          "timeout": {
+            "description": "Milliseconds the whole run may take, across every tier.",
+            "minimum": 1,
+            "type": "integer"
           },
           "where": {
             "additionalProperties": {
@@ -3720,7 +3725,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
+      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref.",
       "inputSchema": {
         "properties": {
           "compact": {

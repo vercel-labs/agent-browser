@@ -493,17 +493,15 @@ async fn resolve_center_in_same_process_frame(
     let context_id = isolated_frame_context_id(client, session_id, frame_id).await?;
     let find_expr = build_find_element_js_in("document", selector);
     let expression = format!(
-        r#"(() => {{
+        r#"(async () => {{
             const el = {find_expr};
             if (!el) return null;
-            if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
-            else el.scrollIntoView({{ block: 'center', inline: 'center' }});
-            const rect = el.getBoundingClientRect();
-            const x = rect.x + rect.width / 2;
-            const y = rect.y + rect.height / 2;
+            const clickPoint = {CLICK_POINT_JS};
+            const point = await clickPoint(el, document);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            return {{ x: x, y: y, reason: notActionable(document, el, x, y), blocker: blockerAt(document, el, x, y) }};
+            const topDoc = (point.view && point.view.document) || document;
+            return {{ x: point.lx, y: point.ly, reason: notActionable(el, point.inView), blocker: blockerAt(document, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
         }})()"#,
     );
     let result = client
@@ -513,6 +511,7 @@ async fn resolve_center_in_same_process_frame(
                 "contextId": context_id,
                 "expression": expression,
                 "returnByValue": true,
+                "awaitPromise": true,
             })),
             Some(session_id),
         )
@@ -603,33 +602,54 @@ pub async fn resolve_element_center(
 
         // Try cached backend_node_id first (fast path)
         if let Some(backend_node_id) = entry.backend_node_id {
-            scroll_node_into_view(client, effective_session_id, backend_node_id).await;
-            let result: Result<DomGetBoxModelResult, String> = client
-                .send_command_typed(
-                    "DOM.getBoxModel",
-                    &DomGetBoxModelParams {
-                        backend_node_id: Some(backend_node_id),
-                        node_id: None,
-                        object_id: None,
-                    },
-                    Some(effective_session_id),
-                )
-                .await;
+            // A ref inside a same-process frame keeps the #2490 box-model
+            // path: its box model is already in top-level viewport space,
+            // and the hit test translates the point into the frame's own
+            // coordinates. Every other ref uses the press point, whose
+            // click-point walk cannot cross a cross-origin frame boundary.
+            if entry.frame_id.is_some() && effective_session_id == session_id {
+                scroll_node_into_view(client, effective_session_id, backend_node_id).await;
+                let result: Result<DomGetBoxModelResult, String> = client
+                    .send_command_typed(
+                        "DOM.getBoxModel",
+                        &DomGetBoxModelParams {
+                            backend_node_id: Some(backend_node_id),
+                            node_id: None,
+                            object_id: None,
+                        },
+                        Some(effective_session_id),
+                    )
+                    .await;
 
-            if let Ok(r) = result {
-                let (x, y) = box_model_center(&r.model);
-                check_node_interception(
+                if let Ok(r) = result {
+                    let (x, y) = box_model_center(&r.model);
+                    check_node_interception(
+                        client,
+                        effective_session_id,
+                        backend_node_id,
+                        selector_or_ref,
+                        x,
+                        y,
+                        require_actionable,
+                        effective_session_id == session_id,
+                    )
+                    .await?;
+                    return Ok((x, y, effective_session_id.to_string()));
+                }
+            } else if let Some(object_id) =
+                resolve_node_object_id(client, effective_session_id, backend_node_id).await
+            {
+                if let Some((x, y)) = node_click_point(
                     client,
                     effective_session_id,
-                    backend_node_id,
+                    &object_id,
                     selector_or_ref,
-                    x,
-                    y,
                     require_actionable,
-                    effective_session_id == session_id,
                 )
-                .await?;
-                return Ok((x, y, effective_session_id.to_string()));
+                .await?
+                {
+                    return Ok((x, y, effective_session_id.to_string()));
+                }
             }
             if !entry.allow_role_fallback {
                 return Err(format!("Element ref {ref_id} is stale"));
@@ -648,30 +668,45 @@ pub async fn resolve_element_center(
             iframe_sessions,
         )
         .await?;
-        scroll_node_into_view(client, effective_session_id, fresh_id).await;
-        let result: DomGetBoxModelResult = client
-            .send_command_typed(
-                "DOM.getBoxModel",
-                &DomGetBoxModelParams {
-                    backend_node_id: Some(fresh_id),
-                    node_id: None,
-                    object_id: None,
-                },
-                Some(effective_session_id),
+        if entry.frame_id.is_some() && effective_session_id == session_id {
+            scroll_node_into_view(client, effective_session_id, fresh_id).await;
+            let result: DomGetBoxModelResult = client
+                .send_command_typed(
+                    "DOM.getBoxModel",
+                    &DomGetBoxModelParams {
+                        backend_node_id: Some(fresh_id),
+                        node_id: None,
+                        object_id: None,
+                    },
+                    Some(effective_session_id),
+                )
+                .await?;
+            let (x, y) = box_model_center(&result.model);
+            check_node_interception(
+                client,
+                effective_session_id,
+                fresh_id,
+                selector_or_ref,
+                x,
+                y,
+                require_actionable,
+                effective_session_id == session_id,
             )
             .await?;
-        let (x, y) = box_model_center(&result.model);
-        check_node_interception(
+            return Ok((x, y, effective_session_id.to_string()));
+        }
+        let object_id = resolve_node_object_id(client, effective_session_id, fresh_id)
+            .await
+            .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
+        let (x, y) = node_click_point(
             client,
             effective_session_id,
-            fresh_id,
+            &object_id,
             selector_or_ref,
-            x,
-            y,
             require_actionable,
-            effective_session_id == session_id,
         )
-        .await?;
+        .await?
+        .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
         return Ok((x, y, effective_session_id.to_string()));
     }
 
@@ -832,7 +867,9 @@ async fn check_node_interception(
             }}
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            return {{ blocker: blockerAt(doc, this, px, py), reason: notActionable(doc, this, px, py) }};
+            const view = doc.defaultView;
+            const inView = !view || (px >= 0 && py >= 0 && px < view.innerWidth && py < view.innerHeight);
+            return {{ blocker: blockerAt(doc, this, px, py), reason: notActionable(this, inView) }};
         }}"#,
     );
     let result = client
@@ -876,6 +913,89 @@ async fn scroll_node_into_view(client: &CdpClient, session_id: &str, backend_nod
             Some(session_id),
         )
         .await;
+}
+
+/// Resolve a backend node id to an object handle, or None when the node is
+/// gone so the caller can fall back to the accessibility tree.
+async fn resolve_node_object_id(
+    client: &CdpClient,
+    session_id: &str,
+    backend_node_id: i64,
+) -> Option<String> {
+    let resolved: DomResolveNodeResult = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(backend_node_id),
+                node_id: None,
+                object_group: Some("agent-browser".to_string()),
+            },
+            Some(session_id),
+        )
+        .await
+        .ok()?;
+    resolved.object.object_id
+}
+
+/// Press point for a resolved node: scroll it in, wait for the page to settle,
+/// and report why the point cannot be pressed before input is dispatched.
+async fn node_click_point(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    target: &str,
+    require_actionable: bool,
+) -> Result<Option<(f64, f64)>, String> {
+    let function = format!(
+        r#"async function() {{
+            if (!this.isConnected) return {{ connected: false }};
+            const doc = this.ownerDocument || document;
+            const clickPoint = {CLICK_POINT_JS};
+            const point = await clickPoint(this, doc);
+            const blockerAt = {BLOCKER_AT_JS};
+            const notActionable = {ACTIONABILITY_JS};
+            const topDoc = (point.view && point.view.document) || doc;
+            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
+        }}"#,
+    );
+    let result = client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object_id,
+                "functionDeclaration": function,
+                "returnByValue": true,
+                "awaitPromise": true,
+            })),
+            Some(session_id),
+        )
+        .await?;
+    let value = result.get("result").and_then(|r| r.get("value"));
+    if value
+        .and_then(|v| v.get("connected"))
+        .and_then(|v| v.as_bool())
+        == Some(false)
+    {
+        return Ok(None);
+    }
+    if require_actionable {
+        if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
+            return Err(not_actionable_error(target, reason));
+        }
+    }
+    if let Some(blocker) = value
+        .and_then(|v| v.get("blocker"))
+        .and_then(|v| v.as_str())
+    {
+        return Err(intercepted_error(target, blocker));
+    }
+    match (
+        value.and_then(|v| v.get("x")).and_then(|v| v.as_f64()),
+        value.and_then(|v| v.get("y")).and_then(|v| v.as_f64()),
+    ) {
+        (Some(x), Some(y)) => Ok(Some((x, y))),
+        _ => Err(format!("Element not found: {}", target)),
+    }
 }
 
 pub async fn resolve_element_object_id(
@@ -1076,7 +1196,7 @@ async fn find_node_id_by_role_name(
     let (ax_params, effective_session_id) =
         resolve_ax_session(frame_id, session_id, iframe_sessions);
     let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed(
+        .send_command_typed_raw(
             "Accessibility.getFullAXTree",
             &ax_params,
             Some(effective_session_id),
@@ -1192,8 +1312,34 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     let hit = d.elementFromPoint(lx, ly);
     while (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && hit.contentDocument && hit !== el) {
         const r = hit.getBoundingClientRect();
-        lx -= r.x + hit.clientLeft;
-        ly -= r.y + hit.clientTop;
+        const ownerWin = hit.ownerDocument.defaultView;
+        const style = ownerWin ? ownerWin.getComputedStyle(hit) : null;
+        const scaleX = hit.offsetWidth > 0 ? r.width / hit.offsetWidth : 1;
+        const scaleY = hit.offsetHeight > 0 ? r.height / hit.offsetHeight : 1;
+        const borderLeft = style ? (parseFloat(style.borderLeftWidth) || 0) : hit.clientLeft;
+        const borderTop = style ? (parseFloat(style.borderTopWidth) || 0) : hit.clientTop;
+        const padLeft = style ? (parseFloat(style.paddingLeft) || 0) : 0;
+        const padTop = style ? (parseFloat(style.paddingTop) || 0) : 0;
+        const padRight = style ? (parseFloat(style.paddingRight) || 0) : 0;
+        const padBottom = style ? (parseFloat(style.paddingBottom) || 0) : 0;
+        const contentLeft = r.x + (borderLeft + padLeft) * scaleX;
+        const contentTop = r.y + (borderTop + padTop) * scaleY;
+        const contentWidth = Math.max(0, hit.clientWidth - padLeft - padRight);
+        const contentHeight = Math.max(0, hit.clientHeight - padTop - padBottom);
+        const renderedWidth = contentWidth * scaleX;
+        const renderedHeight = contentHeight * scaleY;
+        if (
+            renderedWidth <= 0 || renderedHeight <= 0 ||
+            lx < contentLeft || lx >= contentLeft + renderedWidth ||
+            ly < contentTop || ly >= contentTop + renderedHeight
+        ) {
+            break;
+        }
+        const childWin = hit.contentDocument.defaultView;
+        const vw = (childWin && childWin.innerWidth) || contentWidth;
+        const vh = (childWin && childWin.innerHeight) || contentHeight;
+        lx = (lx - contentLeft) * (vw / renderedWidth);
+        ly = (ly - contentTop) * (vh / renderedHeight);
         d = hit.contentDocument;
         hit = d.elementFromPoint(lx, ly);
     }
@@ -1217,44 +1363,116 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     return desc;
 }"#;
 
+const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
+    const measure = () => {
+        const r = el.getBoundingClientRect();
+        const lx = r.x + r.width / 2;
+        const ly = r.y + r.height / 2;
+        let x = lx;
+        let y = ly;
+        const own = doc.defaultView || window;
+        let reachable = lx >= 0 && ly >= 0 && lx < own.innerWidth && ly < own.innerHeight;
+        const frames = [];
+        let win = own;
+        while (win && win.frameElement) {
+            const fe = win.frameElement;
+            const frameRect = fe.getBoundingClientRect();
+            const ownerWin = fe.ownerDocument.defaultView || win.parent;
+            const style = ownerWin.getComputedStyle(fe);
+            const scaleX = fe.offsetWidth > 0 ? frameRect.width / fe.offsetWidth : 1;
+            const scaleY = fe.offsetHeight > 0 ? frameRect.height / fe.offsetHeight : 1;
+            const borderLeft = parseFloat(style.borderLeftWidth) || 0;
+            const borderTop = parseFloat(style.borderTopWidth) || 0;
+            const padLeft = parseFloat(style.paddingLeft) || 0;
+            const padTop = parseFloat(style.paddingTop) || 0;
+            const padRight = parseFloat(style.paddingRight) || 0;
+            const padBottom = parseFloat(style.paddingBottom) || 0;
+            const contentLeft = frameRect.x + (borderLeft + padLeft) * scaleX;
+            const contentTop = frameRect.y + (borderTop + padTop) * scaleY;
+            const contentWidth = Math.max(0, fe.clientWidth - padLeft - padRight);
+            const contentHeight = Math.max(0, fe.clientHeight - padTop - padBottom);
+            const renderedWidth = contentWidth * scaleX;
+            const renderedHeight = contentHeight * scaleY;
+            const vw = win.innerWidth;
+            const vh = win.innerHeight;
+            x = contentLeft + (vw > 0 ? x * (renderedWidth / vw) : 0);
+            y = contentTop + (vh > 0 ? y * (renderedHeight / vh) : 0);
+            const parentWin = win.parent;
+            reachable = reachable
+                && renderedWidth > 0 && renderedHeight > 0
+                && x >= contentLeft && x < contentLeft + renderedWidth
+                && y >= contentTop && y < contentTop + renderedHeight
+                && x >= 0 && y >= 0
+                && x < parentWin.innerWidth && y < parentWin.innerHeight;
+            frames.push(fe);
+            win = parentWin;
+        }
+        const view = win || own;
+        reachable = reachable && x >= 0 && y >= 0 && x < view.innerWidth && y < view.innerHeight;
+        return { x: x, y: y, lx: lx, ly: ly, frames: frames, view: view, inView: reachable, box: r.width > 0 || r.height > 0 };
+    };
+    const settle = async (m) => {
+        for (let i = 0; i < 5; i++) {
+            await new Promise((resolve) => {
+                requestAnimationFrame(() => requestAnimationFrame(resolve));
+                setTimeout(resolve, 100);
+            });
+            const next = measure();
+            const moved = next.x !== m.x || next.y !== m.y;
+            m = next;
+            if (!moved) break;
+        }
+        return m;
+    };
+    let m = measure();
+    if (el.scrollIntoViewIfNeeded) {
+        el.scrollIntoViewIfNeeded(true);
+        const next = measure();
+        m = next.x !== m.x || next.y !== m.y ? await settle(next) : next;
+    }
+    for (let scrolls = 0; scrolls < 2 && m.box && !m.inView; scrolls++) {
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        for (const frame of [...m.frames].reverse()) frame.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        m = await settle(measure());
+    }
+    return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView };
+})"#;
+
 /// Returns why a click at (x, y) cannot reach `el`, or null when it can.
 /// It fails open when the engine lacks an API it needs.
-const ACTIONABILITY_JS: &str = r#"(doc, el, x, y) => {
+const ACTIONABILITY_JS: &str = r#"(el, inView) => {
     try {
         const rect = el.getBoundingClientRect();
         if ((rect.width <= 0 && rect.height <= 0) || ['hidden', 'collapse'].includes(el.ownerDocument.defaultView.getComputedStyle(el).visibility)) return 'not visible';
         if (el.disabled || el.matches(':disabled')) return 'disabled';
-        const view = doc.defaultView;
-        const outside = x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight;
-        if (outside && !doc.elementFromPoint(x, y)) return 'outside the viewport';
+        if (!inView) return 'outside the viewport';
     } catch (e) {}
     return null;
 }"#;
 
+fn box_model_center(model: &BoxModel) -> (f64, f64) {
+    // content quad: [x1,y1, x2,y2, x3,y3, x4,y4]
+    if model.content.len() >= 8 {
+        let x = (model.content[0] + model.content[2] + model.content[4] + model.content[6]) / 4.0;
+        let y = (model.content[1] + model.content[3] + model.content[5] + model.content[7]) / 4.0;
+        (x, y)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
 fn build_selector_js(selector: &str) -> String {
     let find_expr = build_find_element_js(selector);
-    // Input events dispatch at viewport coordinates, so an element outside the
-    // viewport must be scrolled into view first or the click lands on nothing.
-    // The blocker check reports an overlay covering the click point instead of
-    // letting the input land on it and silently doing the wrong thing.
     format!(
-        r#"(() => {{
+        r#"(async () => {{
             const el = {find_expr};
             if (!el) return null;
-            const inView = (r) => r.width > 0 && r.height > 0 &&
-                r.bottom > 0 && r.right > 0 &&
-                r.top < (window.innerHeight || document.documentElement.clientHeight) &&
-                r.left < (window.innerWidth || document.documentElement.clientWidth);
-            let rect = el.getBoundingClientRect();
-            if (!inView(rect)) {{
-                el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-                rect = el.getBoundingClientRect();
-            }}
-            const x = rect.x + rect.width / 2;
-            const y = rect.y + rect.height / 2;
+            const clickPoint = {CLICK_POINT_JS};
+            const point = await clickPoint(el, document);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            return {{ x: x, y: y, reason: notActionable(document, el, x, y), blocker: blockerAt(document, el, x, y) }};
+            const topDoc = (point.view && point.view.document) || document;
+            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(document, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
         }})()"#,
     )
 }
@@ -1273,7 +1491,7 @@ async fn resolve_by_selector(
             &EvaluateParams {
                 expression: js,
                 return_by_value: Some(true),
-                await_promise: Some(false),
+                await_promise: Some(true),
             },
             Some(session_id),
         )
@@ -1309,17 +1527,6 @@ fn not_actionable_error(target: &str, reason: &str) -> String {
         "Element '{}' is {}, so the click would not reach it",
         target, reason
     )
-}
-
-fn box_model_center(model: &BoxModel) -> (f64, f64) {
-    // content quad: [x1,y1, x2,y2, x3,y3, x4,y4]
-    if model.content.len() >= 8 {
-        let x = (model.content[0] + model.content[2] + model.content[4] + model.content[6]) / 4.0;
-        let y = (model.content[1] + model.content[3] + model.content[5] + model.content[7]) / 4.0;
-        (x, y)
-    } else {
-        (0.0, 0.0)
-    }
 }
 
 pub async fn get_element_text(
@@ -2071,7 +2278,6 @@ mod tests {
         assert!(!js.contains("querySelectorAll"));
     }
 
-    #[test]
     fn test_box_model_center() {
         let response: DomGetBoxModelResult = serde_json::from_value(serde_json::json!({
             "model": {

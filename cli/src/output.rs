@@ -406,29 +406,59 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
             Some(out)
         }
         Some("flow_run") => {
-            let steps: Vec<String> = data
+            let tiers: Vec<String> = data
                 .get("steps")?
                 .as_array()?
                 .iter()
-                .map(|s| format!("{} in {}ms", s["id"].as_str().unwrap_or(""), s["ms"]))
+                .map(|s| {
+                    let fell_back: Vec<String> = s["fellBack"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| {
+                            format!(
+                                "{}: {}",
+                                f["tier"].as_str().unwrap_or("-"),
+                                f["error"].as_str().unwrap_or("")
+                            )
+                        })
+                        .collect();
+                    let mut line = format!(
+                        "{} via {} in {}ms",
+                        s["id"].as_str().unwrap_or(""),
+                        s["tier"].as_str().unwrap_or("-"),
+                        s["ms"]
+                    );
+                    if !fell_back.is_empty() {
+                        line.push_str(&format!(" after {}", fell_back.join("; ")));
+                    }
+                    line
+                })
                 .collect();
             let body = data.get("data").cloned().unwrap_or(serde_json::Value::Null);
             let status = match data.get("drift") {
                 Some(d) => format!(
-                    "unverified: {}",
-                    d["reason"].as_str().unwrap_or("response changed")
+                    "unverified: {} on the {} tier",
+                    d["reason"].as_str().unwrap_or("response changed"),
+                    d["tier"].as_str().unwrap_or("-")
                 ),
                 None if data.get("empty") == Some(&serde_json::Value::Bool(true)) => {
                     "no results, so the flow's verified state is unchanged".to_string()
                 }
                 None => "verified".to_string(),
             };
+            let saved = data
+                .get("saveError")
+                .and_then(|e| e.as_str())
+                .map(|e| format!("\nThe flow file was not updated: {}", e))
+                .unwrap_or_default();
             Some(format!(
-                "Flow '{}' ran in {}ms ({}), {}\n{}",
+                "Flow '{}' ran in {}ms ({}), {}{}\n{}",
                 data.get("name")?.as_str()?,
                 data.get("ms")?,
-                steps.join(", "),
+                tiers.join(", "),
                 status,
+                saved,
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             ))
         }
@@ -561,7 +591,7 @@ pub(crate) fn format_webmcp_context(
             ..Default::default()
         },
     ));
-    lines.push("For a relevant tool, fetch its schema: agent-browser webmcp list <tool> --frame <frame-id> --json. Invoke only within the user's authorized task. Omitted WebMCP context means no update.".to_string());
+    lines.push("For a relevant tool, fetch its schema: agent-browser webmcp list <tool> --frame <frame-id> --json, then call it: agent-browser webmcp invoke <tool> --frame <frame-id> '<json>'. Invoke only within the user's authorized task. Omitted WebMCP context means no update.".to_string());
     if context["truncated"] == true {
         lines.push("Catalog shortened; webmcp list --json retrieves all metadata.".to_string());
     }
@@ -2358,6 +2388,12 @@ Usage: agent-browser select <selector> <value...>
 Selects one or more options in a <select> dropdown by value or visible label.
 Label matching normalizes whitespace such as non-breaking spaces.
 
+On a custom ARIA widget (role=combobox or role=listbox, as in Radix or Headless UI),
+select opens it when collapsed, waits for the visible role=option items, and clicks
+the ones whose accessible name or value matches. If none match, the error lists the
+available options, and a matched option marked aria-disabled is an error instead of
+a click. An option that is already selected in a multi-select listbox is left alone.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
@@ -2727,6 +2763,10 @@ Options:
 Compact snapshots keep visible text, status text, and their direct ancestors.
 Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
 interactive to false to retain visible text and status text.
+
+Hints:
+Controls with an empty or duplicated accessible name print hint="..." after
+the ref, read from the icon, image file, data-testid/name/id, and nearest row.
 
 Global Options:
   --json               Output as JSON
@@ -3448,6 +3488,12 @@ work); lower it for long sessions where file size matters more than motion.
 With --cursor, an inert overlay renders the pointer and page together so
 drags stay synchronized. It is hidden from accessibility snapshots and
 removed on stop. Screenshots taken while recording include the overlay.
+
+Frames come from Chrome's screencast, which captures at the window's real
+device scale. When the page's scale is emulated (`set viewport <w> <h> 2`),
+recording switches to full-density screenshots, which can capture fewer frames
+on busy pages; `record stop` reports "capture": "screenshots". Launching with
+--args "--force-device-scale-factor=2" keeps the screencast at full density.
 
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)
@@ -4274,7 +4320,7 @@ Examples:
   agent-browser skills get core --full
   agent-browser skills get core --ref commands
   agent-browser skills get core --ref references/authentication.md
-  agent-browser skills get protected-vercel-deployments
+  agent-browser skills get vercel
   agent-browser skills get electron --full
   agent-browser skills get --all
   agent-browser skills path core
@@ -4474,8 +4520,9 @@ Streaming:
 
 WebMCP (experimental):
   webmcp list [tool]         Full metadata; optional --frame <frame-id>
-  webmcp invoke <tool>       Invoke a page tool; accepts --params <json|@file>,
-                             --frame <frame-id>, --detach, and --timeout <ms>
+  webmcp invoke <tool>       Invoke a page tool; input as <json|@file> after the
+                             tool name or with --params; also --frame <frame-id>,
+                             --detach, and --timeout <ms>
   webmcp result <id>         Wait for a detached invocation result
   webmcp cancel <id>         Cancel an active invocation
   Brief untrusted summaries appear only on discovery or change; no schemas
@@ -4485,8 +4532,9 @@ Saved flows (experimental, open the session with --capture flow):
   flow save <name>           Save the steps since the last open as a flow; accepts --from <seq>,
                              --to <seq>, --param k=v, --output <id>, --description <text>,
                              and --timeout <ms>
-  flow run <name>            Send over HTTP; accepts --param k=v, --where f=v, --fields a,b, --limit n,
-                             --origin <host>, and --allow-write <all|id,...>
+  flow run <name>            Send the saved requests directly, then from the page, then by replaying
+                             the recorded commands; accepts --param k=v, --where f=v, --fields a,b,
+                             --limit n, --origin <host>, --allow-write <all|id,...>, and --timeout <ms>
   flow list [--origin <host>] Saved flows with params and verified state
 
 React (requires `open --enable react-devtools`):
