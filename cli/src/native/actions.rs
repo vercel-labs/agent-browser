@@ -30,7 +30,7 @@ use super::cdp::types::{
 use super::cookies;
 use super::diff;
 use super::downloads::{DownloadLedger, DownloadState};
-use super::element::RefMap;
+use super::element::{PressCheck, RefMap};
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
@@ -7216,7 +7216,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &state.ref_map,
             selector,
             &state.iframe_sessions,
-            super::element::PressCheck::Click,
+            PressCheck::Click,
         )
         .await?;
         let offset = super::element::session_viewport_offset(
@@ -11802,7 +11802,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.ref_map,
         target,
         &state.iframe_sessions,
-        super::element::PressCheck::Drag,
+        PressCheck::Drag,
     )
     .await?;
     let (sx, sy, source_session_id) = super::element::resolve_element_center(
@@ -11811,7 +11811,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.ref_map,
         source,
         &state.iframe_sessions,
-        super::element::PressCheck::Drag,
+        PressCheck::Drag,
     )
     .await?;
 
@@ -11869,7 +11869,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             &state.ref_map,
             target,
             &state.iframe_sessions,
-            super::element::PressCheck::Drag,
+            PressCheck::Drag,
         )
         .await?;
         let target_offset = super::element::session_viewport_offset(

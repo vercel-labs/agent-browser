@@ -49,7 +49,7 @@ pub async fn click(
         button,
         click_count,
         iframe_sessions,
-        true,
+        PressCheck::Click,
     )
     .await
 }
@@ -63,7 +63,7 @@ async fn click_element(
     button: &str,
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
-    require_actionable: bool,
+    check: PressCheck,
 ) -> Result<ClickResult, String> {
     let (x, y, effective_session_id) = resolve_element_center(
         client,
@@ -71,11 +71,7 @@ async fn click_element(
         ref_map,
         selector_or_ref,
         iframe_sessions,
-        if require_actionable {
-            PressCheck::Click
-        } else {
-            PressCheck::None
-        },
+        check,
     )
     .await?;
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
@@ -676,7 +672,7 @@ pub async fn check(
             "left",
             1,
             iframe_sessions,
-            false,
+            PressCheck::None,
         )
         .await?;
         position = Some(result.position);
@@ -731,7 +727,7 @@ pub async fn uncheck(
             "left",
             1,
             iframe_sessions,
-            false,
+            PressCheck::None,
         )
         .await?;
         position = Some(result.position);

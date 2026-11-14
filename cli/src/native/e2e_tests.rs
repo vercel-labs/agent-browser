@@ -4934,14 +4934,10 @@ async fn e2e_drag_presses_source_and_rejects_unreachable_ends() {
         assert!(error.contains(expected), "drag {source} {target}: {error}");
     }
 
-    let resp = execute_command(
-        &json!({ "id": "7", "action": "evaluate", "script": "window.__dragFarProbe.events" }),
+    assert_evaluate(
         &mut state,
-    )
-    .await;
-    assert_success(&resp);
-    assert_eq!(
-        get_data(&resp)["result"],
+        "7",
+        "window.__dragFarProbe.events",
         json!([
             "mousedown on src",
             "mouseup on near",
@@ -4949,8 +4945,9 @@ async fn e2e_drag_presses_source_and_rejects_unreachable_ends() {
             "mouseup on far",
             "mousedown on far",
             "mouseup on src",
-        ])
-    );
+        ]),
+    )
+    .await;
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
