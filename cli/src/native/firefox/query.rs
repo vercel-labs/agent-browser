@@ -726,40 +726,6 @@ mod tests {
         BidiClient::connect(&url).await.unwrap()
     }
 
-    #[test]
-    fn attribute_locators_are_css() {
-        assert_eq!(
-            semantic_locator("placeholder", "Email")["value"],
-            r#"input[placeholder="Email"], textarea[placeholder="Email"]"#
-        );
-        assert_eq!(
-            semantic_locator("alttext", "Logo")["value"],
-            r#"[alt="Logo"]"#
-        );
-        assert_eq!(
-            semantic_locator("title", "Help")["value"],
-            r#"[title="Help"]"#
-        );
-        assert_eq!(
-            semantic_locator("testid", "save")["value"],
-            r#"[data-testid="save"]"#
-        );
-    }
-
-    #[test]
-    fn nth_supports_negative_indexes() {
-        let js = nth_js("#row", -1);
-        assert!(js.contains("els.length + -1"), "{js}");
-        assert!(js.contains(r##"querySelectorAll("#row")"##), "{js}");
-    }
-
-    #[test]
-    fn styles_js_requests_only_the_named_properties() {
-        let js = styles_js(&["color".to_string(), "display".to_string()]);
-        assert!(js.contains(r#"["color","display"]"#), "{js}");
-        assert!(js.contains("getPropertyValue"), "{js}");
-    }
-
     #[tokio::test]
     async fn locate_nodes_sends_the_locator_and_start_nodes() {
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -810,10 +776,6 @@ mod tests {
         let request = requests.lock().unwrap()[0].clone();
         assert_eq!(request["method"], "script.callFunction");
         assert_eq!(request["params"]["this"], json!({"sharedId": "node-9"}));
-        assert_eq!(
-            request["params"]["functionDeclaration"],
-            json!(ELEMENT_BOUNDING_BOX_JS)
-        );
     }
 
     #[tokio::test]

@@ -1654,7 +1654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn element_commands_return_chrome_shapes() {
+    async fn element_and_raw_pointer_commands_return_chrome_shapes() {
         let (mut state, _calls) = state_with_refs(connected).await;
 
         assert_eq!(
@@ -1697,32 +1697,6 @@ mod tests {
             scroll(&json!({ "y": 80 }), &mut state).await.unwrap(),
             json!({ "scrolled": true })
         );
-    }
-
-    #[tokio::test]
-    async fn drag_updates_position_for_following_wheel() {
-        let (mut state, _) = state_with_refs(connected).await;
-        state.mouse_state.x = 17.0;
-        state.mouse_state.y = 23.0;
-        drag(&json!({"source": "@e1", "target": "@e2"}), &mut state)
-            .await
-            .unwrap();
-        assert_eq!(
-            (
-                state.mouse_state.x,
-                state.mouse_state.y,
-                state.mouse_state.buttons
-            ),
-            (40.0, 50.0, 0)
-        );
-        wheel(&json!({"deltaY": 12}), &mut state).await.unwrap();
-        assert_eq!((state.mouse_state.x, state.mouse_state.y), (40.0, 50.0));
-    }
-
-    #[tokio::test]
-    async fn raw_pointer_commands_return_chrome_shapes() {
-        let (mut state, _calls) = state_with_refs(connected).await;
-
         assert_eq!(
             wheel(&json!({ "x": 5, "y": 6, "deltaY": 100 }), &mut state)
                 .await
@@ -1745,6 +1719,26 @@ mod tests {
                 .unwrap(),
             json!({ "dragged": true, "source": "@e1", "target": "@e2" })
         );
+    }
+
+    #[tokio::test]
+    async fn drag_updates_position_for_following_wheel() {
+        let (mut state, _) = state_with_refs(connected).await;
+        state.mouse_state.x = 17.0;
+        state.mouse_state.y = 23.0;
+        drag(&json!({"source": "@e1", "target": "@e2"}), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                state.mouse_state.x,
+                state.mouse_state.y,
+                state.mouse_state.buttons
+            ),
+            (40.0, 50.0, 0)
+        );
+        wheel(&json!({"deltaY": 12}), &mut state).await.unwrap();
+        assert_eq!((state.mouse_state.x, state.mouse_state.y), (40.0, 50.0));
     }
 
     #[tokio::test]

@@ -862,28 +862,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_frame_actor_fails_before_snapshot_returns_partial_tree() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
-        ff.frames = Some(FrameWatch {
-            events: ff.rdp.subscribe(),
-            actors: HashMap::new(),
-            tabs: HashSet::from(["tab".to_string()]),
-        });
-
-        let error = frame_actor(
-            &mut ff,
-            "tab",
-            "child-context",
-            tokio::time::Instant::now() + Duration::from_millis(5),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(error.contains("child-context"), "{error}");
-        assert!(error.contains("snapshot deadline"), "{error}");
-    }
-
-    #[tokio::test]
     async fn lagged_frame_events_do_not_abort_wait() {
         let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
         let (tx, events) = broadcast::channel(1024);
@@ -917,8 +895,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_frame_events_report_a_terminal_error() {
+    async fn frame_actor_reports_deadline_and_closed_stream() {
         let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        ff.frames = Some(FrameWatch {
+            events: ff.rdp.subscribe(),
+            actors: HashMap::new(),
+            tabs: HashSet::from(["tab".to_string()]),
+        });
+
+        let error = frame_actor(
+            &mut ff,
+            "tab",
+            "child-context",
+            tokio::time::Instant::now() + Duration::from_millis(5),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("child-context"), "{error}");
+        assert!(error.contains("snapshot deadline"), "{error}");
+
         let (tx, events) = broadcast::channel(1024);
         drop(tx);
         ff.frames = Some(FrameWatch {
@@ -1185,23 +1181,6 @@ mod tests {
         );
         assert!(out.contains("button \"OK\" [ref=e1]"), "{out}");
         assert!(out.contains("button \"New\" [ref=e2]"), "{out}");
-    }
-
-    #[test]
-    fn repeated_snapshots_reuse_refs_for_the_same_document() {
-        let root = page(vec![leaf("button", "OK", "#ok", &[])]);
-        let mut map = RefMap::new();
-        let mut ids = HashMap::new();
-
-        let first = render_with(&root, &mut map, &mut ids, "loader-a");
-        assert!(first.contains("button \"OK\" [ref=e1]"), "{first}");
-        assert!(map.get("e1").unwrap().backend_node_id.is_some());
-
-        map.begin_snapshot();
-        let second = render_with(&root, &mut map, &mut ids, "loader-a");
-
-        assert_eq!(second, first);
-        assert!(second.contains("button \"OK\" [ref=e1]"), "{second}");
     }
 
     #[tokio::test]

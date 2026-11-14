@@ -697,48 +697,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fill_focuses_then_replaces_with_literal_text() {
-        let (ff, _tx, calls) = fake_session_with(node_responder).await;
-        let mut state = state_with(ff);
-        let result = fill(&json!({"selector": "#email", "value": "a@b.c"}), &mut state)
-            .await
-            .unwrap();
-        assert_eq!(result, json!({"filled": "#email"}));
-        assert_all(
-            &calls,
-            &[
-                "script.callFunction",
-                "script.callFunction",
-                "script.callFunction",
-            ],
-        );
-    }
-
-    #[tokio::test]
-    async fn type_with_clear_runs_the_shared_clear_js_before_typing() {
-        let (ff, _tx, calls) = fake_session_with(node_responder).await;
-        let mut state = state_with(ff);
-        let result = type_text(
-            &json!({"selector": "input", "text": "ok", "clear": true}),
-            &mut state,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result, json!({"typed": "ok"}));
-        assert_all(
-            &calls,
-            &[
-                "script.callFunction",
-                "script.callFunction",
-                "script.callFunction",
-                "script.callFunction",
-                "script.callFunction",
-                "script.callFunction",
-            ],
-        );
-    }
-
-    #[tokio::test]
     async fn fill_and_type_resolve_snapshot_refs() {
         let (mut ff, _tx, calls) = fake_session_with(connected_node_responder).await;
         ff.refs

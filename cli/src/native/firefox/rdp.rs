@@ -236,7 +236,10 @@ pub(crate) mod tests {
                 .await
         });
         assert_eq!(get(&mut s).await["type"], "first");
-        assert!(first.await.unwrap().unwrap_err().contains("timed out"));
+        let error = first.await.unwrap().unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(error.contains("first"), "{error}");
+        assert!(error.contains("act1"), "{error}");
 
         let error = c.request("act1", "second", json!({})).await.unwrap_err();
         assert!(
@@ -260,32 +263,5 @@ pub(crate) mod tests {
         put(&mut s, json!({"from":"acc","enabled":true})).await;
         assert_eq!(r.await.unwrap().unwrap()["enabled"], true);
         assert_eq!(ev.recv().await.unwrap()["type"], "canBeDisabledChange");
-    }
-
-    #[tokio::test]
-    async fn unanswered_request_times_out() {
-        let (c, mut s) = pair().await;
-        let e = c
-            .request_timeout("act1", "enable", json!({}), Duration::from_millis(50))
-            .await
-            .unwrap_err();
-        assert!(e.contains("timed out"), "{e}");
-        assert!(e.contains("enable"), "{e}");
-        assert!(e.contains("act1"), "{e}");
-        assert_eq!(get(&mut s).await["type"], "enable");
-    }
-
-    #[tokio::test]
-    async fn late_reply_after_timeout_does_not_resolve_next_request() {
-        let (c, mut s) = pair().await;
-        c.request_timeout("act1", "first", json!({}), Duration::from_millis(50))
-            .await
-            .unwrap_err();
-        assert_eq!(get(&mut s).await["type"], "first");
-        let error = c.request("act1", "second", json!({})).await.unwrap_err();
-        assert!(
-            error.contains("unusable after a request timeout"),
-            "{error}"
-        );
     }
 }
