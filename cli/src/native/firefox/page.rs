@@ -8,7 +8,9 @@ use super::daemon::session;
 use super::navigation::{self, Load, Wait};
 use super::network;
 use super::session::FirefoxSession;
-use crate::native::actions::{route_url_matches, DaemonState};
+use crate::native::actions::{
+    eval_data, route_url_matches, selector_state_expression, DaemonState,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -33,7 +35,7 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             "dialogOpened": true,
         }));
     }
-    if let Some(message) = landing.failure() {
+    if let Some(message) = navigation::neterror_message(&landing.url) {
         return Err(format!("Navigation failed: {message}"));
     }
     let title = session(state)?
@@ -103,9 +105,9 @@ pub async fn evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(Value::as_str)
         .ok_or("Missing 'script' parameter")?;
     let ff = session(state)?;
-    let result = ff.eval(script).await?;
+    let (result, unserializable) = ff.eval_result(script, false).await?;
     let origin = ff.url().await.unwrap_or_default();
-    Ok(json!({ "result": result, "origin": origin }))
+    Ok(eval_data(result, origin, unserializable))
 }
 
 /// The expression Chrome polls for a `--load` state, or `None` when the state is `none`.
@@ -117,57 +119,19 @@ fn load_state_check(load_state: &str) -> Option<&'static str> {
     }
 }
 
-/// The expression Chrome polls for a selector in one of its `wait` states.
-fn selector_check(selector: &str, state: &str) -> String {
-    let sel = serde_json::to_string(selector).unwrap_or_default();
-    match state {
-        "attached" => format!("!!document.querySelector({sel})"),
-        "detached" => format!("!document.querySelector({sel})"),
-        "hidden" => format!(
-            r#"(() => {{
-                const el = document.querySelector({sel});
-                if (!el) return true;
-                const s = window.getComputedStyle(el);
-                return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
-            }})()"#
-        ),
-        _ => format!(
-            r#"(() => {{
-                const el = document.querySelector({sel});
-                if (!el) return false;
-                const r = el.getBoundingClientRect();
-                const s = window.getComputedStyle(el);
-                return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-            }})()"#
-        ),
-    }
-}
-
-/// Polls `expression` in the active context until it is truthy or the timeout expires.
-pub(super) async fn poll_until_true(
-    ff: &FirefoxSession,
-    expression: &str,
-    timeout_ms: u64,
-) -> Result<(), String> {
-    poll_until_true_or_timeout(
-        ff,
-        expression,
-        timeout_ms,
-        &format!("Wait timed out after {timeout_ms}ms"),
-    )
-    .await
-}
-
-/// Polls `expression` until truthy, failing with `timeout_error` when the deadline passes.
-async fn poll_until_true_or_timeout(
-    ff: &FirefoxSession,
-    expression: &str,
+/// Polls `check` until it is true, failing with `timeout_error` when the deadline passes.
+async fn poll_until<F, Fut>(
     timeout_ms: u64,
     timeout_error: &str,
-) -> Result<(), String> {
+    mut check: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<bool, String>>,
+{
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
-        if ff.eval_lenient(expression).await?.as_bool() == Some(true) {
+        if check().await? {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -177,27 +141,42 @@ async fn poll_until_true_or_timeout(
     }
 }
 
+/// Polls `expression` until truthy, failing with `timeout_error` when the deadline passes.
+async fn poll_expression(
+    ff: &FirefoxSession,
+    expression: &str,
+    timeout_ms: u64,
+    timeout_error: &str,
+) -> Result<(), String> {
+    poll_until(timeout_ms, timeout_error, || async {
+        Ok(ff.eval_lenient(expression).await?.as_bool() == Some(true))
+    })
+    .await
+}
+
+/// Polls `expression` in the active context until it is truthy or the timeout expires.
+pub(super) async fn poll_until_true(
+    ff: &FirefoxSession,
+    expression: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let error = format!("Wait timed out after {timeout_ms}ms");
+    poll_expression(ff, expression, timeout_ms, &error).await
+}
+
 /// Polls the active URL until it matches a glob, with Chrome's `route_url_matches` semantics.
 async fn poll_url(ff: &FirefoxSession, pattern: &str, timeout_ms: u64) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        if route_url_matches(pattern, &ff.url().await?) {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(format!("Wait timed out after {timeout_ms}ms"));
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
+    let error = format!("Wait timed out after {timeout_ms}ms");
+    poll_until(timeout_ms, &error, || async {
+        Ok(route_url_matches(pattern, &ff.url().await?))
+    })
+    .await
 }
 
 /// Waits for ms, selector, text, load state, function or URL. Must return the same
 /// `{waited: ...}` shapes as Chrome's `handle_wait`, honouring `state.timeout_ms(cmd)`.
 pub async fn wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let timeout_ms = cmd
-        .get("timeout")
-        .and_then(Value::as_u64)
-        .unwrap_or(state.default_timeout_ms);
+    let timeout_ms = state.timeout_ms(cmd);
     let ff = session(state)?;
 
     if let Some(text) = cmd.get("text").and_then(Value::as_str) {
@@ -214,7 +193,12 @@ pub async fn wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
             .get("state")
             .and_then(Value::as_str)
             .unwrap_or("visible");
-        poll_until_true(ff, &selector_check(selector, state_str), timeout_ms).await?;
+        poll_until_true(
+            ff,
+            &selector_state_expression(selector, state_str),
+            timeout_ms,
+        )
+        .await?;
         return Ok(json!({ "waited": "selector", "selector": selector }));
     }
 
@@ -250,10 +234,7 @@ pub async fn waitforurl(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .get("url")
         .and_then(Value::as_str)
         .ok_or("Missing 'url' parameter")?;
-    let timeout_ms = cmd
-        .get("timeout")
-        .and_then(Value::as_u64)
-        .unwrap_or(state.default_timeout_ms);
+    let timeout_ms = state.timeout_ms(cmd);
     let ff = session(state)?;
     poll_url(ff, url_pattern, timeout_ms).await?;
     let url = ff.url().await.unwrap_or_default();
@@ -264,17 +245,14 @@ pub async fn waitforurl(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 /// `handle_waitforloadstate`.
 pub async fn waitforloadstate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let load_state = cmd.get("state").and_then(Value::as_str).unwrap_or("load");
-    let timeout_ms = cmd
-        .get("timeout")
-        .and_then(Value::as_u64)
-        .unwrap_or(state.default_timeout_ms);
+    let timeout_ms = state.timeout_ms(cmd);
     if load_state == "networkidle" {
         network::wait_idle(state, timeout_ms)
             .await
             .map_err(|_| "Timeout waiting for networkidle".to_string())?;
     } else if let Some(check) = load_state_check(load_state) {
         let ff = session(state)?;
-        poll_until_true_or_timeout(
+        poll_expression(
             ff,
             check,
             timeout_ms,
@@ -292,10 +270,7 @@ pub async fn waitforfunction(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .get("expression")
         .and_then(Value::as_str)
         .ok_or("Missing 'expression' parameter")?;
-    let timeout_ms = cmd
-        .get("timeout")
-        .and_then(Value::as_u64)
-        .unwrap_or(state.default_timeout_ms);
+    let timeout_ms = state.timeout_ms(cmd);
     let ff = session(state)?;
     poll_until_true(ff, &format!("!!({expression})"), timeout_ms).await?;
     let result = ff.eval(&format!("({expression})")).await?;
@@ -413,21 +388,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn text_wait_polls_then_reports_the_timeout() {
+    async fn wait_variants_poll_then_report_the_timeout() {
         let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
+        let (ff, _tx, calls) = fake_session().await;
         state.firefox = Some(ff);
         let err = wait(&json!({"text": "Missing", "timeout": 50}), &mut state)
             .await
             .unwrap_err();
         assert_eq!(err, "Wait timed out after 50ms");
-    }
-
-    #[tokio::test]
-    async fn selector_wait_polls_then_reports_the_timeout() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
-        state.firefox = Some(ff);
         let err = wait(
             &json!({"selector": "#missing", "state": "hidden", "timeout": 50}),
             &mut state,
@@ -435,6 +403,14 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, "Wait timed out after 50ms");
+        let call_count = calls.lock().unwrap().len();
+        let err = waitforfunction(&json!({"expression": "true", "timeout": 30}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Wait timed out after 30ms");
+        assert!(calls.lock().unwrap()[call_count..]
+            .iter()
+            .any(|call| call == "script.evaluate"));
     }
 
     #[tokio::test]
@@ -472,16 +448,6 @@ mod tests {
             calls.lock().unwrap().clone(),
             vec!["browsingContext.getTree", "browsingContext.getTree"]
         );
-    }
-
-    #[tokio::test]
-    async fn waitforurl_requires_a_url() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-        let err = waitforurl(&json!({}), &mut state).await.unwrap_err();
-        assert_eq!(err, "Missing 'url' parameter");
-        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

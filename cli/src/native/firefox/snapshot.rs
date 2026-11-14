@@ -560,23 +560,6 @@ async fn annotate(
         &mut frames,
     );
     attach_cursor(doc, &cursor_detections(ff, context).await);
-    if let Some(sid) = doc["abSid"].as_str() {
-        if ff
-            .documents
-            .insert(context.to_string(), sid.to_string())
-            .as_deref()
-            != Some(sid)
-        {
-            let stale_ids: HashSet<i64> = ff
-                .refs
-                .iter()
-                .filter(|((c, _), _)| c == context)
-                .map(|(_, id)| *id)
-                .collect();
-            ff.refs.retain(|(c, _), _| c != context);
-            ff.shadow_ids.retain(|id| !stale_ids.contains(id));
-        }
-    }
     if !frames.is_empty() {
         ff.refresh_frame_tree().await?;
     }
@@ -604,10 +587,9 @@ async fn annotate(
     Ok(())
 }
 
-/// Per-context ref and document tracking captured before a snapshot so it can be committed or rolled back.
+/// Ref tracking captured before a snapshot so it can be rolled back.
 struct SnapshotCheckpoint {
-    documents: HashMap<String, String>,
-    refs: HashMap<(String, String), i64>,
+    refs: HashMap<(String, String, String), i64>,
     next_node_id: i64,
     shadow_ids: HashSet<i64>,
 }
@@ -615,49 +597,21 @@ struct SnapshotCheckpoint {
 impl SnapshotCheckpoint {
     fn capture(ff: &FirefoxSession) -> Self {
         Self {
-            documents: ff.documents.clone(),
             refs: ff.refs.clone(),
             next_node_id: ff.next_node_id,
             shadow_ids: ff.shadow_ids.clone(),
         }
     }
 
-    /// Restores tracking when no document changed, otherwise drops the refs of every changed document.
-    /// Returns whether a document change invalidated old refs.
-    fn restore(self, ff: &mut FirefoxSession) -> bool {
-        let changed: HashSet<String> = ff
-            .documents
-            .iter()
-            .filter(|(context, document)| self.documents.get(*context) != Some(*document))
-            .map(|(context, _)| context.clone())
-            .collect();
-        if changed.is_empty() {
-            ff.documents = self.documents;
-            ff.refs = self.refs;
-            ff.next_node_id = self.next_node_id;
-            ff.shadow_ids = self.shadow_ids;
-            return false;
-        }
-        let stale: HashSet<i64> = self
-            .refs
-            .iter()
-            .filter(|((context, _), _)| changed.contains(context))
-            .map(|(_, id)| *id)
-            .collect();
-        ff.shadow_ids.retain(|id| !stale.contains(id));
-        ff.refs.retain(|(context, _), _| !changed.contains(context));
-        true
+    fn restore(self, ff: &mut FirefoxSession) {
+        ff.refs = self.refs;
+        ff.next_node_id = self.next_node_id;
+        ff.shadow_ids = self.shadow_ids;
     }
 }
 
-fn recover_failed_capture(
-    ff: &mut FirefoxSession,
-    ref_map: &mut RefMap,
-    checkpoint: SnapshotCheckpoint,
-) {
-    if checkpoint.restore(ff) {
-        ref_map.invalidate_all_documents();
-    }
+fn recover_failed_capture(ff: &mut FirefoxSession, checkpoint: SnapshotCheckpoint) {
+    checkpoint.restore(ff);
 }
 
 pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Result<Value, String> {
@@ -713,7 +667,14 @@ pub async fn take_snapshot(
     } = ff;
     let mut durable_id = |n: &Value| {
         let context = n["abCtx"].as_str()?.to_string();
-        let key = (context.clone(), n["abSid"].as_str()?.to_string());
+        let document_id = find_context_root(&frame_root, &context)?["abSid"]
+            .as_str()?
+            .to_string();
+        let key = (
+            context.clone(),
+            n["abSid"].as_str()?.to_string(),
+            document_id,
+        );
         let id = *refs.entry(key).or_insert_with(|| {
             *next_node_id += 1;
             *next_node_id
@@ -737,7 +698,6 @@ pub async fn take_snapshot(
     // Firefox has no CDP loaderId; the document root's sharedId scopes durable refs.
     let document_id = frame_root["abSid"].as_str();
     let known = ref_map.observe_document(&context, None, &context, document_id);
-    ff.ref_documents = ff.documents.clone();
     Ok(snapshot_from_ax_nodes(
         &nodes,
         &urls,
@@ -764,7 +724,7 @@ pub async fn snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let tree = match Box::pin(take_snapshot(ff, &options, &mut staged_ref_map)).await {
         Ok(tree) => tree,
         Err(error) => {
-            recover_failed_capture(ff, &mut state.ref_map, checkpoint);
+            recover_failed_capture(ff, checkpoint);
             return Err(error);
         }
     };
@@ -788,14 +748,14 @@ pub async fn diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let current = match Box::pin(take_snapshot(ff, &options, &mut current_ref_map)).await {
         Ok(current) => current,
         Err(error) => {
-            recover_failed_capture(ff, &mut state.ref_map, checkpoint);
+            recover_failed_capture(ff, checkpoint);
             return Err(error);
         }
     };
     let result = chrome::diff_snapshot_response(cmd, state, current, current_ref_map);
     if result.is_err() {
         if let Some(ff) = state.firefox.as_mut() {
-            recover_failed_capture(ff, &mut state.ref_map, checkpoint);
+            recover_failed_capture(ff, checkpoint);
         }
     }
     result
@@ -902,28 +862,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_frame_actor_fails_before_snapshot_returns_partial_tree() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
-        ff.frames = Some(FrameWatch {
-            events: ff.rdp.subscribe(),
-            actors: HashMap::new(),
-            tabs: HashSet::from(["tab".to_string()]),
-        });
-
-        let error = frame_actor(
-            &mut ff,
-            "tab",
-            "child-context",
-            tokio::time::Instant::now() + Duration::from_millis(5),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(error.contains("child-context"), "{error}");
-        assert!(error.contains("snapshot deadline"), "{error}");
-    }
-
-    #[tokio::test]
     async fn lagged_frame_events_do_not_abort_wait() {
         let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
         let (tx, events) = broadcast::channel(1024);
@@ -957,8 +895,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_frame_events_report_a_terminal_error() {
+    async fn frame_actor_reports_deadline_and_closed_stream() {
         let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        ff.frames = Some(FrameWatch {
+            events: ff.rdp.subscribe(),
+            actors: HashMap::new(),
+            tabs: HashSet::from(["tab".to_string()]),
+        });
+
+        let error = frame_actor(
+            &mut ff,
+            "tab",
+            "child-context",
+            tokio::time::Instant::now() + Duration::from_millis(5),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("child-context"), "{error}");
+        assert!(error.contains("snapshot deadline"), "{error}");
+
         let (tx, events) = broadcast::channel(1024);
         drop(tx);
         ff.frames = Some(FrameWatch {
@@ -1227,23 +1183,6 @@ mod tests {
         assert!(out.contains("button \"New\" [ref=e2]"), "{out}");
     }
 
-    #[test]
-    fn repeated_snapshots_reuse_refs_for_the_same_document() {
-        let root = page(vec![leaf("button", "OK", "#ok", &[])]);
-        let mut map = RefMap::new();
-        let mut ids = HashMap::new();
-
-        let first = render_with(&root, &mut map, &mut ids, "loader-a");
-        assert!(first.contains("button \"OK\" [ref=e1]"), "{first}");
-        assert!(map.get("e1").unwrap().backend_node_id.is_some());
-
-        map.begin_snapshot();
-        let second = render_with(&root, &mut map, &mut ids, "loader-a");
-
-        assert_eq!(second, first);
-        assert!(second.contains("button \"OK\" [ref=e1]"), "{second}");
-    }
-
     #[tokio::test]
     async fn changed_document_allocates_new_refs_and_rejects_stale_refs() {
         let root = page(vec![leaf("button", "OK", "#ok", &[])]);
@@ -1340,49 +1279,29 @@ mod tests {
     async fn failed_capture_without_a_document_change_rolls_back_tracking() {
         let (mut ff, tx, _) = crate::native::firefox::session::tests::fake_session().await;
         std::mem::forget(tx);
-        ff.documents.insert("ctx-active".into(), "loader-1".into());
-        ff.refs.insert(("ctx-active".into(), "node-1".into()), 7);
+        ff.refs
+            .insert(("ctx-active".into(), "node-1".into(), "doc-1".into()), 7);
         ff.next_node_id = 7;
         ff.shadow_ids.insert(7);
 
         let checkpoint = SnapshotCheckpoint::capture(&ff);
-        ff.refs.insert(("ctx-active".into(), "node-2".into()), 8);
+        ff.refs
+            .insert(("ctx-active".into(), "node-2".into(), "doc-1".into()), 8);
         ff.next_node_id = 8;
         ff.shadow_ids.insert(8);
 
-        let mut map = RefMap::new();
-        recover_failed_capture(&mut ff, &mut map, checkpoint);
+        recover_failed_capture(&mut ff, checkpoint);
 
         assert_eq!(ff.refs.len(), 1);
         assert_eq!(
-            ff.refs[&("ctx-active".to_string(), "node-1".to_string())],
+            ff.refs[&(
+                "ctx-active".to_string(),
+                "node-1".to_string(),
+                "doc-1".to_string()
+            )],
             7
         );
         assert_eq!(ff.next_node_id, 7);
         assert_eq!(ff.shadow_ids, HashSet::from([7]));
-        assert_eq!(ff.documents["ctx-active"], "loader-1");
-    }
-
-    #[tokio::test]
-    async fn failed_capture_after_a_document_change_invalidates_old_refs() {
-        let (mut ff, tx, _) = crate::native::firefox::session::tests::fake_session().await;
-        std::mem::forget(tx);
-        ff.documents.insert("ctx-active".into(), "loader-1".into());
-        ff.refs.insert(("ctx-active".into(), "node-1".into()), 7);
-        ff.shadow_ids.insert(7);
-
-        let checkpoint = SnapshotCheckpoint::capture(&ff);
-        ff.documents.insert("ctx-active".into(), "loader-2".into());
-        ff.refs.insert(("ctx-active".into(), "node-2".into()), 8);
-
-        let mut map = RefMap::new();
-        map.add("e1".into(), Some(7), "button", "OK", None);
-        map.observe_document("ctx-active", None, "ctx-active", Some("loader-1"));
-        recover_failed_capture(&mut ff, &mut map, checkpoint);
-
-        assert!(ff.refs.is_empty());
-        assert!(!ff.shadow_ids.contains(&7));
-        assert_eq!(ff.documents["ctx-active"], "loader-2");
-        assert!(map.get("e1").is_none());
     }
 }

@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
 
-use super::bidi::{remote_to_json, BidiClient};
+use super::bidi::{remote_to_json, unserializable, BidiClient};
 use super::contexts::{Contexts, Removed};
 use super::emulation::{self, Settings as EmulationSettings};
 use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
@@ -41,13 +41,10 @@ pub struct FirefoxSession {
     pub auto_dialog_changed: Arc<Notify>,
     pub rdp: RdpClient,
     pub contexts: Contexts,
-    /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
-    pub refs: HashMap<(String, String), i64>,
+    /// Durable ref ids keyed by `(context, sharedId, document sharedId)`.
+    pub refs: HashMap<(String, String, String), i64>,
     pub next_node_id: i64,
     pub frames: Option<super::snapshot::FrameWatch>,
-    /// Document node `sharedId` last snapshotted per context, used to reset `refs` on a new document.
-    pub documents: HashMap<String, String>,
-    pub ref_documents: HashMap<String, String>,
     /// Touch points of the active touch sequence, released by a later `input_touch` end.
     pub touches: Vec<(f64, f64)>,
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
@@ -230,8 +227,6 @@ impl FirefoxSession {
             refs: HashMap::new(),
             next_node_id: 0,
             frames: None,
-            documents: HashMap::new(),
-            ref_documents: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
             emulation,
@@ -418,8 +413,8 @@ impl FirefoxSession {
     }
 
     /// Forgets a browsing context that is gone and everything nested in it: element refs,
-    /// documents, shadow ids, unfinished requests and any prompt they owned. Returns true when the
-    /// active context was among them, which the registry then replaces.
+    /// shadow ids and any prompt they owned. Returns true when the active context was
+    /// among them, which the registry then replaces.
     pub fn forget_context(&mut self, context: &str, dialog: &mut Option<PendingDialog>) -> bool {
         let removed = self.contexts.remove(context);
         self.forget(removed, dialog)
@@ -430,12 +425,10 @@ impl FirefoxSession {
         let stale_ids: HashSet<i64> = self
             .refs
             .iter()
-            .filter(|((id, _), _)| gone.contains(id))
+            .filter(|((id, _, _), _)| gone.contains(id))
             .map(|(_, id)| *id)
             .collect();
-        self.refs.retain(|(id, _), _| !gone.contains(id));
-        self.documents.retain(|id, _| !gone.contains(id));
-        self.ref_documents.retain(|id, _| !gone.contains(id));
+        self.refs.retain(|(id, _, _), _| !gone.contains(id));
         self.shadow_ids.retain(|id| !stale_ids.contains(id));
         self.inflight
             .retain(|_, owner| !owner.as_ref().is_some_and(|owner| gone.contains(owner)));
@@ -456,7 +449,6 @@ impl FirefoxSession {
     /// Drops every element ref along with the documents and shadow ids they were recorded for.
     pub fn forget_refs(&mut self) {
         self.refs.clear();
-        self.documents.clear();
         self.shadow_ids.clear();
     }
 
@@ -551,17 +543,30 @@ impl FirefoxSession {
     pub async fn eval(&self, expression: &str) -> Result<Value, String> {
         self.eval_in_context(expression, self.contexts.active(), false)
             .await
+            .map(|result| result.0)
     }
 
     /// Evaluates `expression` in the active top-level tab and returns the decoded value.
     pub async fn eval_top(&self, expression: &str) -> Result<Value, String> {
         self.eval_in_context(expression, self.contexts.active_tab(), false)
             .await
+            .map(|result| result.0)
     }
 
     /// Like `eval`, but a script exception yields `null` so callers can keep polling.
     pub async fn eval_lenient(&self, expression: &str) -> Result<Value, String> {
         self.eval_in_context(expression, self.contexts.active(), true)
+            .await
+            .map(|result| result.0)
+    }
+
+    /// Evaluates `expression`, also returning the JavaScript token JSON cannot carry.
+    pub async fn eval_result(
+        &self,
+        expression: &str,
+        lenient: bool,
+    ) -> Result<(Value, Option<String>), String> {
+        self.eval_in_context(expression, self.contexts.active(), lenient)
             .await
     }
 
@@ -570,7 +575,7 @@ impl FirefoxSession {
         expression: &str,
         context: &str,
         lenient: bool,
-    ) -> Result<Value, String> {
+    ) -> Result<(Value, Option<String>), String> {
         let r = self
             .bidi
             .send(
@@ -585,7 +590,7 @@ impl FirefoxSession {
             .await?;
         if r["type"] == "exception" {
             if lenient {
-                return Ok(Value::Null);
+                return Ok((Value::Null, None));
             }
             let d = &r["exceptionDetails"];
             let msg = d["exception"]["value"]
@@ -594,7 +599,7 @@ impl FirefoxSession {
                 .unwrap_or("script exception");
             return Err(format!("Evaluation error: {msg}"));
         }
-        Ok(remote_to_json(&r["result"]))
+        Ok((remote_to_json(&r["result"]), unserializable(&r["result"])))
     }
 
     /// URL of the active top-level tab, read from the browsing context tree.
@@ -814,8 +819,6 @@ pub(crate) mod tests {
             refs: HashMap::new(),
             next_node_id: 0,
             frames: None,
-            documents: HashMap::new(),
-            ref_documents: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
             emulation: Arc::default(),
@@ -945,8 +948,6 @@ pub(crate) mod tests {
             next_node_id: 0,
             shadow_ids: Default::default(),
             frames: None,
-            documents: HashMap::new(),
-            ref_documents: HashMap::new(),
             touches: Vec::new(),
             emulation: Arc::default(),
             permissions: Arc::default(),
@@ -983,8 +984,9 @@ pub(crate) mod tests {
             .contexts
             .record(&json!({"context": "child", "parent": "ctx-active"}));
         session.contexts.activate("child");
-        session.refs.insert(("child".into(), "node".into()), 1);
-        session.documents.insert("child".into(), "document".into());
+        session
+            .refs
+            .insert(("child".into(), "node".into(), "document".into()), 1);
         session.shadow_ids.insert(1);
         let mut state = crate::native::actions::DaemonState::new();
         state
@@ -1016,7 +1018,6 @@ pub(crate) mod tests {
         assert_eq!(ff.contexts.active(), "ctx-active");
         assert!(state.active_frame_id.is_none());
         assert!(ff.refs.is_empty());
-        assert!(ff.documents.is_empty());
         assert!(ff.shadow_ids.is_empty());
         assert!(state.ref_map.get("e1").is_none());
 
@@ -1200,7 +1201,10 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn race_prompt_waits_for_auto_alert_but_returns_for_manual_confirm() {
-        let (session, events, _) = fake_session().await;
+        let (mut session, events, _) = fake_session().await;
+        session
+            .contexts
+            .record(&json!({"context": "frame-parent", "parent": "ctx-active"}));
         session.auto_dialog.store(true, Ordering::Release);
         let waiting =
             session.race_prompt("ctx-active", std::future::pending::<Result<(), String>>());
@@ -1232,6 +1236,22 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap()
             .is_none());
+
+        session.auto_dialog.store(false, Ordering::Release);
+        let racer = session.race_prompt("ctx-active", std::future::pending::<Result<(), String>>());
+        tokio::pin!(racer);
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut racer)
+            .await
+            .is_err());
+        let background = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"other"}});
+        events.send(background).unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut racer)
+            .await
+            .is_err());
+        events.send(json!({"type":"event","method":"browsingContext.contextCreated","params":{"context":"frame-child","parent":"frame-parent"}})).unwrap();
+        let ours = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"frame-child"}});
+        events.send(ours).unwrap();
+        assert!(racer.await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1278,7 +1298,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn race_prompt_returns_none_when_a_prompt_opens_on_the_active_context() {
-        let (mut s, tx, _) = fake_session().await;
+        let (mut s, events, _) = fake_session().await;
         s.contexts
             .record(&json!({"context": "frame-parent", "parent": "ctx-active"}));
         let hang = std::future::pending::<Result<(), String>>();
@@ -1288,13 +1308,13 @@ pub(crate) mod tests {
             .await
             .is_err());
         let background = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"other"}});
-        tx.send(background).unwrap();
+        events.send(background).unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(100), &mut racer)
             .await
             .is_err());
-        tx.send(json!({"type":"event","method":"browsingContext.contextCreated","params":{"context":"frame-child","parent":"frame-parent"}})).unwrap();
+        events.send(json!({"type":"event","method":"browsingContext.contextCreated","params":{"context":"frame-child","parent":"frame-parent"}})).unwrap();
         let ours = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"frame-child"}});
-        tx.send(ours).unwrap();
+        events.send(ours).unwrap();
         assert!(racer.await.unwrap().is_none());
     }
 }

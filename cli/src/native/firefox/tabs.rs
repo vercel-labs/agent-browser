@@ -233,7 +233,10 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .bidi
         .send("browsingContext.close", json!({"context": context}))
         .await?;
-    let was_active = super::daemon::forget_context(state, &context)?;
+    let was_active = {
+        let ff = state.firefox.as_mut().ok_or("Browser not launched")?;
+        ff.forget_context(&context, &mut state.pending_dialog)
+    };
     session(state)?.release_unused_user_contexts().await;
     if was_active {
         match successor {
@@ -361,13 +364,12 @@ fn resolve_tab_ref(tabs: &[Value], input: &str) -> Result<String, String> {
 /// The tab that becomes active after closing `closed_index`: the next tab to the right,
 /// or the last remaining tab when the closed one was last, as Chrome does.
 fn successor_tab(tabs: &[Value], closed_index: usize) -> Option<String> {
-    let mut remaining = tabs.to_vec();
-    if closed_index >= remaining.len() {
-        return None;
-    }
-    remaining.remove(closed_index);
-    let next = closed_index.min(remaining.len().checked_sub(1)?);
-    remaining[next]["targetId"].as_str().map(str::to_string)
+    let next = if closed_index + 1 < tabs.len() {
+        closed_index + 1
+    } else {
+        closed_index.checked_sub(1)?
+    };
+    tabs.get(next)?["targetId"].as_str().map(str::to_string)
 }
 
 #[cfg(test)]

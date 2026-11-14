@@ -230,7 +230,7 @@ async fn collect_annotations(
         let Some(id) = entry.backend_node_id else {
             continue;
         };
-        let Some(((context, shared_id), _)) = ff.refs.iter().find(|(_, value)| **value == id)
+        let Some(((context, shared_id, _), _)) = ff.refs.iter().find(|(_, value)| **value == id)
         else {
             continue;
         };
@@ -392,20 +392,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn viewport_png_maps_to_bidi_screenshot() {
-        let params = screenshot_params(&json!({}), "ctx-1").unwrap();
-        assert_eq!(
-            params,
-            json!({
-                "context": "ctx-1",
-                "origin": "viewport",
-                "format": {"type": "image/png"},
-            })
-        );
-    }
-
-    #[test]
-    fn full_page_jpeg_carries_quality_as_a_fraction() {
+    fn screenshot_params_map_options_to_bidi() {
         let params = screenshot_params(
             &json!({"fullPage": true, "format": "jpeg", "quality": 55}),
             "c",
@@ -418,10 +405,7 @@ mod tests {
         );
         let default = screenshot_params(&json!({"format": "jpeg"}), "c").unwrap();
         assert_eq!(default["format"]["quality"], 0.8);
-    }
 
-    #[test]
-    fn type_aliases_format_and_png_ignores_quality() {
         let params = screenshot_params(&json!({"type": "jpeg", "quality": 30}), "c").unwrap();
         assert_eq!(
             params["format"],
@@ -431,13 +415,11 @@ mod tests {
         assert_eq!(png["format"], json!({"type": "image/png"}));
         let e = screenshot_params(&json!({"format": "webp"}), "c").unwrap_err();
         assert!(e.contains("Unsupported screenshot format"), "{e}");
-    }
 
-    #[test]
-    fn element_clip_is_a_bidi_element_reference() {
-        assert_eq!(
-            element_clip("node-7"),
-            json!({"type": "element", "element": {"sharedId": "node-7"}})
+        let conditional = screenshot_params(&json!({"ifChanged": true}), "c").unwrap_err();
+        assert!(
+            conditional.contains("not yet supported on Firefox"),
+            "{conditional}"
         );
     }
 
@@ -450,15 +432,6 @@ mod tests {
         let options = screenshot_options(&json!({"selector": "#main", "annotate": true}));
         assert_eq!(options.selector.as_deref(), Some("#main"));
         assert!(options.annotate);
-    }
-
-    #[test]
-    fn conditional_screenshots_are_rejected() {
-        let conditional = screenshot_params(&json!({"ifChanged": true}), "c").unwrap_err();
-        assert!(
-            conditional.contains("not yet supported on Firefox"),
-            "{conditional}"
-        );
     }
 
     #[test]

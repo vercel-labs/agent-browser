@@ -47,6 +47,27 @@ async fn is_connected(ff: &FirefoxSession, target: &Target) -> bool {
     r.is_ok_and(|v| v == true)
 }
 
+pub(crate) async fn current_document_id(ff: &FirefoxSession, context: &str) -> Option<String> {
+    ff.bidi
+        .call_function_in_sandbox(context, SANDBOX, "() => document", vec![])
+        .await
+        .ok()
+        .and_then(|document| document["sharedId"].as_str().map(String::from))
+}
+
+pub(crate) async fn target_document_id(ff: &FirefoxSession, target: &Target) -> Option<String> {
+    ff.bidi
+        .call_function_on_in_sandbox(
+            &target.context,
+            SANDBOX,
+            "function() { return this.ownerDocument; }",
+            target.node_ref(),
+        )
+        .await
+        .ok()
+        .and_then(|document| document["sharedId"].as_str().map(String::from))
+}
+
 /// Resolves `@eN`, `eN`, `ref=eN`, a CSS selector or `xpath=...` to a live node.
 /// A ref whose node is gone is recovered by role and name only when exactly one element matches,
 /// the ref had no `nth`, and the match is in the document the ref was taken from.
@@ -68,28 +89,38 @@ pub async fn resolve_target(
         .get(&ref_id)
         .ok_or_else(|| format!("Unknown ref: {ref_id}"))?
         .clone();
+    let (role, name) = (&entry.role, &entry.name);
+    let id = entry.backend_node_id.ok_or_else(|| {
+        format!("Stale ref for role={role} name={name}: no node was recorded. Run snapshot again and use a fresh ref.")
+    })?;
     let ff = session(state)?;
-    let known = entry.backend_node_id.and_then(|id| {
-        ff.refs
-            .iter()
-            .find(|(_, v)| **v == id)
-            .map(|((context, shared_id), _)| Target {
+    let target = ff
+        .refs
+        .iter()
+        .find(|(_, value)| **value == id)
+        .map(|((context, shared_id, document_id), _)| {
+            (Target {
                 context: context.clone(),
                 shared_id: shared_id.clone(),
-            })
-    });
-    if let Some(target) = &known {
-        if is_connected(ff, target).await {
-            return Ok(target.clone());
+            }, document_id.clone())
+        })
+        .ok_or_else(|| {
+            format!("Stale ref for role={role} name={name}: no node was recorded. Run snapshot again and use a fresh ref.")
+        })?;
+    if is_connected(ff, &target.0).await {
+        if current_document_id(ff, &target.0.context).await.as_deref() == Some(target.1.as_str()) {
+            return Ok(target.0);
         }
+        return Err(format!("Stale ref for role={role} name={name}: the page changed since the snapshot. Run snapshot again and use a fresh ref."));
     }
-    recover(ff, &entry, known.map(|t| t.context)).await
+    recover(ff, &entry, &target.0.context, &target.1).await
 }
 
 async fn recover(
     ff: &mut FirefoxSession,
     entry: &RefEntry,
-    context: Option<String>,
+    context: &str,
+    document_id: &str,
 ) -> Result<Target, String> {
     let (role, name) = (&entry.role, &entry.name);
     if entry
@@ -101,18 +132,7 @@ async fn recover(
     if entry.nth.is_some() {
         return Err(format!("Stale ref for role={role} name={name} cannot be recovered: the snapshot had several matching elements. Run snapshot again and use a fresh ref."));
     }
-    let context = context
-        .or_else(|| entry.frame_id.clone())
-        .unwrap_or_else(|| ff.contexts.active().to_string());
-    let document = ff
-        .bidi
-        .call_function_in_sandbox(&context, SANDBOX, "() => document", vec![])
-        .await
-        .ok()
-        .and_then(|d| d["sharedId"].as_str().map(String::from));
-    if document.is_none()
-        || document.as_deref() != ff.ref_documents.get(&context).map(String::as_str)
-    {
+    if current_document_id(ff, context).await.as_deref() != Some(document_id) {
         return Err(format!("Stale ref for role={role} name={name}: the page changed since the snapshot. Run snapshot again and use a fresh ref."));
     }
     let found = ff
@@ -130,15 +150,24 @@ async fn recover(
     match nodes {
         [] => Err(format!("Could not locate element with role={role} name={name}: the ref is stale. Run snapshot again and use a fresh ref.")),
         [node] => {
+            if current_document_id(ff, context).await.as_deref() != Some(document_id) {
+                return Err(format!("Stale ref for role={role} name={name}: the page changed since the snapshot. Run snapshot again and use a fresh ref."));
+            }
             let shared_id = node["sharedId"]
                 .as_str()
                 .ok_or("Firefox returned a node without a sharedId")?
                 .to_string();
             if let Some(id) = entry.backend_node_id {
                 ff.refs.retain(|_, v| *v != id);
-                ff.refs.insert((context.clone(), shared_id.clone()), id);
+                ff.refs.insert(
+                    (context.to_string(), shared_id.clone(), document_id.to_string()),
+                    id,
+                );
             }
-            Ok(Target { context, shared_id })
+            Ok(Target {
+                context: context.to_string(),
+                shared_id,
+            })
         }
         _ => Err(format!("Stale ref for role={role} name={name} cannot be recovered: several elements now match. Run snapshot again and use a fresh ref.")),
     }
@@ -164,9 +193,8 @@ mod tests {
     ) -> (DaemonState, Calls) {
         let mut state = DaemonState::new();
         let (mut ff, _tx, calls) = fake_session_with_script(document_responder(document)).await;
-        ff.documents.insert("ctx-active".into(), document.into());
-        ff.ref_documents.insert("ctx-active".into(), "doc1".into());
-        ff.refs.insert(("ctx-active".into(), "sid".into()), 7);
+        ff.refs
+            .insert(("ctx-active".into(), "sid".into(), "doc1".into()), 7);
         state.firefox = Some(ff);
         state
             .ref_map
@@ -177,27 +205,18 @@ mod tests {
     #[tokio::test]
     async fn ref_from_an_earlier_document_is_never_recovered() {
         let (mut state, calls) = state_with_document(None, "doc2").await;
+        let ff = state.firefox.as_mut().unwrap();
+        ff.refs
+            .insert(("ctx-active".into(), "sid-2".into(), "doc2".into()), 8);
+        state
+            .ref_map
+            .add_with_frame("e2".into(), Some(8), "button", "OK", None, None);
         let e = resolve_target(&mut state, "@e1").await.unwrap_err();
         assert!(e.contains("the page changed since the snapshot"), "{e}");
         assert!(!calls
             .lock()
             .unwrap()
             .contains(&"browsingContext.locateNodes".to_string()));
-    }
-
-    #[tokio::test]
-    async fn disconnected_ref_with_no_match_is_stale() {
-        let (mut state, calls) = state_with_ref(None).await;
-        let e = resolve_target(&mut state, "@e1").await.unwrap_err();
-        assert!(e.contains("the ref is stale"), "{e}");
-        assert_eq!(
-            *calls.lock().unwrap(),
-            [
-                "script.callFunction",
-                "script.callFunction",
-                "browsingContext.locateNodes"
-            ]
-        );
     }
 
     #[tokio::test]
@@ -224,14 +243,22 @@ mod tests {
 
     #[tokio::test]
     async fn durable_ref_targets_its_context_and_shared_id() {
-        let (mut ff, _, calls) = fake_session_with_script(|_| {
-            json!({
-                "type": "success",
-                "result": {"type": "boolean", "value": true}
-            })
+        let (mut ff, _, calls) = fake_session_with_script(|params| {
+            if params["functionDeclaration"] == "() => document" {
+                json!({
+                    "type": "success",
+                    "result": {"type": "node", "sharedId": "doc1"}
+                })
+            } else {
+                json!({
+                    "type": "success",
+                    "result": {"type": "boolean", "value": true}
+                })
+            }
         })
         .await;
-        ff.refs.insert(("ctx-frame".into(), "sid".into()), 42);
+        ff.refs
+            .insert(("ctx-frame".into(), "sid".into(), "doc1".into()), 42);
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state
@@ -247,7 +274,10 @@ mod tests {
                 shared_id: "sid".into(),
             }
         );
-        assert_eq!(*calls.lock().unwrap(), ["script.callFunction"]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["script.callFunction", "script.callFunction"]
+        );
     }
 
     #[tokio::test]

@@ -274,8 +274,20 @@ pub fn remote_to_json(v: &Value) -> Value {
                 })
                 .collect(),
         ),
-        Some("string" | "number" | "boolean" | "bigint" | "date") => val.clone(),
+        Some("string" | "boolean" | "date") => val.clone(),
+        Some("number") if val.is_number() => val.clone(),
         _ => Value::Null,
+    }
+}
+
+/// Returns the JavaScript token for a value JSON cannot carry, such as `undefined`, `NaN` or `10n`.
+pub fn unserializable(v: &Value) -> Option<String> {
+    let val = &v["value"];
+    match v["type"].as_str() {
+        Some("undefined") => Some("undefined".to_string()),
+        Some("bigint") => val.as_str().map(|n| format!("{n}n")),
+        Some("number") => val.as_str().map(str::to_string),
+        _ => None,
     }
 }
 

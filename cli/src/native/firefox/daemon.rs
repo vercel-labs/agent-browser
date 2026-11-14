@@ -19,14 +19,6 @@ pub fn reset_page(state: &mut DaemonState) {
         ff.forget_refs();
     }
 }
-
-/// Forgets a browsing context that is gone, including any prompt it owned. Returns true when the
-/// active tab was among the contexts dropped.
-pub fn forget_context(state: &mut DaemonState, context: &str) -> Result<bool, String> {
-    let ff = state.firefox.as_mut().ok_or("Browser not launched")?;
-    Ok(ff.forget_context(context, &mut state.pending_dialog))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,7 +32,8 @@ mod tests {
             .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
         ff.contexts.activate("ctx-frame");
         ff.next_node_id = 42;
-        ff.refs.insert(("ctx-frame".into(), "node".into()), 17);
+        ff.refs
+            .insert(("ctx-frame".into(), "node".into(), "doc".into()), 17);
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.active_iframe_sessions.insert("frame-session".into());
