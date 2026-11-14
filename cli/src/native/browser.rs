@@ -2562,7 +2562,7 @@ impl BrowserManager {
             },
             activate,
         );
-        (self.active_tab_id() != Some(tab_id)).then_some(tab_id)
+        (self.active_target_id().ok() != Some(target_id)).then_some(tab_id)
     }
 
     pub fn page_count(&self) -> usize {

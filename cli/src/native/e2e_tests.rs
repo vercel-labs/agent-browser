@@ -10248,18 +10248,16 @@ async fn e2e_stream_url_tracks_active_main_frame_navigation_categories() {
         .expect("background tab should navigate");
     expect_no_stream_url(&mut ws, tokio::time::Duration::from_millis(500)).await;
 
-    state
-        .browser
-        .as_ref()
-        .expect("browser should exist")
-        .client
-        .send_command(
-            "Target.createTarget",
-            Some(json!({ "url": format!("{base_url}/external") })),
-            None,
-        )
-        .await
-        .expect("external tab should open");
+    let resp = execute_command(
+        &json!({
+            "id": "popup-open",
+            "action": "evaluate",
+            "script": format!("window.open('{base_url}/external'); 1")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
     let resp = execute_command(&json!({ "id": "10", "action": "url" }), &mut state).await;
@@ -14353,22 +14351,28 @@ async fn e2e_a11y_preserves_nested_frame_sessions_across_tab_switches() {
     .await;
     assert_frame_violations(&resp);
 
-    // Simulate a popup created outside the tab commands. Target lifecycle
-    // events must move active iframe scoping to the popup and back when it is
-    // externally closed.
+    // Open a popup from the active page without a tab command. Target
+    // lifecycle events must move active iframe scoping to the popup and back
+    // when it is externally closed.
     let browser_client = state.browser.as_ref().unwrap().client.clone();
-    let created = browser_client
-        .send_command(
-            "Target.createTarget",
-            Some(json!({
-                "url": format!("http://localhost:{port}/background")
-            })),
-            None,
-        )
-        .await
-        .unwrap();
-    let external_target_id = created["targetId"].as_str().unwrap().to_string();
+    let resp = execute_command(
+        &json!({
+            "id": "popup-open",
+            "action": "evaluate",
+            "script": format!("window.open('http://localhost:{port}/background'); 1")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let external_target_id = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_target_id()
+        .unwrap()
+        .to_string();
     let resp = execute_command(
         &json!({ "id": "external-open", "action": "tab_list" }),
         &mut state,
