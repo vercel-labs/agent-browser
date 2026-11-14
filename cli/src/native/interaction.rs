@@ -7,6 +7,7 @@ use super::cdp::types::*;
 use super::element::{
     resolve_element_center, resolve_element_object_id, session_viewport_offset, RefMap,
 };
+use super::pointer::{ClickSpec, Modifiers, MouseButton};
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
 /// mid-sequence (the page is then blocked until `dialog accept`/`dismiss`).
@@ -29,7 +30,9 @@ pub struct PendingRelease {
     pub session_id: String,
     pub x: f64,
     pub y: f64,
-    pub button: String,
+    pub button: MouseButton,
+    pub click_count: u8,
+    pub modifiers: Modifiers,
 }
 
 pub async fn click(
@@ -37,8 +40,7 @@ pub async fn click(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
-    button: &str,
-    click_count: i32,
+    spec: ClickSpec,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
     click_element(
@@ -46,8 +48,7 @@ pub async fn click(
         session_id,
         ref_map,
         selector_or_ref,
-        button,
-        click_count,
+        spec,
         iframe_sessions,
         true,
     )
@@ -60,8 +61,7 @@ async fn click_element(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
-    button: &str,
-    click_count: i32,
+    spec: ClickSpec,
     iframe_sessions: &HashMap<String, String>,
     require_actionable: bool,
 ) -> Result<ClickResult, String> {
@@ -85,33 +85,13 @@ async fn click_element(
         &[effective_session_id.as_str(), session_id],
         x,
         y,
-        button,
-        click_count,
+        spec,
     )
     .await?;
     // Compute before dispatch: a click may navigate or open a blocking dialog.
     result.position = (x + offset.0, y + offset.1);
     (result.x, result.y) = result.position;
     Ok(result)
-}
-
-pub async fn dblclick(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<ClickResult, String> {
-    click(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        "left",
-        2,
-        iframe_sessions,
-    )
-    .await
 }
 
 pub async fn hover(
@@ -673,8 +653,7 @@ pub async fn check(
             session_id,
             ref_map,
             selector_or_ref,
-            "left",
-            1,
+            ClickSpec::default(),
             iframe_sessions,
             false,
         )
@@ -728,8 +707,7 @@ pub async fn uncheck(
             session_id,
             ref_map,
             selector_or_ref,
-            "left",
-            1,
+            ClickSpec::default(),
             iframe_sessions,
             false,
         )
@@ -1169,110 +1147,112 @@ async fn dispatch_mouse_or_dialog(
     }
 }
 
+/// One step of a click: the pointer moves to the target, then each click presses and releases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickPhase {
+    Move,
+    Press(u8),
+    Release(u8),
+}
+
+impl ClickPhase {
+    /// The phase that follows this one, or None when the last click is released.
+    fn next(self, spec: &ClickSpec) -> Option<Self> {
+        match self {
+            Self::Move => Some(Self::Press(1)),
+            Self::Press(n) => Some(Self::Release(n)),
+            Self::Release(n) if n < spec.count => Some(Self::Press(n + 1)),
+            Self::Release(_) => None,
+        }
+    }
+
+    /// The CDP mouse event this phase dispatches.
+    fn event(self, spec: &ClickSpec, x: f64, y: f64) -> DispatchMouseEventParams {
+        let modifiers = spec.modifiers.cdp();
+        match self {
+            Self::Move => DispatchMouseEventParams {
+                event_type: "mouseMoved".to_string(),
+                x,
+                y,
+                button: None,
+                buttons: None,
+                click_count: None,
+                delta_x: None,
+                delta_y: None,
+                modifiers,
+            },
+            Self::Press(n) => DispatchMouseEventParams {
+                event_type: "mousePressed".to_string(),
+                x,
+                y,
+                button: Some(spec.button.name().to_string()),
+                buttons: Some(spec.button.mask()),
+                click_count: Some(i32::from(n)),
+                delta_x: None,
+                delta_y: None,
+                modifiers,
+            },
+            Self::Release(n) => DispatchMouseEventParams {
+                event_type: "mouseReleased".to_string(),
+                x,
+                y,
+                button: Some(spec.button.name().to_string()),
+                buttons: Some(0),
+                click_count: Some(i32::from(n)),
+                delta_x: None,
+                delta_y: None,
+                modifiers,
+            },
+        }
+    }
+}
+
 async fn dispatch_click(
     client: &CdpClient,
     session_id: &str,
     accept_sessions: &[&str],
     x: f64,
     y: f64,
-    button: &str,
-    click_count: i32,
+    spec: ClickSpec,
 ) -> Result<ClickResult, String> {
-    // Move
-    if dispatch_mouse_or_dialog(
-        client,
-        session_id,
-        accept_sessions,
-        &DispatchMouseEventParams {
-            event_type: "mouseMoved".to_string(),
-            x,
-            y,
-            button: None,
-            buttons: None,
-            click_count: None,
-            delta_x: None,
-            delta_y: None,
-            modifiers: None,
-        },
-    )
-    .await?
-    {
-        // No button was pressed yet, nothing to release.
-        return Ok(ClickResult {
-            position: (x, y),
-            dialog_opened: true,
-            pending_release: None,
-            x,
-            y,
-            button_pressed: false,
-        });
-    }
-
-    let button_value = match button {
-        "right" => 2,
-        "middle" => 4,
-        _ => 1,
-    };
-
-    // Press
-    if dispatch_mouse_or_dialog(
-        client,
-        session_id,
-        accept_sessions,
-        &DispatchMouseEventParams {
-            event_type: "mousePressed".to_string(),
-            x,
-            y,
-            button: Some(button.to_string()),
-            buttons: Some(button_value),
-            click_count: Some(click_count),
-            delta_x: None,
-            delta_y: None,
-            modifiers: None,
-        },
-    )
-    .await?
-    {
-        // Dialog opened from the mousedown handler: the button is held and the
-        // release will never arrive on its own. Hand the caller what it needs
-        // to release once the dialog is resolved.
-        return Ok(ClickResult {
-            position: (x, y),
-            dialog_opened: true,
-            pending_release: Some(PendingRelease {
-                session_id: session_id.to_string(),
+    let mut phase = Some(ClickPhase::Move);
+    let mut button_pressed = false;
+    while let Some(current) = phase {
+        if matches!(current, ClickPhase::Press(_)) {
+            button_pressed = true;
+        }
+        if dispatch_mouse_or_dialog(
+            client,
+            session_id,
+            accept_sessions,
+            &current.event(&spec, x, y),
+        )
+        .await?
+        {
+            return Ok(ClickResult {
+                position: (x, y),
+                dialog_opened: true,
+                pending_release: match current {
+                    ClickPhase::Press(n) => Some(PendingRelease {
+                        session_id: session_id.to_string(),
+                        x,
+                        y,
+                        button: spec.button,
+                        click_count: n,
+                        modifiers: spec.modifiers,
+                    }),
+                    _ => None,
+                },
                 x,
                 y,
-                button: button.to_string(),
-            }),
-            x,
-            y,
-            button_pressed: true,
-        });
+                button_pressed,
+            });
+        }
+        phase = current.next(&spec);
     }
-
-    // Release. A dialog here fired from the click/mouseup handler, which runs
-    // after the button is already up, so there is nothing left to release.
-    let dialog_opened = dispatch_mouse_or_dialog(
-        client,
-        session_id,
-        accept_sessions,
-        &DispatchMouseEventParams {
-            event_type: "mouseReleased".to_string(),
-            x,
-            y,
-            button: Some(button.to_string()),
-            buttons: Some(0),
-            click_count: Some(click_count),
-            delta_x: None,
-            delta_y: None,
-            modifiers: None,
-        },
-    )
-    .await?;
     Ok(ClickResult {
         position: (x, y),
-        dialog_opened,
+        dialog_opened: false,
         pending_release: None,
         x,
         y,
@@ -1293,12 +1273,12 @@ pub async fn dispatch_pending_release(
                 event_type: "mouseReleased".to_string(),
                 x: release.x,
                 y: release.y,
-                button: Some(release.button.clone()),
+                button: Some(release.button.name().to_string()),
                 buttons: Some(0),
-                click_count: Some(1),
+                click_count: Some(i32::from(release.click_count)),
                 delta_x: None,
                 delta_y: None,
-                modifiers: None,
+                modifiers: release.modifiers.cdp(),
             },
             Some(&release.session_id),
         )
@@ -1512,6 +1492,38 @@ mod tests {
             );
             assert_eq!(key, ch.to_string());
         }
+    }
+
+    #[test]
+    fn click_phase_walks_move_press_release_for_each_click() {
+        let spec = ClickSpec {
+            button: MouseButton::Right,
+            count: 2,
+            modifiers: Modifiers::parse_list("ctrl+shift").unwrap(),
+        };
+        let mut phases = Vec::new();
+        let mut phase = Some(ClickPhase::Move);
+        while let Some(current) = phase {
+            phases.push(current);
+            phase = current.next(&spec);
+        }
+        assert_eq!(
+            phases,
+            [
+                ClickPhase::Move,
+                ClickPhase::Press(1),
+                ClickPhase::Release(1),
+                ClickPhase::Press(2),
+                ClickPhase::Release(2),
+            ]
+        );
+
+        let press = ClickPhase::Press(2).event(&spec, 10.0, 20.0);
+        assert_eq!(press.event_type, "mousePressed");
+        assert_eq!(press.button.as_deref(), Some("right"));
+        assert_eq!(press.buttons, Some(2));
+        assert_eq!(press.click_count, Some(2));
+        assert_eq!(press.modifiers, Some(10));
     }
 
     #[test]
