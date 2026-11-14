@@ -268,7 +268,7 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
         "download" => network::download(cmd, state).await,
         "waitfordownload" => network::waitfordownload(cmd, state).await,
         "viewport" => emulation::set_viewport(cmd, state).await,
-        "device" => emulation::set_device(cmd, state).await,
+        "device" => Err("Firefox does not support `set device`; use `set viewport` plus the `--user-agent` launch flag (or `AGENT_BROWSER_USER_AGENT`) instead of `set device`".to_string()),
         "useragent" | "user_agent" => emulation::set_user_agent(cmd, state).await,
         "locale" => emulation::set_locale(cmd, state).await,
         "timezone" => emulation::set_timezone(cmd, state).await,

@@ -23,7 +23,6 @@ pub(crate) enum NetworkDecision {
         headers: Vec<(String, String)>,
         body: String,
     },
-    Abort,
     Continue {
         headers: Option<Vec<(String, String)>>,
     },
@@ -50,7 +49,7 @@ fn is_blocked(url: &str, resource_type: &str, filter: Option<&DomainFilter>) -> 
         .is_some_and(|hostname| !filter.is_allowed(hostname))
 }
 
-/// Decides how one Firefox request is handled: fail, fulfill, abort or continue.
+/// Decides how one Firefox request is handled: fail, fulfill or continue.
 pub(crate) fn decide_request(
     url: &str,
     resource_type: &str,
@@ -68,7 +67,7 @@ pub(crate) fn decide_request(
             continue;
         }
         if route.abort {
-            return NetworkDecision::Abort;
+            return NetworkDecision::Fail;
         }
         if let Some(response) = &route.response {
             let request_headers = headers
@@ -421,7 +420,7 @@ async fn before_request(
         )
     };
     match decision {
-        NetworkDecision::Fail | NetworkDecision::Abort => {
+        NetworkDecision::Fail => {
             bidi.send("network.failRequest", json!({"request": id}))
                 .await?;
         }
@@ -594,6 +593,23 @@ fn request_id(p: &Value) -> &str {
     p["request"]["request"].as_str().unwrap_or("")
 }
 
+fn last_har_entry<'a>(entries: &'a mut [HarEntry], id: &str) -> Option<&'a mut HarEntry> {
+    entries
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.request_id == id)
+}
+
+fn last_tracked_request<'a>(
+    entries: &'a mut [TrackedRequest],
+    id: &str,
+) -> Option<&'a mut TrackedRequest> {
+    entries
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.request_id == id)
+}
+
 fn request_started(state: &mut DaemonState, p: &Value) {
     let request = &p["request"];
     let id = request_id(p).to_string();
@@ -605,27 +621,15 @@ fn request_started(state: &mut DaemonState, p: &Value) {
     if let Some(timestamp) = timestamp.filter(|_| state.har_recording) {
         state.har_entries.push(HarEntry {
             request_id: id.clone(),
-            remote_addr: None,
             wall_time: timestamp / 1000.0,
             method: method.clone(),
             url: url.clone(),
             request_headers: header_list(&request["headers"]),
-            post_data: None,
             request_body_size: request["bodySize"].as_i64().unwrap_or(0),
             resource_type: resource_type.clone(),
-            status: None,
-            status_text: String::new(),
             http_version: "HTTP/1.1".to_string(),
-            response_headers: Vec::new(),
-            mime_type: String::new(),
-            redirect_url: String::new(),
             response_body_size: -1,
-            cdp_timing: None,
-            loading_finished_timestamp: None,
-            response_started_timestamp: None,
-            response_completed_timestamp: None,
-            response_body: None,
-            response_body_base64: false,
+            ..Default::default()
         });
     }
     if state.request_tracking {
@@ -650,12 +654,7 @@ fn response_seen(state: &mut DaemonState, p: &Value, started: bool) {
     let status = response["status"].as_i64();
     let mime = response["mimeType"].as_str().unwrap_or("").to_string();
     if state.har_recording {
-        if let Some(entry) = state
-            .har_entries
-            .iter_mut()
-            .rev()
-            .find(|e| e.request_id == id)
-        {
+        if let Some(entry) = last_har_entry(&mut state.har_entries, id) {
             let headers = header_list(&response["headers"]);
             entry.status = status;
             entry.status_text = response["statusText"].as_str().unwrap_or("").to_string();
@@ -682,12 +681,7 @@ fn response_seen(state: &mut DaemonState, p: &Value, started: bool) {
         }
     }
     if state.request_tracking {
-        if let Some(entry) = state
-            .tracked_requests
-            .iter_mut()
-            .rev()
-            .find(|e| e.request_id == id)
-        {
+        if let Some(entry) = last_tracked_request(&mut state.tracked_requests, id) {
             entry.status = status;
             entry.mime_type = Some(mime);
             entry.response_headers = Some(header_object(&response["headers"]));
@@ -749,22 +743,12 @@ async fn request_body(state: &mut DaemonState, id: &str) {
         return;
     }
     if har_wanted {
-        if let Some(entry) = state
-            .har_entries
-            .iter_mut()
-            .rev()
-            .find(|e| e.request_id == id)
-        {
+        if let Some(entry) = last_har_entry(&mut state.har_entries, id) {
             entry.post_data = Some(body.clone());
         }
     }
     if tracked_wanted {
-        if let Some(entry) = state
-            .tracked_requests
-            .iter_mut()
-            .rev()
-            .find(|e| e.request_id == id)
-        {
+        if let Some(entry) = last_tracked_request(&mut state.tracked_requests, id) {
             entry.post_data = Some(body);
         }
     }
@@ -797,12 +781,7 @@ async fn har_body(state: &mut DaemonState, id: &str) {
     {
         return;
     }
-    if let Some(entry) = state
-        .har_entries
-        .iter_mut()
-        .rev()
-        .find(|e| e.request_id == id)
-    {
+    if let Some(entry) = last_har_entry(&mut state.har_entries, id) {
         state.har_body_total_bytes += body.len();
         entry.response_body = Some(body);
         entry.response_body_base64 = base64;
@@ -1056,10 +1035,6 @@ impl DownloadStage {
             .map_err(|e| format!("Failed to create download staging directory: {e}"))?;
         Ok(Self { dir })
     }
-
-    fn path(&self) -> &std::path::Path {
-        &self.dir
-    }
 }
 
 impl Drop for DownloadStage {
@@ -1100,7 +1075,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let target = resolve_target(state, selector).await?;
     let stage = DownloadStage::create()?;
     let stage_dir = stage
-        .path()
+        .dir
         .to_str()
         .ok_or("Download staging directory path is not valid UTF-8")?;
     let ff = session(state)?;
@@ -1145,7 +1120,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .or_else(|| {
             record
                 .suggested_filename
-                .map(|name| stage.path().join(name).to_string_lossy().into_owned())
+                .map(|name| stage.dir.join(name).to_string_lossy().into_owned())
         })
         .ok_or("Download completed but could not determine the downloaded file name")?;
     let saved = std::path::Path::new(&saved);
@@ -1385,17 +1360,14 @@ mod tests {
     fn the_download_stage_removes_its_directory_on_drop() {
         let dir = {
             let stage = DownloadStage::create().unwrap();
-            std::fs::write(stage.path().join("conftest.py"), b"page chosen").unwrap();
+            std::fs::write(stage.dir.join("conftest.py"), b"page chosen").unwrap();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mode = std::fs::metadata(stage.path())
-                    .unwrap()
-                    .permissions()
-                    .mode();
+                let mode = std::fs::metadata(&stage.dir).unwrap().permissions().mode();
                 assert_eq!(mode & 0o777, 0o700, "the staging directory is private");
             }
-            stage.path().to_path_buf()
+            stage.dir.to_path_buf()
         };
         assert!(
             !dir.exists(),

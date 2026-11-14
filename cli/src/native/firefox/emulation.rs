@@ -310,10 +310,6 @@ pub async fn set_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     }))
 }
 
-pub async fn set_device(_cmd: &Value, _state: &mut DaemonState) -> Result<Value, String> {
-    Err("Firefox does not support `set device`; use `set viewport` plus the `--user-agent` launch flag (or `AGENT_BROWSER_USER_AGENT`) instead of `set device`".to_string())
-}
-
 /// Overrides the user agent for the active tab and any tab opened later.
 pub async fn set_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let user_agent = cmd
@@ -487,9 +483,10 @@ mod tests {
             Some((800, 600, 1.5))
         );
 
-        let error = set_device(&json!({"device": "iPhone 15"}), &mut state)
-            .await
-            .unwrap_err();
+        let error =
+            super::super::actions::execute("device", &json!({"device": "iPhone 15"}), &mut state)
+                .await
+                .unwrap_err();
         assert!(error.contains("set device"));
         assert!(error.contains("set viewport"));
         assert!(error.contains("--user-agent") && error.contains("AGENT_BROWSER_USER_AGENT"));

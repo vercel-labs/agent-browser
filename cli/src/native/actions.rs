@@ -91,7 +91,7 @@ struct ActiveProviderSession {
 }
 
 /// Captured request/response metadata used to export HAR 1.2 files.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct HarEntry {
     pub request_id: String,
     /// Seconds since Unix epoch from CDP `wallTime` or a BiDi event timestamp.
