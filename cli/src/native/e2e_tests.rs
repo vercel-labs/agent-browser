@@ -15360,15 +15360,15 @@ async fn e2e_click_buttons_modifiers_and_double_click() {
     click_probe_reset_log(&mut state).await;
     assert_success(
         &execute_command(
-            &json!({"id": "5", "action": "click", "selector": "#target", "modifiers": 10}),
+            &json!({"id": "5", "action": "click", "selector": "#target", "modifiers": 12}),
             &mut state,
         )
         .await,
     );
     let log = click_probe_read_log(&mut state).await;
     assert!(
-        log.iter().any(|entry| entry == "click:b0:d1:c1s1a0m0"),
-        "ctrl+shift click should report both modifiers: {:?}",
+        log.iter().any(|entry| entry == "click:b0:d1:c0s1a0m1"),
+        "meta+shift click should report both modifiers: {:?}",
         log
     );
 

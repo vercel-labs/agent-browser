@@ -7132,9 +7132,15 @@ async fn handle_click(
                     wb.click(selector).await?;
                     return Ok(json!({ "clicked": selector }));
                 }
-                _ => {
+                ClickPlan::Pointer(_) => {
                     return Err(
                         "The Safari and iOS backends only support a plain left click; --button, --modifiers, and dblclick need a Chrome session"
+                            .to_string(),
+                    )
+                }
+                ClickPlan::NewTab => {
+                    return Err(
+                        "The Safari and iOS backends cannot open a tab from a click; use `tab new <url>`"
                             .to_string(),
                     )
                 }
