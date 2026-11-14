@@ -16603,6 +16603,68 @@ async fn e2e_firefox_frame_by_name_and_url() {
 /// so a page that shadows `contentWindow` cannot forge a browsing context.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_snapshot_refs_ignore_a_page_forged_content_window() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        r#"new Promise((resolve) => {
+            document.body.innerHTML = '<button onclick="document.title = \'parent-clicked\'">Parent control</button><iframe id=f></iframe>';
+            const frame = document.querySelector('#f');
+            frame.addEventListener('load', () => resolve(true));
+            frame.srcdoc = '<button onclick="parent.document.title = \'frame-clicked\'">Frame control</button>';
+            Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', { configurable: true, get: () => window });
+            Object.defineProperty(frame, 'contentWindow', { configurable: true, get: () => window });
+        })"#,
+    )
+    .await;
+
+    let control = firefox_ref(&mut state, "Frame control").await;
+    assert_success(&firefox_act(&mut state, "click", &control, json!({})).await);
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert_eq!(firefox_title(&mut state).await, "frame-clicked");
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_snapshot_ignores_a_background_tab_that_forges_the_marker() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        r#"document.body.innerHTML = '<button>Forged control</button>';
+        window.Boolean = () => true;
+        true"#,
+    )
+    .await;
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "new", "action": "tab_new", "url": "data:text/html,<button>Real control</button>" }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = firefox_command(&mut state, json!({ "id": "snap", "action": "snapshot" })).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap().to_string();
+    assert!(snapshot.contains("Real control"), "{snapshot}");
+    assert!(!snapshot.contains("Forged control"), "{snapshot}");
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_frame_ignores_a_page_forged_content_window() {
     required_firefox_binary();
     let tmp = tempfile::tempdir().unwrap();

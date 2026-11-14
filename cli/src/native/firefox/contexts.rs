@@ -254,6 +254,11 @@ impl Contexts {
             && self.tab_of(context) == Some(tab)
     }
 
+    /// Whether the browser reported `context` as a frame directly inside `parent`.
+    pub fn is_child_of(&self, context: &str, parent: &str) -> bool {
+        matches!(self.nodes.get(context), Some(Node::Frame { parent: recorded }) if recorded == parent)
+    }
+
     /// Every tab with its context id.
     pub fn tabs(&self) -> impl Iterator<Item = (&str, &Tab)> {
         self.nodes.iter().filter_map(|(context, node)| match node {
@@ -421,5 +426,8 @@ mod tests {
         assert!(!contexts.is_frame_of("tab-a", "tab-a"));
         assert!(!contexts.is_frame_of("frame-a", "tab-b"));
         assert!(!contexts.is_frame_of("unknown", "tab-a"));
+        assert!(contexts.is_child_of("frame-a-inner", "frame-a"));
+        assert!(!contexts.is_child_of("frame-a-inner", "tab-a"));
+        assert!(!contexts.is_child_of("tab-a", "tab-a"));
     }
 }
