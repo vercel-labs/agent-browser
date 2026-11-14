@@ -22,6 +22,7 @@ import {
   responseType,
   representationHeaders,
   indexing,
+  assertContainsLines,
   assertModernMarkdown,
   assertHomeMarkdown,
   assertLegacyMarkdown,
@@ -256,10 +257,9 @@ test("docs introduction keeps its own Markdown route after the homepage split", 
       ),
       `${path}: docs canonical frontmatter`,
     );
-    assert.ok(
-      body.includes(
-        "Browser automation CLI designed for AI agents. Compact text output minimizes context usage. 100% native Rust.",
-      ),
+    assertContainsLines(
+      body,
+      pageAt("/").modernMarkdown,
       `${path}: docs introduction`,
     );
     bodies.push(body);
