@@ -55,6 +55,7 @@ pub struct FirefoxSession {
     pub permissions: Arc<tokio::sync::Mutex<permissions::Grants>>,
     /// Launch download directory, restored after `download` redirects it.
     pub download_dir: Option<String>,
+    pub(super) data_collector: Option<String>,
     events: mpsc::Receiver<Value>,
     pub net: NetContext,
     /// True once the single global network intercept is installed; it is never installed twice.
@@ -178,15 +179,6 @@ impl FirefoxSession {
             .collect();
         bidi.send("session.subscribe", json!({"events": events_to_watch}))
             .await?;
-        bidi.send(
-            "network.addDataCollector",
-            json!({
-                "dataTypes": ["request", "response"],
-                "maxEncodedDataSize": 10_000_000
-            }),
-        )
-        .await?;
-
         let rdp = connect_devtools(&process.devtools).await?;
         let root = rdp.request("root", "getRoot", json!({})).await?;
         let accessibility_actor = root["parentAccessibilityActor"]
@@ -232,6 +224,7 @@ impl FirefoxSession {
             emulation,
             permissions,
             download_dir: options.download_path.clone(),
+            data_collector: None,
             visited_origins: HashSet::new(),
             events,
             net,
@@ -824,6 +817,7 @@ pub(crate) mod tests {
             emulation: Arc::default(),
             permissions: Arc::default(),
             download_dir: None,
+            data_collector: None,
             visited_origins: HashSet::new(),
             events,
             net: NetContext::default(),
@@ -952,6 +946,7 @@ pub(crate) mod tests {
             emulation: Arc::default(),
             permissions: Arc::default(),
             download_dir: None,
+            data_collector: None,
             events,
             visited_origins: HashSet::new(),
             net: NetContext::default(),

@@ -527,6 +527,25 @@ pub async fn drain(state: &mut DaemonState) {
         }
         apply_events(state, events).await;
     }
+    let wanted = state.har_recording || state.request_tracking;
+    if let Some(ff) = state
+        .firefox
+        .as_mut()
+        .filter(|ff| ff.data_collector.is_some() != wanted)
+    {
+        let (method, params) = match ff.data_collector.take() {
+            Some(collector) => (
+                "network.removeDataCollector",
+                json!({ "collector": collector }),
+            ),
+            None => (
+                "network.addDataCollector",
+                json!({ "dataTypes": ["request", "response"], "maxEncodedDataSize": 10_000_000 }),
+            ),
+        };
+        let reply = ff.bidi.send(method, params).await.ok();
+        ff.data_collector = reply.and_then(|r| r["collector"].as_str().map(String::from));
+    }
 }
 
 /// The browsing context an event reports, when the event carries one.
@@ -2046,5 +2065,30 @@ mod tests {
         let errors = state.event_tracker.get_errors_json();
         assert_eq!(errors["errors"][0]["text"], "Error: boom");
         assert_eq!(errors["errors"][0]["line"], 3);
+    }
+
+    #[tokio::test]
+    async fn data_collector_tracks_recording_lifetime() {
+        let (ff, _, calls) = crate::native::firefox::session::tests::fake_session_with(|v| {
+            if v["method"] == "network.addDataCollector" {
+                json!({"collector": "collector-1"})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.har_recording = true;
+
+        drain(&mut state).await;
+        state.har_recording = false;
+        drain(&mut state).await;
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["network.addDataCollector", "network.removeDataCollector"]
+        );
+        assert_eq!(state.firefox.as_ref().unwrap().data_collector, None);
     }
 }
