@@ -11782,6 +11782,10 @@ async fn handle_evalhandle(cmd: &Value, state: &DaemonState) -> Result<Value, St
 // Advanced interaction handlers
 // ---------------------------------------------------------------------------
 
+/// How far, on each axis, the pointer moves right after a drag's press. Chrome
+/// starts a native drag once the pointer has travelled a few pixels.
+const DRAG_START_NUDGE: f64 = 6.0;
+
 async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -11860,10 +11864,38 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     state.mouse_state.y = sy + source_offset.1;
     state.mouse_state.buttons = 1;
 
-    // Measure the target only after pressing: resolving scrolls it into view,
-    // which would move the source out from under a point measured earlier.
-    // It was checked above; the press may since have put a drop zone over it.
+    // The button is held from here, so a failure in this block releases it.
     let resolved_target = async {
+        // Start the drag before anything scrolls. A native drag begins on the
+        // first movement after the press, and a scroll in between means it
+        // never starts. The source point is in the viewport, so stepping
+        // toward the origin stays in it.
+        let nudge = |v: f64| {
+            if v >= DRAG_START_NUDGE {
+                v - DRAG_START_NUDGE
+            } else {
+                v + DRAG_START_NUDGE
+            }
+        };
+        move_mouse_interpolated(
+            &mgr.client,
+            &source_session_id,
+            &mut state.mouse_state,
+            nudge(sx),
+            nudge(sy),
+            0,
+            if human { None } else { Some(2) },
+            human,
+            seed.wrapping_add(2),
+            1,
+            source_offset,
+            &state.recording_state.shared_cursor,
+        )
+        .await?;
+
+        // Measure the target only now: resolving scrolls it into view, which
+        // would move the source out from under a point measured earlier. It
+        // was checked above; the press may since have put a drop zone over it.
         let (tx, ty, target_session_id) = super::element::resolve_element_center(
             &mgr.client,
             &session_id,
@@ -11886,7 +11918,6 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let (tx, ty, target_session_id, target_offset) = match resolved_target {
         Ok(resolved) => resolved,
         Err(err) => {
-            // The target is gone; do not leave the button held.
             let _ = mgr
                 .client
                 .send_command(
