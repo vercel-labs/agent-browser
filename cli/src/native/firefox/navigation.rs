@@ -6,22 +6,66 @@ use serde_json::{json, Value};
 use super::daemon;
 use crate::native::actions::DaemonState;
 
+/// Firefox net-error codes and `about:neterror` names, mapped to the Chromium code Chrome reports
+/// for the same failure.
+const NET_ERRORS: &[(&str, &str)] = &[
+    ("NS_ERROR_ABORT", "net::ERR_FAILED"),
+    ("NS_ERROR_UNKNOWN_HOST", "net::ERR_NAME_NOT_RESOLVED"),
+    ("NS_ERROR_CONNECTION_REFUSED", "net::ERR_CONNECTION_REFUSED"),
+    ("NS_ERROR_NET_TIMEOUT", "net::ERR_TIMED_OUT"),
+    ("NS_ERROR_NET_TIMEOUT_EXTERNAL", "net::ERR_TIMED_OUT"),
+    ("NS_ERROR_OFFLINE", "net::ERR_INTERNET_DISCONNECTED"),
+    (
+        "NS_ERROR_UNKNOWN_PROXY_HOST",
+        "net::ERR_PROXY_CONNECTION_FAILED",
+    ),
+    ("dnsNotFound", "net::ERR_NAME_NOT_RESOLVED"),
+    ("connectionFailure", "net::ERR_CONNECTION_REFUSED"),
+    ("netTimeout", "net::ERR_TIMED_OUT"),
+    ("offline", "net::ERR_INTERNET_DISCONNECTED"),
+    ("proxyConnectFailure", "net::ERR_PROXY_CONNECTION_FAILED"),
+];
+
+/// The Chromium code for an exact Firefox net-error name or Gecko error code.
+fn chromium_net_error(code: &str) -> Option<&'static str> {
+    NET_ERRORS
+        .iter()
+        .find(|(gecko, _)| *gecko == code)
+        .map(|(_, chromium)| *chromium)
+}
+
+/// Finds the first known net-error token in free-form Firefox text such as `Error: NS_ERROR_ABORT`.
+/// Firefox omits the `e` name for failures it has no neterror page for, which is how a route abort
+/// arrives, and a BiDi command error carries the Gecko code in its message instead of a URL.
+fn net_error_token(text: &str) -> Option<&'static str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .find_map(chromium_net_error)
+}
+
+/// Rewrites the Gecko net-error token in a Firefox error message to the Chromium code Chrome
+/// reports for the same failure. Messages without a known code are returned unchanged.
+pub(super) fn normalize_net_error_text(text: &str) -> String {
+    net_error_token(text).map_or_else(|| text.to_string(), str::to_string)
+}
+
 /// How long a load should wait for the document before reporting back.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Wait {
     None,
     Interactive,
     Complete,
+    NetworkIdle { timeout_ms: u64 },
 }
 
 impl Wait {
-    /// Maps a command's `waitUntil` value to a load wait.
-    pub fn from_wait_until(wait_until: Option<&str>) -> Result<Self, String> {
+    /// Maps a command's `waitUntil` value to a load wait, keeping the command's timeout for the
+    /// idle wait.
+    pub fn from_wait_until(wait_until: Option<&str>, timeout_ms: u64) -> Self {
         match wait_until {
-            Some("networkidle") => Err("networkidle is not supported with --engine firefox".into()),
-            Some("domcontentloaded") => Ok(Wait::Interactive),
-            Some("none") => Ok(Wait::None),
-            _ => Ok(Wait::Complete),
+            Some("networkidle") => Wait::NetworkIdle { timeout_ms },
+            Some("domcontentloaded") => Wait::Interactive,
+            Some("none") => Wait::None,
+            _ => Wait::Complete,
         }
     }
 
@@ -29,7 +73,14 @@ impl Wait {
         match self {
             Wait::None => "none",
             Wait::Interactive => "interactive",
-            Wait::Complete => "complete",
+            Wait::Complete | Wait::NetworkIdle { .. } => "complete",
+        }
+    }
+
+    fn idle_timeout(self) -> Option<u64> {
+        match self {
+            Wait::NetworkIdle { timeout_ms } => Some(timeout_ms),
+            _ => None,
         }
     }
 }
@@ -61,12 +112,8 @@ impl Landing {
 /// Loads the active tab, dropping refs and frame scope first, and records the origin it reached.
 /// Fails with the load's name when Firefox rejects it.
 pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, String> {
-    if state.domain_filter.read().await.is_some() {
-        return Err(
-            "--allowed-domains is not supported with --engine firefox, so no page may load; \
-             clear it with `--allowed-domains \"\"`"
-                .to_string(),
-        );
+    if let Load::Url { url, .. } = &load {
+        state.ensure_navigation_allowed(url).await?;
     }
     let (method, params, failure) = match &load {
         Load::Url { url, wait } => (
@@ -89,6 +136,10 @@ pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, St
         Load::Url { url, .. } => (*url).to_string(),
         Load::Reload | Load::History { .. } => String::new(),
     };
+    let idle_timeout = match &load {
+        Load::Url { wait, .. } => wait.idle_timeout(),
+        Load::Reload | Load::History { .. } => None,
+    };
     daemon::reset_page(state);
     let ff = daemon::session(state)?;
     let context = ff.contexts.active_tab().to_string();
@@ -97,12 +148,19 @@ pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, St
     let landed = ff
         .race_prompt(&context, ff.bidi.send(method, params))
         .await
-        .map_err(|error| format!("{failure} failed: {error}"))?;
+        .map_err(|error| format!("{failure} failed: {}", normalize_net_error_text(&error)))?;
     let (url, prompt) = match landed {
         Some(result) => (landed_url(&result, ff.url().await, &requested), false),
         None => (ff.url().await.unwrap_or(requested), true),
     };
     ff.note_visit(&url);
+    if !prompt {
+        if let Some(timeout_ms) = idle_timeout {
+            super::network::wait_idle(state, timeout_ms)
+                .await
+                .map_err(|_| "Timeout waiting for networkidle".to_string())?;
+        }
+    }
     Ok(Landing {
         context,
         url,
@@ -121,7 +179,8 @@ fn landed_url(result: &Value, current: Result<String, String>, requested: &str) 
         .unwrap_or_else(|| requested.to_string())
 }
 
-/// Turns an `about:neterror?e=...&d=...` URL into the message Firefox shows for the failure.
+/// Turns an `about:neterror?e=...&d=...` URL into the failure message, using Chrome's
+/// `net::ERR_*` text when the Firefox code has a known Chromium equivalent.
 fn neterror_message(url: &str) -> Option<String> {
     if !url.starts_with("about:neterror") {
         return None;
@@ -135,7 +194,13 @@ fn neterror_message(url: &str) -> Option<String> {
             .filter(|v| !v.is_empty())
     };
     let code = pair("e").unwrap_or_else(|| "unknown error".to_string());
-    Some(match pair("d") {
+    let detail = pair("d");
+    if let Some(chromium) =
+        chromium_net_error(&code).or_else(|| detail.as_deref().and_then(net_error_token))
+    {
+        return Some(chromium.to_string());
+    }
+    Some(match detail {
         Some(detail) => format!("{code}: {detail}"),
         None => code,
     })
@@ -147,55 +212,78 @@ mod tests {
     use crate::native::firefox::session::tests::fake_session;
 
     #[test]
-    fn neterror_url_becomes_a_message() {
+    fn neterror_url_becomes_chromes_message() {
         let url = "about:neterror?e=dnsNotFound&u=https%3A//nope.invalid/&d=We%20can%27t%20connect";
-        assert_eq!(
-            neterror_message(url).unwrap(),
-            "dnsNotFound: We can't connect"
-        );
+        assert_eq!(neterror_message(url).unwrap(), "net::ERR_NAME_NOT_RESOLVED");
         assert_eq!(
             neterror_message("about:neterror?e=connectionFailure").unwrap(),
-            "connectionFailure"
+            "net::ERR_CONNECTION_REFUSED"
+        );
+        assert_eq!(
+            neterror_message("about:neterror?e=corruptedContentErrorv2&d=Bad%20content").unwrap(),
+            "corruptedContentErrorv2: Bad content"
         );
         assert!(neterror_message("https://example.com").is_none());
     }
 
-    /// Firefox cannot enforce the allowlist, so an installed filter must stop every load rather
-    /// than let a page through unfiltered.
+    #[test]
+    fn error_text_maps_gecko_codes_and_keeps_unknown_ones() {
+        assert_eq!(
+            normalize_net_error_text("unknown error: Error: NS_ERROR_ABORT"),
+            "net::ERR_FAILED"
+        );
+        assert_eq!(
+            normalize_net_error_text("no such frame: gone"),
+            "no such frame: gone"
+        );
+    }
+
+    /// The allowlist is checked here for every URL a caller loads, so no caller repeats the rule.
     #[tokio::test]
-    async fn a_foreign_allowlist_refuses_every_load() {
+    async fn a_foreign_allowlist_refuses_urls_it_does_not_allow() {
         let (ff, _events, calls) = fake_session().await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         *state.domain_filter.write().await =
             Some(crate::native::network::DomainFilter::new("example.com"));
-        let loads = [
+        let error = load(
+            &mut state,
             Load::Url {
-                url: "https://example.com/",
+                url: "https://evil.example/",
+                wait: Wait::Complete,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "Domain 'evil.example' is not in the allowed domains list"
+        );
+        assert!(calls.lock().unwrap().is_empty());
+        for load in [
+            Load::Url {
+                url: "about:blank",
                 wait: Wait::Complete,
             },
             Load::Reload,
             Load::History { delta: -1 },
-        ];
-        for load in loads {
-            let error = super::load(&mut state, load).await.unwrap_err();
-            assert!(error.contains("--allowed-domains"), "{error}");
+        ] {
+            assert!(super::load(&mut state, load).await.is_ok());
         }
-        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
     fn wait_until_values_map_to_load_waits() {
         assert_eq!(
-            Wait::from_wait_until(Some("domcontentloaded")).unwrap(),
+            Wait::from_wait_until(Some("domcontentloaded"), 0),
             Wait::Interactive
         );
-        assert_eq!(Wait::from_wait_until(Some("none")).unwrap(), Wait::None);
-        assert_eq!(Wait::from_wait_until(None).unwrap(), Wait::Complete);
-        assert_eq!(Wait::from_wait_until(Some("load")).unwrap(), Wait::Complete);
+        assert_eq!(Wait::from_wait_until(Some("none"), 0), Wait::None);
+        assert_eq!(Wait::from_wait_until(None, 0), Wait::Complete);
+        assert_eq!(Wait::from_wait_until(Some("load"), 0), Wait::Complete);
         assert_eq!(
-            Wait::from_wait_until(Some("networkidle")).unwrap_err(),
-            "networkidle is not supported with --engine firefox"
+            Wait::from_wait_until(Some("networkidle"), 500),
+            Wait::NetworkIdle { timeout_ms: 500 }
         );
     }
 

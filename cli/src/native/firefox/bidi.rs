@@ -3,10 +3,12 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{mpsc, oneshot};
+
+const BUFFERED_EVENT_CAPACITY: usize = 65_536;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -25,7 +27,8 @@ type WsSink = futures_util::stream::SplitSink<
 pub struct BidiClient {
     sink: tokio::sync::Mutex<WsSink>,
     pending: Pending,
-    events: broadcast::Sender<Value>,
+    buffered_events: Arc<Mutex<Vec<mpsc::Sender<Value>>>>,
+    pub(crate) lost_events: Arc<AtomicBool>,
     next_id: AtomicU64,
     pub(crate) reader: tokio::task::JoinHandle<()>,
 }
@@ -49,8 +52,13 @@ impl BidiClient {
             .map_err(|e| format!("BiDi connect failed: {e}"))?;
         let (sink, mut stream) = ws.split();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let (events, _) = broadcast::channel(1024);
-        let (p, ev) = (pending.clone(), events.clone());
+        let buffered_events = Arc::new(Mutex::new(Vec::<mpsc::Sender<Value>>::new()));
+        let lost_events = Arc::new(AtomicBool::new(false));
+        let (p, be, lost) = (
+            pending.clone(),
+            buffered_events.clone(),
+            lost_events.clone(),
+        );
         let reader = tokio::spawn(async move {
             while let Some(Ok(msg)) = stream.next().await {
                 let Message::Text(text) = msg else { continue };
@@ -59,7 +67,16 @@ impl BidiClient {
                 };
                 match v["type"].as_str() {
                     Some("event") => {
-                        let _ = ev.send(v);
+                        be.lock()
+                            .unwrap()
+                            .retain(|tx| match tx.try_send(v.clone()) {
+                                Ok(()) => true,
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    lost.store(true, Ordering::Relaxed);
+                                    true
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => false,
+                            });
                     }
                     Some(kind @ ("success" | "error")) => {
                         let Some(tx) = v["id"]
@@ -86,15 +103,25 @@ impl BidiClient {
         Ok(Self {
             sink: tokio::sync::Mutex::new(sink),
             pending,
-            events,
+            buffered_events,
+            lost_events,
             next_id: AtomicU64::new(1),
             reader,
         })
     }
 
-    /// Subscribes to BiDi events (`type: event` messages).
-    pub fn subscribe(&self) -> broadcast::Receiver<Value> {
-        self.events.subscribe()
+    /// Whether a full queue dropped events since the last call. State that events keep current
+    /// has to be rebuilt after that.
+    pub fn take_event_loss(&self) -> bool {
+        self.lost_events.swap(false, Ordering::Relaxed)
+    }
+
+    /// Queues events without blocking the reader. Events past the 65,536-item capacity are
+    /// dropped and reported by `take_event_loss`.
+    pub fn subscribe_buffered(&self) -> mpsc::Receiver<Value> {
+        let (tx, rx) = mpsc::channel(BUFFERED_EVENT_CAPACITY);
+        self.buffered_events.lock().unwrap().push(tx);
+        rx
     }
 
     /// Sends a command with the default 30s timeout and returns its `result`.
@@ -313,7 +340,7 @@ mod tests {
             .unwrap();
         });
         let c = BidiClient::connect(&url).await.unwrap();
-        let mut ev = c.subscribe();
+        let mut ev = c.subscribe_buffered();
         let r = c.send("a.b", json!({})).await.unwrap();
         assert_eq!(r, json!({}));
         assert_eq!(ev.recv().await.unwrap()["method"], "x.y");

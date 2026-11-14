@@ -7,25 +7,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::sync::broadcast::{self, error::TryRecvError};
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 
 use super::bidi::{remote_to_json, BidiClient};
 use super::contexts::{Contexts, Removed};
+use super::emulation::{self, Settings as EmulationSettings};
+use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
+use super::permissions;
 use super::process::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
 use super::rdp::RdpClient;
-use crate::native::actions::PendingDialog;
+use crate::native::actions::{EmulatedMedia, PendingDialog};
 use crate::native::cdp::chrome::LaunchOptions;
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-const SUBSCRIBED_EVENTS: [&str; 5] = [
-    "browsingContext.userPromptOpened",
-    "browsingContext.userPromptClosed",
+const CONTEXT_EVENTS: [&str; 3] = [
     "browsingContext.contextCreated",
     "browsingContext.contextDestroyed",
     "browsingContext.domContentLoaded",
+];
+const PROMPT_EVENTS: [&str; 2] = [
+    "browsingContext.userPromptOpened",
+    "browsingContext.userPromptClosed",
 ];
 
 /** One launched Firefox. Dropping it kills the process tree and deletes the profile. */
@@ -48,8 +52,22 @@ pub struct FirefoxSession {
     pub touches: Vec<(f64, f64)>,
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
     pub shadow_ids: std::collections::HashSet<i64>,
+    /// Emulation applied to the active tab and replayed onto new tabs.
+    pub emulation: Arc<std::sync::RwLock<EmulationSettings>>,
+    /// Permissions the session granted, given to each origin as its tabs load it.
+    pub permissions: Arc<tokio::sync::Mutex<permissions::Grants>>,
+    /// Launch download directory, restored after `download` redirects it.
+    pub download_dir: Option<String>,
+    events: mpsc::Receiver<Value>,
+    pub net: NetContext,
+    /// True once the single global network intercept is installed; it is never installed twice.
+    pub intercepting: bool,
+    /// Unfinished requests mapped to their reported browsing contexts.
+    pub inflight: HashMap<String, Option<String>>,
+    _dispatcher: Option<AbortOnDrop>,
     pub visited_origins: HashSet<String>,
-    events: broadcast::Receiver<Value>,
+    /// Version Firefox reported when the session opened, used for HAR browser metadata.
+    pub browser_version: String,
 }
 
 /// Builds the BiDi `proxy` capability from a `--proxy` value such as `http://host:3128`.
@@ -97,33 +115,47 @@ async fn connect_devtools_loop(endpoint: &DevtoolsEndpoint) -> Result<RdpClient,
             DevtoolsEndpoint::Port(port) => RdpClient::connect_tcp(*port).await,
         };
         match attempt {
-            Ok(c) => return Ok(c),
-            Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
+            Ok(client) => return Ok(client),
+            Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
             Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
 }
 
 impl FirefoxSession {
-    /// Finds and launches Firefox, opens the BiDi session and enables the accessibility actor.
+    /// Finds and launches Firefox, opens the BiDi session, starts the network dispatcher
+    /// and enables the accessibility actor.
     /// The daemon handles automatic prompts so the setting can change without relaunching Firefox.
-    pub async fn launch(options: &LaunchOptions, auto_dialog: bool) -> Result<Self, String> {
+    pub async fn launch(
+        options: &LaunchOptions,
+        net: NetContext,
+        auto_dialog: bool,
+    ) -> Result<Self, String> {
         let path = find_firefox(options.executable_path.as_deref())?;
         let (headless, download) = (options.headless, options.download_path.clone());
+        let restrict_webrtc = options.restrict_webrtc;
         let process = tokio::task::spawn_blocking(move || {
-            FirefoxProcess::launch(&path, headless, download.as_deref(), START_TIMEOUT)
+            FirefoxProcess::launch(
+                &path,
+                headless,
+                download.as_deref(),
+                restrict_webrtc,
+                START_TIMEOUT,
+            )
         })
         .await
         .map_err(|e| format!("Firefox launch task failed: {e}"))??;
 
-        let bidi = tokio::time::timeout(
-            START_TIMEOUT,
-            BidiClient::connect(&format!("{}/session", process.bidi_url)),
-        )
-        .await
-        .map_err(|_| "Firefox BiDi connection timed out".to_string())??;
-        let bidi = Arc::new(bidi);
-        let events = bidi.subscribe();
+        let bidi = Arc::new(
+            tokio::time::timeout(
+                START_TIMEOUT,
+                BidiClient::connect(&format!("{}/session", process.bidi_url)),
+            )
+            .await
+            .map_err(|_| "Firefox BiDi connection timed out".to_string())??,
+        );
+        let events = bidi.subscribe_buffered();
+        let dispatch_events = bidi.subscribe_buffered();
         let mut caps = json!({
             "acceptInsecureCerts": options.ignore_https_errors,
             "unhandledPromptBehavior": {"default": "ignore"},
@@ -137,13 +169,26 @@ impl FirefoxSession {
                 json!({"capabilities": {"alwaysMatch": caps}}),
             )
             .await?;
-        check_firefox_version(
-            created["capabilities"]["browserVersion"]
-                .as_str()
-                .unwrap_or(""),
-        )?;
-        bidi.send("session.subscribe", json!({"events": SUBSCRIBED_EVENTS}))
+        let browser_version = created["capabilities"]["browserVersion"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        check_firefox_version(&browser_version)?;
+        let events_to_watch: Vec<&str> = CONTEXT_EVENTS
+            .into_iter()
+            .chain(PROMPT_EVENTS)
+            .chain(NETWORK_EVENTS)
+            .collect();
+        bidi.send("session.subscribe", json!({"events": events_to_watch}))
             .await?;
+        bidi.send(
+            "network.addDataCollector",
+            json!({
+                "dataTypes": ["request", "response"],
+                "maxEncodedDataSize": 10_000_000
+            }),
+        )
+        .await?;
 
         let rdp = connect_devtools(&process.devtools).await?;
         let root = rdp.request("root", "getRoot", json!({})).await?;
@@ -155,6 +200,25 @@ impl FirefoxSession {
             .await?;
 
         let tree = bidi.send("browsingContext.getTree", json!({})).await?;
+        let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
+            viewport: options
+                .viewport_size
+                .map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
+            user_agent: options.user_agent.clone(),
+            media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
+                media: None,
+                features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
+            }),
+            ..EmulationSettings::default()
+        }));
+        let permissions = Arc::new(tokio::sync::Mutex::new(permissions::Grants::default()));
+        let dispatcher = Some(super::network::spawn_dispatcher(
+            bidi.clone(),
+            net.clone(),
+            dispatch_events,
+            emulation.clone(),
+            permissions.clone(),
+        ));
         let mut session = Self {
             process: Some(process),
             headless: options.headless,
@@ -170,25 +234,22 @@ impl FirefoxSession {
             ref_documents: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
+            emulation,
+            permissions,
+            download_dir: options.download_path.clone(),
             visited_origins: HashSet::new(),
             events,
+            net,
+            intercepting: false,
+            inflight: HashMap::new(),
+            _dispatcher: dispatcher,
+            browser_version,
         };
         if let Some(contexts) = tree["contexts"].as_array() {
             session.record_context_origins(contexts);
         }
-        if let Some(viewport) = options.viewport_size {
-            session.set_viewport(viewport).await?;
-        }
+        emulation::apply_to_context(&session, session.contexts.active()).await?;
         Ok(session)
-    }
-
-    /// Sizes the viewport of the active context.
-    pub async fn set_viewport(&self, (width, height): (u32, u32)) -> Result<(), String> {
-        self.bidi.send(
-            "browsingContext.setViewport",
-            json!({"context": self.contexts.active(), "viewport": {"width": width, "height": height}, "devicePixelRatio": 1}),
-        ).await?;
-        Ok(())
     }
 
     fn record_context_origins(&mut self, contexts: &[Value]) {
@@ -216,31 +277,24 @@ impl FirefoxSession {
         self.contexts.partition(self.contexts.active())
     }
 
-    /// Reads the context tree when no context is active, which happens when the event that
-    /// announced the next tab was lost. Returns true when a tab became active.
-    pub async fn recover_active_context(&mut self) -> Result<bool, String> {
-        if !self.contexts.active().is_empty() {
+    /// Rebuilds what events keep current when events were dropped or no context is active: the
+    /// context tree is read again, and after a drop the unfinished requests are forgotten, since
+    /// their completions may be among the lost events. Returns true when the active context
+    /// changed.
+    pub async fn recover_lost_events(
+        &mut self,
+        dialog: &mut Option<PendingDialog>,
+    ) -> Result<bool, String> {
+        let lost = self.bidi.take_event_loss();
+        if !lost && !self.contexts.active().is_empty() {
             return Ok(false);
         }
         let tree = self.bidi.send("browsingContext.getTree", json!({})).await?;
-        self.contexts.sync(&tree);
-        Ok(!self.contexts.active().is_empty())
-    }
-
-    /// Reads the frame tree the browser reports for the active tab and records it, so parent
-    /// relationships come from the browser rather than from page code.
-    pub async fn refresh_frame_tree(&mut self) -> Result<(), String> {
-        let tree = self
-            .bidi
-            .send(
-                "browsingContext.getTree",
-                json!({"root": self.contexts.active_tab()}),
-            )
-            .await?;
-        for info in tree["contexts"].as_array().into_iter().flatten() {
-            self.contexts.record(info);
+        let removed = self.contexts.sync(&tree);
+        if lost {
+            self.inflight.clear();
         }
-        Ok(())
+        Ok(self.forget(removed, dialog))
     }
 
     /// Removes the user contexts this session created once their last tab is gone.
@@ -272,39 +326,100 @@ impl FirefoxSession {
             .await;
     }
 
-    /// Applies buffered BiDi events and returns whether the active context changed.
-    pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> bool {
-        let mut active_changed = false;
-        loop {
-            match self.events.try_recv() {
-                Ok(e) => {
-                    let removed = self.contexts.apply(&e);
-                    active_changed |= self.forget(removed, dialog);
-                    if matches!(
-                        e["method"].as_str(),
-                        Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
-                    ) {
-                        if let Some(url) = e["params"]["url"].as_str() {
-                            self.note_visit(url);
-                        }
-                    }
-                    apply_event(
-                        &e,
-                        dialog,
-                        &self.contexts,
-                        self.auto_dialog.load(Ordering::Acquire),
-                    );
+    /// Applies buffered BiDi events to the session's own bookkeeping and returns them for the
+    /// recorders, which read the batch once through the single intake in `network.rs`.
+    pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> Vec<Value> {
+        let mut drained = Vec::new();
+        while let Ok(e) = self.events.try_recv() {
+            self.track_request(&e);
+            let removed = self.contexts.apply(&e);
+            self.forget(removed, dialog);
+            if matches!(
+                e["method"].as_str(),
+                Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
+            ) {
+                if let Some(url) = e["params"]["url"].as_str() {
+                    self.note_visit(url);
                 }
-                Err(TryRecvError::Lagged(_)) => continue,
-                Err(_) => break,
             }
+            apply_event(
+                &e,
+                dialog,
+                &self.contexts,
+                self.auto_dialog.load(Ordering::Acquire),
+            );
+            drained.push(e);
         }
-        active_changed
+        drained
+    }
+
+    /// Tracks request lifetimes.
+    pub(super) fn track_request(&mut self, event: &Value) {
+        let params = &event["params"];
+        let id = params["request"]["request"].as_str();
+        match event["method"].as_str() {
+            Some("network.beforeRequestSent") => {
+                let url = params["request"]["url"].as_str().unwrap_or("");
+                if !super::network::is_websocket(url) {
+                    if let Some(id) = id {
+                        self.inflight.insert(
+                            id.to_string(),
+                            params["context"].as_str().map(str::to_string),
+                        );
+                    }
+                }
+            }
+            Some("network.responseCompleted" | "network.fetchError") => {
+                if let Some(id) = id {
+                    self.inflight.remove(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// True while the active tab or one of its descendant frames has an unfinished request.
+    pub fn has_inflight_in_active_tab(&self) -> bool {
+        self.inflight
+            .values()
+            .filter_map(|context| context.as_deref())
+            .any(|context| self.context_is_in_active_tab(context))
+    }
+
+    /// True when `context` is the active tab or one of its frames.
+    pub(crate) fn context_is_in_active_tab(&self, context: &str) -> bool {
+        self.contexts.tab_of(context) == Some(self.contexts.active_tab())
+    }
+
+    /// Records the frame tree under the active tab so frames created since the last drain can be placed.
+    pub(crate) async fn refresh_frame_tree(&mut self) -> Result<(), String> {
+        let tree = self
+            .bidi
+            .send(
+                "browsingContext.getTree",
+                json!({"root": self.contexts.active_tab()}),
+            )
+            .await?;
+        let contexts = tree["contexts"].as_array().cloned().unwrap_or_default();
+        for info in &contexts {
+            self.contexts.record(info);
+        }
+        self.record_context_origins(&contexts);
+        Ok(())
+    }
+
+    /// True when `context` is the active tab or one of its frames, reading the live frame tree
+    /// when the drained events have not described it yet.
+    pub(crate) async fn active_tab_contains(&mut self, context: &str) -> bool {
+        if self.context_is_in_active_tab(context) {
+            return true;
+        }
+        self.refresh_frame_tree().await.is_ok() && self.context_is_in_active_tab(context)
     }
 
     /// Forgets a browsing context that is gone and everything nested in it: element refs,
-    /// documents, shadow ids and any prompt they owned. Returns true when the active context was
-    /// among them, which the registry then replaces.
+    /// documents, shadow ids, unfinished requests and any prompt they owned. Returns true when the
+    /// active context was among them, which the registry then replaces.
     pub fn forget_context(&mut self, context: &str, dialog: &mut Option<PendingDialog>) -> bool {
         let removed = self.contexts.remove(context);
         self.forget(removed, dialog)
@@ -322,6 +437,8 @@ impl FirefoxSession {
         self.documents.retain(|id, _| !gone.contains(id));
         self.ref_documents.retain(|id, _| !gone.contains(id));
         self.shadow_ids.retain(|id| !stale_ids.contains(id));
+        self.inflight
+            .retain(|_, owner| !owner.as_ref().is_some_and(|owner| gone.contains(owner)));
         if dialog.as_ref().is_some_and(|d| {
             [&d.owner_context, &d.session_id]
                 .into_iter()
@@ -346,7 +463,7 @@ impl FirefoxSession {
     /// Accepts the prompts the daemon answers itself, following `auto_dialog` as it changes.
     pub fn spawn_auto_dismiss(&self) -> tokio::task::JoinHandle<()> {
         let client = Arc::clone(&self.bidi);
-        let mut events = client.subscribe();
+        let mut events = client.subscribe_buffered();
         let enabled = Arc::clone(&self.auto_dialog);
         let changed = Arc::clone(&self.auto_dialog_changed);
         tokio::spawn(async move {
@@ -373,9 +490,8 @@ impl FirefoxSession {
                 tokio::select! {
                     biased;
                     event = events.recv() => match event {
-                        Ok(event) => track(&event, &mut pending),
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(_) => break,
+                        Some(event) => track(&event, &mut pending),
+                        None => break,
                     },
                     _ = changed.notified() => {}
                 }
@@ -409,24 +525,23 @@ impl FirefoxSession {
         context: &str,
         fut: impl Future<Output = Result<T, String>>,
     ) -> Result<Option<T>, String> {
-        let mut events = self.bidi.subscribe();
+        let mut events = self.bidi.subscribe_buffered();
         let mut contexts = self.contexts.clone();
         tokio::pin!(fut);
         loop {
             tokio::select! {
                 r = &mut fut => return r.map(Some),
                 e = events.recv() => match e {
-                    Ok(e) if e["method"] == "browsingContext.userPromptOpened"
+                    Some(e) if e["method"] == "browsingContext.userPromptOpened"
                         && !auto_handles_prompt(&e["params"], self.auto_dialog.load(Ordering::Acquire))
                         && [context, contexts.active()].iter().any(|active|
                             contexts.tab_of(active)
                                 == contexts.tab_of(e["params"]["context"].as_str().unwrap_or_default())
                         ) => return Ok(None),
-                    Ok(e) => {
+                    Some(e) => {
                         contexts.apply(&e);
                     }
-                    Err(broadcast::error::RecvError::Closed) => return fut.await.map(Some),
-                    _ => {}
+                    None => return fut.await.map(Some),
                 },
             }
         }
@@ -544,7 +659,7 @@ pub(crate) mod tests {
     use tokio::io::AsyncWriteExt;
     use tokio_tungstenite::tungstenite::Message;
 
-    fn active_only() -> Contexts {
+    pub(crate) fn active_only() -> Contexts {
         Contexts::from_tree(&json!({"contexts": [{"context": "ctx-active"}]})).unwrap()
     }
 
@@ -611,6 +726,16 @@ pub(crate) mod tests {
         .await
     }
 
+    /// A BiDi command reply: a `result` payload, a protocol `error`/`message` pair, or no reply.
+    pub(crate) enum FakeReply {
+        Result(Value),
+        Error {
+            error: &'static str,
+            message: &'static str,
+        },
+        Silent,
+    }
+
     /// Same as `fake_session`, with `responder` deciding each command's `result`.
     pub(crate) async fn fake_session_with(
         responder: impl Fn(&Value) -> Value + Send + 'static,
@@ -619,12 +744,13 @@ pub(crate) mod tests {
         tokio::sync::mpsc::UnboundedSender<Value>,
         Calls,
     ) {
-        fake_session_with_replies(move |v| Some(responder(v))).await
+        fake_session_with_replies(move |v: &Value| FakeReply::Result(responder(v))).await
     }
 
-    /// Like `fake_session_with`, but a `None` from `responder` leaves that command unanswered.
+    /// Same as `fake_session_with`, but `responder` chooses the reply, so a test can reject a
+    /// command the way Firefox does or leave it unanswered.
     pub(crate) async fn fake_session_with_replies(
-        responder: impl Fn(&Value) -> Option<Value> + Send + 'static,
+        responder: impl Fn(&Value) -> FakeReply + Send + 'static,
     ) -> (
         FirefoxSession,
         tokio::sync::mpsc::UnboundedSender<Value>,
@@ -644,9 +770,21 @@ pub(crate) mod tests {
                         let Some(Ok(Message::Text(t))) = m else { break };
                         let v: Value = serde_json::from_str(&t).unwrap();
                         log.lock().unwrap().push(v["method"].as_str().unwrap().to_string());
-                        if let Some(result) = responder(&v) {
-                            let reply = json!({"type":"success","id":v["id"],"result":result});
-                            ws.send(Message::Text(reply.to_string())).await.unwrap();
+                        match responder(&v) {
+                            FakeReply::Result(result) => {
+                                let reply = json!({"type":"success","id":v["id"],"result":result});
+                                ws.send(Message::Text(reply.to_string())).await.unwrap();
+                            }
+                            FakeReply::Error { error, message } => {
+                                let reply = json!({
+                                    "type": "error",
+                                    "id": v["id"],
+                                    "error": error,
+                                    "message": message
+                                });
+                                ws.send(Message::Text(reply.to_string())).await.unwrap();
+                            }
+                            FakeReply::Silent => {}
                         }
                     }
                     Some(ev) = rx.recv() => {
@@ -656,7 +794,8 @@ pub(crate) mod tests {
             }
         });
         let bidi = BidiClient::connect(&url).await.unwrap();
-        let events = bidi.subscribe();
+        let bidi = Arc::new(bidi);
+        let events = bidi.subscribe_buffered();
         let (a, mut b) = tokio::io::duplex(4096);
         let greeting = json!({"from":"root"}).to_string();
         b.write_all(format!("{}:{}", greeting.len(), greeting).as_bytes())
@@ -667,7 +806,7 @@ pub(crate) mod tests {
         let session = FirefoxSession {
             process: None,
             headless: true,
-            bidi: Arc::new(bidi),
+            bidi,
             auto_dialog: Arc::new(AtomicBool::new(false)),
             auto_dialog_changed: Arc::new(Notify::new()),
             rdp,
@@ -679,10 +818,148 @@ pub(crate) mod tests {
             ref_documents: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
+            emulation: Arc::default(),
+            permissions: Arc::default(),
+            download_dir: None,
             visited_origins: HashSet::new(),
             events,
+            net: NetContext::default(),
+            intercepting: false,
+            inflight: HashMap::new(),
+            _dispatcher: None,
+            browser_version: String::new(),
         };
         (session, tx, calls)
+    }
+
+    pub(crate) type Messages = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+
+    /// A session whose BiDi server records full messages, answers `browsingContext.create`
+    /// with a new context and whose DevTools stream answers tab configuration requests.
+    pub(crate) async fn fake_session_with_rdp() -> (
+        FirefoxSession,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+        Messages,
+        Messages,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+        async fn put(s: &mut DuplexStream, v: Value) {
+            let b = v.to_string();
+            s.write_all(format!("{}:{}", b.len(), b).as_bytes())
+                .await
+                .unwrap();
+        }
+
+        async fn get(s: &mut DuplexStream) -> Option<Value> {
+            let mut len = Vec::new();
+            loop {
+                let b = s.read_u8().await.ok()?;
+                if b == b':' {
+                    break;
+                }
+                len.push(b);
+            }
+            let n: usize = String::from_utf8(len).ok()?.parse().ok()?;
+            let mut buf = vec![0; n];
+            s.read_exact(&mut buf).await.ok()?;
+            serde_json::from_slice(&buf).ok()
+        }
+
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", l.local_addr().unwrap());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let calls = Calls::default();
+        let methods = calls.clone();
+        let bidi_messages = Messages::default();
+        let bidi_log = bidi_messages.clone();
+        tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
+            loop {
+                tokio::select! {
+                    m = ws.next() => {
+                        let Some(Ok(Message::Text(t))) = m else { break };
+                        let v: Value = serde_json::from_str(&t).unwrap();
+                        methods.lock().unwrap().push(v["method"].as_str().unwrap().to_string());
+                        bidi_log.lock().unwrap().push(v.clone());
+                        let result = if v["method"] == "browsingContext.create" {
+                            json!({"context": "ctx-new"})
+                        } else if v["method"] == "browsingContext.getTree" {
+                            json!({"contexts": [{"context": "ctx-active", "url": "https://example.com/", "userContext": "default"}]})
+                        } else {
+                            json!({})
+                        };
+                        let reply = json!({"type":"success","id":v["id"],"result":result});
+                        ws.send(Message::Text(reply.to_string())).await.unwrap();
+                    }
+                    Some(ev) = rx.recv() => {
+                        ws.send(Message::Text(ev.to_string())).await.unwrap();
+                    }
+                }
+            }
+        });
+        let bidi = BidiClient::connect(&url).await.unwrap();
+        let events = bidi.subscribe_buffered();
+
+        let (a, mut b) = tokio::io::duplex(65536);
+        let rdp_messages = Messages::default();
+        let rdp_log = rdp_messages.clone();
+        tokio::spawn(async move {
+            put(&mut b, json!({"from":"root"})).await;
+            while let Some(v) = get(&mut b).await {
+                rdp_log.lock().unwrap().push(v.clone());
+                let to = v["to"].as_str().unwrap_or("");
+                let kind = v["type"].as_str().unwrap_or("");
+                let reply = match (to, kind) {
+                    ("root", "getRoot") => json!({"from": "root", "preferenceActor": "prefs1"}),
+                    ("root", "listTabs") => json!({
+                        "from": "root",
+                        "tabs": [{"actor": "tab1", "selected": true}],
+                    }),
+                    ("tab1", "getWatcher") => json!({"from": "tab1", "actor": "watcher1"}),
+                    ("watcher1", "getTargetConfigurationActor") => json!({
+                        "from": "watcher1",
+                        "configuration": {"actor": "cfg1"},
+                    }),
+                    ("cfg1", "updateConfiguration") => json!({
+                        "from": "cfg1",
+                        "configuration": {},
+                    }),
+                    _ => json!({"from": to}),
+                };
+                put(&mut b, reply).await;
+            }
+        });
+        let rdp = RdpClient::from_stream(a).await.unwrap();
+        let session = FirefoxSession {
+            process: None,
+            headless: true,
+            bidi: Arc::new(bidi),
+            auto_dialog: Arc::new(AtomicBool::new(false)),
+            auto_dialog_changed: Arc::new(Notify::new()),
+            rdp,
+            contexts: active_only(),
+            refs: HashMap::new(),
+            next_node_id: 0,
+            shadow_ids: Default::default(),
+            frames: None,
+            documents: HashMap::new(),
+            ref_documents: HashMap::new(),
+            touches: Vec::new(),
+            emulation: Arc::default(),
+            permissions: Arc::default(),
+            download_dir: None,
+            events,
+            visited_origins: HashSet::new(),
+            net: NetContext::default(),
+            intercepting: false,
+            inflight: HashMap::new(),
+            _dispatcher: None,
+            browser_version: String::new(),
+        };
+        (session, tx, calls, bidi_messages, rdp_messages)
     }
 
     #[test]
@@ -698,33 +975,55 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn context_events_update_the_registry_and_reset_page_state() {
+    async fn destroyed_contexts_reconcile_tabs_and_active_state() {
         let (mut session, tx, _) = fake_session().await;
         session.contexts.record(&json!({"context": "survivor"}));
-        session.refs.insert(("ctx-active".into(), "node".into()), 1);
+        session.contexts.set_label("ctx-active", "docs");
+        session
+            .contexts
+            .record(&json!({"context": "child", "parent": "ctx-active"}));
+        session.contexts.activate("child");
+        session.refs.insert(("child".into(), "node".into()), 1);
+        session.documents.insert("child".into(), "document".into());
+        session.shadow_ids.insert(1);
         let mut state = crate::native::actions::DaemonState::new();
         state
             .ref_map
             .add_with_frame("e1".into(), Some(1), "button", "OK", None, Some("child"));
         state.firefox = Some(session);
-        state.active_frame_id = Some("frame".into());
-        for (method, params) in [
-            (
-                "contextCreated",
-                json!({"context": "popup", "parent": null, "userContext": "jar"}),
-            ),
-            (
-                "contextDestroyed",
-                json!({"context": "ctx-active", "parent": null}),
-            ),
-        ] {
-            let method = format!("browsingContext.{method}");
-            tx.send(json!({"type": "event", "method": method, "params": params}))
-                .unwrap();
-        }
+        state.active_frame_id = Some("child".into());
+
+        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"child", "parent":"ctx-active"}})).unwrap();
+        tx.send(json!({"type":"event", "method":"browsingContext.domContentLoaded", "params":{"url":"https://child-event.example/"}})).unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                state.drain_firefox_events();
+                crate::native::firefox::network::drain(&mut state).await;
+                if state
+                    .firefox
+                    .as_ref()
+                    .unwrap()
+                    .visited_origins
+                    .contains("https://child-event.example")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let ff = state.firefox.as_ref().unwrap();
+        assert_eq!(ff.contexts.active(), "ctx-active");
+        assert!(state.active_frame_id.is_none());
+        assert!(ff.refs.is_empty());
+        assert!(ff.documents.is_empty());
+        assert!(ff.shadow_ids.is_empty());
+        assert!(state.ref_map.get("e1").is_none());
+
+        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                crate::native::firefox::network::drain(&mut state).await;
                 if state.firefox.as_ref().unwrap().contexts.active() == "survivor" {
                     break;
                 }
@@ -734,17 +1033,87 @@ pub(crate) mod tests {
         .await
         .unwrap();
         let ff = state.firefox.as_ref().unwrap();
-        assert_eq!(ff.contexts.tab("popup").unwrap().user_context, "jar");
         assert!(ff.contexts.tab("ctx-active").is_none());
-        assert!(ff.refs.is_empty());
         assert!(state.active_frame_id.is_none());
+        ff.eval("1 + 1").await.unwrap();
+        let err = super::super::tabs::tab_new(&json!({"label":"docs"}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Firefox did not return a context id for the new tab");
+
+        tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
+        tx.send(json!({"type":"event", "method":"browsingContext.contextCreated", "params":{"context":"third", "parent":null}})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                crate::native::firefox::network::drain(&mut state).await;
+                if state
+                    .firefox
+                    .as_ref()
+                    .unwrap()
+                    .contexts
+                    .tab("third")
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            state.firefox.as_ref().unwrap().contexts.active(),
+            "survivor"
+        );
     }
 
     #[tokio::test]
-    async fn initial_viewport_is_sent_to_firefox() {
-        let (session, _tx, calls) = fake_session().await;
-        session.set_viewport((800, 600)).await.unwrap();
-        assert_eq!(*calls.lock().unwrap(), ["browsingContext.setViewport"]);
+    async fn a_frame_missing_from_drained_events_is_still_in_the_active_tab() {
+        let (mut ff, _, _) = fake_session_with(|v: &Value| {
+            if v["method"] == "browsingContext.getTree" {
+                json!({"contexts": [{"context": "ctx-active", "children": [{"context": "ctx-frame"}]}]})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        assert!(!ff.context_is_in_active_tab("ctx-frame"));
+        assert!(ff.active_tab_contains("ctx-frame").await);
+        assert!(ff.context_is_in_active_tab("ctx-frame"));
+        assert!(!ff.active_tab_contains("ctx-other").await);
+    }
+
+    #[tokio::test]
+    async fn dropped_events_rebuild_the_context_tree_and_forget_unfinished_requests() {
+        let (mut ff, _tx, _) = fake_session_with(|request| match request["method"].as_str() {
+            Some("browsingContext.getTree") => json!({"contexts": [{"context": "ctx-next"}]}),
+            _ => json!({}),
+        })
+        .await;
+        ff.inflight
+            .insert("unfinished".into(), Some("ctx-active".into()));
+        assert!(!ff.recover_lost_events(&mut None).await.unwrap());
+        assert_eq!(ff.inflight.len(), 1);
+
+        ff.bidi.lost_events.store(true, Ordering::Relaxed);
+        assert!(ff.recover_lost_events(&mut None).await.unwrap());
+        assert!(ff.inflight.is_empty());
+        assert_eq!(ff.contexts.active(), "ctx-next");
+        assert!(!ff.recover_lost_events(&mut None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn drain_events_keeps_more_than_broadcast_capacity() {
+        let (mut ff, tx, _) = fake_session().await;
+        let mut received = ff.bidi.subscribe_buffered();
+        for i in 0..2048 {
+            tx.send(json!({"type":"event","method":"log.entryAdded","params":{"index":i}}))
+                .unwrap();
+        }
+        for _ in 0..2048 {
+            received.recv().await.unwrap();
+        }
+        assert_eq!(ff.drain_events(&mut None).len(), 2048);
     }
 
     #[tokio::test]
@@ -863,6 +1232,48 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn inflight_requests_follow_tab_ancestry_and_end_on_completion_error_or_destroy() {
+        let (mut session, _, _) = fake_session().await;
+        for tab in [
+            json!({"context": "ctx-active", "children": [{"context": "frame", "children": [{"context": "nested"}]}]}),
+            json!({"context": "other"}),
+        ] {
+            session.contexts.record(&tab);
+        }
+        for (id, context) in [("background", Some("other")), ("unknown", None)] {
+            session.track_request(&json!({
+                "method": "network.beforeRequestSent",
+                "params": {"context": context, "request": {"request": id, "url": "http://example.com/"}},
+            }));
+        }
+        assert!(!session.has_inflight_in_active_tab());
+        session.contexts.activate("other");
+        assert!(session.has_inflight_in_active_tab());
+        session.track_request(&json!({
+            "method": "network.fetchError",
+            "params": {"request": {"request": "background"}},
+        }));
+        assert!(!session.has_inflight_in_active_tab());
+        session.contexts.activate("frame");
+        for id in ["completed", "destroyed"] {
+            session.track_request(&json!({
+                "method": "network.beforeRequestSent",
+                "params": {"context": "nested", "request": {"request": id, "url": "http://example.com/"}},
+            }));
+        }
+        assert!(session.has_inflight_in_active_tab());
+        session.track_request(&json!({
+            "method": "network.responseCompleted",
+            "params": {"request": {"request": "completed"}},
+        }));
+        assert!(!session.inflight.contains_key("completed"));
+        assert!(session.has_inflight_in_active_tab());
+        session.forget_context("frame", &mut None);
+        assert!(!session.inflight.contains_key("destroyed"));
+        assert!(!session.has_inflight_in_active_tab());
     }
 
     #[tokio::test]

@@ -1066,6 +1066,40 @@ fn a_forced_relaunch_needs_no_change() {
 }
 
 #[test]
+fn changing_proxy_drops_only_inherited_credentials() {
+    let running = running_with(&[
+        (Key::Proxy, json!("http://old-proxy:8080")),
+        (Key::ProxyUsername, json!("old-user")),
+        (Key::ProxyPassword, json!("old-password")),
+    ]);
+    assert_eq!(running.plan(&Patch::default()).next, running);
+
+    let mut flags = blank_flags();
+    for (proxy, username, password) in [
+        ("http://new-proxy:8080", None, None),
+        ("http://new-user@new-proxy:8080", Some("new-user"), None),
+        (
+            "http://new-user:new-password@new-proxy:8080",
+            Some("new-user"),
+            Some("new-password"),
+        ),
+    ] {
+        flags.proxy = Some(proxy.to_string());
+        let patch = Patch::from_flags(&flags);
+        let wire = patch.to_wire().unwrap();
+        let patch = Patch::from_wire(Some(&wire)).unwrap();
+        let plan = running.plan(&patch);
+        let options = plan.next.launch_options();
+        assert!(plan.relaunch);
+        assert!(plan.ignored.is_empty());
+        assert_eq!(options.proxy.as_deref(), Some("http://new-proxy:8080"));
+        assert_eq!(options.proxy_username.as_deref(), username);
+        assert_eq!(options.proxy_password.as_deref(), password);
+        assert!(plan.next.plan(&patch).is_empty());
+    }
+}
+
+#[test]
 fn a_connection_target_displaces_the_others() {
     let running = running_with(&[
         (Key::Cdp, json!("9222")),

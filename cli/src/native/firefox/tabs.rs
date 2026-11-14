@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::bidi::{remote_to_json, BidiClient};
 use super::daemon::{reset_page, session};
+use super::emulation;
 use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
@@ -109,7 +110,8 @@ fn validate_tab_label(ff: &FirefoxSession, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Makes `context` the active tab and drops the page state that belonged to the old one.
+/// Makes `context` the active tab, drops the page state that belonged to the old one, and replays
+/// the stored emulation, so every switch reaches it through this one path.
 async fn activate(state: &mut DaemonState, context: &str) -> Result<(), String> {
     let ff = session(state)?;
     ff.bidi
@@ -117,7 +119,7 @@ async fn activate(state: &mut DaemonState, context: &str) -> Result<(), String> 
         .await?;
     ff.contexts.activate(context);
     reset_page(state);
-    Ok(())
+    emulation::apply_to_context(session(state)?, context).await
 }
 
 /// The title of `context`, or null when the tab cannot answer before the deadline.
@@ -269,12 +271,7 @@ pub async fn window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let (context, tab_id) = created?;
     activate(state, &context).await?;
     if let Some(viewport) = cmd.get("viewport") {
-        let side = |key: &str, default: u64| {
-            viewport.get(key).and_then(Value::as_u64).unwrap_or(default) as u32
-        };
-        session(state)?
-            .set_viewport((side("width", 1280), side("height", 720)))
-            .await?;
+        super::emulation::set_viewport(viewport, state).await?;
     }
     let total = tab_count(session(state)?).await?;
 
@@ -376,7 +373,7 @@ fn successor_tab(tabs: &[Value], closed_index: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session_with_replies;
+    use crate::native::firefox::session::tests::{fake_session_with_replies, FakeReply};
 
     #[tokio::test]
     async fn tab_new_returns_with_a_pending_navigation_prompt() {
@@ -386,10 +383,10 @@ mod tests {
             {"context": "ctx-active", "url": "about:blank"}
         ]});
         let (ff, events, _) = fake_session_with_replies(move |v| match v["method"].as_str() {
-            Some("browsingContext.navigate") => None,
-            Some("browsingContext.create") => Some(json!({"context": "ctx-new"})),
-            Some("browsingContext.getTree") => Some(tree.clone()),
-            _ => Some(json!({})),
+            Some("browsingContext.navigate") => FakeReply::Silent,
+            Some("browsingContext.create") => FakeReply::Result(json!({"context": "ctx-new"})),
+            Some("browsingContext.getTree") => FakeReply::Result(tree.clone()),
+            _ => FakeReply::Result(json!({})),
         })
         .await;
         let mut state = DaemonState::new();

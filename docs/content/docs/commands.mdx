@@ -224,6 +224,8 @@ agent-browser set credentials <u> <p> # HTTP basic auth for current and future t
 agent-browser set media [dark|light]  # Emulate color scheme (persists for session)
 ```
 
+Firefox does not support mobile viewport mode, `set device`, or `reduced-motion` media emulation. Use `set viewport` plus the `--user-agent` launch flag (or `AGENT_BROWSER_USER_AGENT`) instead of `set device`.
+
 Viewport scales and geolocation coordinates must be finite numbers.
 
 Use `--color-scheme` for persistent dark/light mode across all commands:
@@ -708,7 +710,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script r
 
 In a `batch`, `--relaunch` relaunches the browser once: the first command that can launch a browser carries it. Commands that never launch one, such as `read`, and commands denied by policy or waiting for confirmation pass it on to the next command.
 
-Firefox rejects `--allowed-domains`, authenticated proxies, `--user-agent`, `--color-scheme`, and `networkidle` waits. Firefox takes `http://`, `socks4://`, and `socks5://` proxies and rejects `https://` proxies instead of connecting to them without TLS.
+Firefox rejects `--cdp`, `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. Authenticated proxies work through `--proxy` with credentials. Firefox takes `http://`, `socks4://`, and `socks5://` proxies and rejects `https://` proxies instead of connecting to them without TLS.
 
 See [Configuration](/configuration) for config files and environment variables. See [Proxy](/proxy) for proxy server, bypass, and credential settings.
 

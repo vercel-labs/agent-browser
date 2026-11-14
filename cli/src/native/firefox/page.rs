@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 use super::daemon::session;
 use super::navigation::{self, Load, Wait};
+use super::network;
 use super::session::FirefoxSession;
 use crate::native::actions::{route_url_matches, DaemonState};
 
@@ -18,14 +19,12 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .get("url")
         .and_then(Value::as_str)
         .ok_or("Missing 'url' parameter")?;
-    if cmd
-        .get("headers")
-        .and_then(Value::as_object)
-        .is_some_and(|headers| !headers.is_empty())
-    {
-        return Err("--headers is not supported with --engine firefox".into());
-    }
-    let wait = Wait::from_wait_until(cmd.get("waitUntil").and_then(Value::as_str))?;
+    let timeout_ms = cmd
+        .get("timeout")
+        .and_then(Value::as_u64)
+        .unwrap_or(state.default_timeout_ms);
+    let wait = Wait::from_wait_until(cmd.get("waitUntil").and_then(Value::as_str), timeout_ms);
+    network::set_origin_headers(cmd, url, state).await?;
     let landing = navigation::load(state, Load::Url { url, wait }).await?;
     if landing.prompt {
         return Ok(json!({
@@ -110,13 +109,12 @@ pub async fn evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 }
 
 /// The expression Chrome polls for a `--load` state, or `None` when the state is `none`.
-fn load_state_check(load_state: &str) -> Result<Option<&'static str>, String> {
-    Ok(match load_state {
-        "networkidle" => return Err("networkidle is not supported with --engine firefox".into()),
+fn load_state_check(load_state: &str) -> Option<&'static str> {
+    match load_state {
         "none" => None,
         "domcontentloaded" => Some("document.readyState !== 'loading'"),
         _ => Some("document.readyState === 'complete'"),
-    })
+    }
 }
 
 /// The expression Chrome polls for a selector in one of its `wait` states.
@@ -231,7 +229,11 @@ pub async fn wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
     }
 
     if let Some(load_state) = cmd.get("loadState").and_then(Value::as_str) {
-        if let Some(check) = load_state_check(load_state)? {
+        if load_state == "networkidle" {
+            network::wait_idle(state, timeout_ms)
+                .await
+                .map_err(|_| format!("Wait timed out after {timeout_ms}ms"))?;
+        } else if let Some(check) = load_state_check(load_state) {
             poll_until_true(ff, check, timeout_ms).await?;
         }
         return Ok(json!({ "waited": "load", "state": load_state }));
@@ -266,7 +268,11 @@ pub async fn waitforloadstate(cmd: &Value, state: &mut DaemonState) -> Result<Va
         .get("timeout")
         .and_then(Value::as_u64)
         .unwrap_or(state.default_timeout_ms);
-    if let Some(check) = load_state_check(load_state)? {
+    if load_state == "networkidle" {
+        network::wait_idle(state, timeout_ms)
+            .await
+            .map_err(|_| "Timeout waiting for networkidle".to_string())?;
+    } else if let Some(check) = load_state_check(load_state) {
         let ff = session(state)?;
         poll_until_true_or_timeout(
             ff,
@@ -299,7 +305,78 @@ pub async fn waitforfunction(cmd: &Value, state: &mut DaemonState) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session, fake_session_with};
+    use crate::native::firefox::session::tests::{
+        fake_session, fake_session_with, fake_session_with_replies, FakeReply,
+    };
+
+    #[tokio::test]
+    async fn navigate_allows_about_blank_under_an_allowlist() {
+        let (ff, _tx, _) = fake_session_with(|cmd: &Value| {
+            if cmd["method"] == "browsingContext.navigate" {
+                json!({"navigation": "nav-1", "url": "about:blank"})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        *state.domain_filter.write().await =
+            Some(crate::native::network::DomainFilter::new("allowed.example"));
+        let result = navigate(&json!({ "url": "about:blank" }), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(result["url"], "about:blank");
+        let error = navigate(&json!({ "url": "https://evil.example/" }), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Domain 'evil.example' is not in the allowed domains list"
+        );
+    }
+
+    #[tokio::test]
+    async fn aborted_navigation_reports_chromes_net_error() {
+        let mut state = DaemonState::new();
+        let (ff, _tx, _) = fake_session_with(|cmd: &Value| {
+            if cmd["method"] == "browsingContext.navigate" {
+                json!({"navigation": null, "url": "about:neterror?d=Error%3A%20NS_ERROR_ABORT"})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        state.firefox = Some(ff);
+        let error = navigate(&json!({"url": "http://blocked.test/"}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Navigation failed: net::ERR_FAILED");
+    }
+
+    #[tokio::test]
+    async fn aborted_navigation_bidi_error_reports_chromes_net_error() {
+        let mut state = DaemonState::new();
+        let (ff, _tx, _) = fake_session_with_replies(|cmd: &Value| {
+            if cmd["method"] == "browsingContext.navigate" {
+                FakeReply::Error {
+                    error: "unknown error",
+                    message: "Error: NS_ERROR_ABORT",
+                }
+            } else {
+                FakeReply::Result(json!({}))
+            }
+        })
+        .await;
+        state.firefox = Some(ff);
+        let error = navigate(
+            &json!({"url": "http://blocked.test/blocked.html"}),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Navigation failed: net::ERR_FAILED");
+    }
 
     #[tokio::test]
     async fn bare_wait_sleeps_and_returns_the_timeout_shape() {
@@ -428,54 +505,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, "Timeout waiting for load state: load");
-    }
-
-    #[tokio::test]
-    async fn networkidle_is_rejected_for_navigation_and_waits() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-        let error = "networkidle is not supported with --engine firefox";
-        assert_eq!(
-            navigate(
-                &json!({"url": "https://example.com", "waitUntil": "networkidle"}),
-                &mut state
-            )
-            .await
-            .unwrap_err(),
-            error
-        );
-        assert_eq!(
-            wait(&json!({"loadState": "networkidle"}), &mut state)
-                .await
-                .unwrap_err(),
-            error
-        );
-        assert_eq!(
-            waitforloadstate(&json!({"state": "networkidle"}), &mut state)
-                .await
-                .unwrap_err(),
-            error
-        );
-        assert!(calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn navigation_headers_are_rejected_before_navigation() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-        let err = navigate(
-            &json!({
-                "url": "https://example.com",
-                "headers": {"Authorization": "Bearer token"}
-            }),
-            &mut state,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err, "--headers is not supported with --engine firefox");
-        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

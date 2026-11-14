@@ -94,7 +94,7 @@ struct ActiveProviderSession {
 #[derive(Clone)]
 pub struct HarEntry {
     pub request_id: String,
-    /// Seconds since Unix epoch (CDP `wallTime`), with sub-second precision.
+    /// Seconds since Unix epoch from CDP `wallTime` or a BiDi event timestamp.
     pub wall_time: f64,
     // Request fields
     pub method: String,
@@ -118,6 +118,8 @@ pub struct HarEntry {
     /// Monotonic timestamp (seconds) from `Network.loadingFinished`; used to
     /// compute the `receive` timing phase.
     pub loading_finished_timestamp: Option<f64>,
+    pub response_started_timestamp: Option<f64>,
+    pub response_completed_timestamp: Option<f64>,
     /// Response body fetched via `Network.getResponseBody` when the entry
     /// finished loading, subject to the active [`HarContentMode`] and size caps.
     pub response_body: Option<String>,
@@ -156,9 +158,9 @@ impl HarContentMode {
 
 /// Bodies larger than this are not embedded in the HAR (the entry keeps its
 /// size/MIME metadata either way).
-const HAR_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const HAR_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// Total budget for embedded bodies across one recording session.
-const HAR_MAX_TOTAL_BODY_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const HAR_MAX_TOTAL_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct RouteEntry {
     pub url_pattern: String,
@@ -177,6 +179,18 @@ pub struct RouteResponse {
     pub headers: Option<HashMap<String, String>>,
     /// Origin a page must have to read the mock cross-origin (`--allow-origin`).
     pub allow_origin: Option<String>,
+}
+
+impl RouteEntry {
+    /// Returns whether this route applies to the given URL and resource type.
+    pub(crate) fn matches(&self, url: &str, resource_type: &str) -> bool {
+        route_url_matches(&self.url_pattern, url)
+            && (self.resource_types.is_empty()
+                || self
+                    .resource_types
+                    .iter()
+                    .any(|rt| rt.eq_ignore_ascii_case(resource_type)))
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -902,6 +916,11 @@ impl DaemonState {
         self.mouse_state = MouseState::default();
     }
 
+    /// Rejects a navigation to a URL outside the allowed domains; `about:blank` stays reachable.
+    pub async fn ensure_navigation_allowed(&self, url: &str) -> Result<(), String> {
+        network::check_navigation_allowed(self.domain_filter.read().await.as_ref(), url)
+    }
+
     /// Create state with an optional stream client slot and server instance
     /// (for daemon startup with stream server).
     pub fn new_with_stream(
@@ -1290,23 +1309,11 @@ impl DaemonState {
         recording::stop_recording_task(&mut self.recording_state).await
     }
 
-    pub(crate) fn drain_firefox_events(&mut self) {
-        if self
-            .firefox
-            .as_mut()
-            .is_some_and(|ff| ff.drain_events(&mut self.pending_dialog))
-        {
-            self.ref_map.invalidate_all_documents();
-            self.active_iframe_sessions.clear();
-            self.active_frame_id = None;
-        }
-    }
-
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
-        self.drain_firefox_events();
+        firefox::network::drain(self).await;
         if let Some(ff) = self.firefox.as_mut() {
             ff.release_unused_user_contexts().await;
-            if ff.recover_active_context().await? {
+            if ff.recover_lost_events(&mut self.pending_dialog).await? {
                 firefox::daemon::reset_page(self);
             }
         }
@@ -2141,6 +2148,8 @@ impl DaemonState {
                                         response_body_size: -1,
                                         cdp_timing: None,
                                         loading_finished_timestamp: None,
+                                        response_started_timestamp: None,
+                                        response_completed_timestamp: None,
                                         response_body: None,
                                         response_body_base64: false,
                                         remote_addr: None,
@@ -4152,9 +4161,7 @@ fn should_defer_url_until_network_controls(
         return Ok(false);
     };
 
-    if let Some(filter) = filter {
-        filter.check_url(url)?;
-    }
+    network::check_navigation_allowed(filter, url)?;
     Ok(filter.is_some_and(|filter| !filter.allowed_domains.is_empty()) || handle_auth_requests)
 }
 
@@ -4251,7 +4258,7 @@ fn direct_page_allowed_domains_error() -> String {
         .to_string()
 }
 
-async fn ensure_state_replay_supported_by_active_domain_filter(
+pub(super) async fn ensure_state_replay_supported_by_active_domain_filter(
     state: &DaemonState,
     source: &str,
 ) -> Result<(), String> {
@@ -4834,6 +4841,16 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
     Ok(())
 }
 
+/// Replaces the stored proxy credentials with those of the browser being launched. They are
+/// cleared when the launch names none, and for a browser this daemon does not launch itself.
+async fn store_proxy_credentials(state: &DaemonState, options: &LaunchOptions, local: bool) {
+    *state.proxy_credentials.write().await = options
+        .proxy_username
+        .clone()
+        .filter(|_| local)
+        .map(|user| (user, options.proxy_password.clone().unwrap_or_default()));
+}
+
 async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
@@ -4936,15 +4953,7 @@ async fn auto_launch_inner(
     // browser is never answered proxy challenges on the session's behalf.
     let local = matches!(connection, Connection::Local);
     let has_proxy_auth = local && options.proxy_username.is_some();
-    if has_proxy_auth {
-        let mut creds = state.proxy_credentials.write().await;
-        *creds = Some((
-            options.proxy_username.clone().unwrap_or_default(),
-            options.proxy_password.clone().unwrap_or_default(),
-        ));
-    } else if !local {
-        *state.proxy_credentials.write().await = None;
-    }
+    store_proxy_credentials(state, &options, local).await;
     // Nor is a state file replayed into one.
     let storage_state_path = if local { storage_state_path } else { None };
     let storage_state = storage_state_path.as_deref();
@@ -5507,8 +5516,8 @@ pub(crate) async fn auto_save_restore_state(
     }
 
     let session_id = state.session_id.clone();
-    state.drain_firefox_events();
-    if let Some(ff) = state.firefox.as_ref() {
+    firefox::network::drain(state).await;
+    if let Some(ff) = state.firefox.as_mut() {
         return match firefox::storage::save_auto_state(ff, &session_name, &session_id).await {
             Ok(path) => {
                 state.restore_save_status = "saved".to_string();
@@ -5758,7 +5767,7 @@ async fn handle_launch_for_target(
 /// Launches owned Firefox with the session's resolved settings.
 async fn launch_firefox(
     state: &mut DaemonState,
-    options: LaunchOptions,
+    mut options: LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
     strict_state: bool,
 ) -> Result<Value, String> {
@@ -5773,24 +5782,45 @@ async fn launch_firefox(
     };
     let enable_features = state.settings.enable_features();
     let init_scripts = state.settings.init_scripts();
-    let allowed_domains = !current_allowed_domains(state).await.is_empty();
+    let allowed_domains = current_allowed_domains(state).await;
     firefox::process::validate_launch(
         &options,
         firefox::process::LaunchFlags {
             cdp: cdp.as_deref(),
             auto_connect: matches!(connection, Connection::AutoConnect),
             provider: provider.as_deref(),
-            allowed_domains,
             capture_flow: state.settings.captures_flow(),
             enable_features: &enable_features,
             init_scripts: &init_scripts,
             plugins,
         },
     )?;
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        allowed_domains: &allowed_domains,
+        cdp_url: None,
+        cdp_port: None,
+        auto_connect: false,
+        profile: None,
+        provider_name: None,
+        args: &[],
+        restore_key: state.session_name.as_deref(),
+        storage_state: options.storage_state.as_deref(),
+    })?;
+    options.restrict_webrtc = !allowed_domains.is_empty();
+    store_proxy_credentials(state, &options, true).await;
     let storage_state = options.storage_state.clone();
     state.ref_map.invalidate_all_documents();
     state.reset_input_state();
-    let session = firefox::session::FirefoxSession::launch(&options, state.auto_dialog).await?;
+    let net = firefox::network::NetContext::from_state(state);
+    let mut session =
+        firefox::session::FirefoxSession::launch(&options, net, state.auto_dialog).await?;
+    if !allowed_domains.is_empty()
+        || state.proxy_credentials.read().await.is_some()
+        || !state.routes.read().await.is_empty()
+        || !state.origin_headers.read().await.is_empty()
+    {
+        firefox::network::ensure_intercept(&mut session).await?;
+    }
     state.engine = "firefox".to_string();
     write_engine_file(&state.session_id, &state.engine);
     state.launch_identity = Some(state.settings.launch_identity());
@@ -5940,6 +5970,7 @@ struct SettingsOutcome {
 struct PendingSettings {
     keys: Vec<Key>,
     before: Running,
+    proxy_credentials: Option<(String, String)>,
     filter: Option<DomainFilter>,
     ca_cert: Option<EffectiveCaCert>,
     attached: Option<AttachedTarget>,
@@ -6013,6 +6044,7 @@ async fn rollback_launch_settings(
     state.effective_ca_cert = pending.ca_cert;
     state.attached_target = pending.attached;
     state.cdp_headers = pending.cdp_headers;
+    *state.proxy_credentials.write().await = pending.proxy_credentials;
     outcome.mark_rolled_back(&restored);
     if rejected {
         return state
@@ -6159,6 +6191,7 @@ async fn apply_settings_patch(
         Some(PendingSettings {
             keys,
             before: state.settings.clone(),
+            proxy_credentials: state.proxy_credentials.read().await.clone(),
             filter: state.domain_filter.read().await.clone(),
             ca_cert: state.effective_ca_cert.clone(),
             attached: state.attached_target.clone(),
@@ -6447,12 +6480,7 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
 
-    {
-        let df = state.domain_filter.read().await;
-        if let Some(ref filter) = *df {
-            filter.check_url(url)?;
-        }
-    }
+    state.ensure_navigation_allowed(url).await?;
 
     // WebDriver backend path
     if let Some(ref wb) = state.webdriver_backend {
@@ -8301,7 +8329,7 @@ async fn handle_offline(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     Ok(json!({ "offline": offline }))
 }
 
-async fn handle_console(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_console(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     if clear {
         state.event_tracker.clear_console();
@@ -8313,7 +8341,7 @@ async fn handle_console(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 }
 
 /// Reads captured page errors or clears them when requested.
-async fn handle_errors(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_errors(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     if clear {
         state.event_tracker.clear_errors();
@@ -8901,9 +8929,9 @@ async fn handle_set_media(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     Ok(json!({ "set": true }))
 }
 
-/// Chrome may still be flushing a download to disk after signalling
+/// A browser may still be flushing a download to disk after signalling
 /// completion; wait briefly for the file to appear.
-async fn wait_for_downloaded_file(path: &std::path::Path) -> bool {
+pub(crate) async fn wait_for_downloaded_file(path: &std::path::Path) -> bool {
     for _ in 0..10 {
         if path.exists() {
             return true;
@@ -8937,16 +8965,8 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     result
 }
 
-async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'selector' parameter")?;
-    let path_str = cmd
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'path' parameter")?;
-
+/// Resolves a download target to an absolute `(directory, file)` pair, creating the directory.
+pub(crate) fn resolve_download_dest(path_str: &str) -> Result<(PathBuf, PathBuf), String> {
     // Resolve to absolute path and canonicalize to prevent path traversal
     let raw_dest = if std::path::Path::new(path_str).is_absolute() {
         PathBuf::from(path_str)
@@ -8975,6 +8995,20 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             .file_name()
             .ok_or("Invalid download path: no filename")?,
     );
+    Ok((download_dir, dest))
+}
+
+async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'selector' parameter")?;
+    let path_str = cmd
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'path' parameter")?;
+
+    let (download_dir, dest) = resolve_download_dest(path_str)?;
     let download_dir_str = download_dir
         .to_str()
         .ok_or("Download directory path is not valid UTF-8")?;
@@ -9207,9 +9241,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     {
         let domain_filter = state.domain_filter.read().await;
         if let Some(url) = recording_url {
-            if let Some(filter) = domain_filter.as_ref() {
-                filter.check_url(url)?;
-            }
+            network::check_navigation_allowed(domain_filter.as_ref(), url)?;
         }
     }
 
@@ -9274,9 +9306,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
     {
         let domain_filter = state.domain_filter.read().await;
         if let Some(ref url) = recording_url {
-            if let Some(filter) = domain_filter.as_ref() {
-                filter.check_url(url)?;
-            }
+            network::check_navigation_allowed(domain_filter.as_ref(), url)?;
         }
     }
 
@@ -10329,6 +10359,42 @@ async fn handle_wheel(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     Ok(json!({ "scrolled": true, "deltaX": delta_x, "deltaY": delta_y }))
 }
 
+/// Viewport, scale, touch and user agent for a named device preset.
+pub(crate) struct DevicePreset {
+    pub width: i32,
+    pub height: i32,
+    pub device_scale_factor: f64,
+    pub mobile: bool,
+    pub user_agent: &'static str,
+}
+
+pub(crate) fn device_preset(name: &str) -> Result<DevicePreset, String> {
+    let (width, height, device_scale_factor, mobile, user_agent) =
+        match name.to_lowercase().as_str() {
+            "iphone 15" | "iphone15" => (393, 852, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"),
+            "iphone 16" | "iphone16" => (393, 852, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"),
+            "iphone 16 pro" | "iphone16pro" => (402, 874, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"),
+            "iphone 17" | "iphone17" => (402, 874, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 19_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/19.0 Mobile/15E148 Safari/604.1"),
+            "ipad" | "ipad air" => (820, 1180, 2.0, true, "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/604.1"),
+            "ipad pro" => (1024, 1366, 2.0, true, "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/604.1"),
+            "pixel 9" | "pixel9" => (412, 923, 2.625, true, "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"),
+            "galaxy s25" | "galaxys25" => (360, 800, 3.0, true, "Mozilla/5.0 (Linux; Android 15; SM-S931B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"),
+            "iphone 12" | "iphone12" => (390, 844, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"),
+            "iphone 14" | "iphone14" => (390, 844, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"),
+            "pixel 5" | "pixel5" => (393, 851, 2.75, true, "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36"),
+            "pixel 7" | "pixel7" => (412, 915, 2.625, true, "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"),
+            "galaxy s21" | "galaxys21" => (360, 800, 3.0, true, "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36"),
+            _ => return Err(format!("Unknown device: {}. Supported: iPhone 15, iPhone 16, iPhone 16 Pro, iPhone 17, iPad, iPad Pro, Pixel 9, Galaxy S25", name)),
+        };
+    Ok(DevicePreset {
+        width,
+        height,
+        device_scale_factor,
+        mobile,
+        user_agent,
+    })
+}
+
 async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let name = cmd
@@ -10337,23 +10403,14 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .ok_or("Missing 'name' parameter")?;
 
-    let (width, height, scale, mobile, ua) = match name.to_lowercase().as_str() {
-        "iphone 15" | "iphone15" => (393, 852, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"),
-        "iphone 16" | "iphone16" => (393, 852, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"),
-        "iphone 16 pro" | "iphone16pro" => (402, 874, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"),
-        "iphone 17" | "iphone17" => (402, 874, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 19_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/19.0 Mobile/15E148 Safari/604.1"),
-        "ipad" | "ipad air" => (820, 1180, 2.0, true, "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/604.1"),
-        "ipad pro" => (1024, 1366, 2.0, true, "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/604.1"),
-        "pixel 9" | "pixel9" => (412, 923, 2.625, true, "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"),
-        "galaxy s25" | "galaxys25" => (360, 800, 3.0, true, "Mozilla/5.0 (Linux; Android 15; SM-S931B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"),
-        // Legacy aliases
-        "iphone 12" | "iphone12" => (390, 844, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"),
-        "iphone 14" | "iphone14" => (390, 844, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"),
-        "pixel 5" | "pixel5" => (393, 851, 2.75, true, "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36"),
-        "pixel 7" | "pixel7" => (412, 915, 2.625, true, "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"),
-        "galaxy s21" | "galaxys21" => (360, 800, 3.0, true, "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36"),
-        _ => return Err(format!("Unknown device: {}. Supported: iPhone 15, iPhone 16, iPhone 16 Pro, iPhone 17, iPad, iPad Pro, Pixel 9, Galaxy S25", name)),
-    };
+    let preset = device_preset(name)?;
+    let (width, height, scale, mobile, ua) = (
+        preset.width,
+        preset.height,
+        preset.device_scale_factor,
+        preset.mobile,
+        preset.user_agent,
+    );
 
     mgr.set_viewport(width, height, scale, mobile).await?;
     mgr.set_user_agent(ua).await?;
@@ -12341,7 +12398,7 @@ fn guid_download_path(download_dir: &std::path::Path, guid: &str) -> Result<Path
 /// The saved path comes from a CDP event, so only a browser this daemon
 /// launched is trusted to name a local file. A remote endpoint could otherwise
 /// point the move at any file the daemon can read.
-fn may_move_download(
+pub(crate) fn may_move_download(
     saved: &std::path::Path,
     launched_locally: bool,
     download_dir: Option<&str>,
@@ -12358,7 +12415,7 @@ fn may_move_download(
     }
 }
 
-fn move_download(saved: &std::path::Path, path_str: &str) -> Result<Value, String> {
+pub(crate) fn move_download(saved: &std::path::Path, path_str: &str) -> Result<Value, String> {
     let dest = if std::path::Path::new(path_str).is_absolute() {
         PathBuf::from(path_str)
     } else {
@@ -12366,6 +12423,9 @@ fn move_download(saved: &std::path::Path, path_str: &str) -> Result<Value, Strin
             .map_err(|e| format!("Failed to get current directory: {}", e))?
             .join(path_str)
     };
+    if saved == dest {
+        return Ok(json!({ "path": dest.to_string_lossy() }));
+    }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create download directory: {}", e))?;
@@ -12625,7 +12685,7 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 }
 
 /// Stop HAR recording and write the captured requests to disk.
-async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if state.flow.active() {
         return Err("capture is owned by --capture flow; use flow save".to_string());
     }
@@ -13332,8 +13392,13 @@ fn har_entry_to_json(e: &HarEntry) -> Value {
         .map(|(k, v)| json!({ "name": k, "value": v }))
         .collect();
 
-    let (timings, total_time) =
-        har_compute_timings(e.cdp_timing.as_ref(), e.loading_finished_timestamp);
+    let (timings, total_time) = e
+        .response_started_timestamp
+        .zip(e.response_completed_timestamp)
+        .map(|(started, completed)| har_compute_bidi_timings(e.wall_time, started, completed))
+        .unwrap_or_else(|| {
+            har_compute_timings(e.cdp_timing.as_ref(), e.loading_finished_timestamp)
+        });
 
     let mime_type = if e.mime_type.is_empty() {
         "application/octet-stream"
@@ -13410,7 +13475,7 @@ fn har_extract_headers(headers_val: Option<&Value>) -> Vec<(String, String)> {
 
 /// Whether a MIME type is text-like enough to embed as HAR `content.text`
 /// under [`HarContentMode::Text`].
-fn har_mime_is_text(mime: &str) -> bool {
+pub(crate) fn har_mime_is_text(mime: &str) -> bool {
     let mime = mime
         .split(';')
         .next()
@@ -13434,7 +13499,7 @@ fn har_mime_is_text(mime: &str) -> bool {
 
 /// Map a CDP `response.protocol` value to an HTTP-version string as required
 /// by the HAR spec (e.g. `"h2"` → `"HTTP/2.0"`).
-fn har_cdp_protocol_to_http_version(protocol: &str) -> String {
+pub(crate) fn har_cdp_protocol_to_http_version(protocol: &str) -> String {
     match protocol.to_ascii_lowercase().as_str() {
         "h2" => "HTTP/2.0".to_string(),
         "h3" => "HTTP/3.0".to_string(),
@@ -13633,6 +13698,18 @@ fn har_compute_timings(
     (timings, total)
 }
 
+fn har_compute_bidi_timings(started: f64, response_started: f64, completed: f64) -> (Value, f64) {
+    let millis = |end: f64, start: f64| ((end - start) * 1000.0).max(0.0);
+    (
+        json!({
+            "send": 0,
+            "wait": millis(response_started, started),
+            "receive": millis(completed, response_started),
+        }),
+        millis(completed, started),
+    )
+}
+
 /// Format a Unix epoch timestamp (seconds, fractional) as RFC 3339 using the
 /// `time` crate, e.g. `"2024-03-17T10:30:00.456Z"`.
 fn har_wall_time_to_rfc3339(wall_time: f64) -> String {
@@ -13678,6 +13755,9 @@ fn unix_timestamp_millis() -> u128 {
 }
 
 async fn har_browser_metadata(state: &DaemonState) -> Option<Value> {
+    if let Some(ff) = state.firefox.as_ref() {
+        return Some(json!({ "name": "Firefox", "version": ff.browser_version }));
+    }
     let mgr = state.browser.as_ref()?;
     if !mgr.is_connection_alive().await {
         return None;
@@ -13724,7 +13804,7 @@ fn collapse_wildcards(pattern: &str) -> String {
 /// Status, headers and base64 body for a mocked route response. A mock gets
 /// CORS headers only for the origin the route allows (`--allow-origin`), so a
 /// page from any other origin cannot read it.
-fn mocked_response(
+pub(crate) fn mocked_response(
     resp: &RouteResponse,
     request_headers: Option<&serde_json::Map<String, Value>>,
 ) -> (u16, Vec<Value>, String) {
@@ -14086,8 +14166,25 @@ fn parse_route_response(cmd: &Value) -> Option<RouteResponse> {
 }
 
 async fn handle_route(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let session_id = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .active_session_id()?
+        .to_string();
+    let url_pattern = add_route(cmd, state).await?;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
+    let patterns = build_fetch_patterns(state).await;
+    let params = build_fetch_enable_params(state, patterns).await;
+    mgr.client
+        .send_command("Fetch.enable", Some(params), Some(&session_id))
+        .await?;
+
+    Ok(json!({ "routed": url_pattern }))
+}
+
+/// Parses a `route` command and appends it to the shared route list. Returns the URL pattern.
+pub(crate) async fn add_route(cmd: &Value, state: &DaemonState) -> Result<String, String> {
     let url_pattern = cmd
         .get("url")
         .and_then(|v| v.as_str())
@@ -14128,33 +14225,14 @@ async fn handle_route(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             resource_types,
         });
     }
-
-    let patterns = build_fetch_patterns(state).await;
-    let params = build_fetch_enable_params(state, patterns).await;
-    mgr.client
-        .send_command("Fetch.enable", Some(params), Some(&session_id))
-        .await?;
-
-    Ok(json!({ "routed": url_pattern }))
+    Ok(url_pattern)
 }
 
 async fn handle_unroute(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let url = cmd.get("url").and_then(|v| v.as_str());
-
-    {
-        let mut routes = state.routes.write().await;
-        match url {
-            Some(pattern) => {
-                routes.retain(|r| r.url_pattern != pattern);
-            }
-            None => {
-                routes.clear();
-            }
-        }
-    }
+    let label = remove_routes(cmd, state).await;
 
     let patterns = build_fetch_patterns(state).await;
     if patterns.is_empty() {
@@ -14168,8 +14246,18 @@ async fn handle_unroute(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             .await?;
     }
 
-    let label = url.unwrap_or("all");
     Ok(json!({ "unrouted": label }))
+}
+
+/// Removes the routes named by an `unroute` command, or all of them. Returns the label to report.
+pub(crate) async fn remove_routes(cmd: &Value, state: &DaemonState) -> String {
+    let url = cmd.get("url").and_then(|v| v.as_str());
+    let mut routes = state.routes.write().await;
+    match url {
+        Some(pattern) => routes.retain(|r| r.url_pattern != pattern),
+        None => routes.clear(),
+    }
+    url.unwrap_or("all").to_string()
 }
 
 pub fn matches_status_filter(status: Option<i64>, filter: &str) -> bool {
@@ -14191,7 +14279,7 @@ pub fn matches_status_filter(status: Option<i64>, filter: &str) -> bool {
     false
 }
 
-async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
         state.tracked_requests.clear();
         return Ok(json!({ "cleared": true }));
@@ -14248,7 +14336,10 @@ async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     Ok(json!({ "requests": requests }))
 }
 
-async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_request_detail(
+    cmd: &Value,
+    state: &mut DaemonState,
+) -> Result<Value, String> {
     let request_id = cmd
         .get("requestId")
         .and_then(|v| v.as_str())
@@ -16037,6 +16128,8 @@ mod tests {
             redirect_url: String::new(),
             response_body_size: 2,
             cdp_timing: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             loading_finished_timestamp: Some(1.0),
             response_body: body.map(String::from),
             response_body_base64: false,
@@ -20448,7 +20541,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
         guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
 
-        let state = DaemonState::new();
+        let mut state = DaemonState::new();
         {
             let mut df = state.domain_filter.write().await;
             *df = Some(DomainFilter::new("example.com"));
@@ -20460,6 +20553,15 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
         assert!(error.contains("state load"), "got: {}", error);
         assert!(error.contains("replays saved origins"), "got: {}", error);
+
+        let firefox_error = firefox::storage::state_load(&json!({"path":"unused"}), &mut state)
+            .await
+            .unwrap_err();
+        assert!(
+            firefox_error.contains("state load"),
+            "got: {}",
+            firefox_error
+        );
     }
 
     #[test]
@@ -20830,6 +20932,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 42,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: Some(1773576000.4),
+            response_completed_timestamp: Some(1773576000.42),
             response_body: None,
             response_body_base64: false,
             remote_addr: None,
@@ -20856,6 +20960,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
         assert_eq!(har["response"]["cookies"][0]["value"], "xyz");
         assert_eq!(har["_resourceType"], "XHR");
+        assert_eq!(har["timings"]["send"], 0);
+        assert!((har["timings"]["wait"].as_f64().unwrap() - 400.0).abs() < 0.001);
+        assert!((har["timings"]["receive"].as_f64().unwrap() - 20.0).abs() < 0.001);
+        assert!((har["time"].as_f64().unwrap() - 420.0).abs() < 0.001);
         // No body captured: content carries size/MIME only.
         assert!(har["response"]["content"].get("text").is_none());
         assert!(har["response"]["content"].get("encoding").is_none());
@@ -20881,6 +20989,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 13,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: Some(r#"{"items":[1]}"#.to_string()),
             response_body_base64: false,
             remote_addr: None,
@@ -20889,6 +20999,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let har = har_entry_to_json(&entry);
         assert_eq!(har["response"]["content"]["text"], r#"{"items":[1]}"#);
         assert!(har["response"]["content"].get("encoding").is_none());
+        assert_eq!(har["timings"]["send"], 0);
+        assert_eq!(har["timings"]["wait"], 0);
+        assert_eq!(har["timings"]["receive"], 0);
+        assert_eq!(har["time"], 0.0);
 
         entry.response_body = Some("aGVsbG8=".to_string());
         entry.response_body_base64 = true;
@@ -20978,6 +21092,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 0,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: None,
             response_body_base64: false,
             remote_addr: None,
@@ -21037,6 +21153,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 128,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: None,
             response_body_base64: false,
             remote_addr: None,
@@ -21997,6 +22115,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: response_body.len() as i64,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: Some(response_body.to_string()),
             response_body_base64: false,
             remote_addr: None,
@@ -22069,6 +22189,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 64,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: None,
             response_body_base64: false,
             remote_addr: None,
@@ -23927,6 +24049,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    async fn test_a_local_launch_without_proxy_credentials_drops_the_previous_ones() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state
+            .settings
+            .set(Key::Proxy, json!("http://other-proxy.example:8080"));
+        state.settings.set(
+            Key::ExecutablePath,
+            json!("/nonexistent/agent-browser-chrome"),
+        );
+        *state.proxy_credentials.write().await = Some(("old".to_string(), "old".to_string()));
+
+        assert!(auto_launch(&mut state, Vec::new()).await.is_err());
+
+        assert!(state.proxy_credentials.read().await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_switching_to_an_external_browser_drops_inherited_local_settings() {
         let (_env, mut state) = isolated_state();
         state.settings = Running::defaults();
@@ -24736,10 +24876,17 @@ mod firefox_routing_tests {
             .await
             .unwrap_err();
         assert!(e.contains("--args"), "{e}");
-        let e = handle_launch(&launch(json!({"allowedDomains":"a.test"})), &mut state)
-            .await
-            .unwrap_err();
-        assert!(e.contains("allowed-domains"), "{e}");
+        state.session_name = Some("k".into());
+        let e = handle_launch(
+            &launch(json!({"allowedDomains":"a.test","restoreKey":"k"})),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            e.contains("--allowed-domains") && e.contains("--restore"),
+            "{e}"
+        );
         assert!(state.firefox.is_none());
     }
 
@@ -24777,9 +24924,10 @@ mod firefox_routing_tests {
         assert!(error.contains("Firefox executable not found"), "{error}");
     }
 
-    /// Firefox has no way to enforce the allowlist, so asking for one must leave none installed.
+    /// Firefox enforces the allowlist through its own network intercepts, so the launch keeps the
+    /// filter installed and only fails on the browser it cannot find.
     #[tokio::test]
-    async fn firefox_allowed_domains_launch_is_refused_without_installing_a_filter() {
+    async fn firefox_allowed_domains_launch_keeps_the_filter() {
         let _guard = clean_env();
         let (mut state, _calls) = firefox_state().await;
         let resp = execute_command(
@@ -24793,19 +24941,28 @@ mod firefox_routing_tests {
             &mut state,
         )
         .await;
+        let error = resp["error"].as_str().unwrap_or_default();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+        let filter = state.domain_filter.read().await.clone();
+        let filter = filter.expect("the allowlist stays installed");
+        assert!(filter.is_allowed("example.com"));
+        assert!(!filter.is_allowed("evil.example"));
+    }
+
+    #[tokio::test]
+    async fn implicit_launch_rejects_allowed_domains_with_a_session_name() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        state.session_name = Some("k".into());
+        *state.domain_filter.write().await = Some(network::DomainFilter::new("a.test"));
+        let options = state.settings.launch_options();
+        let e = launch_firefox(&mut state, options, &[], true)
+            .await
+            .unwrap_err();
         assert!(
-            state.domain_filter.read().await.is_none(),
-            "a refused allowlist must not stay installed"
+            e.contains("--allowed-domains") && e.contains("--restore"),
+            "{e}"
         );
-        assert_eq!(
-            resp["error"].as_str().unwrap_or_default(),
-            "--allowed-domains is not supported with --engine firefox"
-        );
-        assert!(state
-            .settings
-            .security()
-            .allowed_domains
-            .is_none_or(|domains| domains.is_empty()));
     }
 
     #[tokio::test]

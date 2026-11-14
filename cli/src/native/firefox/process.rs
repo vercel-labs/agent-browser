@@ -49,7 +49,6 @@ pub struct LaunchFlags<'a> {
     pub cdp: Option<&'a str>,
     pub auto_connect: bool,
     pub provider: Option<&'a str>,
-    pub allowed_domains: bool,
     pub capture_flow: bool,
     pub enable_features: &'a [String],
     pub init_scripts: &'a [String],
@@ -103,20 +102,8 @@ pub fn validate_launch(options: &LaunchOptions, flags: LaunchFlags<'_>) -> Resul
     if options.ca_cert.is_some() {
         return unsupported("--ca-cert");
     }
-    if options.proxy_username.is_some() || options.proxy_password.is_some() {
-        return unsupported("authenticated proxy");
-    }
     if let Some(proxy) = options.proxy.as_deref() {
         super::session::proxy_capability(proxy, None)?;
-    }
-    if options.user_agent.is_some() {
-        return unsupported("--user-agent");
-    }
-    if options.color_scheme.is_some() {
-        return unsupported("--color-scheme");
-    }
-    if flags.allowed_domains {
-        return unsupported("--allowed-domains");
     }
     Ok(())
 }
@@ -184,7 +171,7 @@ pub fn check_firefox_version(version: &str) -> Result<(), String> {
     }
 }
 
-fn user_js(download_path: Option<&str>) -> String {
+fn user_js(download_path: Option<&str>, restrict_webrtc: bool) -> String {
     let mut js = String::from(
         "user_pref(\"devtools.debugger.remote-enabled\", true);\n\
          user_pref(\"devtools.chrome.enabled\", true);\n\
@@ -194,6 +181,9 @@ fn user_js(download_path: Option<&str>) -> String {
          user_pref(\"browser.download.always_ask_before_handling_new_types\", false);\n\
          user_pref(\"browser.download.manager.showWhenStarting\", false);\n",
     );
+    if restrict_webrtc {
+        js.push_str("user_pref(\"media.peerconnection.enabled\", false);\n");
+    }
     if let Some(dir) = download_path {
         let dir = serde_json::to_string(dir).unwrap_or_default();
         js.push_str(&format!(
@@ -203,7 +193,7 @@ fn user_js(download_path: Option<&str>) -> String {
     js
 }
 
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
@@ -242,9 +232,13 @@ fn prepare(
     headless: bool,
     profile_dir: &Path,
     download_path: Option<&str>,
+    restrict_webrtc: bool,
 ) -> Result<(DevtoolsEndpoint, Option<PathBuf>, Child), String> {
-    std::fs::write(profile_dir.join("user.js"), user_js(download_path))
-        .map_err(|e| format!("Failed to write Firefox profile: {e}"))?;
+    std::fs::write(
+        profile_dir.join("user.js"),
+        user_js(download_path, restrict_webrtc),
+    )
+    .map_err(|e| format!("Failed to write Firefox profile: {e}"))?;
     let (devtools, rdp, socket_dir) = devtools_endpoint(profile_dir)?;
     let mut args: Vec<String> = Vec::new();
     if headless {
@@ -277,6 +271,7 @@ impl FirefoxProcess {
         path: &Path,
         headless: bool,
         download_path: Option<&str>,
+        restrict_webrtc: bool,
         timeout: Duration,
     ) -> Result<Self, String> {
         let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
@@ -284,9 +279,11 @@ impl FirefoxProcess {
         create_private_dir(&profile_dir)
             .map_err(|e| format!("Failed to create Firefox profile dir: {e}"))?;
         let (devtools, socket_dir, mut child) =
-            prepare(path, headless, &profile_dir, download_path).inspect_err(|_| {
-                let _ = std::fs::remove_dir_all(&profile_dir);
-            })?;
+            prepare(path, headless, &profile_dir, download_path, restrict_webrtc).inspect_err(
+                |_| {
+                    let _ = std::fs::remove_dir_all(&profile_dir);
+                },
+            )?;
         let stderr: Option<Box<dyn Read + Send>> = child.stderr.take().map(|s| Box::new(s) as _);
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let (tx, rx) = mpsc::channel();
@@ -373,7 +370,7 @@ impl Drop for FirefoxProcess {
     }
 }
 
-fn remove_private_dir(dir: &Path) {
+pub(crate) fn remove_private_dir(dir: &Path) {
     for _ in 0..3 {
         if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
             break;
@@ -424,6 +421,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_accepts_the_options_emulation_replays() {
+        let mut o = ok();
+        o.user_agent = Some("custom".into());
+        o.color_scheme = Some("dark".into());
+        assert!(validate_launch(&o, LaunchFlags::default()).is_ok());
+    }
+
+    #[test]
     fn validate_rejects_each_option_naming_it() {
         let mut o = ok();
         o.extensions = Some(vec!["x".into()]);
@@ -445,16 +450,10 @@ mod tests {
         assert!(err_of(&o).contains("--ca-cert"));
         let mut o = ok();
         o.proxy_username = Some("user".into());
-        assert!(err_of(&o).contains("authenticated proxy"));
+        assert!(validate_launch(&o, LaunchFlags::default()).is_ok());
         let mut o = ok();
         o.proxy = Some("https://proxy:443".into());
         assert!(err_of(&o).contains("https:// proxy is not supported"));
-        let mut o = ok();
-        o.user_agent = Some("custom".into());
-        assert!(err_of(&o).contains("--user-agent"));
-        let mut o = ok();
-        o.color_scheme = Some("dark".into());
-        assert!(err_of(&o).contains("--color-scheme"));
         let flags = |cdp, auto_connect, provider| LaunchFlags {
             cdp,
             auto_connect,
@@ -502,17 +501,6 @@ mod tests {
             .unwrap_err(),
             "--capture flow is not supported with --engine firefox"
         );
-        assert_eq!(
-            validate_launch(
-                &ok(),
-                LaunchFlags {
-                    allowed_domains: true,
-                    ..LaunchFlags::default()
-                }
-            )
-            .unwrap_err(),
-            "--allowed-domains is not supported with --engine firefox"
-        );
     }
 
     #[test]
@@ -526,6 +514,12 @@ mod tests {
             parse_bidi_url("WebDriver BiDi listening on ws://[::1]:9\r").as_deref(),
             Some("ws://[::1]:9")
         );
+    }
+
+    #[test]
+    fn webrtc_is_disabled_only_when_domains_are_restricted() {
+        assert!(user_js(None, true).contains("media.peerconnection.enabled\", false"));
+        assert!(!user_js(None, false).contains("peerconnection"));
     }
 
     #[test]
@@ -574,7 +568,7 @@ mod tests {
             dir.path(),
             "echo noise >&2\necho 'WebDriver BiDi listening on ws://127.0.0.1:4242' >&2\nexec sleep 30",
         );
-        let p = FirefoxProcess::launch(&bin, true, None, Duration::from_secs(10)).unwrap();
+        let p = FirefoxProcess::launch(&bin, true, None, false, Duration::from_secs(10)).unwrap();
         assert_eq!(p.bidi_url, "ws://127.0.0.1:4242");
         let profile = p.profile_dir.clone();
         assert!(profile.join("user.js").exists());
@@ -622,7 +616,7 @@ mod tests {
             log.display()
         );
         let bin = fake(dir.path(), &body);
-        let e = FirefoxProcess::launch(&bin, true, None, Duration::from_millis(800))
+        let e = FirefoxProcess::launch(&bin, true, None, false, Duration::from_millis(800))
             .err()
             .unwrap();
         assert!(e.contains("boom on stderr"), "{e}");
@@ -636,7 +630,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = fake(dir.path(), "echo 'bad profile' >&2\nexit 3");
         let start = Instant::now();
-        let e = FirefoxProcess::launch(&bin, true, None, Duration::from_secs(20))
+        let e = FirefoxProcess::launch(&bin, true, None, false, Duration::from_secs(20))
             .err()
             .unwrap();
         assert!(start.elapsed() < Duration::from_secs(10));
@@ -647,8 +641,8 @@ mod tests {
     #[ignore = "requires FIREFOX_BIN"]
     fn real_firefox_smoke() {
         let bin = std::env::var("FIREFOX_BIN").expect("FIREFOX_BIN");
-        let p =
-            FirefoxProcess::launch(Path::new(&bin), true, None, Duration::from_secs(30)).unwrap();
+        let p = FirefoxProcess::launch(Path::new(&bin), true, None, false, Duration::from_secs(30))
+            .unwrap();
         assert!(p.bidi_url.starts_with("ws://127.0.0.1:"), "{}", p.bidi_url);
         let profile = p.profile_dir.clone();
         drop(p);

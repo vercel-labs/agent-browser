@@ -834,8 +834,9 @@ mod tests {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let log = requests.clone();
         let (ff, _tx, _) = super::super::session::tests::fake_session_with_replies(move |v| {
+            use super::super::session::tests::FakeReply;
             log.lock().unwrap().push(v.clone());
-            Some(match v["method"].as_str() {
+            FakeReply::Result(match v["method"].as_str() {
                 Some("script.callFunction") if v["params"]["target"]["sandbox"].is_string() => {
                     json!({"type": "success", "result": {"type": "object", "value": [
                         ["label", {"type": "string", "value": "forged"}],
