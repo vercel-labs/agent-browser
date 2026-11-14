@@ -8,6 +8,11 @@ use super::cdp::types::{
 };
 use super::element::{normalize_ax_role, resolve_ax_session, RefMap};
 
+mod compact;
+
+pub use compact::DEFAULT_MAX_TOKENS;
+use compact::{Placement, SnapshotLine};
+
 #[cfg(test)]
 mod document_identity_regressions {
     use super::*;
@@ -104,6 +109,573 @@ mod document_identity_regressions {
     }
 }
 
+#[cfg(test)]
+mod compact_snapshot_regressions {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+
+    /// An AX tree with a heading, a 60-row table whose rows hold a checkbox
+    /// and an Edit button, and a long paragraph. Row 40's button is focused.
+    fn ax_nodes() -> Value {
+        let ax = |id: i64, role: &str, name: &str, children: Vec<i64>| {
+            json!({
+                "nodeId": id.to_string(),
+                "role": {"type": "role", "value": role},
+                "name": {"type": "computedString", "value": name},
+                "childIds": children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "backendDOMNodeId": id,
+            })
+        };
+        let mut nodes = vec![
+            ax(1, "RootWebArea", "Customers", vec![2, 3, 4]),
+            ax(2, "heading", "Customers", vec![]),
+            ax(4, "paragraph", "", vec![5]),
+            ax(
+                5,
+                "StaticText",
+                &"A long paragraph of text. ".repeat(20),
+                vec![],
+            ),
+        ];
+        let rows: Vec<i64> = (0..60).map(|r| 100 + r * 10).collect();
+        nodes.push(ax(3, "table", "Customers", rows.clone()));
+        for (r, &row) in rows.iter().enumerate() {
+            nodes.push(ax(row, "row", "", vec![row + 1, row + 2]));
+            nodes.push(ax(
+                row + 1,
+                "checkbox",
+                &format!("Select customer {r}"),
+                vec![],
+            ));
+            let mut button = ax(row + 2, "button", "Edit", vec![]);
+            if r == 40 {
+                button["properties"] =
+                    json!([{"name": "focused", "value": {"type": "boolean", "value": true}}]);
+            }
+            nodes.push(button);
+        }
+        Value::Array(nodes)
+    }
+
+    async fn serve(nodes: Value) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(text).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "Page.getFrameTree" => {
+                        json!({"frameTree": {"frame": {"id": "main", "loaderId": "doc"}}})
+                    }
+                    "Accessibility.getFullAXTree" => json!({ "nodes": nodes }),
+                    "Runtime.evaluate" => json!({"result": {"type": "object", "value": []}}),
+                    _ => json!({}),
+                };
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"id": request["id"], "result": result}).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    fn ref_lines(snapshot: &str) -> Vec<(String, String)> {
+        snapshot
+            .lines()
+            .filter_map(|line| {
+                let start = line.find("ref=e")? + 4;
+                let end = start + line[start..].find([']', ','])?;
+                Some((line[start..end].to_string(), line.trim().to_string()))
+            })
+            .collect()
+    }
+
+    async fn snapshot(
+        client: &CdpClient,
+        refs: &mut RefMap,
+        options: SnapshotOptions,
+    ) -> (String, std::collections::HashSet<String>) {
+        refs.begin_snapshot();
+        let text = take_snapshot(client, "s", &options, refs, None, &HashMap::new())
+            .await
+            .unwrap();
+        (text, refs.ref_ids())
+    }
+
+    #[tokio::test]
+    async fn compact_refs_match_full_snapshot_and_stay_resolvable() {
+        let (url, server) = serve(ax_nodes()).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+
+        let (full, full_ids) = snapshot(&client, &mut refs, SnapshotOptions::default()).await;
+        let (compact, compact_ids) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                compact: true,
+                max_tokens: Some(DEFAULT_MAX_TOKENS),
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        let (tight, tight_ids) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                compact: true,
+                max_tokens: Some(60),
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        let (full_again, _) = snapshot(&client, &mut refs, SnapshotOptions::default()).await;
+        server.abort();
+
+        assert!(compact.len() < full.len() / 3, "{compact}");
+        assert!(compact.contains("  - … 35 more rows\n"), "{compact}");
+        assert!(
+            compact.contains("  - … 17 more rows (60 total)\n"),
+            "{compact}"
+        );
+        // The focused row survives both collapsing and a tight budget.
+        let focused = "button \"Edit\" [ref=e";
+        let full_lines = ref_lines(&full);
+        let focused_ref = &full_lines
+            .iter()
+            .filter(|(_, line)| line.starts_with(&format!("- {focused}")))
+            .nth(40)
+            .unwrap()
+            .0;
+        for text in [&compact, &tight] {
+            assert!(text.contains(&format!("[ref={focused_ref}]")), "{text}");
+        }
+        // Every ref shown in compact output is the full snapshot's ref for
+        // the same line.
+        for text in [&compact, &tight] {
+            for (ref_id, line) in ref_lines(text) {
+                assert!(
+                    full_lines.contains(&(ref_id.clone(), line.clone())),
+                    "{ref_id}: {line}"
+                );
+            }
+        }
+        // Hidden lines still have resolvable refs, and nothing is reallocated.
+        assert_eq!(full_ids, compact_ids);
+        assert_eq!(full_ids, tight_ids);
+        assert_eq!(full, full_again);
+        // The long paragraph is truncated in compact output only.
+        assert!(full.contains(
+            &"A long paragraph of text. "
+                .repeat(20)
+                .trim_end()
+                .to_string()
+        ));
+        assert!(compact.contains("A long paragraph of text. A long"));
+        assert!(compact.contains("…\""), "{compact}");
+    }
+
+    /// A 40-row table with a header row; each row has a plain-text ID cell
+    /// and an actions cell with Edit and Delete buttons.
+    fn actions_table_nodes() -> Value {
+        let ax = |id: i64, role: &str, name: &str, children: Vec<i64>| {
+            json!({
+                "nodeId": id.to_string(),
+                "role": {"type": "role", "value": role},
+                "name": {"type": "computedString", "value": name},
+                "childIds": children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "backendDOMNodeId": id,
+            })
+        };
+        let rows: Vec<i64> = (0..40).map(|r| 100 + r * 10).collect();
+        let mut nodes = vec![
+            ax(1, "RootWebArea", "Users", vec![2]),
+            ax(2, "table", "Users", [vec![50], rows.clone()].concat()),
+            ax(50, "row", "", vec![51, 52]),
+            ax(51, "columnheader", "ID", vec![]),
+            ax(52, "columnheader", "Actions", vec![]),
+        ];
+        for (r, &row) in rows.iter().enumerate() {
+            nodes.push(ax(row, "row", "", vec![row + 1, row + 2]));
+            nodes.push(ax(row + 1, "cell", &format!("U-{r}"), vec![]));
+            nodes.push(ax(row + 2, "cell", "Edit Delete", vec![row + 3, row + 4]));
+            nodes.push(ax(row + 3, "button", "Edit", vec![]));
+            nodes.push(ax(row + 4, "button", "Delete", vec![]));
+        }
+        Value::Array(nodes)
+    }
+
+    #[tokio::test]
+    async fn interactive_compact_keeps_each_rows_identity() {
+        let (url, server) = serve(actions_table_nodes()).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        let interactive = SnapshotOptions {
+            interactive: true,
+            ..SnapshotOptions::default()
+        };
+        let (plain, plain_ids) = snapshot(&client, &mut refs, interactive).await;
+        let (compact, compact_ids) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                interactive: true,
+                compact: true,
+                max_tokens: Some(DEFAULT_MAX_TOKENS),
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        server.abort();
+
+        // Plain -i output still skips rows; -i -c shows them under the table.
+        assert!(!plain.contains("- row"), "{plain}");
+        assert!(
+            compact.starts_with("- table \"Users\"\n  - row\n    - columnheader \"ID\""),
+            "{compact}"
+        );
+        assert!(
+            compact.contains("- … 33 more rows (40 total)\n"),
+            "{compact}"
+        );
+        assert_eq!(plain_ids, compact_ids);
+        // Every kept button sits in a row that also shows its ID cell.
+        let rows: Vec<&str> = compact.split("- row\n").skip(2).collect();
+        assert_eq!(rows.len(), 7, "{compact}");
+        for row in rows {
+            assert!(row.contains("button \"Edit\""), "{row}");
+            assert!(row.trim_start().starts_with("- cell \"U-"), "{row}");
+        }
+        let plain_lines = ref_lines(&plain);
+        for line in ref_lines(&compact) {
+            assert!(plain_lines.contains(&line), "{line:?}");
+        }
+    }
+
+    /// Two adjacent action tables with `rows_each` rows each, every row holding
+    /// a plain-text ID cell and Edit and Delete buttons.
+    fn two_short_actions_tables_nodes(rows_each: i64) -> Value {
+        let ax = |id: i64, role: &str, name: &str, children: Vec<i64>| {
+            json!({
+                "nodeId": id.to_string(),
+                "role": {"type": "role", "value": role},
+                "name": {"type": "computedString", "value": name},
+                "childIds": children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "backendDOMNodeId": id,
+            })
+        };
+        let tables: Vec<i64> = vec![2, 3];
+        let mut nodes = vec![ax(1, "RootWebArea", "Two tables", tables.clone())];
+        for (t, &table) in tables.iter().enumerate() {
+            let base = 100 + t as i64 * 1_000;
+            let header = base - 10;
+            let rows: Vec<i64> = (0..rows_each).map(|r| base + r * 10).collect();
+            nodes.push(ax(
+                table,
+                "table",
+                &format!("Table {t}"),
+                [vec![header], rows.clone()].concat(),
+            ));
+            nodes.push(ax(header, "row", "", vec![header + 1, header + 2]));
+            nodes.push(ax(header + 1, "columnheader", "ID", vec![]));
+            nodes.push(ax(header + 2, "columnheader", "Actions", vec![]));
+            for (r, &row) in rows.iter().enumerate() {
+                nodes.push(ax(row, "row", "", vec![row + 1, row + 2]));
+                nodes.push(ax(row + 1, "cell", &format!("T{t}-U-{r}"), vec![]));
+                nodes.push(ax(row + 2, "cell", "Edit Delete", vec![row + 3, row + 4]));
+                nodes.push(ax(row + 3, "button", "Edit", vec![]));
+                nodes.push(ax(row + 4, "button", "Delete", vec![]));
+            }
+        }
+        Value::Array(nodes)
+    }
+
+    /// Each of two adjacent tables stays below the row-collapse threshold, so
+    /// `-i -c` must keep every control. Dropping their `table` wrappers would
+    /// make both tables' rows one fourteen-item run and hide controls.
+    #[tokio::test]
+    async fn interactive_compact_keeps_controls_in_separate_short_tables() {
+        const ROWS: i64 = 7; // fewer than the 12-item collapse threshold
+        let (url, server) = serve(two_short_actions_tables_nodes(ROWS)).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        let (plain, _) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                interactive: true,
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        let (compact, _) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                interactive: true,
+                compact: true,
+                max_tokens: Some(DEFAULT_MAX_TOKENS),
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            !plain.contains("- table") && !plain.contains("- row"),
+            "plain -i still skips structure: {plain}"
+        );
+        assert_eq!(
+            compact.matches("button \"Edit\"").count(),
+            2 * ROWS as usize,
+            "{compact}"
+        );
+        assert_eq!(
+            compact.matches("button \"Delete\"").count(),
+            2 * ROWS as usize,
+            "{compact}"
+        );
+        for t in 0..2 {
+            for r in 0..ROWS {
+                assert!(
+                    compact.contains(&format!("cell \"T{t}-U-{r}\"")),
+                    "table {t} row {r} lost its identity:\n{compact}"
+                );
+            }
+        }
+        assert!(!compact.contains('…'), "{compact}");
+        assert!(!compact.contains("(compact:"), "{compact}");
+    }
+
+    fn ax_node(id: i64, role: &str, name: &str, children: &[i64]) -> Value {
+        json!({
+            "nodeId": id.to_string(),
+            "role": {"type": "role", "value": role},
+            "name": {"type": "computedString", "value": name},
+            "childIds": children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            "backendDOMNodeId": id,
+        })
+    }
+
+    async fn plain_and_compact_interactive(nodes: Value, depth: Option<usize>) -> (String, String) {
+        let (url, server) = serve(nodes).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        let (plain, _) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                interactive: true,
+                depth,
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        let (compact, _) = snapshot(
+            &client,
+            &mut refs,
+            SnapshotOptions {
+                interactive: true,
+                compact: true,
+                max_tokens: Some(DEFAULT_MAX_TOKENS),
+                depth,
+                ..SnapshotOptions::default()
+            },
+        )
+        .await;
+        server.abort();
+        (plain, compact)
+    }
+
+    /// Two adjacent lists (or trees) of seven links (or tree items) each.
+    /// Each stays below the collapse threshold, so `-i -c` must print every
+    /// item, as plain `-i` does. Dropping the `list`/`tree` wrappers would make
+    /// the two short runs one fourteen-item run and collapse it.
+    #[tokio::test]
+    async fn interactive_compact_keeps_items_in_separate_short_lists_and_trees() {
+        const ITEMS: i64 = 7;
+        for (container, item_role) in [("list", "link"), ("tree", "treeitem")] {
+            let lists = [2, 3];
+            let mut nodes = vec![ax_node(1, "RootWebArea", "Lists", &lists)];
+            for (l, &list) in lists.iter().enumerate() {
+                let base = 100 + l as i64 * 1_000;
+                let items: Vec<i64> = (0..ITEMS).map(|i| base + i * 10).collect();
+                nodes.push(ax_node(list, container, "", &items));
+                for (i, &item) in items.iter().enumerate() {
+                    let name = format!("L{l} item {i}");
+                    if container == "list" {
+                        nodes.push(ax_node(item, "listitem", "", &[item + 1]));
+                        nodes.push(ax_node(item + 1, item_role, &name, &[]));
+                    } else {
+                        nodes.push(ax_node(item, item_role, &name, &[]));
+                    }
+                }
+            }
+            let (plain, compact) = plain_and_compact_interactive(Value::Array(nodes), None).await;
+            for out in [&plain, &compact] {
+                for l in 0..2 {
+                    for i in 0..ITEMS {
+                        assert!(
+                            out.contains(&format!("{item_role} \"L{l} item {i}\" [ref=")),
+                            "{container} {l} item {i} missing:\n{out}"
+                        );
+                    }
+                }
+            }
+            assert!(!compact.contains('…'), "{compact}");
+            assert!(!compact.contains("(compact:"), "{compact}");
+            assert_eq!(
+                compact.matches(&format!("- {container}\n")).count(),
+                2,
+                "{compact}"
+            );
+            assert!(!plain.contains(&format!("- {container}\n")), "{plain}");
+        }
+    }
+
+    /// `-d` counts only the lines plain `-i` prints, so the `table`,
+    /// `rowgroup`, `row`, and `list` lines budgeted `-i -c` adds do not push
+    /// controls past the depth limit.
+    #[tokio::test]
+    async fn interactive_compact_depth_cuts_the_same_controls_as_plain_interactive() {
+        let rows: Vec<i64> = (0..3).map(|r| 100 + r * 10).collect();
+        let mut nodes = vec![
+            ax_node(1, "RootWebArea", "Depth", &[2, 5]),
+            ax_node(2, "table", "Users", &[3]),
+            ax_node(3, "rowgroup", "", &rows),
+            ax_node(5, "list", "", &[6]),
+            ax_node(6, "listitem", "", &[7]),
+            ax_node(7, "link", "Outer", &[8]),
+            ax_node(8, "button", "Inner", &[9]),
+            ax_node(9, "checkbox", "Innermost", &[]),
+        ];
+        for (r, &row) in rows.iter().enumerate() {
+            nodes.push(ax_node(row, "row", "", &[row + 1, row + 2]));
+            nodes.push(ax_node(row + 1, "cell", &format!("U-{r}"), &[]));
+            nodes.push(ax_node(row + 2, "cell", "Edit", &[row + 3]));
+            nodes.push(ax_node(row + 3, "button", "Edit", &[]));
+        }
+        let nodes = Value::Array(nodes);
+        let printed = |out: &str| -> Vec<String> {
+            ref_lines(out).into_iter().map(|(_, line)| line).collect()
+        };
+        for depth in 0..=3 {
+            let (plain, compact) = plain_and_compact_interactive(nodes.clone(), Some(depth)).await;
+            assert_eq!(
+                printed(&compact),
+                printed(&plain),
+                "-d {depth}\nplain:\n{plain}\ncompact:\n{compact}"
+            );
+            assert!(!printed(&plain).is_empty(), "{plain}");
+            // Cells carry refs, so their buttons sit one level below them.
+            assert_eq!(compact.matches("cell \"U-").count(), 3, "{compact}");
+            assert_eq!(
+                compact.matches("button \"Edit\"").count(),
+                if depth >= 1 { 3 } else { 0 },
+                "-d {depth}: {compact}"
+            );
+            assert!(compact.contains("- rowgroup"), "{compact}");
+            assert_eq!(
+                compact.contains("button \"Inner\""),
+                depth >= 1,
+                "-d {depth}: {compact}"
+            );
+            assert_eq!(
+                compact.contains("checkbox \"Innermost\""),
+                depth >= 2,
+                "-d {depth}: {compact}"
+            );
+        }
+    }
+
+    /// Budgeted compact snapshots shorten long values on interactive lines
+    /// too, so a textarea with a long value keeps its ref instead of costing
+    /// more than the whole budget. Interactive names stay whole.
+    #[tokio::test]
+    async fn budgeted_compact_shortens_long_values_on_interactive_lines() {
+        let long_value = "Meeting notes. ".repeat(1_000);
+        let long_name = format!("Save {}", "and publish ".repeat(15));
+        let mut textarea = ax_node(3, "textbox", "Notes", &[]);
+        textarea["value"] = json!({"type": "string", "value": long_value});
+        let nodes = Value::Array(vec![
+            ax_node(1, "RootWebArea", "Editor", &[2]),
+            ax_node(2, "form", "Editor", &[3, 4]),
+            textarea,
+            ax_node(4, "button", &long_name, &[]),
+        ]);
+        let (url, server) = serve(nodes).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        let (full, _) = snapshot(&client, &mut refs, SnapshotOptions::default()).await;
+        let mut outputs = Vec::new();
+        for interactive in [false, true] {
+            let (out, _) = snapshot(
+                &client,
+                &mut refs,
+                SnapshotOptions {
+                    interactive,
+                    compact: true,
+                    max_tokens: Some(DEFAULT_MAX_TOKENS),
+                    ..SnapshotOptions::default()
+                },
+            )
+            .await;
+            outputs.push(out);
+        }
+        server.abort();
+
+        assert!(
+            full.contains(long_value.trim_end()),
+            "full output keeps the value"
+        );
+        let textbox_ref = &ref_lines(&full)
+            .into_iter()
+            .find(|(_, line)| line.starts_with("- textbox"))
+            .unwrap()
+            .0;
+        for out in outputs {
+            let line = out
+                .lines()
+                .find(|l| l.contains("textbox \"Notes\""))
+                .unwrap_or_else(|| panic!("textbox dropped:\n{out}"));
+            assert!(line.contains(&format!("ref={textbox_ref}")), "{line}");
+            assert!(line.ends_with('…'), "{line}");
+            assert!(line.len() < 200, "{line}");
+            let name = serde_json::to_string(long_name.as_str()).unwrap();
+            assert!(out.contains(&format!("button {name}")), "{out}");
+            assert!(!out.contains("more textbox"), "{out}");
+        }
+    }
+
+    #[test]
+    fn layout_placement_from_cdp() {
+        let snapshot = json!({"documents": [{
+            "nodes": {"backendNodeId": [1, 2, 3, 4, 5]},
+            "layout": {
+                "nodeIndex": [0, 1, 2, 3],
+                "bounds": [[0, 0, 800, 600], [10, 2000, 100, 20], [10, 10, 1, 1], [10, 100, 50, 20]]
+            }
+        }]});
+        let metrics = json!({"cssLayoutViewport": {"pageX": 0, "pageY": 50, "clientWidth": 800, "clientHeight": 600}});
+        let layout = LayoutInfo::from_cdp(&snapshot, &metrics).unwrap();
+        assert_eq!(layout.placement(Some(1)), Placement::InViewport);
+        assert_eq!(layout.placement(Some(2)), Placement::Offscreen);
+        assert_eq!(layout.placement(Some(3)), Placement::Hidden);
+        assert_eq!(layout.placement(Some(4)), Placement::InViewport);
+        assert_eq!(layout.placement(Some(5)), Placement::Hidden);
+        assert_eq!(layout.placement(Some(6)), Placement::Unknown);
+        assert_eq!(layout.placement(None), Placement::Unknown);
+    }
+}
+
 const INTERACTIVE_ROLES: &[&str] = &[
     "button",
     "link",
@@ -182,6 +754,12 @@ pub struct SnapshotOptions {
     pub selector: Option<String>,
     pub interactive: bool,
     pub compact: bool,
+    /// Token budget for `compact` snapshots. `None` keeps only the structural
+    /// compaction (empty branches removed), which `diff snapshot` relies on.
+    /// `Some(n)` also collapses repeated rows, truncates long text, and keeps
+    /// the highest-priority lines that fit in about `n` tokens (`usize::MAX`
+    /// disables the cap).
+    pub max_tokens: Option<usize>,
     pub depth: Option<usize>,
     pub urls: bool,
 }
@@ -195,6 +773,9 @@ struct TreeNode {
     selected: Option<bool>,
     disabled: Option<bool>,
     required: Option<bool>,
+    focused: bool,
+    modal: bool,
+    pressed: bool,
     value_text: Option<String>,
     backend_node_id: Option<i64>,
     children: Vec<usize>,
@@ -219,6 +800,9 @@ impl TreeNode {
             selected: None,
             disabled: None,
             required: None,
+            focused: false,
+            modal: false,
+            pressed: false,
             value_text: None,
             backend_node_id: None,
             children: Vec::new(),
@@ -241,6 +825,9 @@ impl TreeNode {
         self.selected = None;
         self.disabled = None;
         self.required = None;
+        self.focused = false;
+        self.modal = false;
+        self.pressed = false;
         self.value_text = None;
         self.backend_node_id = None;
         self.children.clear();
@@ -341,6 +928,53 @@ pub async fn take_snapshot(
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
+    let lines = snapshot_lines(
+        client,
+        session_id,
+        options,
+        ref_map,
+        frame_id,
+        iframe_sessions,
+    )
+    .await?;
+
+    let output = match (options.compact, options.max_tokens) {
+        (true, Some(max_tokens)) => compact::compact_lines(&lines, options.interactive, max_tokens),
+        (true, None) => compact_tree(&join_lines(&lines), options.interactive),
+        (false, _) => join_lines(&lines),
+    };
+
+    let trimmed = output.trim().to_string();
+
+    if trimmed.is_empty() {
+        if options.interactive {
+            return Ok("(no interactive elements)".to_string());
+        }
+        return Ok("(empty page)".to_string());
+    }
+
+    Ok(trimmed)
+}
+
+fn join_lines(lines: &[SnapshotLine]) -> String {
+    let mut output = String::with_capacity(lines.iter().map(|l| l.text.len() + 1).sum());
+    for line in lines {
+        output.push_str(&line.text);
+        output.push('\n');
+    }
+    output
+}
+
+/// Build the rendered snapshot lines for one frame, with the snapshots of
+/// child iframes spliced in below their Iframe lines.
+async fn snapshot_lines(
+    client: &CdpClient,
+    session_id: &str,
+    options: &SnapshotOptions,
+    ref_map: &mut RefMap,
+    frame_id: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Vec<SnapshotLine>, String> {
     client
         .send_command_no_params("DOM.enable", Some(session_id))
         .await?;
@@ -442,15 +1076,28 @@ pub async fn take_snapshot(
             .send_command_no_params("Accessibility.enable", Some(effective_session_id))
             .await;
     }
+    // Budgeted compact snapshots rank by viewport placement. Fetch layout
+    // alongside the accessibility tree so the extra round trip overlaps it.
+    // Layout is only used for the top-level document of the main frame.
+    let want_layout = options.compact && options.max_tokens.is_some() && frame_id.is_none();
     // The full tree of a large page runs to megabytes, so the response is
     // parsed once, straight from its text, instead of through a Value.
-    let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed_raw(
+    let (ax_tree, layout) = futures_util::future::join(
+        client.send_command_typed_raw::<_, GetFullAXTreeResult>(
             "Accessibility.getFullAXTree",
             &ax_params,
             Some(effective_session_id),
-        )
-        .await?;
+        ),
+        async {
+            if want_layout {
+                capture_layout(client, effective_session_id).await
+            } else {
+                None
+            }
+        },
+    )
+    .await;
+    let ax_tree = ax_tree?;
 
     let (mut tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
 
@@ -631,9 +1278,17 @@ pub async fn take_snapshot(
         }
     }
 
-    let mut output = String::new();
+    let mut output: Vec<SnapshotLine> = Vec::new();
     for &root_idx in &effective_roots {
-        render_tree(&tree_nodes, root_idx, 0, &mut output, options);
+        render_tree(
+            &tree_nodes,
+            root_idx,
+            0,
+            0,
+            &mut output,
+            options,
+            layout.as_ref(),
+        );
     }
 
     // Recurse into child iframes: for each Iframe node with a backend_node_id,
@@ -641,7 +1296,7 @@ pub async fn take_snapshot(
     // We only recurse from the main frame (frame_id == None) to avoid
     // unbounded depth; nested iframes within iframes are not expanded.
     if frame_id.is_none() {
-        let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
+        let mut iframe_snapshots: Vec<(String, Vec<SnapshotLine>)> = Vec::new(); // (ref_id, child lines)
         for node in tree_nodes.iter() {
             if node.role != "Iframe" || !node.has_ref {
                 continue;
@@ -653,7 +1308,7 @@ pub async fn take_snapshot(
             if let Ok(child_fid) = resolve_iframe_frame_id(client, session_id, bid).await {
                 // Snapshot the child frame; errors are silently ignored
                 // (e.g. cross-origin iframes)
-                if let Ok(child_text) = Box::pin(take_snapshot(
+                if let Ok(child_lines) = Box::pin(snapshot_lines(
                     client,
                     session_id,
                     options,
@@ -663,62 +1318,159 @@ pub async fn take_snapshot(
                 ))
                 .await
                 {
-                    if !child_text.is_empty()
-                        && child_text != "(empty page)"
-                        && child_text != "(no interactive elements)"
-                    {
-                        iframe_snapshots.push((ref_id.to_string(), child_text));
+                    if !join_lines(&child_lines).trim().is_empty() {
+                        iframe_snapshots.push((ref_id.to_string(), child_lines));
                     }
                 }
             }
         }
 
         // Insert each child snapshot after its Iframe line in the output
-        for (ref_id, child_text) in iframe_snapshots {
+        for (ref_id, child_lines) in iframe_snapshots {
             let marker = format!("[ref={}]", ref_id);
-            if let Some(pos) = output.find(&marker) {
-                // Find the end of the Iframe line
-                let line_end = output[pos..]
-                    .find('\n')
-                    .map(|i| pos + i)
-                    .unwrap_or(output.len());
-                // Determine the indent of the Iframe line
-                let line_start = output[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-                let iframe_line = &output[line_start..line_end];
-                let iframe_indent = iframe_line.len() - iframe_line.trim_start().len();
-                let child_indent = iframe_indent + 2; // one level deeper
-                let prefix = " ".repeat(child_indent);
-
-                let indented_child: String = child_text
-                    .lines()
-                    .map(|line| format!("{}{}\n", prefix, line))
-                    .collect();
-
-                // Ensure there's a newline to insert after
-                if line_end == output.len() {
-                    output.push('\n');
-                    output.push_str(&indented_child);
-                } else {
-                    output.insert_str(line_end + 1, &indented_child);
-                }
+            if let Some(pos) = output.iter().position(|line| line.text.contains(&marker)) {
+                let child_depth = output[pos].depth + 1; // one level deeper
+                let indented = indent_child_lines(child_lines, child_depth);
+                output.splice(pos + 1..pos + 1, indented);
             }
         }
     }
 
-    if options.compact {
-        output = compact_tree(&output, options.interactive);
+    Ok(output)
+}
+
+/// Re-indent a child frame's lines to sit `depth` levels deep. The child's
+/// output is trimmed first, matching how a standalone snapshot is printed.
+fn indent_child_lines(mut lines: Vec<SnapshotLine>, depth: usize) -> Vec<SnapshotLine> {
+    // Drop lines that only contain whitespace at either end, then trim the
+    // remaining ends, as `str::trim` would on the joined text.
+    while lines.last().is_some_and(|l| l.text.trim().is_empty()) {
+        lines.pop();
+    }
+    let leading = lines
+        .iter()
+        .take_while(|l| l.text.trim().is_empty())
+        .count();
+    lines.drain(..leading);
+    if let Some(first) = lines.first_mut() {
+        first.text = first.text.trim_start().to_string();
+    }
+    if let Some(last) = lines.last_mut() {
+        last.text = last.text.trim_end().to_string();
     }
 
-    let trimmed = output.trim().to_string();
+    let prefix = "  ".repeat(depth);
+    for line in &mut lines {
+        line.text = line
+            .text
+            .split('\n')
+            .map(|part| format!("{}{}", prefix, part.strip_suffix('\r').unwrap_or(part)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        line.depth += depth;
+        // Layout is captured for the main document only.
+        line.placement = Placement::Unknown;
+    }
+    lines
+}
 
-    if trimmed.is_empty() {
-        if options.interactive {
-            return Ok("(no interactive elements)".to_string());
+/// Rendered boxes for the main document plus the visible viewport, used to
+/// rank budgeted compact snapshots.
+struct LayoutInfo {
+    /// Viewport rectangle in document coordinates: x, y, width, height.
+    viewport: [f64; 4],
+    /// Union of the layout boxes of each rendered DOM node.
+    boxes: HashMap<i64, [f64; 4]>,
+    /// Every DOM node in the document, rendered or not.
+    known: std::collections::HashSet<i64>,
+}
+
+impl LayoutInfo {
+    fn placement(&self, backend_node_id: Option<i64>) -> Placement {
+        let Some(id) = backend_node_id else {
+            return Placement::Unknown;
+        };
+        let Some(&[x, y, w, h]) = self.boxes.get(&id) else {
+            return if self.known.contains(&id) {
+                Placement::Hidden
+            } else {
+                Placement::Unknown
+            };
+        };
+        if w <= 1.0 && h <= 1.0 {
+            return Placement::Hidden;
         }
-        return Ok("(empty page)".to_string());
+        let [vx, vy, vw, vh] = self.viewport;
+        if x < vx + vw && x + w > vx && y < vy + vh && y + h > vy {
+            Placement::InViewport
+        } else {
+            Placement::Offscreen
+        }
     }
 
-    Ok(trimmed)
+    /// Parse `DOMSnapshot.captureSnapshot` and `Page.getLayoutMetrics` results.
+    fn from_cdp(snapshot: &Value, metrics: &Value) -> Option<Self> {
+        let viewport = &metrics["cssLayoutViewport"];
+        let viewport = [
+            viewport["pageX"].as_f64().unwrap_or(0.0),
+            viewport["pageY"].as_f64().unwrap_or(0.0),
+            viewport["clientWidth"].as_f64()?,
+            viewport["clientHeight"].as_f64()?,
+        ];
+        let document = &snapshot["documents"][0];
+        let backend_ids: Vec<Option<i64>> = document["nodes"]["backendNodeId"]
+            .as_array()?
+            .iter()
+            .map(Value::as_i64)
+            .collect();
+        let node_index = document["layout"]["nodeIndex"].as_array()?;
+        let bounds = document["layout"]["bounds"].as_array()?;
+        let mut boxes: HashMap<i64, [f64; 4]> = HashMap::with_capacity(node_index.len());
+        for (index, rect) in node_index.iter().zip(bounds) {
+            let Some(id) = index
+                .as_u64()
+                .and_then(|i| backend_ids.get(i as usize).copied().flatten())
+            else {
+                continue;
+            };
+            let Some(rect) = rect.as_array() else {
+                continue;
+            };
+            let [x, y, w, h] =
+                [0, 1, 2, 3].map(|i| rect.get(i).and_then(Value::as_f64).unwrap_or(0.0));
+            boxes
+                .entry(id)
+                .and_modify(|b| {
+                    let right = (b[0] + b[2]).max(x + w);
+                    let bottom = (b[1] + b[3]).max(y + h);
+                    b[0] = b[0].min(x);
+                    b[1] = b[1].min(y);
+                    b[2] = right - b[0];
+                    b[3] = bottom - b[1];
+                })
+                .or_insert([x, y, w, h]);
+        }
+        let known = backend_ids.into_iter().flatten().collect();
+        Some(Self {
+            viewport,
+            boxes,
+            known,
+        })
+    }
+}
+
+/// Capture layout for ranking. Failures only lose the viewport signal.
+async fn capture_layout(client: &CdpClient, session_id: &str) -> Option<LayoutInfo> {
+    let (snapshot, metrics) = futures_util::future::join(
+        client.send_command(
+            "DOMSnapshot.captureSnapshot",
+            Some(serde_json::json!({ "computedStyles": [] })),
+            Some(session_id),
+        ),
+        client.send_command_no_params("Page.getLayoutMetrics", Some(session_id)),
+    )
+    .await;
+    LayoutInfo::from_cdp(&snapshot.ok()?, &metrics.ok()?)
 }
 
 /// Describes a control from its icon, image file, stable attribute, and nearest row.
@@ -1149,8 +1901,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
         let name = extract_ax_string(&node.name);
         let value_text = extract_ax_string_opt(&node.value);
 
-        let (level, checked, expanded, selected, disabled, required) =
-            extract_properties(&node.properties);
+        let props = extract_properties(&node.properties);
 
         if (node.ignored.unwrap_or(false) && role != "RootWebArea") || role == "InlineTextBox" {
             tree_nodes.push(TreeNode::empty());
@@ -1161,12 +1912,15 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
         tree_nodes.push(TreeNode {
             role,
             name,
-            level,
-            checked,
-            expanded,
-            selected,
-            disabled,
-            required,
+            level: props.level,
+            checked: props.checked,
+            expanded: props.expanded,
+            selected: props.selected,
+            disabled: props.disabled,
+            required: props.required,
+            focused: props.focused,
+            modal: props.modal,
+            pressed: props.pressed,
             value_text,
             backend_node_id: node.backend_d_o_m_node_id,
             children: Vec::new(),
@@ -1275,12 +2029,18 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
     (tree_nodes, root_indices)
 }
 
+/// Render `nodes[idx]` and its subtree. `indent` is the printed indentation;
+/// `depth` counts only the ancestors plain `-i` would print, so the
+/// structural lines budgeted `-i -c` adds do not change what `-d` cuts.
+#[allow(clippy::too_many_arguments)]
 fn render_tree(
     nodes: &[TreeNode],
     idx: usize,
     indent: usize,
-    output: &mut String,
+    depth: usize,
+    output: &mut Vec<SnapshotLine>,
     options: &SnapshotOptions,
+    layout: Option<&LayoutInfo>,
 ) {
     let node = &nodes[idx];
 
@@ -1291,13 +2051,13 @@ fn render_tree(
     {
         // Ignored node -- still render children
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
+            render_tree(nodes, child, indent, depth, output, options, layout);
         }
         return;
     }
 
     if let Some(max_depth) = options.depth {
-        if indent > max_depth {
+        if depth > max_depth {
             return;
         }
     }
@@ -1307,21 +2067,40 @@ fn render_tree(
     // Skip root WebArea wrapper
     if role == "RootWebArea" || role == "WebArea" {
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
+            render_tree(nodes, child, indent, depth, output, options, layout);
         }
         return;
     }
 
-    if options.interactive && !node.has_ref {
+    // Budgeted `-i -c` keeps row lines so compaction can collapse whole rows
+    // and keep each row's cells together. It keeps the table, list, and tree
+    // wrappers too: dropping those makes the rows or links of separate short
+    // tables and lists adjacent siblings, and compaction collapses them as
+    // one repeated run. These lines have no refs, so this changes neither
+    // plain `-i` output nor ref allocation, and they do not count toward
+    // `-d`.
+    let keeps_repeated_structure = options.interactive
+        && options.compact
+        && options.max_tokens.is_some()
+        && !node.has_ref
+        && matches!(
+            role.as_str(),
+            "row" | "rowgroup" | "table" | "grid" | "treegrid" | "list" | "tree"
+        );
+    if options.interactive && !node.has_ref && !keeps_repeated_structure {
         // In interactive mode, skip non-interactive but render children
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
+            render_tree(nodes, child, indent, depth, output, options, layout);
         }
         return;
     }
 
     let prefix = "  ".repeat(indent);
     let mut line = format!("{}- {}", prefix, role);
+    let interactive = INTERACTIVE_ROLES.contains(&role.as_str()) || node.cursor_info.is_some();
+    // Budgeted compact snapshots shorten long text; interactive names stay whole.
+    let budgeted = options.compact && options.max_tokens.is_some();
+    let truncate = budgeted && !interactive;
 
     // Use ARIA name if available, only fall back to cursor-interactive textContent in interactive mode since their visible text in child nodes is filtered out
     let unescaped_display_name = if options.interactive {
@@ -1329,10 +2108,14 @@ fn render_tree(
     } else {
         node.name.as_str()
     };
+    let display_name_full = normalize_snapshot_name(unescaped_display_name);
     if !unescaped_display_name.is_empty() {
-        if let Ok(display_name) =
-            serde_json::to_string(&normalize_snapshot_name(unescaped_display_name))
-        {
+        let shown_name = if truncate {
+            compact::truncate_text(&display_name_full)
+        } else {
+            std::borrow::Cow::Borrowed(display_name_full.as_str())
+        };
+        if let Ok(display_name) = serde_json::to_string(&shown_name) {
             line.push_str(&format!(" {}", display_name));
         }
     }
@@ -1391,17 +2174,53 @@ fn render_tree(
     }
 
     // Value
+    let mut has_value = false;
     if let Some(ref val) = node.value_text {
         if !val.is_empty() && val != &node.name {
-            line.push_str(&format!(": {}", val));
+            // Values are shortened on interactive lines too: a long textarea
+            // value would otherwise cost more than the whole budget.
+            if budgeted {
+                line.push_str(&format!(": {}", compact::truncate_text(val)));
+            } else {
+                line.push_str(&format!(": {}", val));
+            }
+            has_value = true;
         }
     }
 
-    output.push_str(&line);
-    output.push('\n');
+    output.push(SnapshotLine {
+        text: line,
+        depth: indent,
+        role: role.clone(),
+        interactive,
+        has_ref: node.ref_id.is_some(),
+        named: !unescaped_display_name.is_empty(),
+        name: display_name_full,
+        has_value,
+        focused: node.focused,
+        modal: node.modal,
+        expanded: node.expanded,
+        active: node.selected == Some(true)
+            || node.checked.as_deref() == Some("true")
+            || node.pressed,
+        placement: layout.map_or(Placement::Unknown, |l| l.placement(node.backend_node_id)),
+    });
 
+    let child_depth = if keeps_repeated_structure {
+        depth
+    } else {
+        depth + 1
+    };
     for &child in &node.children {
-        render_tree(nodes, child, indent + 1, output, options);
+        render_tree(
+            nodes,
+            child,
+            indent + 1,
+            child_depth,
+            output,
+            options,
+            layout,
+        );
     }
 }
 
@@ -1479,54 +2298,64 @@ fn extract_ax_string_opt(value: &Option<AXValue>) -> Option<String> {
     }
 }
 
-type NodeProperties = (
-    Option<i64>,    // level
-    Option<String>, // checked
-    Option<bool>,   // expanded
-    Option<bool>,   // selected
-    Option<bool>,   // disabled
-    Option<bool>,   // required
-);
+#[derive(Default)]
+struct NodeProperties {
+    level: Option<i64>,
+    checked: Option<String>,
+    expanded: Option<bool>,
+    selected: Option<bool>,
+    disabled: Option<bool>,
+    required: Option<bool>,
+    focused: bool,
+    modal: bool,
+    pressed: bool,
+}
 
 fn extract_properties(props: &Option<Vec<AXProperty>>) -> NodeProperties {
-    let mut level = None;
-    let mut checked = None;
-    let mut expanded = None;
-    let mut selected = None;
-    let mut disabled = None;
-    let mut required = None;
+    let mut out = NodeProperties::default();
 
     if let Some(properties) = props {
         for prop in properties {
+            let value = prop.value.value.as_ref();
             match prop.name.as_str() {
                 "level" => {
-                    level = prop.value.value.as_ref().and_then(|v| v.as_i64());
+                    out.level = value.and_then(|v| v.as_i64());
                 }
                 "checked" => {
-                    checked = prop.value.value.as_ref().map(|v| match v {
+                    out.checked = value.map(|v| match v {
                         Value::String(s) => s.clone(),
                         Value::Bool(b) => b.to_string(),
                         _ => "false".to_string(),
                     });
                 }
                 "expanded" => {
-                    expanded = prop.value.value.as_ref().and_then(|v| v.as_bool());
+                    out.expanded = value.and_then(|v| v.as_bool());
                 }
                 "selected" => {
-                    selected = prop.value.value.as_ref().and_then(|v| v.as_bool());
+                    out.selected = value.and_then(|v| v.as_bool());
                 }
                 "disabled" => {
-                    disabled = prop.value.value.as_ref().and_then(|v| v.as_bool());
+                    out.disabled = value.and_then(|v| v.as_bool());
                 }
                 "required" => {
-                    required = prop.value.value.as_ref().and_then(|v| v.as_bool());
+                    out.required = value.and_then(|v| v.as_bool());
+                }
+                "focused" => {
+                    out.focused = value.and_then(|v| v.as_bool()).unwrap_or(false);
+                }
+                "modal" => {
+                    out.modal = value.and_then(|v| v.as_bool()).unwrap_or(false);
+                }
+                "pressed" => {
+                    out.pressed = matches!(value, Some(Value::Bool(true)))
+                        || matches!(value, Some(Value::String(s)) if s == "true");
                 }
                 _ => {}
             }
         }
     }
 
-    (level, checked, expanded, selected, disabled, required)
+    out
 }
 
 /// Build the set of texts to de-duplicate cursor-interactive elements against.

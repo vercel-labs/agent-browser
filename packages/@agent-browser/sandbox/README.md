@@ -23,7 +23,7 @@ import { runAgentBrowserCommand, withAgentBrowserSandbox } from "@agent-browser/
 
 const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
   await runAgentBrowserCommand(sandbox, ["open", "https://example.com"]);
-  const result = await runAgentBrowserCommand(sandbox, ["snapshot", "-i", "-c"], {
+  const result = await runAgentBrowserCommand(sandbox, ["snapshot", "-i"], {
     json: false,
   });
   return result.stdout;
