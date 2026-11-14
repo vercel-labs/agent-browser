@@ -634,7 +634,10 @@ pub fn state_show(path: &str) -> Result<Value, String> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
         "encrypted": encrypted,
-        "summary": format!("{} cookies, {} origins", state.cookies.len(), state.origins.len()),
+        "summary": {
+            "cookies": state.cookies.len(),
+            "origins": state.origins.len(),
+        },
         "state": state,
     }))
 }
@@ -904,6 +907,24 @@ mod tests {
     fn test_state_show_nonexistent_file() {
         let result = state_show("/tmp/nonexistent-agent-browser-state-file.json");
         assert!(result.is_err());
+    }
+
+    /// The CLI renders `summary` as an object with `cookies` and `origins`
+    /// counts, so it must stay structured rather than preformatted text.
+    #[test]
+    fn test_state_show_reports_summary_as_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("summary.json");
+        std::fs::write(
+            &path,
+            r#"{"cookies":[{"name":"a","value":"1","domain":".example.com","path":"/","expires":0,"size":1,"httpOnly":false,"secure":false,"sameSite":"Lax"}],"origins":[]}"#,
+        )
+        .unwrap();
+
+        let result = state_show(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(result["summary"]["cookies"], 1);
+        assert_eq!(result["summary"]["origins"], 0);
     }
 
     #[test]
