@@ -2211,10 +2211,12 @@ Examples:
             r##"
 agent-browser click - Click an element
 
-Usage: agent-browser click <selector> [--new-tab] [--human]
+Usage: agent-browser click <selector> [--button <button>] [--modifiers <keys>] [--new-tab] [--human]
 
 Clicks on the specified element. The selector can be a CSS selector,
 XPath, or an element reference from snapshot (e.g., @e1).
+
+Flags can go before or after the selector. Unknown flags are rejected.
 
 If another element covers the click point, agent-browser reports the
 covering element instead of dispatching a click to the wrong target.
@@ -2224,9 +2226,16 @@ is hidden, disabled, or outside the viewport. With --new-tab, click opens
 the link's URL directly, so these checks do not apply.
 
 Options:
+  --button <button>    Mouse button to press: left (default), right, middle,
+                       back, forward. A right click fires contextmenu, a middle
+                       click fires auxclick.
+  --modifiers <keys>   Keys held during the click: alt, control (alias ctrl),
+                       meta (aliases cmd, command), shift. Join several with a
+                       comma or a plus, such as control,shift.
   --new-tab            Open link in a new tab instead of navigating current tab.
                        The new tab inherits session setup before its first load.
                        Only works on elements with an href attribute.
+                       Cannot be combined with --button or --modifiers.
   --human              Approach along a reproducible eased curve
                        Starts at the last pointer or element interaction
 
@@ -2241,19 +2250,30 @@ Examples:
   agent-browser click "//button[@type='submit']"
   agent-browser click @e3 --new-tab
   agent-browser click @e3 --human
+  agent-browser click @e3 --button right
+  agent-browser click @e4 --button middle
+  agent-browser click @e5 --modifiers control,shift
 "##
         }
         "dblclick" => {
             r##"
 agent-browser dblclick - Double-click an element
 
-Usage: agent-browser dblclick <selector>
+Usage: agent-browser dblclick <selector> [--button <button>] [--modifiers <keys>] [--human]
 
 Double-clicks on the specified element. Useful for text selection
 or triggering double-click handlers.
 
 Double-click fails, instead of reporting success, when the element is
 hidden, disabled, or outside the viewport.
+
+Options:
+  --button <button>    Mouse button: left (default), right, middle, back, forward
+  --modifiers <keys>   Keys held during the click: alt, control (alias ctrl),
+                       meta (aliases cmd, command), shift. Join several with a
+                       comma or a plus, such as control,shift.
+  --human              Approach along a reproducible eased curve
+                       Starts at the last pointer or element interaction
 
 Global Options:
   --json               Output as JSON
@@ -2262,6 +2282,7 @@ Global Options:
 Examples:
   agent-browser dblclick "#editable-text"
   agent-browser dblclick @e5
+  agent-browser dblclick @e2 --modifiers shift
 "##
         }
         "fill" => {

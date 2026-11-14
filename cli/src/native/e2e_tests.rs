@@ -139,6 +139,7 @@ async fn e2e_empty_table_cell_refs_resolve() {
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "click_probe" => include_str!("test_fixtures/click_probe.html"),
         "wheel_probe" => include_str!("test_fixtures/wheel_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
@@ -15271,6 +15272,160 @@ async fn e2e_find_role_document_matches_root() {
     assert_success(&resp);
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+async fn click_probe_reset_log(state: &mut DaemonState) {
+    let resp = execute_command(
+        &json!({ "id": "click-probe-reset", "action": "evaluate", "script": "window.__log = []; 0" }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+}
+
+async fn click_probe_read_log(state: &mut DaemonState) -> Vec<String> {
+    let resp = execute_command(
+        &json!({ "id": "click-probe-read", "action": "evaluate", "script": "window.__log" }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("click log is not an array: {}", resp))
+        .iter()
+        .filter_map(|entry| entry.as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_buttons_modifiers_and_double_click() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": native_test_fixture_url("click_probe")}),
+            &mut state,
+        )
+        .await,
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "click", "selector": "#target", "button": "right"}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry.starts_with("contextmenu:b2")),
+        "right click should open a context menu: {:?}",
+        log
+    );
+    assert!(
+        !log.iter().any(|entry| entry.starts_with("click:")),
+        "right click should not fire a click event: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "4", "action": "click", "selector": "#target", "button": "middle"}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry.starts_with("auxclick:b1")),
+        "middle click should fire auxclick: {:?}",
+        log
+    );
+    assert!(
+        !log.iter().any(|entry| entry.starts_with("click:")),
+        "middle click should not fire a click event: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "5", "action": "click", "selector": "#target", "modifiers": 10}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry == "click:b0:d1:c1s1a0m0"),
+        "ctrl+shift click should report both modifiers: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "6", "action": "dblclick", "selector": "#target"}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    let double_click_events: Vec<&String> = log
+        .iter()
+        .filter(|entry| entry.starts_with("click:") || entry.starts_with("dblclick:"))
+        .collect();
+    assert_eq!(
+        double_click_events,
+        [
+            "click:b0:d1:c0s0a0m0",
+            "click:b0:d2:c0s0a0m0",
+            "dblclick:b0:d2:c0s0a0m0",
+        ],
+        "double click event sequence: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "7", "action": "dblclick", "selector": "#target", "button": "middle", "modifiers": 8}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry == "auxclick:b1:d2:c0s1a0m0"),
+        "shift middle double click should reach the page: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    let resp = execute_command(
+        &json!({"id": "8", "action": "click", "selector": "#target", "button": "bogus"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "bogus button must fail: {}", resp);
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.is_empty(),
+        "failed click must not reach the page: {:?}",
+        log
+    );
+
+    assert_success(&execute_command(&json!({"id": "99", "action": "close"}), &mut state).await);
 }
 
 #[tokio::test]
