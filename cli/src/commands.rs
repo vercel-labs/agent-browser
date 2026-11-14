@@ -478,32 +478,8 @@ fn parse_command_inner(
         "flow" => parse_flow(&rest, &id),
 
         // === Core Actions ===
-        "click" => {
-            let new_tab = rest.contains(&"--new-tab");
-            let human = rest.contains(&"--human");
-            let sel = rest
-                .iter()
-                .find(|arg| **arg != "--new-tab" && **arg != "--human")
-                .ok_or_else(|| ParseError::MissingArguments {
-                    context: "click".to_string(),
-                    usage: "click <selector> [--new-tab] [--human]",
-                })?;
-            let mut cmd = json!({ "id": id, "action": "click", "selector": sel });
-            if new_tab {
-                cmd["newTab"] = json!(true);
-            }
-            if human {
-                cmd["inputMode"] = json!("human");
-            }
-            Ok(cmd)
-        }
-        "dblclick" => {
-            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "dblclick".to_string(),
-                usage: "dblclick <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "dblclick", "selector": sel }))
-        }
+        "click" => parse_click(&rest, &id, "click"),
+        "dblclick" => parse_click(&rest, &id, "dblclick"),
         "fill" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "fill".to_string(),
@@ -3510,6 +3486,69 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+/// Parse a click or dblclick command, accepting flags before or after the selector.
+fn parse_click(rest: &[&str], id: &str, action: &'static str) -> Result<Value, ParseError> {
+    let usage = match action {
+        "click" => "click <selector> [--button <left|right|middle|back|forward>] [--modifiers <alt,control,meta,shift>] [--new-tab] [--human]",
+        _ => "dblclick <selector> [--button <left|right|middle|back|forward>] [--modifiers <alt,control,meta,shift>] [--human]",
+    };
+
+    let mut cmd = json!({ "id": id, "action": action });
+    let mut selector: Option<&str> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        let arg = rest[i];
+        match arg {
+            "--human" => {
+                cmd["inputMode"] = json!("human");
+                i += 1;
+            }
+            "--new-tab" if action == "click" => {
+                cmd["newTab"] = json!(true);
+                i += 1;
+            }
+            "--button" | "--modifiers" => {
+                let value = rest
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: format!("{} {}", action, arg),
+                        usage,
+                    })?;
+                if arg == "--button" {
+                    cmd["button"] = json!(value);
+                } else {
+                    let modifiers = crate::native::pointer::Modifiers::parse_list(value)
+                        .map_err(|message| ParseError::InvalidValue { message, usage })?;
+                    cmd["modifiers"] = json!(modifiers.mask());
+                }
+                i += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unknown flag for {}: {}", action, other),
+                    usage,
+                })
+            }
+            other => {
+                if selector.is_none() {
+                    selector = Some(other);
+                }
+                i += 1;
+            }
+        }
+    }
+
+    let selector = selector.ok_or_else(|| ParseError::MissingArguments {
+        context: action.to_string(),
+        usage,
+    })?;
+    cmd["selector"] = json!(selector);
+
+    crate::native::pointer::ClickPlan::from_command(&cmd, 1)
+        .map_err(|message| ParseError::InvalidValue { message, usage })?;
+    Ok(cmd)
+}
+
 /// Parse mouse arguments, requiring finite coordinates and wheel deltas.
 fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["move", "down", "up", "wheel"];
@@ -4999,6 +5038,54 @@ mod tests {
         let cmd = parse_command(&args("click @e1 --human"), &default_flags()).unwrap();
         assert_eq!(cmd["selector"], "@e1");
         assert_eq!(cmd["inputMode"], "human");
+    }
+
+    #[test]
+    fn test_click_accepts_flags_before_and_after_the_selector() {
+        let cmd = parse_command(&args("click --button right #item"), &default_flags()).unwrap();
+        assert_eq!(cmd["selector"], "#item");
+        assert_eq!(cmd["button"], "right");
+
+        let cmd = parse_command(
+            &args("click #item --button middle --modifiers ctrl+shift"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["button"], "middle");
+        assert_eq!(cmd["modifiers"], 10);
+        assert!(cmd.get("clickCount").is_none());
+    }
+
+    #[test]
+    fn test_dblclick_accepts_button_modifiers_and_human() {
+        let cmd = parse_command(
+            &args("dblclick #b --button right --modifiers shift --human"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "dblclick");
+        assert_eq!(cmd["selector"], "#b");
+        assert_eq!(cmd["button"], "right");
+        assert_eq!(cmd["modifiers"], 8);
+        assert_eq!(cmd["inputMode"], "human");
+    }
+
+    #[test]
+    fn test_click_rejects_bad_flags_and_combinations() {
+        for line in [
+            "click #b --button bogus",
+            "click #b --modifiers ctrl,super",
+            "click #b --button",
+            "click #b --bogus",
+            "click #b --new-tab --button right",
+            "dblclick #b --new-tab",
+        ] {
+            assert!(
+                parse_command(&args(line), &default_flags()).is_err(),
+                "{} should be rejected",
+                line
+            );
+        }
     }
 
     #[test]
