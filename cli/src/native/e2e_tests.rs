@@ -14909,9 +14909,9 @@ async fn e2e_discovered_popup_following_resets_old_refs() {
     .await;
     assert_success(&resp);
     let warning = resp["warning"].as_str().unwrap_or_default();
-    assert!(
-        warning.contains("New tab t2 opened in the background"),
-        "{warning}"
+    assert_eq!(
+        warning,
+        "New tab t2 opened in the background. Switch to it with `tab t2`."
     );
 
     let resp = execute_command(&json!({ "id": "5", "action": "url" }), &mut state).await;

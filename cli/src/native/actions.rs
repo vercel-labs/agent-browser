@@ -630,7 +630,7 @@ pub struct DaemonState {
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
     follow_opened_tabs: bool,
-    tab_notices: Vec<(u32, bool)>,
+    tab_notices: Vec<String>,
     /// Cross-origin iframe frame_id → dedicated CDP session_id.
     /// Populated by Target.attachedToTarget events from Target.setAutoAttach.
     /// Entries are retained across tab changes because Chrome does not emit a
@@ -1285,26 +1285,6 @@ impl DaemonState {
         self.apply_drained_events(drained).await
     }
 
-    /// Warning text for a tab that opened in the background, or that became
-    /// the active tab without a tab command.
-    fn tab_notice(&self, tab_id: u32, active: bool) -> String {
-        let tab = super::browser::format_tab_id(tab_id);
-        let tabs = self.browser.as_ref().map(|mgr| mgr.tab_list());
-        let url = tabs
-            .iter()
-            .flatten()
-            .find(|entry| entry["tabId"] == tab.as_str())
-            .and_then(|entry| entry["url"].as_str())
-            .filter(|url| !url.is_empty() && *url != "about:blank")
-            .map(|url| format!(": {url}"))
-            .unwrap_or_default();
-        if active {
-            format!("Active tab is now {tab}{url}. Refs from the previous tab were cleared; run `snapshot`.")
-        } else {
-            format!("New tab {tab} opened in the background{url}. Switch to it with `tab {tab}`.")
-        }
-    }
-
     fn reset_active_page_scope(&mut self) {
         self.ref_map.begin_snapshot();
         self.active_iframe_sessions.clear();
@@ -1355,7 +1335,7 @@ impl DaemonState {
             }
             let landed = self.browser.as_ref().and_then(|mgr| mgr.active_tab_id());
             if let (Some(_), Some(_), Some(tab_id)) = (previous, current, landed) {
-                self.tab_notices.push((tab_id, true));
+                self.tab_notices.push(tab_notice(tab_id, true));
             }
         }
         result
@@ -1498,7 +1478,7 @@ impl DaemonState {
                 Ok(())
             };
             if let Some(tab_id) = background_tab {
-                self.tab_notices.push((tab_id, false));
+                self.tab_notices.push(tab_notice(tab_id, false));
             }
             match setup_result {
                 Ok(()) => {}
@@ -1642,7 +1622,7 @@ impl DaemonState {
                 Ok(())
             };
             if let Some(tab_id) = background_tab {
-                self.tab_notices.push((tab_id, false));
+                self.tab_notices.push(tab_notice(tab_id, false));
             }
             match setup_result {
                 Ok(()) => {}
@@ -3026,8 +3006,8 @@ async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
     let outer = state.flow.enter();
     let mut resp = execute_command_inner(cmd, state).await;
     state.follow_opened_tabs = false;
-    for (tab_id, active) in std::mem::take(&mut state.tab_notices) {
-        append_warning(&mut resp, &state.tab_notice(tab_id, active));
+    for notice in std::mem::take(&mut state.tab_notices) {
+        append_warning(&mut resp, &notice);
     }
     if let Some(seq) = state.flow.exit(outer) {
         let ok = resp.get("success") == Some(&json!(true));
@@ -4618,6 +4598,18 @@ fn may_replace_wedged_tab(state: &DaemonState) -> bool {
 }
 
 /// Add to the response's warning instead of replacing one already set.
+/// Warning for a tab that opened in the background, or that became active
+/// without a tab command. It carries only the daemon-assigned tab id, never
+/// a URL or title, because those are page-controlled text.
+fn tab_notice(tab_id: u32, active: bool) -> String {
+    let tab = super::browser::format_tab_id(tab_id);
+    if active {
+        format!("Active tab is now {tab}. Refs from the previous tab were cleared; run `snapshot`.")
+    } else {
+        format!("New tab {tab} opened in the background. Switch to it with `tab {tab}`.")
+    }
+}
+
 fn append_warning(resp: &mut Value, warning: &str) {
     let merged = match resp.get("warning").and_then(Value::as_str) {
         Some(existing) => format!("{}\n{}", existing, warning),

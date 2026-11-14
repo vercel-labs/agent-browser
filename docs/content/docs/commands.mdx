@@ -325,13 +325,13 @@ agent-browser click @e3         # uses docs's refs
 
 A new tab becomes the active tab only when the command that is running opened it: a click, key press, `type`, `fill`, `select`, `check`, mouse action, or `eval` on the active tab. Clicking a `target=_blank` link, for example, switches to the tab it opens.
 
-A tab the page opens by itself, such as a timer popup, ad, sign-in helper, or chat widget, is registered in the background. The session stays on its tab and its refs stay valid, and the response names the tab in a warning:
+A tab the page opens by itself, such as a timer popup, ad, sign-in helper, or chat widget, is registered in the background. The session stays on its tab and its refs stay valid, and the response names the tab in a warning. The warning carries the tab id only; run `tab list` to see its URL:
 
 ```text
-New tab t2 opened in the background: https://example.com/chat. Switch to it with `tab t2`.
+New tab t2 opened in the background. Switch to it with `tab t2`.
 ```
 
-Whenever the active tab changes, refs from the previous snapshot stop working with `Unknown ref: e2`; run `snapshot` again. When the change was not a tab command, such as following a tab a click opened or returning after the active tab was closed, the response warns ``Active tab is now t2: <url>. Refs from the previous tab were cleared; run `snapshot`.`` Sessions started with `--pin-tab` never follow a discovered tab.
+Whenever the active tab changes, refs from the previous snapshot stop working with `Unknown ref: e2`; run `snapshot` again. When the change was not a tab command, such as following a tab a click opened or returning after the active tab was closed, the response warns ``Active tab is now t2. Refs from the previous tab were cleared; run `snapshot`.`` Sessions started with `--pin-tab` never follow a discovered tab.
 
 ### Discarded tab revival
 
