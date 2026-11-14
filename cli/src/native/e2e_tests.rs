@@ -16321,7 +16321,9 @@ async fn e2e_firefox_click_buttons_modifiers_and_double_click() {
 
     let reset = "window.__log = []; true";
     assert_eq!(firefox_eval(&mut state, reset).await, json!(true));
-    assert_success(&firefox_act(&mut state, "click", "#target", json!({ "button": "right" })).await);
+    assert_success(
+        &firefox_act(&mut state, "click", "#target", json!({ "button": "right" })).await,
+    );
     let lines = firefox_log(&mut state).await;
     assert!(
         lines.iter().any(|line| line.starts_with("contextmenu:2:")),
@@ -16333,7 +16335,15 @@ async fn e2e_firefox_click_buttons_modifiers_and_double_click() {
     );
 
     assert_eq!(firefox_eval(&mut state, reset).await, json!(true));
-    assert_success(&firefox_act(&mut state, "click", "#target", json!({ "button": "middle" })).await);
+    assert_success(
+        &firefox_act(
+            &mut state,
+            "click",
+            "#target",
+            json!({ "button": "middle" }),
+        )
+        .await,
+    );
     let lines = firefox_log(&mut state).await;
     assert!(
         lines.iter().any(|line| line.starts_with("auxclick:1:")),
@@ -16341,7 +16351,15 @@ async fn e2e_firefox_click_buttons_modifiers_and_double_click() {
     );
 
     assert_eq!(firefox_eval(&mut state, reset).await, json!(true));
-    assert_success(&firefox_act(&mut state, "click", "#target", json!({ "modifiers": 2 | 8 })).await);
+    assert_success(
+        &firefox_act(
+            &mut state,
+            "click",
+            "#target",
+            json!({ "modifiers": 2 | 8 }),
+        )
+        .await,
+    );
     let lines = firefox_log(&mut state).await;
     assert!(
         lines.iter().any(|line| line == "click:0:1:11"),

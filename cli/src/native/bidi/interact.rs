@@ -17,10 +17,10 @@ use crate::native::element::{
     intercepted_error, not_actionable_error, ACTIONABILITY_JS, BLOCKER_AT_JS,
 };
 use crate::native::interaction::PendingRelease;
-use crate::native::pointer::{ClickPlan, Modifiers, MouseButton};
 use crate::native::interaction::{
     dispatch_event_js, CLICK_HREF_JS, FOCUS_JS, HIGHLIGHT_JS, SCROLL_BY_JS, SCROLL_INTO_VIEW_JS,
 };
+use crate::native::pointer::{ClickPlan, Modifiers, MouseButton};
 
 /// Reports BiDi's in-view center plus the shared actionability and blocker verdicts.
 fn prepare_js() -> String {
