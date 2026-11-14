@@ -2028,7 +2028,7 @@
       "inputSchema": {
         "properties": {
           "key": {
-            "description": "Key name such as Enter, Tab, or Control+a.",
+            "description": "Key name such as Enter, Tab, w, Shift, or KeyW.",
             "type": "string"
           },
           "session": {
@@ -2056,7 +2056,7 @@
       "inputSchema": {
         "properties": {
           "key": {
-            "description": "Key name such as Enter, Tab, or Control+a.",
+            "description": "Key name such as Enter, Tab, w, Shift, or KeyW.",
             "type": "string"
           },
           "session": {

@@ -125,6 +125,7 @@ agent-browser click @e1 --new-tab         # open a link in a new tab
 agent-browser fill @e2 "hello"            # clear, then type
 agent-browser type @e2 " world"           # type without clearing
 agent-browser press Enter                 # key at current focus (Control+a for combos)
+agent-browser keydown w                   # hold a key (games see code KeyW); release with keyup w
 agent-browser select @e4 "option-value"   # by value or visible label
 agent-browser check @e3                   # also: uncheck, hover, focus, dblclick
 agent-browser upload @e5 file.pdf         # upload file(s)
