@@ -14,6 +14,7 @@ use super::interact::{act_element, perform_actions, PointerAction};
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
 use crate::native::actions::{raw_key, DaemonState};
+use crate::native::pointer::MouseButton;
 use crate::native::element::ELEMENT_CHECKED_JS;
 use crate::native::interaction::{
     CLEAR_INPUT_JS, CLEAR_VALUE_JS, CLICK_CHECKBOX_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
@@ -405,7 +406,7 @@ async fn set_checked(
             target,
             selector,
             PointerAction::Check,
-            pointer_click(&Origin::Element(target.shared_id.clone()), "left", 1),
+            pointer_click(&Origin::Element(target.shared_id.clone()), MouseButton::Left, 1),
             json!({}),
         )
         .await?;

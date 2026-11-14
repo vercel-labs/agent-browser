@@ -110,6 +110,21 @@ impl Modifiers {
         (0..=15).contains(&mask).then_some(Self(mask as i32))
     }
 
+    /// The WebDriver key names to hold for this mask, in a stable order.
+    pub fn key_names(self) -> Vec<&'static str> {
+        Self::NAMES
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.0 & (1 << index) != 0)
+            .map(|(_, name)| match *name {
+                "alt" => "Alt",
+                "control" => "Control",
+                "meta" => "Meta",
+                _ => "Shift",
+            })
+            .collect()
+    }
+
     pub fn mask(self) -> i32 {
         self.0
     }

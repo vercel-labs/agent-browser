@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 
 use crate::native::actions::{plan_pointer_move, PointerMoveOptions, RawKey};
 use crate::native::interaction::{char_to_key_info, key_text, named_key_info};
+use crate::native::pointer::MouseButton;
 
 /// Target of a pointer action: a shared element id or a viewport position.
 #[derive(Clone, Debug)]
@@ -77,8 +78,8 @@ pub(crate) fn key_event_actions(event_type: &str, key: &str) -> Value {
 }
 
 /// Build the BiDi actions for a click, repeating the pair for the click count.
-pub(crate) fn pointer_click(origin: &Origin, button: &str, click_count: u32) -> Value {
-    let button = mouse_button(button);
+pub(crate) fn pointer_click(origin: &Origin, button: MouseButton, click_count: u32) -> Value {
+    let button = bidi_button(button);
     let mut actions = vec![pointer_move(origin)];
     for _ in 0..click_count.max(1) {
         actions.push(json!({ "type": "pointerDown", "button": button }));
@@ -293,14 +294,18 @@ pub(crate) fn mouse_button_name(button: u8) -> &'static str {
     }
 }
 
-fn mouse_button(button: &str) -> u8 {
-    match button.to_ascii_lowercase().as_str() {
-        "middle" => 1,
-        "right" => 2,
-        "back" => 3,
-        "forward" => 4,
-        _ => 0,
+fn bidi_button(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        MouseButton::Back => 3,
+        MouseButton::Forward => 4,
     }
+}
+
+fn mouse_button(button: &str) -> u8 {
+    MouseButton::parse(button).map_or(0, bidi_button)
 }
 
 fn key_value(key_name: &str) -> String {
@@ -592,7 +597,7 @@ mod tests {
     #[test]
     fn click_with_click_count_two_emits_two_down_up_pairs() {
         let origin = Origin::Viewport { x: 10.0, y: 20.0 };
-        let actions = pointer_click(&origin, "left", 2);
+        let actions = pointer_click(&origin, MouseButton::Left, 2);
         let steps = steps(&actions);
         let downs = steps.iter().filter(|s| s["type"] == "pointerDown").count();
         let ups = steps.iter().filter(|s| s["type"] == "pointerUp").count();
