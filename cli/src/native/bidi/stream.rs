@@ -418,8 +418,9 @@ mod tests {
         use crate::native::actions::{execute_command, DaemonState};
         use crate::native::stream::{IdleActivity, StreamServer};
 
-        let (ff, events, calls) = fake_session().await;
+        let (mut ff, events, calls) = fake_session().await;
         std::mem::forget(events);
+        ff.data_collector = Some("collector".into());
         let activity = Arc::new(IdleActivity::new());
         let (server, slot) =
             StreamServer::start_without_client(0, "firefox-idle".into(), true, activity.clone())
