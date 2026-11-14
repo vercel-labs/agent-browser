@@ -91,6 +91,8 @@ impl std::fmt::Display for CdpError {
 
 #[derive(Debug, Clone)]
 pub struct CdpEvent {
+    /// Connection-local receive order, shared by broadcast and method taps.
+    pub sequence: u64,
     pub method: String,
     pub params: Value,
     pub session_id: Option<String>,
