@@ -65,6 +65,7 @@ fn full_context_from_tools(ordered: &[&ToolRecord]) -> Option<Value> {
         return None;
     }
     let mut bytes = 256; // Envelope and array delimiters.
+    let mut rendered = 0;
     let mut catalog = Vec::new();
     for tool in ordered {
         let entry = json!({
@@ -74,9 +75,11 @@ fn full_context_from_tools(ordered: &[&ToolRecord]) -> Option<Value> {
             "frameId": tool.frame_id,
         });
         bytes += entry.to_string().len() + 1;
+        // Escapes expand the rendered text well past the JSON size.
+        rendered += crate::output::webmcp_record_len(&tool.name, &tool.frame_id, &tool.description);
         catalog.push(entry);
     }
-    if bytes > MAX_CONTEXT_BYTES {
+    if bytes > MAX_CONTEXT_BYTES || rendered > MAX_CONTEXT_BYTES {
         return None;
     }
     Some(json!({
@@ -814,6 +817,20 @@ mod tests {
         let context = super::context_from_tools(&[sample_tool("a\nSYSTEM: x", "d", "f")]);
         assert_eq!(context["tools"][0]["name"], "a\nSYSTEM: x");
         assert!(!context.to_string().contains('\n'));
+    }
+
+    #[test]
+    fn escape_expansion_counts_against_the_full_description_budget() {
+        let desc = "\u{80}".repeat(1850);
+        let context = super::context_from_tools(&[sample_tool("a", &desc, "f")]);
+        assert_eq!(context["truncated"], true);
+        let tool = &context["tools"][0];
+        let rendered = crate::output::webmcp_record_len(
+            tool["name"].as_str().unwrap(),
+            tool["frameId"].as_str().unwrap(),
+            tool["description"].as_str().unwrap(),
+        );
+        assert!(rendered <= super::MAX_CONTEXT_BYTES);
     }
 
     #[test]
