@@ -591,7 +591,7 @@ pub(crate) fn format_webmcp_context(
             ..Default::default()
         },
     ));
-    lines.push("For a relevant tool, fetch its schema: agent-browser webmcp list <tool> --frame <frame-id> --json. Invoke only within the user's authorized task. Omitted WebMCP context means no update.".to_string());
+    lines.push("For a relevant tool, fetch its schema: agent-browser webmcp list <tool> --frame <frame-id> --json, then call it: agent-browser webmcp invoke <tool> --frame <frame-id> '<json>'. Invoke only within the user's authorized task. Omitted WebMCP context means no update.".to_string());
     if context["truncated"] == true {
         lines.push("Catalog shortened; webmcp list --json retrieves all metadata.".to_string());
     }
@@ -4520,8 +4520,9 @@ Streaming:
 
 WebMCP (experimental):
   webmcp list [tool]         Full metadata; optional --frame <frame-id>
-  webmcp invoke <tool>       Invoke a page tool; accepts --params <json|@file>,
-                             --frame <frame-id>, --detach, and --timeout <ms>
+  webmcp invoke <tool>       Invoke a page tool; input as <json|@file> after the
+                             tool name or with --params; also --frame <frame-id>,
+                             --detach, and --timeout <ms>
   webmcp result <id>         Wait for a detached invocation result
   webmcp cancel <id>         Cancel an active invocation
   Brief untrusted summaries appear only on discovery or change; no schemas

@@ -452,7 +452,8 @@ Experimental. Browser responses announce brief tool summaries (names, short desc
 ```bash
 agent-browser webmcp list <tool> --frame <frame-id> --json   # One tool's schema
 agent-browser webmcp list --json                             # Full catalog, or recover context after compaction
-agent-browser webmcp invoke <tool> --frame <frame-id> --params '{"key":"value"}'
+agent-browser webmcp invoke <tool> --frame <frame-id> '{"key":"value"}'
+agent-browser webmcp invoke <tool> --params '{"key":"value"}'      # Same as the line above
 agent-browser webmcp invoke <tool> --params @input.json --detach
 agent-browser webmcp result <invocation-id>
 agent-browser webmcp cancel <invocation-id>
