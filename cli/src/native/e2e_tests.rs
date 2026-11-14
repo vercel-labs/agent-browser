@@ -3083,6 +3083,44 @@ async fn e2e_storage() {
         "Storage should be empty after clear"
     );
 
+    for (storage_type, set_id, scalar_id, bulk_id) in
+        [("local", "8", "9", "10"), ("session", "11", "12", "13")]
+    {
+        let resp = execute_command(
+            &json!({
+                "id": set_id,
+                "action": "storage_set",
+                "type": storage_type,
+                "key": "__proto__",
+                "value": "fixture"
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": scalar_id,
+                "action": "storage_get",
+                "type": storage_type,
+                "key": "__proto__"
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["value"], "fixture");
+
+        let resp = execute_command(
+            &json!({ "id": bulk_id, "action": "storage_get", "type": storage_type }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["data"]["__proto__"], "fixture");
+    }
+
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
