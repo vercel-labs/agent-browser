@@ -1376,9 +1376,16 @@ fn exchange<S: Read + Write>(mut stream: S, request: &[u8]) -> Result<Response, 
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .map_err(|e| SendError::OutcomeUnknown(format!("Failed to read: {}", e)))?;
+    reader.read_line(&mut response_line).map_err(|error| {
+        // A read timeout on a blocking socket can be WouldBlock on Unix.
+        let message = match error.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                format!("Timed out waiting for the local daemon's response ({error})")
+            }
+            _ => format!("Failed to read: {error}"),
+        };
+        SendError::OutcomeUnknown(message)
+    })?;
 
     serde_json::from_str(&response_line)
         .map_err(|e| SendError::OutcomeUnknown(format!("Invalid response: {}", e)))
@@ -1450,12 +1457,13 @@ mod tests {
     }
 
     /// In-memory stream: accepts at most `accept` bytes, then fails writes
-    /// with `write_err`; reads return `response`.
+    /// with `write_err`; reads return `response` or fail with `read_err`.
     struct MockStream {
         accept: usize,
         write_err: std::io::ErrorKind,
         written: usize,
         response: std::io::Cursor<Vec<u8>>,
+        read_err: Option<std::io::ErrorKind>,
     }
 
     impl MockStream {
@@ -1465,13 +1473,17 @@ mod tests {
                 write_err: std::io::ErrorKind::BrokenPipe,
                 written: 0,
                 response: std::io::Cursor::new(response.as_bytes().to_vec()),
+                read_err: None,
             }
         }
     }
 
     impl Read for MockStream {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.response.read(buf)
+            match self.read_err {
+                Some(kind) => Err(kind.into()),
+                None => self.response.read(buf),
+            }
         }
     }
 
@@ -1511,6 +1523,27 @@ mod tests {
 
         let ok = exchange(MockStream::new("{\"success\":true}\n"), b"{}\n");
         assert!(ok.unwrap().success);
+    }
+
+    #[test]
+    fn daemon_read_timeout_explains_where_the_timeout_occurred() {
+        use std::io::ErrorKind;
+
+        for kind in [ErrorKind::TimedOut, ErrorKind::WouldBlock] {
+            let mut stream = MockStream::new("");
+            stream.read_err = Some(kind);
+            let mut stream = Some(stream);
+            let response = send_with_retry(false, || exchange(stream.take().unwrap(), b"{}\n"))
+                .expect("a lost daemon response should keep the outcome_unknown code");
+
+            assert_eq!(response.code.as_deref(), Some("outcome_unknown"));
+            let message = response.error.unwrap();
+            assert!(
+                message.starts_with("Timed out waiting for the local daemon's response"),
+                "{message}"
+            );
+            assert!(message.contains("it was not retried"), "{message}");
+        }
     }
 
     fn ok_response() -> Response {
