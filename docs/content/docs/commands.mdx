@@ -54,6 +54,8 @@ agent-browser mcp call <tool> <json>  # Run one MCP tool and print its result
 
 For `fill` and `type`, put options before the optional `--` marker. Text after the marker is literal, including values that look like flags. For example, `agent-browser fill "#search" -- --json` fills with `--json`, and `agent-browser --json type "#search" --clear --delay 10 -- --clear` clears the field, then types `--clear`. MCP `agent_browser_fill` and `agent_browser_type` pass typed `text` values literally, so they do not need the marker.
 
+`select` works on a native `<select>` and on a custom ARIA combobox or listbox, such as Radix or Headless UI. On a custom widget it opens the widget, then clicks the `role=option` whose name or value matches. A value with no match is an error that lists the available options, a matched option marked `aria-disabled` is an error instead of a click, and an option already selected in a multi-select listbox is left alone.
+
 `type`, `press`, `keyboard type`, `keyboard inserttext`, and `inserttext` return only after the page has run one animation frame and one macrotask, so timers queued by a key handler have already run before the next command.
 
 Browser responses automatically announce WebMCP tools on first discovery and when the catalog changes. Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context. JSON exposes updates as `data.webmcp`; CLI and MCP text include the same bounded summary. See [WebMCP](/webmcp) for update semantics and security.

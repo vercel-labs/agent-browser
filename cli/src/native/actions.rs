@@ -21,7 +21,7 @@ use super::a11y;
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
-use super::cdp::client::CdpClient;
+use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
     ExceptionThrownEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent, TargetCreatedEvent,
@@ -1012,9 +1012,6 @@ impl DaemonState {
                         if is_recorder_session {
                             continue;
                         }
-                        let target_needs_controls = target_info
-                            .as_ref()
-                            .is_some_and(target_supports_network_controls);
                         let waiting_for_debugger = event
                             .params
                             .get("waitingForDebugger")
@@ -1023,56 +1020,15 @@ impl DaemonState {
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
-                        let controls_active = df.is_some() || has_proxy_creds;
-                        let controls_result = if controls_active && target_needs_controls {
-                            async {
-                                if let Some(ref target) = target_info {
-                                    prepare_network_control_target_session(&client, &sid, target)
-                                        .await?;
-                                }
-                                if let Some(ref target) = target_info {
-                                    if target_is_worker_like(target) {
-                                        install_worker_network_controls_for_session(
-                                            &client,
-                                            &sid,
-                                            df.as_ref(),
-                                            has_proxy_creds,
-                                            target,
-                                        )
-                                        .await
-                                    } else {
-                                        install_network_controls_for_session(
-                                            &client,
-                                            &sid,
-                                            df.as_ref(),
-                                            has_proxy_creds,
-                                            waiting_for_debugger,
-                                        )
-                                        .await
-                                    }
-                                } else {
-                                    Ok(())
-                                }
-                            }
-                            .await
-                        } else {
-                            Ok(())
-                        };
-
-                        if controls_result.is_ok() {
-                            let _ = client
-                                .send_command_no_wait(
-                                    "Runtime.runIfWaitingForDebugger",
-                                    None,
-                                    Some(&sid),
-                                )
-                                .await;
-                        } else if let Err(error) = controls_result {
-                            eprintln!(
-                                "Failed to apply browser network controls to auto-attached target: {}",
-                                error
-                            );
-                        }
+                        setup_auto_attached_session(
+                            &client,
+                            &sid,
+                            target_info.as_ref(),
+                            waiting_for_debugger,
+                            df.as_ref(),
+                            has_proxy_creds,
+                        )
+                        .await;
                     }
                     Some(event) if event.method == "Fetch.requestPaused" => {
                         let request_id = event
@@ -1259,6 +1215,8 @@ impl DaemonState {
         let shared_count = Arc::new(AtomicU64::new(0));
         let shared_captured = Arc::new(AtomicU64::new(0));
         let shared_contact_sheet_count = Arc::new(AtomicU64::new(0));
+        let shared_screenshot_capture = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.recording_state.device_scale = initial_frame.device_scale;
         let (cancel_tx, cancel_rx) = oneshot::channel();
         if self.recording_state.cursor {
             self.refresh_active_iframe_sessions().await;
@@ -1281,6 +1239,7 @@ impl DaemonState {
         let handle = recording::spawn_recording_task(
             client,
             capture_session,
+            session_id,
             initial_frame,
             self.recording_state.output_path.clone(),
             self.recording_state.fps,
@@ -1293,12 +1252,14 @@ impl DaemonState {
             self.recording_state.contact_sheet_path.clone(),
             self.recording_state.contact_sheet_threshold,
             shared_contact_sheet_count.clone(),
+            shared_screenshot_capture.clone(),
             cancel_rx,
         );
         self.recording_state.capture_task = Some(handle);
         self.recording_state.shared_frame_count = Some(shared_count);
         self.recording_state.shared_captured_count = Some(shared_captured);
         self.recording_state.shared_contact_sheet_count = Some(shared_contact_sheet_count);
+        self.recording_state.shared_screenshot_capture = Some(shared_screenshot_capture);
         self.recording_state.cancel_tx = Some(cancel_tx);
         Ok(())
     }
@@ -1374,7 +1335,7 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mgr) = self.browser {
-                async {
+                bounded_auto_attached_setup("session", iframe_sid, async {
                     mgr.prepare_domains_pub(iframe_sid).await?;
                     let _ = mgr
                         .client
@@ -1395,19 +1356,33 @@ impl DaemonState {
                         .await?;
                     }
                     mgr.resume_if_waiting_pub(iframe_sid).await
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                // Only this session is dropped; other frames keep theirs.
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("iframe", &error);
+                    self.iframe_sessions.retain(|_, sid| sid != iframe_sid);
+                    self.active_iframe_sessions.remove(iframe_sid);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!(
-                    "Warning: failed to prepare iframe session controls: {}",
-                    error
-                );
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to prepare iframe session controls: {}",
+                        error
+                    );
+                    // No controls depend on the pause, so do not leave the
+                    // frame stopped before its first script.
+                    if let Some(ref mgr) = self.browser {
+                        let _ = mgr.resume_if_waiting_pub(iframe_sid).await;
+                    }
+                }
             }
         }
 
@@ -1418,7 +1393,7 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mut mgr) = self.browser {
-                async {
+                bounded_auto_attached_setup("session", page_sid, async {
                     mgr.prepare_domains_pub(page_sid).await?;
                     if controls_active {
                         install_network_controls_for_session(
@@ -1469,19 +1444,26 @@ impl DaemonState {
                     );
 
                     mgr.resume_if_waiting_pub(page_sid).await
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                // A popup that closed right away; its target is gone.
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("page", &error);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!(
-                    "Warning: failed to prepare attached page session: {}",
-                    error
-                );
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to prepare attached page session: {}",
+                        error
+                    );
+                }
             }
         }
 
@@ -1490,7 +1472,7 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mgr) = self.browser {
-                async {
+                bounded_auto_attached_setup("session", worker_sid, async {
                     prepare_network_control_target_session(&mgr.client, worker_sid, target_info)
                         .await?;
                     if controls_active {
@@ -1512,19 +1494,25 @@ impl DaemonState {
                         )
                         .await;
                     Ok(())
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("worker", &error);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!(
-                    "Warning: failed to prepare worker session controls: {}",
-                    error
-                );
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to prepare worker session controls: {}",
+                        error
+                    );
+                }
             }
         }
 
@@ -1545,7 +1533,8 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mut mgr) = self.browser {
-                async {
+                let target_id = te.target_info.target_id.as_str();
+                bounded_auto_attached_setup("target", target_id, async {
                     let attach: AttachToTargetResult = mgr
                         .client
                         .send_command_typed(
@@ -1600,16 +1589,22 @@ impl DaemonState {
                         te.target_info.target_type.clone(),
                     );
                     mgr.resume_if_waiting_pub(&attach.session_id).await
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("page", &error);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!("Warning: failed to prepare new page session: {}", error);
+                Err(error) => {
+                    eprintln!("Warning: failed to prepare new page session: {}", error);
+                }
             }
         }
 
@@ -4261,6 +4256,115 @@ fn allowed_domains_disallowed_chrome_arg(args: &[String]) -> Option<&'static str
     }
 
     None
+}
+
+/// Upper bound for preparing an iframe, worker, or page session that the
+/// event drain or auto-attach reported. Every command drains CDP events
+/// first, so this setup runs on the command path: a session that neither
+/// answers nor reports its detach would otherwise hold every queued command
+/// for the 30 s CDP timeout of each command it sends.
+const AUTO_ATTACHED_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `kind` and `id` name what is being prepared in the timeout error, e.g.
+/// `"session"` and a session id, or `"target"` and a target id when the
+/// session does not exist yet.
+async fn bounded_auto_attached_setup(
+    kind: &str,
+    id: &str,
+    setup: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    tokio::time::timeout(AUTO_ATTACHED_SETUP_TIMEOUT, setup)
+        .await
+        .unwrap_or_else(|_| Err(format!("Timed out preparing auto-attached {} {}", kind, id)))
+}
+
+/// What the background handler did with a session that auto-attach reported.
+#[derive(Debug, PartialEq, Eq)]
+enum AutoAttachedSetup {
+    /// Controls (if any) are installed and the target was resumed.
+    Resumed,
+    /// The session detached during setup; its target is gone.
+    Detached,
+    /// Setup failed; the target stays paused so it cannot run uncontrolled.
+    Failed,
+}
+
+/// Installs network controls on a session that browser-level auto-attach
+/// reported, then resumes it. This runs in the background handler that also
+/// answers `Fetch.requestPaused` for the page, so a dead child session must
+/// not stall it.
+async fn setup_auto_attached_session(
+    client: &CdpClient,
+    sid: &str,
+    target_info: Option<&TargetInfo>,
+    waiting_for_debugger: bool,
+    domain_filter: Option<&DomainFilter>,
+    has_proxy_creds: bool,
+) -> AutoAttachedSetup {
+    let target_needs_controls = target_info.is_some_and(target_supports_network_controls);
+    let controls_active = domain_filter.is_some() || has_proxy_creds;
+    let controls_result = match target_info {
+        Some(target) if controls_active && target_needs_controls => {
+            bounded_auto_attached_setup("session", sid, async {
+                prepare_network_control_target_session(client, sid, target).await?;
+                if target_is_worker_like(target) {
+                    install_worker_network_controls_for_session(
+                        client,
+                        sid,
+                        domain_filter,
+                        has_proxy_creds,
+                        target,
+                    )
+                    .await
+                } else {
+                    install_network_controls_for_session(
+                        client,
+                        sid,
+                        domain_filter,
+                        has_proxy_creds,
+                        waiting_for_debugger,
+                    )
+                    .await
+                }
+            })
+            .await
+        }
+        _ => Ok(()),
+    };
+
+    match controls_result {
+        Ok(()) => {
+            let _ = client
+                .send_command_no_wait("Runtime.runIfWaitingForDebugger", None, Some(sid))
+                .await;
+            AutoAttachedSetup::Resumed
+        }
+        Err(error) if is_session_detached_error(&error) => {
+            log_detached_during_setup("auto-attached", &error);
+            AutoAttachedSetup::Detached
+        }
+        Err(error) => {
+            eprintln!(
+                "Failed to apply browser network controls to auto-attached target: {}",
+                error
+            );
+            AutoAttachedSetup::Failed
+        }
+    }
+}
+
+/// An auto-attached session that detached during setup took its target with
+/// it, so there is nothing left to control or resume. Short-lived iframes do
+/// this routinely; it is not worth a warning.
+fn log_detached_during_setup(kind: &str, error: &str) {
+    if env::var_os("AGENT_BROWSER_DEBUG").is_some() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "[cdp] {} session detached during setup: {}",
+            kind,
+            error
+        );
+    }
 }
 
 async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> Result<(), String> {
@@ -11250,7 +11354,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 
     let ax_tree: GetFullAXTreeResult = mgr
         .client
-        .send_command_typed(
+        .send_command_typed_raw(
             "Accessibility.getFullAXTree",
             &ax_params,
             Some(effective_session_id),
@@ -16937,6 +17041,402 @@ mod tests {
         assert!(drained.attached_page_sessions.is_empty());
         assert_eq!(drained.new_targets.len(), 1);
         assert_eq!(drained.new_targets[0].target_info.target_id, "p");
+    }
+
+    /// An iframe that detaches while its session is being prepared is
+    /// dropped without waiting out the CDP timeout and without closing the
+    /// browser, even with network controls active (#1991). Frames that were
+    /// already attached, and ones attached in the same batch, are kept.
+    #[tokio::test]
+    async fn iframe_detached_during_setup_is_dropped_without_stalling() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let resumed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let resumed_by_server = resumed.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let session = command["sessionId"].as_str().unwrap_or_default();
+                if command["method"] == "Runtime.runIfWaitingForDebugger" {
+                    resumed_by_server.lock().unwrap().push(session.to_string());
+                    continue;
+                }
+                // The short-lived frame is gone before Chrome answers.
+                let reply = if session == "S-GONE" {
+                    json!({
+                        "method": "Target.detachedFromTarget",
+                        "params": { "sessionId": "S-GONE", "targetId": "F-GONE" }
+                    })
+                } else {
+                    json!({ "id": command["id"], "result": {} })
+                };
+                if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let mut state = DaemonState::new();
+        let client = CdpClient::connect(&url).await.unwrap();
+        state.browser = Some(BrowserManager::for_test(client, url.clone()));
+        *state.proxy_credentials.write().await = Some(("user".into(), "pass".into()));
+        state
+            .iframe_sessions
+            .insert("F-PAY".to_string(), "S-PAY".to_string());
+
+        let drained = DrainedEvents {
+            attached_iframe_sessions: vec![
+                ("F-GONE".to_string(), "S-GONE".to_string()),
+                ("F-NEW".to_string(), "S-NEW".to_string()),
+            ],
+            ..DrainedEvents::default()
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.apply_drained_events(drained),
+        )
+        .await
+        .expect("a detached iframe must not hold up the drain")
+        .unwrap();
+
+        assert!(state.browser.is_some(), "the browser must stay open");
+        assert_eq!(
+            state.iframe_sessions,
+            HashMap::from([
+                ("F-PAY".to_string(), "S-PAY".to_string()),
+                ("F-NEW".to_string(), "S-NEW".to_string()),
+            ])
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !resumed.lock().unwrap().contains(&"S-NEW".to_string()) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the live frame should be resumed");
+        assert!(!resumed.lock().unwrap().contains(&"S-GONE".to_string()));
+    }
+
+    fn setup_test_target(target_id: &str, target_type: &str) -> TargetInfo {
+        TargetInfo {
+            target_id: target_id.to_string(),
+            target_type: target_type.to_string(),
+            title: String::new(),
+            url: "https://example.com/".to_string(),
+            attached: Some(true),
+            browser_context_id: None,
+        }
+    }
+
+    /// Fake CDP endpoint for the session setup tests. `Target.attachToTarget`
+    /// attaches `attach_sid`. Commands to `S-GONE` are answered with that
+    /// session's detach, commands to `S-SILENT` are never answered,
+    /// `Runtime.evaluate` in `S-THROWS` reports an exception whose text names
+    /// a missing session, and everything else succeeds. Returns the URL and
+    /// the sessions resumed.
+    async fn spawn_session_setup_cdp_server(
+        attach_sid: &'static str,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let resumed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let resumed_by_server = resumed.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let session = command["sessionId"].as_str().unwrap_or_default();
+                if command["method"] == "Runtime.runIfWaitingForDebugger" {
+                    resumed_by_server.lock().unwrap().push(session.to_string());
+                    continue;
+                }
+                let reply = match session {
+                    "S-SILENT" => continue,
+                    "S-THROWS" if command["method"] == "Runtime.evaluate" => json!({
+                        "id": command["id"],
+                        "result": {
+                            "result": { "type": "object", "subtype": "error" },
+                            "exceptionDetails": {
+                                "text": "Uncaught",
+                                "exception": {
+                                    "type": "object",
+                                    "subtype": "error",
+                                    "description": "Error: Session with given id not found."
+                                }
+                            }
+                        }
+                    }),
+                    "S-GONE" => json!({
+                        "method": "Target.detachedFromTarget",
+                        "params": { "sessionId": "S-GONE", "targetId": "T-GONE" }
+                    }),
+                    _ if command["method"] == "Target.attachToTarget" => json!({
+                        "id": command["id"],
+                        "result": { "sessionId": attach_sid }
+                    }),
+                    _ => json!({ "id": command["id"], "result": {} }),
+                };
+                if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                    return;
+                }
+            }
+        });
+        (url, resumed)
+    }
+
+    /// A popup page or worker that detaches while the drain prepares it is
+    /// dropped without closing the browser, even though network controls are
+    /// active. Covers every page and worker path of the drain.
+    #[tokio::test]
+    async fn page_or_worker_detached_during_setup_keeps_the_browser_open() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-GONE", "page"),
+                        "S-GONE".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "discovered page",
+                DrainedEvents {
+                    new_targets: vec![TargetCreatedEvent {
+                        target_info: setup_test_target("T-GONE", "page"),
+                    }],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "worker",
+                DrainedEvents {
+                    attached_worker_sessions: vec![(
+                        setup_test_target("T-GONE", "service_worker"),
+                        "S-GONE".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, resumed) = spawn_session_setup_cdp_server("S-GONE").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            *state.proxy_credentials.write().await = Some(("user".into(), "pass".into()));
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: a detached session must not hold up the drain"));
+
+            assert_eq!(result, Ok(()), "{name}");
+            assert!(
+                state.browser.is_some(),
+                "{name}: the browser must stay open"
+            );
+            assert!(
+                !resumed.lock().unwrap().contains(&"S-GONE".to_string()),
+                "{name}: a detached session is not resumed"
+            );
+        }
+    }
+
+    /// Every child session the drain prepares is bounded, so one that never
+    /// answers and never reports a detach holds the drain (and with it every
+    /// queued command) for the setup bound, not the 30 s CDP timeout of each
+    /// command it sends.
+    #[tokio::test]
+    async fn silent_session_setup_is_bounded() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "iframe",
+                DrainedEvents {
+                    attached_iframe_sessions: vec![(
+                        "F-SILENT".to_string(),
+                        "S-SILENT".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-SILENT", "page"),
+                        "S-SILENT".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "discovered page",
+                DrainedEvents {
+                    new_targets: vec![TargetCreatedEvent {
+                        target_info: setup_test_target("T-SILENT", "page"),
+                    }],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, _) = spawn_session_setup_cdp_server("S-SILENT").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+
+            // Virtual time: the clock jumps to the next timer once the
+            // runtime is idle, so the bound fires without a 10 s wait.
+            tokio::time::pause();
+            let started = tokio::time::Instant::now();
+            let result = tokio::time::timeout(
+                AUTO_ATTACHED_SETUP_TIMEOUT * 2,
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: setup must give up at the setup bound"));
+            let elapsed = started.elapsed();
+            tokio::time::resume();
+
+            // Without network controls a failed setup is only a warning.
+            assert_eq!(result, Ok(()), "{name}");
+            assert!(state.browser.is_some(), "{name}");
+            assert!(
+                elapsed >= AUTO_ATTACHED_SETUP_TIMEOUT,
+                "{name}: gave up after {elapsed:?}"
+            );
+        }
+    }
+
+    /// The background handler drops a session that detaches while it
+    /// installs network controls, and resumes the ones that stay attached.
+    #[tokio::test]
+    async fn background_auto_attach_drops_sessions_detached_during_setup() {
+        let (url, resumed) = spawn_session_setup_cdp_server("S-GONE").await;
+        let client = CdpClient::connect(&url).await.unwrap();
+
+        for target_type in ["iframe", "page", "service_worker"] {
+            for (sid, target_id, expected) in [
+                ("S-LIVE", "T-LIVE", AutoAttachedSetup::Resumed),
+                ("S-GONE", "T-GONE", AutoAttachedSetup::Detached),
+            ] {
+                let target = setup_test_target(target_id, target_type);
+                let outcome = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    setup_auto_attached_session(&client, sid, Some(&target), true, None, true),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{target_type} {sid}: setup must not stall"));
+                assert_eq!(outcome, expected, "{target_type} {sid}");
+            }
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while resumed.lock().unwrap().len() < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("each live session should be resumed");
+        let resumed = resumed.lock().unwrap();
+        assert!(resumed.iter().all(|sid| sid == "S-LIVE"), "{resumed:?}");
+    }
+
+    /// A live frame or page can throw from the injected domain filter with
+    /// any message, including Chrome's text for a missing session. That is a
+    /// failure to install the filter, not a detach, so the browser still
+    /// closes instead of leaving the target running without its controls.
+    #[tokio::test]
+    async fn page_thrown_detach_text_still_fails_network_controls_closed() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "iframe",
+                DrainedEvents {
+                    attached_iframe_sessions: vec![(
+                        "F-THROWS".to_string(),
+                        "S-THROWS".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-THROWS", "page"),
+                        "S-THROWS".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, resumed) = spawn_session_setup_cdp_server("S-THROWS").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: setup must not stall"));
+
+            let error = result.expect_err(name);
+            assert!(
+                error.starts_with("Failed to install browser network controls"),
+                "{name}: {error}"
+            );
+            assert!(state.browser.is_none(), "{name}: the browser must close");
+            assert!(
+                !resumed.lock().unwrap().contains(&"S-THROWS".to_string()),
+                "{name}: an uncontrolled target is not resumed"
+            );
+        }
+
+        let (url, resumed) = spawn_session_setup_cdp_server("S-THROWS").await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let filter = DomainFilter::new("example.com");
+        for target_type in ["iframe", "page"] {
+            let target = setup_test_target("T-THROWS", target_type);
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                setup_auto_attached_session(
+                    &client,
+                    "S-THROWS",
+                    Some(&target),
+                    false,
+                    Some(&filter),
+                    false,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("auto-attached {target_type}: setup must not stall"));
+            assert_eq!(
+                outcome,
+                AutoAttachedSetup::Failed,
+                "auto-attached {target_type}"
+            );
+        }
+        assert!(resumed.lock().unwrap().is_empty());
     }
 
     #[test]
