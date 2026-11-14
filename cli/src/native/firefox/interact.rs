@@ -20,7 +20,7 @@ use crate::native::interaction::PendingRelease;
 use crate::native::interaction::{
     dispatch_event_js, CLICK_HREF_JS, FOCUS_JS, HIGHLIGHT_JS, SCROLL_BY_JS, SCROLL_INTO_VIEW_JS,
 };
-use crate::native::pointer::{Modifiers, MouseButton};
+use crate::native::pointer::{ClickPlan, Modifiers, MouseButton};
 
 /// Reports BiDi's in-view center plus the shared actionability and blocker verdicts.
 fn prepare_js() -> String {
@@ -571,35 +571,42 @@ async fn act_raw(
     .await
 }
 
-/// Clicks a ref or selector, returning Chrome's `{clicked}` shape.
+/// Clicks a ref or selector with Chrome's click rules.
 pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    click_with(cmd, state, 1, PointerAction::Click).await
+}
+
+/// Decodes the click the way Chrome does, then presses the requested button the requested number
+/// of times. Modifier keys are refused: nothing here holds them yet.
+async fn click_with(
+    cmd: &Value,
+    state: &mut DaemonState,
+    default_count: u8,
+    action: PointerAction,
+) -> Result<Value, String> {
+    let plan = ClickPlan::from_command(cmd, default_count)?;
     let selector = cmd
         .get("selector")
         .and_then(Value::as_str)
         .ok_or("Missing 'selector' parameter")?;
-
-    if cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false) {
+    let ClickPlan::Pointer(spec) = plan else {
         return click_new_tab(selector, state).await;
+    };
+    if spec.modifiers != Modifiers::default() {
+        return Err("--modifiers is not supported with --engine firefox".to_string());
     }
-
     let target = resolve_target(state, selector).await?;
-    let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
-    let click_count = cmd
-        .get("clickCount")
-        .and_then(Value::as_i64)
-        .unwrap_or(1)
-        .max(0) as u32;
     let actions = pointer_click(
         &Origin::Element(target.shared_id.clone()),
-        button,
-        click_count,
+        spec.button.name(),
+        u32::from(spec.count),
     );
     Ok(act_pointer(
         state,
         cmd,
         &target,
         selector,
-        PointerAction::Click,
+        action,
         actions,
         json!({ "clicked": selector }),
     )
@@ -630,23 +637,7 @@ async fn click_new_tab(selector: &str, state: &mut DaemonState) -> Result<Value,
 
 /// Double-clicks a ref or selector.
 pub async fn dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
-    let target = resolve_target(state, selector).await?;
-    let actions = pointer_click(&Origin::Element(target.shared_id.clone()), "left", 2);
-    Ok(act_pointer(
-        state,
-        cmd,
-        &target,
-        selector,
-        PointerAction::DoubleClick,
-        actions,
-        json!({ "clicked": selector }),
-    )
-    .await?
-    .value)
+    click_with(cmd, state, 2, PointerAction::DoubleClick).await
 }
 
 /// Moves the mouse over a ref or selector.
@@ -1887,5 +1878,14 @@ mod tests {
 
         assert!(state.pending_dialog.is_none());
         assert_eq!(*calls.lock().unwrap(), ["browsingContext.handleUserPrompt"]);
+    }
+
+    #[tokio::test]
+    async fn clicks_refuse_modifier_keys() {
+        let mut state = DaemonState::new();
+        let held = json!({"selector": "#a", "modifiers": 2});
+        let refused = "--modifiers is not supported with --engine firefox";
+        assert_eq!(click(&held, &mut state).await.unwrap_err(), refused);
+        assert_eq!(dblclick(&held, &mut state).await.unwrap_err(), refused);
     }
 }
