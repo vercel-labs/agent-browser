@@ -32,7 +32,8 @@ mod tests {
             .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
         ff.contexts.activate("ctx-frame");
         ff.next_node_id = 42;
-        ff.refs.insert(("ctx-frame".into(), "node".into()), 17);
+        ff.refs
+            .insert(("ctx-frame".into(), "node".into(), "doc".into()), 17);
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.active_iframe_sessions.insert("frame-session".into());

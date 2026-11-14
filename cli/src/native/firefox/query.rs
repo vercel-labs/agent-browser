@@ -2,7 +2,7 @@
 
 use super::bidi::{BidiClient, SANDBOX};
 use super::daemon::session;
-use super::target::{resolve_target, Target};
+use super::target::{resolve_target, target_document_id, Target};
 use crate::native::actions::{self as chrome, DaemonState};
 use crate::native::element::{
     build_count_elements_js, parse_ref, ELEMENT_BOUNDING_BOX_JS, ELEMENT_CHECKED_JS,
@@ -362,7 +362,15 @@ async fn run_subaction(
     }
     let ref_num = state.ref_map.next_ref_num();
     let ref_id = format!("e{ref_num}");
-    let key = (target.context.clone(), target.shared_id.clone());
+    let ff = session(state)?;
+    let document_id = target_document_id(ff, target)
+        .await
+        .ok_or_else(|| "Could not identify the target document".to_string())?;
+    let key = (
+        target.context.clone(),
+        target.shared_id.clone(),
+        document_id,
+    );
     let existing = session(state)?.refs.get(&key).copied();
     let node_id = existing.unwrap_or(TEMP_NODE_ID);
     state

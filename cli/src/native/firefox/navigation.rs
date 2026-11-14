@@ -202,7 +202,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .refs
-            .insert(("ctx-active".into(), "node".into()), 7);
+            .insert(("ctx-active".into(), "node".into(), "doc".into()), 7);
         state.active_frame_id = Some("frame".into());
 
         let landing = load(

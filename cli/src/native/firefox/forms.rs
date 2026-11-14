@@ -741,7 +741,8 @@ mod tests {
     #[tokio::test]
     async fn fill_and_type_resolve_snapshot_refs() {
         let (mut ff, _tx, calls) = fake_session_with(connected_node_responder).await;
-        ff.refs.insert(("ctx-active".into(), "node-1".into()), 7);
+        ff.refs
+            .insert(("ctx-active".into(), "node-1".into(), "node-1".into()), 7);
         let mut state = state_with(ff);
         state
             .ref_map
@@ -762,6 +763,8 @@ mod tests {
         assert_all(
             &calls,
             &[
+                "script.callFunction",
+                "script.callFunction",
                 "script.callFunction",
                 "script.callFunction",
                 "script.callFunction",

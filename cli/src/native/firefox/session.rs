@@ -37,13 +37,10 @@ pub struct FirefoxSession {
     pub auto_dialog_changed: Arc<Notify>,
     pub rdp: RdpClient,
     pub contexts: Contexts,
-    /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
-    pub refs: HashMap<(String, String), i64>,
+    /// Durable ref ids keyed by `(context, sharedId, document sharedId)`.
+    pub refs: HashMap<(String, String, String), i64>,
     pub next_node_id: i64,
     pub frames: Option<super::snapshot::FrameWatch>,
-    /// Document node `sharedId` last snapshotted per context, used to reset `refs` on a new document.
-    pub documents: HashMap<String, String>,
-    pub ref_documents: HashMap<String, String>,
     /// Touch points of the active touch sequence, released by a later `input_touch` end.
     pub touches: Vec<(f64, f64)>,
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
@@ -166,8 +163,6 @@ impl FirefoxSession {
             refs: HashMap::new(),
             next_node_id: 0,
             frames: None,
-            documents: HashMap::new(),
-            ref_documents: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
             visited_origins: HashSet::new(),
@@ -303,7 +298,7 @@ impl FirefoxSession {
     }
 
     /// Forgets a browsing context that is gone and everything nested in it: element refs,
-    /// documents, shadow ids and any prompt they owned. Returns true when the active context was
+    /// shadow ids and any prompt they owned. Returns true when the active context was
     /// among them, which the registry then replaces.
     pub fn forget_context(&mut self, context: &str, dialog: &mut Option<PendingDialog>) -> bool {
         let removed = self.contexts.remove(context);
@@ -315,12 +310,10 @@ impl FirefoxSession {
         let stale_ids: HashSet<i64> = self
             .refs
             .iter()
-            .filter(|((id, _), _)| gone.contains(id))
+            .filter(|((id, _, _), _)| gone.contains(id))
             .map(|(_, id)| *id)
             .collect();
-        self.refs.retain(|(id, _), _| !gone.contains(id));
-        self.documents.retain(|id, _| !gone.contains(id));
-        self.ref_documents.retain(|id, _| !gone.contains(id));
+        self.refs.retain(|(id, _, _), _| !gone.contains(id));
         self.shadow_ids.retain(|id| !stale_ids.contains(id));
         if dialog.as_ref().is_some_and(|d| {
             [&d.owner_context, &d.session_id]
@@ -339,7 +332,6 @@ impl FirefoxSession {
     /// Drops every element ref along with the documents and shadow ids they were recorded for.
     pub fn forget_refs(&mut self) {
         self.refs.clear();
-        self.documents.clear();
         self.shadow_ids.clear();
     }
 
@@ -688,8 +680,6 @@ pub(crate) mod tests {
             refs: HashMap::new(),
             next_node_id: 0,
             frames: None,
-            documents: HashMap::new(),
-            ref_documents: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
             visited_origins: HashSet::new(),
@@ -714,7 +704,9 @@ pub(crate) mod tests {
     async fn context_events_update_the_registry_and_reset_page_state() {
         let (mut session, tx, _) = fake_session().await;
         session.contexts.record(&json!({"context": "survivor"}));
-        session.refs.insert(("ctx-active".into(), "node".into()), 1);
+        session
+            .refs
+            .insert(("ctx-active".into(), "node".into(), "doc".into()), 1);
         let mut state = crate::native::actions::DaemonState::new();
         state
             .ref_map

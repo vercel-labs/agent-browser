@@ -17583,7 +17583,7 @@ async fn e2e_firefox_screenshot_annotate_excludes_iframe_overlays() {
             .and_then(|ref_id| state.ref_map.get(ref_id))
             .and_then(|entry| entry.backend_node_id)
             .and_then(|id| ff.refs.iter().find(|(_, value)| **value == id))
-            .is_some_and(|((context, _), _)| *context != ff.contexts.active())
+            .is_some_and(|((context, _, _), _)| *context != ff.contexts.active())
     };
     let top_document_numbers = annotations
         .iter()

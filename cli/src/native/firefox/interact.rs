@@ -1497,8 +1497,9 @@ mod tests {
                 let (mut state, _) = state_with_refs(connected).await;
                 let ff = state.firefox.as_mut().unwrap();
                 ff.contexts.activate(selected_context);
-                ff.refs.retain(|(_, shared_id), _| shared_id != "sid-1");
-                ff.refs.insert((target_context.into(), "sid-1".into()), 7);
+                ff.refs.retain(|(_, shared_id, _), _| shared_id != "sid-1");
+                ff.refs
+                    .insert((target_context.into(), "sid-1".into(), "doc".into()), 7);
                 state.mouse_state.x = 17.0;
                 state.mouse_state.y = 23.0;
                 let command = json!({"selector": "@e1"});
@@ -1569,9 +1570,18 @@ mod tests {
 
     async fn state_with_refs(reply: fn(&Value) -> Value) -> (DaemonState, Calls) {
         let mut state = DaemonState::new();
-        let (mut ff, _tx, calls) = fake_session_with_script(reply).await;
-        ff.refs.insert(("ctx-active".into(), "sid-1".into()), 7);
-        ff.refs.insert(("ctx-active".into(), "sid-2".into()), 8);
+        let (mut ff, _tx, calls) = fake_session_with_script(move |params| {
+            if params["functionDeclaration"] == "() => document" {
+                json!({ "type": "success", "result": { "type": "node", "sharedId": "doc" } })
+            } else {
+                reply(params)
+            }
+        })
+        .await;
+        ff.refs
+            .insert(("ctx-active".into(), "sid-1".into(), "doc".into()), 7);
+        ff.refs
+            .insert(("ctx-active".into(), "sid-2".into(), "doc".into()), 8);
         state.firefox = Some(ff);
         state
             .ref_map
@@ -1616,6 +1626,7 @@ mod tests {
             [
                 "script.callFunction",
                 "script.callFunction",
+                "script.callFunction",
                 "input.performActions",
                 "input.performActions",
                 "input.performActions"
@@ -1634,7 +1645,11 @@ mod tests {
         assert!(error.contains("covered by <div#overlay>"), "{error}");
         assert_eq!(
             *calls.lock().unwrap(),
-            ["script.callFunction", "script.callFunction"]
+            [
+                "script.callFunction",
+                "script.callFunction",
+                "script.callFunction"
+            ]
         );
     }
 
