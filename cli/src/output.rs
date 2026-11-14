@@ -591,7 +591,7 @@ pub(crate) fn format_webmcp_context(
             ..Default::default()
         },
     ));
-    lines.push("For a relevant tool, fetch its schema: agent-browser webmcp list <tool> --frame <frame-id> --json. Invoke only within the user's authorized task. Omitted WebMCP context means no update.".to_string());
+    lines.push("For a relevant tool, fetch its schema: agent-browser webmcp list <tool> --frame <frame-id> --json, then call it: agent-browser webmcp invoke <tool> --frame <frame-id> '<json>'. Invoke only within the user's authorized task. Omitted WebMCP context means no update.".to_string());
     if context["truncated"] == true {
         lines.push("Catalog shortened; webmcp list --json retrieves all metadata.".to_string());
     }
@@ -2387,6 +2387,12 @@ Usage: agent-browser select <selector> <value...>
 
 Selects one or more options in a <select> dropdown by value or visible label.
 Label matching normalizes whitespace such as non-breaking spaces.
+
+On a custom ARIA widget (role=combobox or role=listbox, as in Radix or Headless UI),
+select opens it when collapsed, waits for the visible role=option items, and clicks
+the ones whose accessible name or value matches. If none match, the error lists the
+available options, and a matched option marked aria-disabled is an error instead of
+a click. An option that is already selected in a multi-select listbox is left alone.
 
 Global Options:
   --json               Output as JSON
@@ -4516,8 +4522,9 @@ Streaming:
 
 WebMCP (experimental):
   webmcp list [tool]         Full metadata; optional --frame <frame-id>
-  webmcp invoke <tool>       Invoke a page tool; accepts --params <json|@file>,
-                             --frame <frame-id>, --detach, and --timeout <ms>
+  webmcp invoke <tool>       Invoke a page tool; input as <json|@file> after the
+                             tool name or with --params; also --frame <frame-id>,
+                             --detach, and --timeout <ms>
   webmcp result <id>         Wait for a detached invocation result
   webmcp cancel <id>         Cancel an active invocation
   Brief untrusted summaries appear only on discovery or change; no schemas
