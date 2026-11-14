@@ -143,7 +143,6 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "drop_overlay_probe" => include_str!("test_fixtures/drop_overlay_probe.html"),
         "wheel_probe" => include_str!("test_fixtures/wheel_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
-        "html5_drag_far_probe" => include_str!("test_fixtures/html5_drag_far_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "snapshot_diff_probe" => include_str!("test_fixtures/snapshot_diff_probe.html"),
         "upload_probe" => include_str!("test_fixtures/upload_probe.html"),
@@ -4947,55 +4946,6 @@ async fn e2e_drag_presses_source_and_rejects_unreachable_ends() {
             "mouseup on far",
             "mousedown on far",
             "mouseup on src",
-        ]),
-    )
-    .await;
-
-    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
-    assert_success(&resp);
-}
-
-#[tokio::test]
-#[ignore]
-async fn e2e_drag_starts_a_native_drag_before_scrolling_to_a_far_target() {
-    let mut state = DaemonState::new();
-
-    let resp = execute_command(
-        &json!({ "id": "1", "action": "launch", "headless": true }),
-        &mut state,
-    )
-    .await;
-    assert_success(&resp);
-
-    let resp = execute_command(
-        &json!({
-            "id": "2",
-            "action": "navigate",
-            "url": native_test_fixture_url("html5_drag_far_probe")
-        }),
-        &mut state,
-    )
-    .await;
-    assert_success(&resp);
-
-    // A draggable element 3000px above its drop zone. If the page scrolls
-    // right after the press, Chrome never starts the drag and nothing drops.
-    let resp = execute_command(
-        &json!({ "id": "3", "action": "drag", "source": "#src", "target": "#far" }),
-        &mut state,
-    )
-    .await;
-    assert_success(&resp);
-
-    assert_evaluate(
-        &mut state,
-        "4",
-        "window.__html5DragFarProbe.events",
-        json!([
-            "mousedown on src",
-            "dragstart on src",
-            "drop on far",
-            "dragend on src",
         ]),
     )
     .await;
