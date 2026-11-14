@@ -6762,11 +6762,16 @@ mod tests {
 
     #[test]
     fn test_webmcp_rejects_malformed_params() {
-        let result = parse_command(
+        let err = parse_command(
             &args("webmcp invoke search --params not-json"),
             &default_flags(),
+        )
+        .unwrap_err();
+        let message = err.format();
+        assert!(
+            message.contains("Invalid JSON for WebMCP params"),
+            "gave: {message}"
         );
-        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
     }
 
     #[test]
@@ -6791,28 +6796,38 @@ mod tests {
 
     #[test]
     fn test_webmcp_rejects_non_object_params() {
-        let result = parse_command(
+        let err = parse_command(
             &args(r#"webmcp invoke search --params ["agents"]"#),
             &default_flags(),
+        )
+        .unwrap_err();
+        let message = err.format();
+        assert!(
+            message.contains("WebMCP params must be a JSON object"),
+            "gave: {message}"
         );
-        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
     }
 
     #[test]
     fn test_webmcp_rejects_unexpected_arguments() {
-        for command in [
-            "webmcp list search extra",
-            "webmcp list --frame",
-            "webmcp result invocation-1 extra",
-            "webmcp cancel invocation-1 extra",
+        for (command, expected) in [
+            (
+                "webmcp list search extra",
+                "Unexpected argument for webmcp list",
+            ),
+            ("webmcp list --frame", "Unexpected argument for webmcp list"),
+            (
+                "webmcp result invocation-1 extra",
+                "Unknown webmcp result option",
+            ),
+            (
+                "webmcp cancel invocation-1 extra",
+                "Unexpected argument for webmcp cancel",
+            ),
         ] {
-            assert!(
-                matches!(
-                    parse_command(&args(command), &default_flags()),
-                    Err(ParseError::InvalidValue { .. })
-                ),
-                "{command} should reject trailing arguments"
-            );
+            let err = parse_command(&args(command), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(message.contains(expected), "{command} gave: {message}");
         }
     }
 
