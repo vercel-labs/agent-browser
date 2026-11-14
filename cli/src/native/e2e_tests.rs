@@ -16663,6 +16663,61 @@ async fn e2e_firefox_snapshot_ignores_a_background_tab_that_forges_the_marker() 
     firefox_close(&mut state).await;
 }
 
+/// A ref taken before the page replaced its document does not carry over to a control with the
+/// same role and name in the new document.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_ref_does_not_survive_a_page_driven_document_change() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    let ask = firefox_ref(&mut state, "Ask").await;
+
+    firefox_eval(
+        &mut state,
+        "window.__before = true; setTimeout(() => location.reload(), 0); true",
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while firefox_eval(
+        &mut state,
+        "window.__before === true && document.readyState",
+    )
+    .await
+        != json!(false)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the page never reloaded"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    firefox_eval(
+        &mut state,
+        "new Promise(r => document.readyState === 'complete' ? r(true) : addEventListener('load', () => r(true)))",
+    )
+    .await;
+
+    let resp = firefox_act(&mut state, "click", &ask, json!({})).await;
+    assert_eq!(resp["success"], json!(false), "{resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("Run snapshot again"),
+        "{resp}"
+    );
+    assert!(
+        state.pending_dialog.is_none(),
+        "the stale ref must not click"
+    );
+    firefox_close(&mut state).await;
+}
+
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_frame_ignores_a_page_forged_content_window() {
