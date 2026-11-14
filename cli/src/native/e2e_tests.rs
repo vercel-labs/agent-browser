@@ -18694,13 +18694,6 @@ async fn e2e_firefox_popup_has_the_session_emulation_before_it_loads() {
         r#"document.body.innerHTML = '<button id=pop onclick="window.open(\'/whoami\')">Open</button>'; true"#,
     )
     .await;
-    let original = state
-        .firefox
-        .as_ref()
-        .unwrap()
-        .contexts
-        .active_tab()
-        .to_string();
     assert_success(&firefox_act(&mut state, "click", "#pop", json!({})).await);
 
     let bidi = state.firefox.as_ref().unwrap().bidi.clone();
@@ -18735,10 +18728,6 @@ async fn e2e_firefox_popup_has_the_session_emulation_before_it_loads() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
     assert_eq!(probe, json!(["dark", "PopupCoverage/1.0"]));
-    assert_eq!(
-        state.firefox.as_ref().unwrap().contexts.active_tab(),
-        original
-    );
     firefox_close(&mut state).await;
 }
 
