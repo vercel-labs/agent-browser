@@ -23,8 +23,81 @@ const DEFAULT_PROFILER_CATEGORIES: &[&str] = &[
     "toplevel",
 ];
 
+/// Which command owns the single active CDP tracing session. `trace` and
+/// `profiler` both drive Chrome's `Tracing` domain (only one can run at a
+/// time), so we record who started it and let only the matching `stop` end it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorder {
+    Trace,
+    Profiler,
+}
+
+impl Recorder {
+    /// Lowercase name used in messages, e.g. "trace" / "profiler".
+    fn label(self) -> &'static str {
+        match self {
+            Recorder::Trace => "trace",
+            Recorder::Profiler => "profiler",
+        }
+    }
+
+    /// The command that stops this recorder, e.g. "trace stop".
+    fn stop_command(self) -> &'static str {
+        match self {
+            Recorder::Trace => "trace stop",
+            Recorder::Profiler => "profiler stop",
+        }
+    }
+
+    /// Noun for "No <x> in progress", e.g. "tracing" / "profiling".
+    fn progress_noun(self) -> &'static str {
+        match self {
+            Recorder::Trace => "tracing",
+            Recorder::Profiler => "profiling",
+        }
+    }
+
+    /// Capitalized noun for "<X> already active", e.g. "Tracing" / "Profiling".
+    fn active_noun(self) -> &'static str {
+        match self {
+            Recorder::Trace => "Tracing",
+            Recorder::Profiler => "Profiling",
+        }
+    }
+}
+
+/// Guard for a `start` command: is it safe to start `want`?
+fn ensure_startable(active: Option<Recorder>, want: Recorder) -> Result<(), String> {
+    match active {
+        None => Ok(()),
+        Some(a) if a == want => Err(format!("{} already active", want.active_noun())),
+        Some(other) => Err(format!(
+            "A {} recording is already active; stop it with '{}' before starting the {}",
+            other.label(),
+            other.stop_command(),
+            want.label()
+        )),
+    }
+}
+
+/// Guard for a `stop` command: only the recorder that is actually running may
+/// be stopped, so `profiler stop` no longer ends a trace (and vice versa).
+fn ensure_stoppable(active: Option<Recorder>, want: Recorder) -> Result<(), String> {
+    match active {
+        Some(a) if a == want => Ok(()),
+        Some(other) => Err(format!(
+            "No {} recording in progress (a {} recording is active; use '{}')",
+            want.label(),
+            other.label(),
+            other.stop_command()
+        )),
+        None => Err(format!("No {} in progress", want.progress_noun())),
+    }
+}
+
 pub struct TracingState {
-    pub active: bool,
+    /// `Some(recorder)` when a trace or profiler recording is active, else `None`.
+    pub active: Option<Recorder>,
     pub events: Vec<Value>,
     pub events_dropped: bool,
 }
@@ -32,7 +105,7 @@ pub struct TracingState {
 impl TracingState {
     pub fn new() -> Self {
         Self {
-            active: false,
+            active: None,
             events: Vec::new(),
             events_dropped: false,
         }
@@ -44,9 +117,7 @@ pub async fn trace_start(
     session_id: &str,
     tracing_state: &mut TracingState,
 ) -> Result<Value, String> {
-    if tracing_state.active {
-        return Err("Tracing already active".to_string());
-    }
+    ensure_startable(tracing_state.active, Recorder::Trace)?;
 
     client
         .send_command(
@@ -61,7 +132,7 @@ pub async fn trace_start(
         )
         .await?;
 
-    tracing_state.active = true;
+    tracing_state.active = Some(Recorder::Trace);
     tracing_state.events.clear();
     tracing_state.events_dropped = false;
 
@@ -74,9 +145,7 @@ pub async fn trace_stop(
     tracing_state: &mut TracingState,
     path: Option<&str>,
 ) -> Result<Value, String> {
-    if !tracing_state.active {
-        return Err("No tracing in progress".to_string());
-    }
+    ensure_stoppable(tracing_state.active, Recorder::Trace)?;
 
     // Subscribe to events before stopping
     let mut rx = client.subscribe();
@@ -154,7 +223,7 @@ pub async fn trace_stop(
             .await;
     }
 
-    tracing_state.active = false;
+    tracing_state.active = None;
 
     let save_path = match path {
         Some(p) => p.to_string(),
@@ -186,9 +255,7 @@ pub async fn profiler_start(
     tracing_state: &mut TracingState,
     categories: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    if tracing_state.active {
-        return Err("Profiling/tracing already active".to_string());
-    }
+    ensure_startable(tracing_state.active, Recorder::Profiler)?;
 
     let cats: Vec<String> = categories.unwrap_or_else(|| {
         DEFAULT_PROFILER_CATEGORIES
@@ -211,7 +278,7 @@ pub async fn profiler_start(
         )
         .await?;
 
-    tracing_state.active = true;
+    tracing_state.active = Some(Recorder::Profiler);
     tracing_state.events.clear();
     tracing_state.events_dropped = false;
 
@@ -224,9 +291,7 @@ pub async fn profiler_stop(
     tracing_state: &mut TracingState,
     path: Option<&str>,
 ) -> Result<Value, String> {
-    if !tracing_state.active {
-        return Err("No profiling in progress".to_string());
-    }
+    ensure_stoppable(tracing_state.active, Recorder::Profiler)?;
 
     let mut rx = client.subscribe();
 
@@ -269,7 +334,7 @@ pub async fn profiler_stop(
         }
     }
 
-    tracing_state.active = false;
+    tracing_state.active = None;
 
     let save_path = match path {
         Some(p) => p.to_string(),
@@ -369,5 +434,80 @@ fn get_profiles_dir() -> PathBuf {
         home.join(".agent-browser").join("tmp").join("profiles")
     } else {
         std::env::temp_dir().join("agent-browser").join("profiles")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression for #1313: a stop command must act only on its own recorder,
+    // never on the other type that happens to share the CDP tracing session.
+
+    #[test]
+    fn stop_refuses_the_other_recorder() {
+        // trace running, `profiler stop` -> clear error, does NOT stop the trace.
+        let err = ensure_stoppable(Some(Recorder::Trace), Recorder::Profiler).unwrap_err();
+        assert_eq!(
+            err,
+            "No profiler recording in progress (a trace recording is active; use 'trace stop')"
+        );
+
+        // profiler running, `trace stop` -> clear error, does NOT stop the profiler.
+        let err = ensure_stoppable(Some(Recorder::Profiler), Recorder::Trace).unwrap_err();
+        assert_eq!(
+            err,
+            "No trace recording in progress (a profiler recording is active; use 'profiler stop')"
+        );
+    }
+
+    #[test]
+    fn stop_allows_the_matching_recorder() {
+        assert!(ensure_stoppable(Some(Recorder::Trace), Recorder::Trace).is_ok());
+        assert!(ensure_stoppable(Some(Recorder::Profiler), Recorder::Profiler).is_ok());
+    }
+
+    #[test]
+    fn stop_with_nothing_active_keeps_the_original_message() {
+        assert_eq!(
+            ensure_stoppable(None, Recorder::Trace).unwrap_err(),
+            "No tracing in progress"
+        );
+        assert_eq!(
+            ensure_stoppable(None, Recorder::Profiler).unwrap_err(),
+            "No profiling in progress"
+        );
+    }
+
+    #[test]
+    fn start_refuses_while_the_other_recorder_is_active() {
+        let err = ensure_startable(Some(Recorder::Profiler), Recorder::Trace).unwrap_err();
+        assert_eq!(
+            err,
+            "A profiler recording is already active; stop it with 'profiler stop' before starting the trace"
+        );
+        let err = ensure_startable(Some(Recorder::Trace), Recorder::Profiler).unwrap_err();
+        assert_eq!(
+            err,
+            "A trace recording is already active; stop it with 'trace stop' before starting the profiler"
+        );
+    }
+
+    #[test]
+    fn start_refuses_a_duplicate_of_the_same_recorder() {
+        assert_eq!(
+            ensure_startable(Some(Recorder::Trace), Recorder::Trace).unwrap_err(),
+            "Tracing already active"
+        );
+        assert_eq!(
+            ensure_startable(Some(Recorder::Profiler), Recorder::Profiler).unwrap_err(),
+            "Profiling already active"
+        );
+    }
+
+    #[test]
+    fn start_allows_when_idle() {
+        assert!(ensure_startable(None, Recorder::Trace).is_ok());
+        assert!(ensure_startable(None, Recorder::Profiler).is_ok());
     }
 }
