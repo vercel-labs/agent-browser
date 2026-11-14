@@ -333,6 +333,7 @@ async fn resolve_center_in_same_process_frame(
 ) -> Result<(f64, f64), String> {
     let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
     let find_expr = build_find_element_js_in("doc", selector);
+    let check_disabled = check.rejects_disabled();
     let function = format!(
         r#"async function() {{
             const doc = this.contentDocument;
@@ -344,7 +345,7 @@ async fn resolve_center_in_same_process_frame(
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             const topDoc = (point.view && point.view.document) || doc;
-            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), inView: point.inView, blocker: blockerAt(doc, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
+            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView, {check_disabled}), blocker: blockerAt(doc, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
         }}"#,
     );
     let result = client
@@ -599,6 +600,7 @@ async fn node_click_point(
     target: &str,
     check: PressCheck,
 ) -> Result<Option<(f64, f64)>, String> {
+    let check_disabled = check.rejects_disabled();
     let function = format!(
         r#"async function() {{
             if (!this.isConnected) return {{ connected: false }};
@@ -608,7 +610,7 @@ async fn node_click_point(
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             const topDoc = (point.view && point.view.document) || doc;
-            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView), inView: point.inView, blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
+            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView, {check_disabled}), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
         }}"#,
     );
     let result = client
@@ -1089,20 +1091,22 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
     return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView };
 })"#;
 
-/// Returns why a click at (x, y) cannot reach `el`, or null when it can.
+/// Returns why input at (x, y) cannot reach `el`, or null when it can. A
+/// disabled element counts only with `checkDisabled`.
 /// It fails open when the engine lacks an API it needs.
-const ACTIONABILITY_JS: &str = r#"(el, inView) => {
+const ACTIONABILITY_JS: &str = r#"(el, inView, checkDisabled) => {
     try {
         const rect = el.getBoundingClientRect();
         if ((rect.width <= 0 && rect.height <= 0) || ['hidden', 'collapse'].includes(el.ownerDocument.defaultView.getComputedStyle(el).visibility)) return 'not visible';
-        if (el.disabled || el.matches(':disabled')) return 'disabled';
+        if (checkDisabled && (el.disabled || el.matches(':disabled'))) return 'disabled';
         if (!inView) return 'outside the viewport';
     } catch (e) {}
     return null;
 }"#;
 
-fn build_selector_js(selector: &str) -> String {
+fn build_selector_js(selector: &str, check: PressCheck) -> String {
     let find_expr = build_find_element_js(selector);
+    let check_disabled = check.rejects_disabled();
     format!(
         r#"(async () => {{
             const el = {find_expr};
@@ -1112,7 +1116,7 @@ fn build_selector_js(selector: &str) -> String {
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             const topDoc = (point.view && point.view.document) || document;
-            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), inView: point.inView, blocker: blockerAt(document, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
+            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView, {check_disabled}), blocker: blockerAt(document, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
         }})()"#,
     )
 }
@@ -1123,7 +1127,7 @@ async fn resolve_by_selector(
     selector: &str,
     check: PressCheck,
 ) -> Result<(f64, f64), String> {
-    let js = build_selector_js(selector);
+    let js = build_selector_js(selector, check);
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -1172,23 +1176,18 @@ pub enum PressCheck {
 }
 
 impl PressCheck {
+    fn rejects_disabled(self) -> bool {
+        matches!(self, PressCheck::Click)
+    }
+
     /// Why input at the resolved `point` would miss `target`, if it would.
     fn rejection(self, target: &str, point: Option<&Value>) -> Option<String> {
-        let reason = point.and_then(|v| v.get("reason")).and_then(|v| v.as_str());
-        let (action, reason) = match self {
+        let action = match self {
             PressCheck::None => return None,
-            PressCheck::Click => ("click", reason?),
-            PressCheck::Drag => {
-                let in_view = point
-                    .and_then(|v| v.get("inView"))
-                    .and_then(|v| v.as_bool());
-                match reason {
-                    Some("not visible") => ("drag", "not visible"),
-                    _ if in_view == Some(false) => ("drag", "outside the viewport"),
-                    _ => return None,
-                }
-            }
+            PressCheck::Click => "click",
+            PressCheck::Drag => "drag",
         };
+        let reason = point?.get("reason")?.as_str()?;
         Some(format!(
             "Element '{}' is {}, so the {} would not reach it",
             target, reason, action
@@ -1906,28 +1905,28 @@ mod tests {
 
     #[test]
     fn test_build_selector_js_css() {
-        let js = build_selector_js("#submit-btn");
+        let js = build_selector_js("#submit-btn", PressCheck::None);
         assert!(js.contains("document.querySelector(\"#submit-btn\")"));
         assert!(!js.contains("document.evaluate"));
     }
 
     #[test]
     fn test_build_selector_js_xpath() {
-        let js = build_selector_js("xpath=//button[@id='ok']");
+        let js = build_selector_js("xpath=//button[@id='ok']", PressCheck::None);
         assert!(js.contains("document.evaluate(\"//button[@id='ok']\", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)"));
         assert!(!js.contains("document.querySelector"));
     }
 
     #[test]
     fn test_build_selector_js_xpath_empty() {
-        let js = build_selector_js("xpath=");
+        let js = build_selector_js("xpath=", PressCheck::None);
         assert!(js.contains("document.evaluate"));
     }
 
     #[test]
     fn test_build_selector_js_not_xpath_prefix() {
         // "xpath" without "=" should be treated as CSS selector
-        let js = build_selector_js("xpath//div");
+        let js = build_selector_js("xpath//div", PressCheck::None);
         assert!(js.contains("document.querySelector"));
     }
 
