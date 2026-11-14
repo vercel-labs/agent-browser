@@ -11854,6 +11854,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 
     // Measure the target only after pressing: resolving scrolls it into view,
     // which would move the source out from under a point measured earlier.
+    // It was checked above; the press may since have put a drop zone over it.
     let resolved_target = async {
         let (tx, ty, target_session_id) = super::element::resolve_element_center(
             &mgr.client,
@@ -11861,7 +11862,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             &state.ref_map,
             target,
             &state.iframe_sessions,
-            PressCheck::Drag,
+            PressCheck::Held,
         )
         .await?;
         let target_offset = super::element::session_viewport_offset(
@@ -11877,7 +11878,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let (tx, ty, target_session_id, target_offset) = match resolved_target {
         Ok(resolved) => resolved,
         Err(err) => {
-            // The page changed under the held button; do not leave it held.
+            // The target is gone; do not leave the button held.
             let _ = mgr
                 .client
                 .send_command(

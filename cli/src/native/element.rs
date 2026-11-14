@@ -364,12 +364,6 @@ async fn resolve_center_in_same_process_frame(
     if let Some(err) = check.rejection(selector, value) {
         return Err(err);
     }
-    if let Some(blocker) = value
-        .and_then(|v| v.get("blocker"))
-        .and_then(|v| v.as_str())
-    {
-        return Err(intercepted_error(selector, blocker));
-    }
     let x = value.and_then(|v| v.get("x")).and_then(|v| v.as_f64());
     let y = value.and_then(|v| v.get("y")).and_then(|v| v.as_f64());
     match (x, y) {
@@ -635,12 +629,6 @@ async fn node_click_point(
     }
     if let Some(err) = check.rejection(target, value) {
         return Err(err);
-    }
-    if let Some(blocker) = value
-        .and_then(|v| v.get("blocker"))
-        .and_then(|v| v.as_str())
-    {
-        return Err(intercepted_error(target, blocker));
     }
     match (
         value.and_then(|v| v.get("x")).and_then(|v| v.as_f64()),
@@ -1145,9 +1133,6 @@ async fn resolve_by_selector(
     if let Some(err) = check.rejection(selector, Some(&val)) {
         return Err(err);
     }
-    if let Some(blocker) = val.get("blocker").and_then(|v| v.as_str()) {
-        return Err(intercepted_error(selector, blocker));
-    }
     let x = val.get("x").and_then(|v| v.as_f64());
     let y = val.get("y").and_then(|v| v.as_f64());
 
@@ -1167,12 +1152,15 @@ fn intercepted_error(target: &str, blocker: &str) -> String {
 /// What a resolved press point must satisfy before input is dispatched to it.
 #[derive(Clone, Copy)]
 pub enum PressCheck {
-    /// Use the point as measured.
+    /// Nothing else may cover the point.
     None,
-    /// The element must be visible, enabled, and inside the viewport.
+    /// The element must also be visible, enabled, and inside the viewport.
     Click,
-    /// The element must be visible and inside the viewport.
+    /// The element must also be visible and inside the viewport.
     Drag,
+    /// No check. The button is already down, so what the page puts over the
+    /// point in response, such as a drop zone, is part of the gesture.
+    Held,
 }
 
 impl PressCheck {
@@ -1183,15 +1171,21 @@ impl PressCheck {
     /// Why input at the resolved `point` would miss `target`, if it would.
     fn rejection(self, target: &str, point: Option<&Value>) -> Option<String> {
         let action = match self {
-            PressCheck::None => return None,
-            PressCheck::Click => "click",
-            PressCheck::Drag => "drag",
+            PressCheck::Held => return None,
+            PressCheck::None => None,
+            PressCheck::Click => Some("click"),
+            PressCheck::Drag => Some("drag"),
         };
-        let reason = point?.get("reason")?.as_str()?;
-        Some(format!(
-            "Element '{}' is {}, so the {} would not reach it",
-            target, reason, action
-        ))
+        let point = point?;
+        let reason = point.get("reason").and_then(|v| v.as_str());
+        if let (Some(action), Some(reason)) = (action, reason) {
+            return Some(format!(
+                "Element '{}' is {}, so the {} would not reach it",
+                target, reason, action
+            ));
+        }
+        let blocker = point.get("blocker")?.as_str()?;
+        Some(intercepted_error(target, blocker))
     }
 }
 
