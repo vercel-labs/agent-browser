@@ -17,6 +17,7 @@ import {
   newSessionDialogAtom,
 } from "@/store/sessions";
 import { tabsForPortAtom, engineForPortAtom } from "@/store/tabs";
+import { dashboardConfigAtom } from "@/store/dashboard-config";
 import { ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
@@ -59,21 +60,24 @@ const PROVIDER_LOGOS: Record<string, string> = {
   agentcore: "/providers/agentcore.svg",
   browserbase: "/providers/browserbase.svg",
   browserless: "/providers/browserless.svg",
+  browseruse: "/providers/browser-use.svg",
   "browser-use": "/providers/browser-use.svg",
   kernel: "/providers/kernel.svg",
 };
 
 const SUPPORTED_ENGINES = ["chrome", "lightpanda", "obscura"] as const;
 
-const BROWSER_OPTIONS: { id: string; label: string; engine?: string; provider?: string }[] = [
-  { id: "chrome", label: "Chrome", engine: "chrome" },
-  { id: "lightpanda", label: "Lightpanda", engine: "lightpanda" },
-  { id: "agentcore", label: "AgentCore", provider: "agentcore" },
-  { id: "browserbase", label: "Browserbase", provider: "browserbase" },
-  { id: "browserless", label: "Browserless", provider: "browserless" },
-  { id: "browser-use", label: "Browser Use", provider: "browser-use" },
-  { id: "kernel", label: "Kernel", provider: "kernel" },
-];
+const BROWSER_LABELS: Record<string, string> = {
+  chrome: "Chrome",
+  lightpanda: "Lightpanda",
+  agentcore: "AgentCore",
+  browserbase: "Browserbase",
+  browserless: "Browserless",
+  browseruse: "Browser Use",
+  kernel: "Kernel",
+};
+
+type BrowserOption = { name: string; engine?: string; provider?: string };
 
 function BrandLogo({ name, logos }: { name: string; logos: Record<string, string> }) {
   const src = logos[name];
@@ -368,6 +372,13 @@ export function SessionTree() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const config = useAtomValue(dashboardConfigAtom);
+  const browserOptions: BrowserOption[] = [
+    ...(config?.engines ?? []).map((name) => ({ name, engine: name })),
+    ...(config?.providers ?? []).map((name) => ({ name, provider: name })),
+  ];
+  const selectedBrowser =
+    browserOptions.find((option) => option.name === newSessionBrowser) ?? browserOptions[0];
 
   const isExpanded = useCallback(
     (port: number) => expandedMap[port] ?? true,
@@ -383,11 +394,10 @@ export function SessionTree() {
     if (!name || creating) return;
     setCreating(true);
     setCreateError("");
-    const option = BROWSER_OPTIONS.find((o) => o.id === newSessionBrowser);
     const error = await dispatchCreateSession({
       name,
-      engine: option?.engine ?? "chrome",
-      provider: option?.provider,
+      engine: selectedBrowser?.engine ?? "chrome",
+      provider: selectedBrowser?.provider,
     });
     setCreating(false);
     if (error) {
@@ -396,7 +406,7 @@ export function SessionTree() {
       setNewSessionName("");
       setNewSessionOpen(false);
     }
-  }, [newSessionName, newSessionBrowser, creating, dispatchCreateSession]);
+  }, [newSessionName, selectedBrowser, creating, dispatchCreateSession]);
 
   useEffect(() => {
     if (newSessionOpen && !newSessionName) {
@@ -493,28 +503,30 @@ export function SessionTree() {
             disabled={creating}
             className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
           />
-          <div className="grid grid-cols-3 gap-2">
-            {BROWSER_OPTIONS.map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                disabled={creating}
-                onClick={() => setNewSessionBrowser(opt.id)}
-                className={cn(
-                  "flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
-                  newSessionBrowser === opt.id
-                    ? "border-ring bg-muted text-foreground"
-                    : "border-border text-muted-foreground hover:text-foreground",
-                  creating && "opacity-50",
-                )}
-              >
-                {opt.engine
-                  ? <EngineLogo engine={opt.engine} />
-                  : <ProviderLogo provider={opt.provider!} />}
-                {opt.label}
-              </button>
-            ))}
-          </div>
+          {browserOptions.length > 1 && (
+            <div className="grid grid-cols-3 gap-2">
+              {browserOptions.map((opt) => (
+                <button
+                  key={opt.name}
+                  type="button"
+                  disabled={creating}
+                  onClick={() => setNewSessionBrowser(opt.name)}
+                  className={cn(
+                    "flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
+                    selectedBrowser?.name === opt.name
+                      ? "border-ring bg-muted text-foreground"
+                      : "border-border text-muted-foreground hover:text-foreground",
+                    creating && "opacity-50",
+                  )}
+                >
+                  {opt.engine
+                    ? <EngineLogo engine={opt.engine} />
+                    : <ProviderLogo provider={opt.provider!} />}
+                  {BROWSER_LABELS[opt.name] ?? opt.name}
+                </button>
+              ))}
+            </div>
+          )}
           {createError && (
             <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {createError}

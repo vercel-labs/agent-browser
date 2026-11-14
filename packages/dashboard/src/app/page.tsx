@@ -6,7 +6,8 @@ import { useSessionsSync } from "@/store/sessions";
 import { useStreamSync, hasConsoleErrorsAtom, consoleLogsAtom } from "@/store/stream";
 import { useActivitySync } from "@/store/activity";
 import { activeExtensionsAtom } from "@/store/sessions";
-import { useChatStatusSync } from "@/store/chat";
+import { useChatModelsSync } from "@/store/chat";
+import { dashboardConfigAtom, useDashboardConfigSync } from "@/store/dashboard-config";
 import { initializeDashboardAccessToken } from "@/lib/dashboard-routes";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { Viewport } from "@/components/viewport";
@@ -32,7 +33,9 @@ export default function DashboardPage() {
   useStreamSync(activePort);
   useSessionsSync();
   useActivitySync();
-  useChatStatusSync();
+  useDashboardConfigSync();
+  const chatEnabled = useAtomValue(dashboardConfigAtom)?.chat.enabled ?? false;
+  useChatModelsSync(chatEnabled);
 
   const sessions = useAtomValue(sessionsAtom);
   const hasSessions = sessions.length > 0;
@@ -41,11 +44,15 @@ export default function DashboardPage() {
   const hasConsoleErrors = useAtomValue(hasConsoleErrorsAtom);
   const activeExtensions = useAtomValue(activeExtensionsAtom);
 
+  const defaultTab = chatEnabled ? "chat" : "activity";
   const sidePanel = (
-    <Tabs defaultValue="chat" className="flex h-full flex-col">
+    // Remount when the config enables chat so its tab opens first.
+    <Tabs key={defaultTab} defaultValue={defaultTab} className="flex h-full flex-col">
       <div className="shrink-0 px-2 pt-1">
         <TabsList variant="line" className="h-7 w-full">
-          <TabsTrigger value="chat" className="text-[11px]">Chat</TabsTrigger>
+          {chatEnabled && (
+            <TabsTrigger value="chat" className="text-[11px]">Chat</TabsTrigger>
+          )}
           <TabsTrigger value="activity" className="text-[11px]">Activity</TabsTrigger>
           <TabsTrigger value="console" className="text-[11px]">
             Console
@@ -78,9 +85,11 @@ export default function DashboardPage() {
       <TabsContent value="extensions" className="min-h-0 flex-1 overflow-hidden">
         <ExtensionsPanel />
       </TabsContent>
-      <TabsContent value="chat" className="min-h-0 flex-1 overflow-hidden">
-        <ChatPanel />
-      </TabsContent>
+      {chatEnabled && (
+        <TabsContent value="chat" className="min-h-0 flex-1 overflow-hidden">
+          <ChatPanel />
+        </TabsContent>
+      )}
     </Tabs>
   );
 

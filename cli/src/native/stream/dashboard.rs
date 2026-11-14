@@ -1,6 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::OnceLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -8,7 +9,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::connection::get_socket_dir;
 use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
 
-use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
+use super::chat::{handle_chat_request, handle_models_request, is_chat_enabled};
 use super::discovery::discover_sessions;
 use super::http::serve_embedded_file;
 use super::origin::{
@@ -177,6 +178,116 @@ pub fn normalize_dashboard_allowed_origins(value: Option<&str>) -> Result<Vec<St
 fn allowed_dashboard_origins() -> Result<Vec<String>, String> {
     let configured = std::env::var("AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS").ok();
     normalize_dashboard_allowed_origins(configured.as_deref())
+}
+
+const DASHBOARD_ENGINES: &[&str] = &["chrome", "lightpanda"];
+const DASHBOARD_PROVIDERS: &[&str] = &[
+    "agentcore",
+    "browserbase",
+    "browserless",
+    "browseruse",
+    "kernel",
+];
+
+static DASHBOARD_BROWSERS: OnceLock<DashboardBrowsers> = OnceLock::new();
+
+/// Engines and providers the New Session dialog offers. This only trims the
+/// UI: `/api/exec` still runs any CLI command.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct DashboardBrowsers {
+    pub engines: Vec<String>,
+    pub providers: Vec<String>,
+}
+
+impl Default for DashboardBrowsers {
+    fn default() -> Self {
+        Self {
+            engines: DASHBOARD_ENGINES
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+            providers: DASHBOARD_PROVIDERS
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+        }
+    }
+}
+
+impl DashboardBrowsers {
+    /// Parse `--engines` and `--providers` lists. An omitted list offers every
+    /// option, `none` offers no providers, and unknown names are errors.
+    pub fn parse(engines: Option<&str>, providers: Option<&str>) -> Result<Self, String> {
+        Ok(Self {
+            engines: parse_browser_names("engine", engines, DASHBOARD_ENGINES)?,
+            providers: if providers.map(str::trim) == Some("none") {
+                Vec::new()
+            } else {
+                parse_browser_names("provider", providers, DASHBOARD_PROVIDERS)?
+            },
+        })
+    }
+
+    fn from_env() -> Result<Self, String> {
+        Self::parse(
+            std::env::var("AGENT_BROWSER_DASHBOARD_ENGINES")
+                .ok()
+                .as_deref(),
+            std::env::var("AGENT_BROWSER_DASHBOARD_PROVIDERS")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    /// The `--providers` value that selects these providers.
+    pub fn providers_value(&self) -> String {
+        if self.providers.is_empty() {
+            "none".to_string()
+        } else {
+            self.providers.join(",")
+        }
+    }
+}
+
+fn parse_browser_names(
+    kind: &str,
+    value: Option<&str>,
+    supported: &[&str],
+) -> Result<Vec<String>, String> {
+    let requested: Vec<&str> = match value {
+        Some(value) => value.split(',').map(str::trim).collect(),
+        None => supported.to_vec(),
+    };
+    if let Some(unknown) = requested.iter().find(|&&name| !supported.contains(&name)) {
+        return Err(format!(
+            "Unknown dashboard {kind} '{unknown}'. Expected a comma-separated list of: {}.",
+            supported.join(", ")
+        ));
+    }
+    // Keep the supported order so equivalent lists compare equal.
+    Ok(supported
+        .iter()
+        .filter(|&&name| requested.contains(&name))
+        .map(|name| name.to_string())
+        .collect())
+}
+
+/// Body of `/api/dashboard/config`, which the dashboard UI reads once at load.
+pub(super) fn dashboard_config_json() -> String {
+    let browsers = DASHBOARD_BROWSERS.get().cloned().unwrap_or_default();
+    let enabled = is_chat_enabled();
+    let mut chat = json!({ "enabled": enabled });
+    if enabled {
+        if let Ok(model) = std::env::var("AI_GATEWAY_MODEL") {
+            chat["model"] = Value::String(model);
+        }
+    }
+    json!({
+        "engines": browsers.engines,
+        "providers": browsers.providers,
+        "chat": chat,
+    })
+    .to_string()
 }
 
 pub fn is_valid_dashboard_access_token(value: &str) -> bool {
@@ -524,6 +635,16 @@ async fn proxy_session_stream(mut stream: tokio::net::TcpStream, port: u16) {
 }
 
 pub async fn run_dashboard_server(port: u16) {
+    match DashboardBrowsers::from_env() {
+        Ok(browsers) => {
+            let _ = DASHBOARD_BROWSERS.set(browsers);
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            return;
+        }
+    }
+
     let ipv4_addr = (Ipv4Addr::LOCALHOST, port);
     let ipv4_listener = match TcpListener::bind(ipv4_addr).await {
         Ok(l) => l,
@@ -740,11 +861,11 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
             "application/json; charset=utf-8",
             discover_sessions().into_bytes(),
         )
-    } else if path == "/api/chat/status" {
+    } else if path == "/api/dashboard/config" {
         (
             "200 OK",
             "application/json; charset=utf-8",
-            chat_status_json().into_bytes(),
+            dashboard_config_json().into_bytes(),
         )
     } else {
         serve_embedded_file(path)
@@ -1342,6 +1463,70 @@ mod tests {
                 "unexpectedly accepted {value}"
             );
         }
+    }
+
+    #[test]
+    fn dashboard_browsers_parse_known_names_in_a_stable_order() {
+        assert_eq!(
+            DashboardBrowsers::parse(None, None),
+            Ok(DashboardBrowsers::default())
+        );
+        assert_eq!(
+            DashboardBrowsers::parse(Some("lightpanda, chrome,chrome"), Some("none")),
+            Ok(DashboardBrowsers {
+                engines: vec!["chrome".to_string(), "lightpanda".to_string()],
+                providers: Vec::new(),
+            })
+        );
+        assert_eq!(
+            DashboardBrowsers::parse(None, Some("kernel,browserbase"))
+                .unwrap()
+                .providers,
+            vec!["browserbase".to_string(), "kernel".to_string()]
+        );
+        for (engines, providers) in [
+            (Some(""), None),
+            (Some("chrome,firefox"), None),
+            (Some("none"), None),
+            (None, Some("")),
+            (None, Some("kernel,ios")),
+        ] {
+            assert!(
+                DashboardBrowsers::parse(engines, providers).is_err(),
+                "unexpectedly accepted {engines:?} {providers:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_config_reports_browsers_and_chat_availability() {
+        let guard = EnvGuard::new(&["AI_GATEWAY_API_KEY"]);
+        let request = dashboard_request(
+            "GET",
+            "/api/dashboard/config",
+            "Origin: http://localhost:4848\r\n",
+            "",
+        );
+        let config = |response: String| -> Value {
+            assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+        };
+
+        guard.remove("AI_GATEWAY_API_KEY");
+        assert_eq!(
+            config(send_request_to_dashboard_handler(&request).await),
+            json!({
+                "engines": DASHBOARD_ENGINES,
+                "providers": DASHBOARD_PROVIDERS,
+                "chat": { "enabled": false },
+            })
+        );
+
+        guard.set("AI_GATEWAY_API_KEY", "test-key");
+        assert_eq!(
+            config(send_request_to_dashboard_handler(&request).await)["chat"]["enabled"],
+            true
+        );
     }
 
     #[test]

@@ -2020,13 +2020,23 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DASHBOARD_START,
             "Dashboard start",
-            "Start dashboard server. Loopback access requires no token. When the dashboard is exposed through a reverse proxy, configure its exact browser origin with allowedOrigins and open the returned private URL. Stop a running dashboard before changing its port or allowed origins.",
+            "Start dashboard server. Loopback access requires no token. When the dashboard is exposed through a reverse proxy, configure its exact browser origin with allowedOrigins and open the returned private URL. Stop a running dashboard before changing its settings.",
             json!({
                 "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
                 "allowedOrigins": {
                     "type": "string",
                     "minLength": 1,
                     "description": "Comma-separated exact HTTPS origins allowed to use a reverse-proxied dashboard. Every entry must be valid. Local loopback origins are allowed by default."
+                },
+                "engines": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Comma-separated engines the New Session dialog offers: chrome, lightpanda. Default: all."
+                },
+                "providers": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Comma-separated providers the New Session dialog offers: agentcore, browserbase, browserless, browseruse, kernel, or none. Default: all."
                 }
             }),
             &[],
@@ -4541,6 +4551,14 @@ fn dashboard_start_args(arguments: &Value) -> Result<Vec<String>, ProtocolError>
     if let Some(origins) = optional_string(arguments, "allowedOrigins")? {
         args.push("--allowed-origins".to_string());
         args.push(origins);
+    }
+    if let Some(engines) = optional_string(arguments, "engines")? {
+        args.push("--engines".to_string());
+        args.push(engines);
+    }
+    if let Some(providers) = optional_string(arguments, "providers")? {
+        args.push("--providers".to_string());
+        args.push(providers);
     }
     Ok(args)
 }
@@ -7282,7 +7300,9 @@ mod tests {
 
         let args = dashboard_start_args(&json!({
             "port": 8080,
-            "allowedOrigins": "https://dashboard.example.com"
+            "allowedOrigins": "https://dashboard.example.com",
+            "engines": "chrome",
+            "providers": "none"
         }))
         .unwrap();
         assert_eq!(
@@ -7293,7 +7313,11 @@ mod tests {
                 "--port",
                 "8080",
                 "--allowed-origins",
-                "https://dashboard.example.com"
+                "https://dashboard.example.com",
+                "--engines",
+                "chrome",
+                "--providers",
+                "none"
             ]
         );
     }
