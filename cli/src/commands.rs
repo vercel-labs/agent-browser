@@ -2404,6 +2404,23 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 const INVOKE_USAGE: &str =
     "webmcp invoke <tool> [<json|@file> | --params <json|@file>] [--frame <frame-id>] [--detach] [--timeout <ms>]";
 
+/// Reads the value that follows an invoke flag. A dash-prefixed token is the next
+/// option with its value missing, never the value itself.
+fn invoke_flag_value<'a>(
+    rest: &'a [&'a str],
+    index: usize,
+    flag: &str,
+    usage: &'static str,
+) -> Result<&'a str, ParseError> {
+    match rest.get(index + 1) {
+        Some(value) if !value.starts_with('-') => Ok(value),
+        _ => Err(ParseError::MissingArguments {
+            context: format!("webmcp invoke {}", flag),
+            usage,
+        }),
+    }
+}
+
 /// Reads a tool's input from inline JSON or `@file`, given as `--params` or as the
 /// argument after the tool name. Giving it twice is an error, not a silent override.
 fn set_invoke_params(
@@ -2498,33 +2515,28 @@ fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             while index < rest.len() {
                 match rest[index] {
                     "--params" => {
-                        let raw =
-                            rest.get(index + 1)
-                                .ok_or_else(|| ParseError::MissingArguments {
-                                    context: "webmcp invoke --params".to_string(),
-                                    usage: INVOKE_USAGE,
-                                })?;
+                        let raw = invoke_flag_value(rest, index, "--params", INVOKE_USAGE)?;
                         set_invoke_params(&mut command, &mut has_params, raw)?;
                         index += 1;
                     }
                     "--frame" => {
-                        let frame =
-                            rest.get(index + 1)
-                                .ok_or_else(|| ParseError::MissingArguments {
-                                    context: "webmcp invoke --frame".to_string(),
-                                    usage: "webmcp invoke <tool> --frame <frame-id>",
-                                })?;
+                        let frame = invoke_flag_value(
+                            rest,
+                            index,
+                            "--frame",
+                            "webmcp invoke <tool> --frame <frame-id>",
+                        )?;
                         command["frameId"] = json!(frame);
                         index += 1;
                     }
                     "--detach" => command["detach"] = json!(true),
                     "--timeout" => {
-                        let raw =
-                            rest.get(index + 1)
-                                .ok_or_else(|| ParseError::MissingArguments {
-                                    context: "webmcp invoke --timeout".to_string(),
-                                    usage: "webmcp invoke <tool> --timeout <ms>",
-                                })?;
+                        let raw = invoke_flag_value(
+                            rest,
+                            index,
+                            "--timeout",
+                            "webmcp invoke <tool> --timeout <ms>",
+                        )?;
                         let timeout = raw.parse::<u64>().map_err(|_| ParseError::InvalidValue {
                             message: format!("--timeout expects a number in ms, got '{}'", raw),
                             usage: "webmcp invoke <tool> --timeout <ms>",
@@ -6727,6 +6739,22 @@ mod tests {
             let message = err.format();
             assert!(
                 message.contains("Unknown webmcp invoke option"),
+                "{input} gave: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_webmcp_invoke_does_not_read_a_flag_as_a_value() {
+        for input in [
+            r#"webmcp invoke search --params --frame frame-1"#,
+            "webmcp invoke search --frame --detach",
+            "webmcp invoke search --timeout --detach",
+        ] {
+            let err = parse_command(&args(input), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(
+                message.contains("Missing arguments for: webmcp invoke --"),
                 "{input} gave: {message}"
             );
         }
