@@ -284,6 +284,12 @@ impl Contexts {
             .filter(|user_context| *user_context != DEFAULT_USER_CONTEXT)
     }
 
+    /// The user context, Firefox's cookie jar, of the tab `context` belongs to.
+    pub fn jar(&self, context: &str) -> &str {
+        self.tab(context)
+            .map_or(DEFAULT_USER_CONTEXT, |tab| tab.user_context.as_str())
+    }
+
     /// Whether a `getTree` entry uses the same cookie jar as the active tab.
     pub fn in_active_jar(&self, info: &Value) -> bool {
         let jar = self

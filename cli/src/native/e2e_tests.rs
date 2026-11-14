@@ -15924,6 +15924,19 @@ fn firefox_serve(
                     )
                 }
                 "/api" => ("text/plain", "", "real".to_string()),
+                "/whoami" => {
+                    let agent = head
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+                        .map(|(_, value)| value.trim().to_string())
+                        .unwrap_or_default();
+                    (
+                        "text/html; charset=utf-8",
+                        "",
+                        format!("<script>document.title = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'</script><pre>{agent}</pre>"),
+                    )
+                }
                 "/auth" => (
                     "text/plain",
                     "WWW-Authenticate: Basic realm=\"origin\"\r\n",
@@ -18664,6 +18677,167 @@ async fn e2e_firefox_user_agent_locale_geolocation_and_permissions() {
         )
         .await,
         json!([35.5, 139.75, 12])
+    );
+    firefox_close(&mut state).await;
+}
+
+/// A tab the page opens itself sends the session's user agent on its first request and reports
+/// the emulated color scheme while it loads, before the daemon ever switches to it.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_popup_has_the_session_emulation_before_it_loads() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "ua", "action": "useragent", "userAgent": "PopupCoverage/1.0" }),
+        )
+        .await,
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "m", "action": "set_media", "colorScheme": "dark" }),
+        )
+        .await,
+    );
+    firefox_eval(
+        &mut state,
+        r#"document.body.innerHTML = '<button id=pop onclick="window.open(\'/whoami\')">Open</button>'; true"#,
+    )
+    .await;
+    let original = state
+        .firefox
+        .as_ref()
+        .unwrap()
+        .contexts
+        .active_tab()
+        .to_string();
+    assert_success(&firefox_act(&mut state, "click", "#pop", json!({})).await);
+
+    let bidi = state.firefox.as_ref().unwrap().bidi.clone();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let probe = loop {
+        let tree = bidi
+            .send("browsingContext.getTree", json!({ "maxDepth": 0 }))
+            .await
+            .unwrap();
+        let popup = tree["contexts"].as_array().unwrap().iter().find_map(|c| {
+            let loaded = c["url"].as_str().is_some_and(|u| u.ends_with("/whoami"));
+            loaded.then(|| c["context"].as_str().unwrap().to_string())
+        });
+        if let Some(popup) = popup {
+            let probe = bidi
+                .call_function(
+                    &popup,
+                    "() => [document.title, document.querySelector('pre')?.textContent ?? null]",
+                    None,
+                    vec![],
+                )
+                .await
+                .unwrap();
+            if !probe[1].is_null() {
+                break probe;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the popup never loaded"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(probe, json!(["dark", "PopupCoverage/1.0"]));
+    assert_eq!(
+        state.firefox.as_ref().unwrap().contexts.active_tab(),
+        original
+    );
+    firefox_close(&mut state).await;
+}
+
+/// An origin that rejects the credentials the session sends answers at once instead of leaving
+/// Firefox's auth prompt open until the navigation times out.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_rejected_credentials_do_not_wait_on_an_auth_prompt() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "c", "action": "credentials", "username": "user", "password": "wrong" }),
+        )
+        .await,
+    );
+
+    let started = std::time::Instant::now();
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "nav", "action": "navigate", "url": format!("{}auth", fixture.url) }),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "navigation took {elapsed:?}: {resp}"
+    );
+    assert!(fixture.hit_count("/auth#authorization") > 0);
+    assert_eq!(
+        firefox_eval(&mut state, "document.body.innerText").await,
+        json!("denied")
+    );
+    firefox_close(&mut state).await;
+}
+
+/// A frame of another origin holds the granted permissions, like the page that embeds it.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_permissions_cover_a_cross_origin_frame() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "permissions", "action": "permissions", "permissions": ["geolocation"] }),
+        )
+        .await,
+    );
+    firefox_open(&mut state, &fixture.url).await;
+    let frame_url = format!("{}/frame.html", fixture.other);
+    firefox_eval(
+        &mut state,
+        &format!(
+            "new Promise(resolve => {{ document.body.innerHTML = '<iframe id=other allow=geolocation src=\"{frame_url}\"></iframe>'; document.querySelector('#other').addEventListener('load', () => resolve(true)); }})"
+        ),
+    )
+    .await;
+
+    assert_success(&firefox_act(&mut state, "frame", "#other", json!({})).await);
+    assert_eq!(
+        firefox_eval(&mut state, "location.origin").await,
+        json!(fixture.other)
+    );
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "navigator.permissions.query({name:'geolocation'}).then(p => p.state)"
+        )
+        .await,
+        json!("granted")
     );
     firefox_close(&mut state).await;
 }

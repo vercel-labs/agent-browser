@@ -909,6 +909,7 @@ pub(crate) mod tests {
                 let to = v["to"].as_str().unwrap_or("");
                 let kind = v["type"].as_str().unwrap_or("");
                 let reply = match (to, kind) {
+                    ("root", "getRoot") => json!({"from": "root", "preferenceActor": "prefs1"}),
                     ("root", "listTabs") => json!({
                         "from": "root",
                         "tabs": [{"actor": "tab1", "selected": true}],
