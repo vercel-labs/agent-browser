@@ -7216,7 +7216,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &state.ref_map,
             selector,
             &state.iframe_sessions,
-            true,
+            super::element::PressCheck::Click,
         )
         .await?;
         let offset = super::element::session_viewport_offset(
@@ -11794,22 +11794,24 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'target' parameter")?;
 
+    // Check the target first, so a target that is missing, covered, or cannot
+    // be scrolled into view fails before any input reaches the page.
+    super::element::resolve_element_center(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        target,
+        &state.iframe_sessions,
+        super::element::PressCheck::Drag,
+    )
+    .await?;
     let (sx, sy, source_session_id) = super::element::resolve_element_center(
         &mgr.client,
         &session_id,
         &state.ref_map,
         source,
         &state.iframe_sessions,
-        false,
-    )
-    .await?;
-    let (tx, ty, target_session_id) = super::element::resolve_element_center(
-        &mgr.client,
-        &session_id,
-        &state.ref_map,
-        target,
-        &state.iframe_sessions,
-        false,
+        super::element::PressCheck::Drag,
     )
     .await?;
 
@@ -11825,13 +11827,6 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &mgr.client,
         &session_id,
         &source_session_id,
-        &state.iframe_sessions,
-    )
-    .await?;
-    let target_offset = super::element::session_viewport_offset(
-        &mgr.client,
-        &session_id,
-        &target_session_id,
         &state.iframe_sessions,
     )
     .await?;
@@ -11861,11 +11856,54 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         cursor.record(sx + source_offset.0, sy + source_offset.1, 1);
     }
 
-    // Move in steps to target, keeping the left button held (buttons: 1) so
-    // that the browser sees a drag rather than a plain pointer move.
     state.mouse_state.x = sx + source_offset.0;
     state.mouse_state.y = sy + source_offset.1;
     state.mouse_state.buttons = 1;
+
+    // Measure the target only after pressing: resolving scrolls it into view,
+    // which would move the source out from under a point measured earlier.
+    let resolved_target = async {
+        let (tx, ty, target_session_id) = super::element::resolve_element_center(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            target,
+            &state.iframe_sessions,
+            super::element::PressCheck::Drag,
+        )
+        .await?;
+        let target_offset = super::element::session_viewport_offset(
+            &mgr.client,
+            &session_id,
+            &target_session_id,
+            &state.iframe_sessions,
+        )
+        .await?;
+        Ok::<_, String>((tx, ty, target_session_id, target_offset))
+    }
+    .await;
+    let (tx, ty, target_session_id, target_offset) = match resolved_target {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            // The page changed under the held button; do not leave it held.
+            let _ = mgr
+                .client
+                .send_command(
+                    "Input.dispatchMouseEvent",
+                    Some(json!({ "type": "mouseReleased", "x": sx, "y": sy, "button": "left", "buttons": 0, "clickCount": 1 })),
+                    Some(&source_session_id),
+                )
+                .await;
+            state.mouse_state.buttons = 0;
+            if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
+                cursor.record(sx + source_offset.0, sy + source_offset.1, 0);
+            }
+            return Err(err);
+        }
+    };
+
+    // Move in steps to target, keeping the left button held (buttons: 1) so
+    // that the browser sees a drag rather than a plain pointer move.
     move_mouse_interpolated(
         &mgr.client,
         &target_session_id,

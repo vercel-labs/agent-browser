@@ -5,7 +5,7 @@ use serde_json::Value;
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::{
-    resolve_element_center, resolve_element_object_id, session_viewport_offset, RefMap,
+    resolve_element_center, resolve_element_object_id, session_viewport_offset, PressCheck, RefMap,
 };
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
@@ -71,7 +71,11 @@ async fn click_element(
         ref_map,
         selector_or_ref,
         iframe_sessions,
-        require_actionable,
+        if require_actionable {
+            PressCheck::Click
+        } else {
+            PressCheck::None
+        },
     )
     .await?;
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
@@ -127,7 +131,7 @@ pub async fn hover(
         ref_map,
         selector_or_ref,
         iframe_sessions,
-        false,
+        PressCheck::None,
     )
     .await?;
     let offset =
@@ -1073,7 +1077,7 @@ pub async fn tap_touch(
         ref_map,
         selector_or_ref,
         iframe_sessions,
-        false,
+        PressCheck::None,
     )
     .await?;
 

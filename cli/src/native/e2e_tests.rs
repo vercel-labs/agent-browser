@@ -139,6 +139,7 @@ async fn e2e_empty_table_cell_refs_resolve() {
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "drag_far_probe" => include_str!("test_fixtures/drag_far_probe.html"),
         "wheel_probe" => include_str!("test_fixtures/wheel_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
@@ -4849,6 +4850,106 @@ async fn e2e_drag_action_sends_buttons_during_move() {
     assert!(
         events.iter().any(|event| event["type"] == "dragstart"),
         "Expected dragstart to fire on the source element"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_drag_presses_source_and_rejects_unreachable_ends() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("drag_far_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Source and target share the viewport, so nothing scrolls.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "drag", "source": "#src", "target": "#near" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The target sits 3000px below the source, so reaching it scrolls the
+    // source out of the viewport. The press must still land on the source.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "drag", "source": "#src", "target": "#far" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // And back up: the source is now the element that starts off-screen.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "drag", "source": "#far", "target": "#src" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // An end of the drag that is missing, hidden, or cannot be scrolled into
+    // view fails before any input reaches the page.
+    for (source, target, expected) in [
+        ("#src", "#missing", "Element not found"),
+        (
+            "#src",
+            "#offscreen",
+            "Element '#offscreen' is outside the viewport, so the drag would not reach it",
+        ),
+        (
+            "#offscreen",
+            "#src",
+            "Element '#offscreen' is outside the viewport, so the drag would not reach it",
+        ),
+        (
+            "#src",
+            "#hidden",
+            "Element '#hidden' is not visible, so the drag would not reach it",
+        ),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": "6", "action": "drag", "source": source, "target": target }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "drag {source} {target}");
+        let error = resp["error"].as_str().unwrap_or_default();
+        assert!(error.contains(expected), "drag {source} {target}: {error}");
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "window.__dragFarProbe.events" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!([
+            "mousedown on src",
+            "mouseup on near",
+            "mousedown on src",
+            "mouseup on far",
+            "mousedown on far",
+            "mouseup on src",
+        ])
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
