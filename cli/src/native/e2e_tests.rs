@@ -17085,6 +17085,15 @@ async fn e2e_firefox_core_flow() {
     assert_success(&firefox_act(&mut state, "click", &go, json!({})).await);
     assert_eq!(firefox_title(&mut state).await, "Hello Ada");
 
+    let second = firefox_ref(&mut state, "Second").await;
+    firefox_eval(
+        &mut state,
+        "document.getElementById('list').prepend(document.createElement('div')); 0",
+    )
+    .await;
+    assert_success(&firefox_act(&mut state, "click", &second, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "clicked-second");
+
     firefox_close(&mut state).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(!firefox_processes_using(tmp.path()));
