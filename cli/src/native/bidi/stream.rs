@@ -145,7 +145,7 @@ async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<Fire
                     break;
                 }
                 if frame.is_none() && !prompts.contains(&live.context) && server.has_clients().await {
-                    frame = Some(capture_frame(&live, server.screencast_quality()));
+                    frame = Some(capture_frame(&live, server.screencast_quality(), server.screencast_max_size()));
                 }
             }
             _ = tab_tick.tick() => {
@@ -164,10 +164,49 @@ fn list_tabs(live: &FirefoxLive) -> tokio::task::JoinHandle<Option<Vec<Value>>> 
 }
 
 /// Asks Firefox for a frame without holding the poller's event loop.
-fn capture_frame(live: &FirefoxLive, quality: i32) -> tokio::task::JoinHandle<Option<Shot>> {
+fn capture_frame(
+    live: &FirefoxLive,
+    quality: i32,
+    max_size: (Option<u32>, Option<u32>),
+) -> tokio::task::JoinHandle<Option<Shot>> {
     let live = live.clone();
-    let quality = quality as f64 / 100.0;
-    tokio::spawn(async move { capture(&live, quality).await })
+    tokio::spawn(async move {
+        let mut shot = capture(&live, quality as f64 / 100.0).await?;
+        let frame = std::mem::take(&mut shot.data);
+        shot.data = tokio::task::spawn_blocking(move || fit_frame(frame, max_size, quality))
+            .await
+            .ok()?;
+        Some(shot)
+    })
+}
+
+/// Shrinks a JPEG frame to fit the configured cap, keeping its proportions. Firefox captures at
+/// the viewport size, so the cap is applied here. A frame inside the cap is returned unchanged.
+fn fit_frame(frame: String, max_size: (Option<u32>, Option<u32>), quality: i32) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+
+    if max_size == (None, None) {
+        return frame;
+    }
+    let shrunk = || {
+        let image = image::load_from_memory(&STANDARD.decode(&frame).ok()?).ok()?;
+        let max_width = max_size.0.unwrap_or(image.width());
+        let max_height = max_size.1.unwrap_or(image.height());
+        if image.width() <= max_width && image.height() <= max_height {
+            return None;
+        }
+        let resized = image
+            .resize(max_width, max_height, image::imageops::FilterType::Triangle)
+            .to_rgb8();
+        let mut jpeg = Vec::new();
+        let quality = quality.clamp(1, 100) as u8;
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality)
+            .encode_image(&resized)
+            .ok()?;
+        Some(STANDARD.encode(jpeg))
+    };
+    shrunk().unwrap_or(frame)
 }
 
 /// Captures the tab's viewport and size, giving up quickly so a stuck page cannot hold the dashboard.
@@ -308,6 +347,30 @@ pub async fn dispatch_input(live: &FirefoxLive, msg_type: &str, msg: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_larger_than_the_cap_is_shrunk_in_proportion() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+
+        let mut jpeg = Vec::new();
+        image::RgbImage::new(1280, 720)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let frame = STANDARD.encode(&jpeg);
+        let size = |frame: &str| {
+            let image = image::load_from_memory(&STANDARD.decode(frame).unwrap()).unwrap();
+            (image.width(), image.height())
+        };
+
+        let capped = fit_frame(frame.clone(), (Some(640), Some(480)), 80);
+        assert_eq!(size(&capped), (640, 360));
+        assert_eq!(fit_frame(frame.clone(), (None, None), 80), frame);
+        assert_eq!(fit_frame(frame.clone(), (Some(1920), None), 80), frame);
+    }
     use crate::native::bidi::session::tests::{fake_session, fake_session_with_replies, FakeReply};
 
     async fn dashboard(

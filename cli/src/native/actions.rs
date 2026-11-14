@@ -4971,12 +4971,15 @@ async fn auto_launch_inner(
     cmd: &Value,
     strict_state: bool,
 ) -> Result<Value, String> {
-    if has_active_browser_session(state) {
-        close_before_implicit_relaunch(state).await?;
-    }
     let mut options = state.settings.launch_options();
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
+    if state.settings.engine().as_deref() == Some("firefox") {
+        validate_firefox_launch(state, &options, &plugins).await?;
+    }
+    if has_active_browser_session(state) {
+        close_before_implicit_relaunch(state).await?;
+    }
     state.plugin_init_scripts.clear();
     state.session_setup = SessionSetup::default();
 
@@ -5828,13 +5831,13 @@ async fn handle_launch_for_target(
     result
 }
 
-/// Launches owned Firefox with the session's resolved settings.
-async fn launch_firefox(
-    state: &mut DaemonState,
-    mut options: LaunchOptions,
+/// Rejects the settings Firefox cannot launch with. It runs before a relaunch closes the running
+/// browser, so a rejected option leaves that browser and its pages alone.
+async fn validate_firefox_launch(
+    state: &DaemonState,
+    options: &LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
-    strict_state: bool,
-) -> Result<Value, String> {
+) -> Result<(), String> {
     let connection = state.settings.connection();
     let cdp = match &connection {
         Connection::Cdp(cdp) => Some(cdp.clone()),
@@ -5848,7 +5851,7 @@ async fn launch_firefox(
     let init_scripts = state.settings.init_scripts();
     let allowed_domains = current_allowed_domains(state).await;
     bidi::firefox::validate_launch(
-        &options,
+        options,
         bidi::firefox::LaunchFlags {
             cdp: cdp.as_deref(),
             auto_connect: matches!(connection, Connection::AutoConnect),
@@ -5869,7 +5872,18 @@ async fn launch_firefox(
         args: &[],
         restore_key: state.session_name.as_deref(),
         storage_state: options.storage_state.as_deref(),
-    })?;
+    })
+}
+
+/// Launches owned Firefox with the session's resolved settings.
+async fn launch_firefox(
+    state: &mut DaemonState,
+    mut options: LaunchOptions,
+    plugins: &[crate::plugins::PluginConfig],
+    strict_state: bool,
+) -> Result<Value, String> {
+    validate_firefox_launch(state, &options, plugins).await?;
+    let allowed_domains = current_allowed_domains(state).await;
     options.restrict_webrtc = !allowed_domains.is_empty();
     store_proxy_credentials(state, &options, true).await;
     let storage_state = options.storage_state.clone();
@@ -22158,6 +22172,28 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "--capture flow is not supported with --engine firefox"
         );
         assert!(state.firefox.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_firefox_option_leaves_the_running_browser_open() {
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        let rejected = Patch::from_entries([
+            (Key::Engine, Requested::Set(json!("firefox"))),
+            (Key::Capture, Requested::Set(json!(["flow"]))),
+        ]);
+        state.settings = state.settings.plan(&rejected).next;
+
+        let error = auto_launch_inner(&mut state, Vec::new(), &json!({}), false)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "--capture flow is not supported with --engine firefox"
+        );
+        assert!(state.firefox.is_some());
     }
 
     #[tokio::test]
