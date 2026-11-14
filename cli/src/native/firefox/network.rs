@@ -1541,28 +1541,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_context_requests_receive_blank_page() {
-        let (ff, _tx, _, messages, _) =
-            crate::native::firefox::session::tests::fake_session_with_rdp().await;
-        let net = NetContext::default();
-        net.blank_contexts
-            .write()
-            .await
-            .insert("storage-tab".into());
-        before_request(
-            &ff.bidi,
-            &net,
-            &json!({"request": "r1", "url": "https://example.com/", "headers": []}),
-            Some("storage-tab"),
-        )
-        .await
-        .unwrap();
-        let sent = messages.lock().unwrap().last().unwrap().clone();
-        assert_eq!(sent["method"], "network.provideResponse");
-        assert_eq!(sent["params"]["body"]["value"], "PGh0bWw+PC9odG1sPg==");
-    }
-
-    #[tokio::test]
     async fn blank_context_bypasses_abort_route() {
         let (ff, _tx, _, messages, _) =
             crate::native::firefox::session::tests::fake_session_with_rdp().await;
@@ -1783,67 +1761,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatcher_tracks_repeated_downloads_with_null_navigation() {
-        let (ff, tx, _) = fake_session().await;
-        let net = NetContext::default();
-        let downloads = net.downloads.clone();
-        let _dispatcher = spawn_dispatcher(
-            ff.bidi.clone(),
-            net,
-            ff.bidi.subscribe_buffered(),
-            ff.emulation.clone(),
-            ff.permissions.clone(),
-        );
-        for filename in ["first.txt", "second.txt"] {
-            tx.send(json!({
-                "type": "event",
-                "method": "browsingContext.downloadWillBegin",
-                "params": {
-                    "context": "ctx-active",
-                    "navigation": null,
-                    "url": "http://example.com/download",
-                    "suggestedFilename": filename,
-                },
-            }))
-            .unwrap();
-            tx.send(json!({
-                "type": "event",
-                "method": "browsingContext.downloadEnd",
-                "params": {
-                    "context": "ctx-active",
-                    "navigation": null,
-                    "url": "http://example.com/download",
-                    "status": "complete",
-                    "filepath": format!("/downloads/{filename}"),
-                },
-            }))
-            .unwrap();
-        }
-        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
-            let mut claimed = Vec::new();
-            loop {
-                let mut ledger = downloads.lock().await;
-                if let Some(record) = ledger.claim_finished_since(0, &[]) {
-                    claimed.push(record);
-                    if claimed.len() == 2 {
-                        break claimed;
-                    }
-                }
-                drop(ledger);
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("dispatcher should record both downloads");
-        let [first, second] = claimed.as_slice() else {
-            unreachable!("the timeout returned two claimed downloads");
-        };
-        assert_ne!(first.guid, second.guid);
-        assert_eq!(first.suggested_filename.as_deref(), Some("first.txt"));
-        assert_eq!(second.suggested_filename.as_deref(), Some("second.txt"));
-    }
-
-    #[tokio::test]
     async fn dispatcher_separates_overlapping_downloads_with_null_navigation() {
         let (ff, tx, _) = fake_session().await;
         let net = NetContext::default();
@@ -1906,7 +1823,11 @@ mod tests {
     async fn har_captures_request_body_and_bidi_timestamps() {
         let (ff, _, _) = crate::native::firefox::session::tests::fake_session_with(|v| {
             if v["params"]["dataType"] == "request" {
-                json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD1oYXItcHJvYmU="}})
+                if v["params"]["request"] == "r2" {
+                    json!({"bytes": {"type": "string", "value": ""}})
+                } else {
+                    json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD1oYXItcHJvYmU="}})
+                }
             } else {
                 json!({"bytes": {"type": "string", "value": "har-response"}})
             }
@@ -1915,6 +1836,7 @@ mod tests {
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.har_recording = true;
+        state.request_tracking = true;
         state.har_content_mode = HarContentMode::All;
         let request = json!({
             "request": "r1",
@@ -1964,91 +1886,39 @@ mod tests {
             (entry.response_completed_timestamp.unwrap() - 1_800_000_000.42025).abs() < 0.00001
         );
         assert_eq!(entry.response_body.as_deref(), Some("har-response"));
-    }
-
-    #[tokio::test]
-    async fn tracked_requests_include_request_body() {
-        let (ff, _, _) = crate::native::firefox::session::tests::fake_session_with(|v| {
-            if v["params"]["dataType"] == "request" {
-                json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD10cmFja2Vk"}})
-            } else {
-                json!({"bytes": {"type": "string", "value": "response"}})
-            }
-        })
-        .await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-        state.request_tracking = true;
-        let request = json!({
-            "request": "r1",
-            "url": "http://example.com/probe",
-            "method": "POST",
-            "headers": [],
-            "bodySize": 14,
-            "initiatorType": "fetch",
-        });
-        let response = json!({"status": 200, "headers": [], "bodySize": 8});
-
-        apply_events(
-            &mut state,
-            vec![
-                json!({
-                    "method": "network.beforeRequestSent",
-                    "params": {"timestamp": 1000, "request": request},
-                }),
-                json!({
-                    "method": "network.responseCompleted",
-                    "params": {"timestamp": 2000, "request": request, "response": response},
-                }),
-            ],
-        )
-        .await;
-
         assert_eq!(
             state.tracked_requests[0].post_data.as_deref(),
-            Some("payload=tracked")
+            Some("payload=har-probe")
         );
         assert_eq!(
             serde_json::to_value(&state.tracked_requests[0]).unwrap()["postData"],
-            json!("payload=tracked")
+            json!("payload=har-probe")
         );
-    }
 
-    #[tokio::test]
-    async fn an_empty_request_body_is_left_out_of_the_har() {
-        let (ff, _, _) = crate::native::firefox::session::tests::fake_session_with(
-            |_| json!({"bytes": {"type": "string", "value": ""}}),
-        )
-        .await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-        state.har_recording = true;
-        let request = json!({
-            "request": "r1",
-            "url": "http://example.com/probe",
+        let empty = json!({
+            "request": "r2",
+            "url": "http://example.com/empty",
             "method": "POST",
             "headers": [],
             "bodySize": 0,
             "initiatorType": "fetch",
         });
-        let response = json!({"status": 200, "headers": [], "bodySize": 0});
-
+        let empty_response = json!({"status": 200, "headers": [], "bodySize": 0});
         apply_events(
             &mut state,
             vec![
                 json!({
                     "method": "network.beforeRequestSent",
-                    "params": {"timestamp": 1000, "request": request},
+                    "params": {"timestamp": 1_800_000_001_000.25, "request": empty},
                 }),
                 json!({
                     "method": "network.responseCompleted",
-                    "params": {"timestamp": 2000, "request": request, "response": response},
+                    "params": {"timestamp": 1_800_000_001_100.25, "request": empty, "response": empty_response},
                 }),
             ],
         )
         .await;
-
-        assert_eq!(state.har_entries[0].post_data, None);
+        assert_eq!(state.har_entries[1].post_data, None);
     }
 
     #[tokio::test]

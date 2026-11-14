@@ -17744,30 +17744,6 @@ async fn e2e_firefox_resolve_target() {
     firefox_close(&mut state).await;
 }
 
-/// PR3: a route mocks `/api`, and an unrouted fetch reaches the server.
-#[tokio::test]
-#[ignore = "requires FIREFOX_BIN; run serially"]
-async fn e2e_firefox_route_mock() {
-    required_firefox_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let _env = firefox_test_environment(tmp.path());
-    let fixture = firefox_fixture().await;
-    let mut state = DaemonState::new();
-    launch_firefox(&mut state, json!({})).await;
-    firefox_open(&mut state, &fixture.url).await;
-
-    let fetch = "fetch('/api').then(r => r.text())";
-    assert_eq!(firefox_eval(&mut state, fetch).await, json!("real"));
-    let resp = firefox_command(
-        &mut state,
-        json!({ "id": "r", "action": "route", "url": "**/api", "response": { "body": "mocked" } }),
-    )
-    .await;
-    assert_success(&resp);
-    assert_eq!(firefox_eval(&mut state, fetch).await, json!("mocked"));
-    firefox_close(&mut state).await;
-}
-
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_headers_requests_and_har() {
@@ -18427,6 +18403,7 @@ async fn e2e_firefox_console_route_and_offline() {
     );
 
     let fetch_api = "fetch('/api', {cache: 'no-store'}).then(r => r.text())";
+    assert_eq!(firefox_eval(&mut state, fetch_api).await, json!("real"));
     let served = fixture.hit_count("/api");
     assert_success(
         &send(

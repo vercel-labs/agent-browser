@@ -421,38 +421,6 @@ mod tests {
     use crate::native::firefox::session::tests::{fake_session, fake_session_with_rdp};
     use crate::native::firefox::tabs;
 
-    fn media_with_feature(name: &str, value: &str) -> EmulatedMedia {
-        EmulatedMedia {
-            media: None,
-            features: vec![(name.to_string(), value.to_string())],
-        }
-    }
-
-    #[test]
-    fn color_scheme_dark_maps_to_color_scheme_simulation() {
-        let config = validate_media(&media_with_feature("prefers-color-scheme", "dark")).unwrap();
-        assert_eq!(config["colorSchemeSimulation"], "dark");
-    }
-
-    #[test]
-    fn reduced_motion_lists_supported_features() {
-        let error = validate_media(&media_with_feature("prefers-reduced-motion", "reduce"))
-            .expect_err("reduced motion is not supported");
-        assert!(error.contains("prefers-reduced-motion"));
-        assert!(error.contains("prefers-color-scheme"));
-    }
-
-    #[test]
-    fn offline_toggles_network_conditions() {
-        let (method, params) = offline(true);
-        assert_eq!(method, "emulation.setNetworkConditions");
-        assert_eq!(params["networkConditions"]["type"], "offline");
-
-        let (method, params) = offline(false);
-        assert_eq!(method, "emulation.setNetworkConditions");
-        assert!(params["networkConditions"].is_null());
-    }
-
     async fn session_state() -> (DaemonState, crate::native::firefox::session::tests::Calls) {
         let (ff, _, calls) = fake_session().await;
         let mut state = DaemonState::new();
@@ -553,28 +521,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_dark_accepts_reduced_motion_no_preference() {
-        let (ff, _, _, _, rdp) = fake_session_with_rdp().await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-
-        set_media(
-            &json!({"colorScheme": "dark", "reducedMotion": "no-preference"}),
-            &mut state,
-        )
-        .await
-        .unwrap();
-
-        let messages = rdp.lock().unwrap().clone();
-        let pref = messages
-            .iter()
-            .find(|m| m["type"] == "setIntPref")
-            .expect("no setIntPref message");
-        assert_eq!(pref["name"], COLOR_SCHEME_PREF);
-        assert_eq!(pref["value"], 0);
-    }
-
-    #[tokio::test]
     async fn timezone_locale_and_offline_are_scoped_to_the_cookie_jar_of_the_active_tab() {
         let (ff, _, _, bidi, _) = fake_session_with_rdp().await;
         let mut state = DaemonState::new();
@@ -613,6 +559,17 @@ mod tests {
             find("emulation.setNetworkConditions")["params"]["networkConditions"]["type"],
             "offline"
         );
+
+        set_offline(&json!({"offline": false}), &mut state)
+            .await
+            .unwrap();
+        let updated = bidi.lock().unwrap().clone();
+        let last = updated
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "emulation.setNetworkConditions")
+            .unwrap();
+        assert!(last["params"]["networkConditions"].is_null());
     }
 
     #[tokio::test]
@@ -622,6 +579,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("prefers-reduced-motion"), "{error}");
+        assert!(error.contains("prefers-color-scheme"), "{error}");
         assert!(calls.lock().unwrap().is_empty());
     }
 
@@ -632,7 +590,11 @@ mod tests {
         state.firefox = Some(ff);
 
         let result = set_media(
-            &json!({"colorScheme": "dark", "media": "screen"}),
+            &json!({
+                "colorScheme": "dark",
+                "media": "screen",
+                "reducedMotion": "no-preference"
+            }),
             &mut state,
         )
         .await
@@ -677,7 +639,13 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .features,
-            vec![("prefers-color-scheme".to_string(), "dark".to_string())]
+            vec![
+                ("prefers-color-scheme".to_string(), "dark".to_string()),
+                (
+                    "prefers-reduced-motion".to_string(),
+                    "no-preference".to_string()
+                ),
+            ]
         );
     }
 
