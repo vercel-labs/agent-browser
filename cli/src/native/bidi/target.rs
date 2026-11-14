@@ -2,10 +2,11 @@
 
 use serde_json::{json, Value};
 
+use super::client::SANDBOX;
 use super::daemon::session;
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
-use crate::native::element::{build_find_element_js, parse_ref, RefEntry, IS_CONNECTED_JS};
+use crate::native::element::{build_find_element_js, parse_ref, RefEntry};
 
 /// A node handle: the BiDi browsing context that owns it and its `sharedId`.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,21 +32,24 @@ pub async fn find_element(
     Ok(found["sharedId"].as_str().map(String::from))
 }
 
+/// Whether `this` is attached to the document its browsing context shows now. A node of a
+/// document the page has since replaced stays connected to that old document, so both are checked.
+pub(crate) const IN_DOCUMENT_JS: &str =
+    "function() { return this.isConnected && this.ownerDocument === document; }";
+
+/// Whether the node is still in the page. It is asked in the sandbox, where the page cannot
+/// answer for it.
 async fn is_connected(ff: &FirefoxSession, target: &Target) -> bool {
     let r = ff
         .bidi
-        .call_function(
-            &target.context,
-            IS_CONNECTED_JS,
-            Some(target.node_ref()),
-            vec![],
-        )
+        .call_function_on_in_sandbox(&target.context, SANDBOX, IN_DOCUMENT_JS, target.node_ref())
         .await;
     r.is_ok_and(|v| v == true)
 }
 
 /// Resolves `@eN`, `eN`, `ref=eN`, a CSS selector or `xpath=...` to a live node.
-/// A ref whose node is gone is recovered by role and name only when exactly one element matches and the ref had no `nth`.
+/// A ref whose node is gone is recovered by role and name only when exactly one element matches,
+/// the ref had no `nth`, and the match is in the document the ref was taken from.
 pub async fn resolve_target(
     state: &mut DaemonState,
     selector_or_ref: &str,
@@ -102,7 +106,7 @@ async fn recover(
         .unwrap_or_else(|| ff.contexts.active().to_string());
     let document = ff
         .bidi
-        .call_function(&context, "() => document", None, vec![])
+        .call_function_in_sandbox(&context, SANDBOX, "() => document", vec![])
         .await
         .ok()
         .and_then(|d| d["sharedId"].as_str().map(String::from));
