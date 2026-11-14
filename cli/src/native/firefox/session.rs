@@ -815,6 +815,7 @@ pub(crate) mod tests {
             next_node_id: 0,
             frames: None,
             documents: HashMap::new(),
+            ref_documents: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
             emulation: Arc::default(),
