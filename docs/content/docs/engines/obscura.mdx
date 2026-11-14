@@ -35,12 +35,12 @@ See the [Obscura README](https://github.com/h4ckf0r0day/obscura) for more instal
 
 ## Usage
 
-Set `--engine` on the command that launches the browser. Later commands in the same session use Obscura without the flag:
+Use the `--engine` flag to select Obscura:
 
 ```bash
 agent-browser --engine obscura open example.com
-agent-browser snapshot
-agent-browser screenshot
+agent-browser --engine obscura snapshot
+agent-browser --engine obscura screenshot
 ```
 
 Or set it as the default via environment variable:

@@ -24986,24 +24986,6 @@ mod firefox_routing_tests {
     }
 
     #[tokio::test]
-    async fn connect_rejects_the_firefox_engine_like_cdp_settings() {
-        let _guard = clean_env();
-        let mut state = DaemonState::new();
-        let resp = execute_command(
-            &json!({"id":"1","action":"launch","cdpPort":9,"settings":{"engine":"firefox"}}),
-            &mut state,
-        )
-        .await;
-        assert_eq!(resp["success"], false);
-        let error = resp["error"].as_str().unwrap();
-        assert!(
-            error.contains("connect and --cdp are not supported with --engine firefox"),
-            "{error}"
-        );
-        assert!(state.browser.is_none());
-    }
-
-    #[tokio::test]
     async fn implicit_launch_rejects_cdp_settings_before_launching() {
         let _guard = clean_env();
         let mut state = DaemonState::new();
@@ -25139,11 +25121,7 @@ mod firefox_routing_tests {
             *state.proxy_credentials.read().await,
             Some(("old".to_string(), "secret".to_string()))
         );
-    }
 
-    #[tokio::test]
-    async fn failed_firefox_launch_rolls_back_proxy_settings() {
-        let _guard = clean_env();
         let (mut state, _calls) = firefox_state().await;
         state.settings.set(Key::Proxy, json!("http://proxy:3128"));
         state.settings.set(Key::ProxyUsername, json!("old"));

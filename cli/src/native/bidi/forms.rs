@@ -13,7 +13,7 @@ use super::input::{
 use super::interact::{act_element, perform_actions, PointerAction};
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
-use crate::native::actions::{raw_key, DaemonState};
+use crate::native::actions::{raw_key, upload_files, DaemonState};
 use crate::native::element::ELEMENT_CHECKED_JS;
 use crate::native::interaction::{
     CLEAR_INPUT_JS, CLEAR_VALUE_JS, CLICK_CHECKBOX_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
@@ -210,23 +210,6 @@ fn select_values(cmd: &Value) -> Vec<String> {
             .map(|value| vec![value.to_string()])
             .unwrap_or_default(),
     }
-}
-
-fn upload_files(cmd: &Value) -> Vec<String> {
-    cmd.get("files")
-        .and_then(Value::as_array)
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .or_else(|| {
-            cmd.get("file")
-                .and_then(Value::as_str)
-                .map(|file| vec![file.to_string()])
-        })
-        .unwrap_or_default()
 }
 
 fn absolute_files(files: &[String]) -> Vec<String> {
