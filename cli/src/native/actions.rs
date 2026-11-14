@@ -891,7 +891,7 @@ impl DaemonState {
     /// configured `default_timeout_ms` (from `AGENT_BROWSER_DEFAULT_TIMEOUT`).
     /// All wait-family handlers should use this instead of reading the
     /// timeout field and providing their own fallback.
-    fn timeout_ms(&self, cmd: &Value) -> u64 {
+    pub(crate) fn timeout_ms(&self, cmd: &Value) -> u64 {
         cmd.get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.default_timeout_ms)
@@ -7973,30 +7973,19 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 // Wait helpers
 // ---------------------------------------------------------------------------
 
-async fn wait_for_selector(
-    client: &super::cdp::client::CdpClient,
-    session_id: &str,
-    selector: &str,
-    state: &str,
-    timeout_ms: u64,
-) -> Result<(), String> {
-    let check_fn = match state {
-        "attached" => format!(
-            "!!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
-        "detached" => format!(
-            "!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
+/// The expression Chrome polls for a selector in one of its `wait` states.
+pub(crate) fn selector_state_expression(selector: &str, state: &str) -> String {
+    let sel = serde_json::to_string(selector).unwrap_or_default();
+    match state {
+        "attached" => format!("!!document.querySelector({sel})"),
+        "detached" => format!("!document.querySelector({sel})"),
         "hidden" => format!(
             r#"(() => {{
                 const el = document.querySelector({sel});
                 if (!el) return true;
                 const s = window.getComputedStyle(el);
                 return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
-            }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
+            }})()"#
         ),
         _ => format!(
             r#"(() => {{
@@ -8005,11 +7994,19 @@ async fn wait_for_selector(
                 const r = el.getBoundingClientRect();
                 const s = window.getComputedStyle(el);
                 return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-            }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
+            }})()"#
         ),
-    };
+    }
+}
 
+async fn wait_for_selector(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    selector: &str,
+    state: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let check_fn = selector_state_expression(selector, state);
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 

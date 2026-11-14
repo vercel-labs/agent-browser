@@ -17,10 +17,3 @@ pub fn reset_page(state: &mut DaemonState) {
         ff.refs.clear();
     }
 }
-
-/// Forgets a browsing context that is gone, including any prompt it owned. Returns true when it
-/// was the active tab, which is then replaced by the lowest tab id.
-pub fn forget_context(state: &mut DaemonState, context: &str) -> Result<bool, String> {
-    let ff = state.firefox.as_mut().ok_or("Browser not launched")?;
-    Ok(ff.forget_context(context, &mut state.pending_dialog))
-}
