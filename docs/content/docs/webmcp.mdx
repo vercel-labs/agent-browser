@@ -5,7 +5,7 @@ navTitle: "WebMCP"
 
 WebMCP support is experimental. agent-browser enables Chrome's current WebMCP launch features by default for locally managed Chrome sessions. Pass `--no-webmcp` or set `AGENT_BROWSER_NO_WEBMCP=1` to opt out.
 
-Browser responses automatically announce WebMCP tools on first discovery and when the catalog changes. The announcement lists each tool's name, frame ID, and description, and tells you to use a relevant tool before driving the DOM. When every listed tool shares one frame, the call examples carry that frame ID. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context. JSON output adds:
+Browser responses automatically announce WebMCP tools on first discovery and when the catalog changes. The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context. JSON output adds:
 
 ```json
 {
@@ -46,7 +46,7 @@ The daemon subscribes to CDP WebMCP events once per page session and reads its e
 
 `webmcp invoke` takes the tool's input as JSON or `@file`, either right after the tool name or with `--params`. Giving it both ways is an error. Use `--frame <frame-id>` with `webmcp invoke` when multiple frames register the same tool name. `webmcp list` returns the required frame ID, page origin, input schema, and page-provided annotations.
 
-The [dashboard](/dashboard) and `agent-browser chat` follow the same flow: they fetch the selected tool's schema with `webmcp list <tool> --frame <frame-id> --json` and invoke it with the same `--frame`.
+The [dashboard](/dashboard) and `agent-browser chat` follow the same flow: they use an announced tool directly, fetch its schema with `webmcp list <tool> --frame <frame-id> --json` when the description does not show the arguments, and invoke it with the same `--frame`.
 
 With `--no-webmcp`, compatible Chrome builds return an empty tool list because page tools are disabled. Attached browsers, remote providers, Lightpanda, Safari, iOS, and older Chrome builds may not expose the experimental CDP WebMCP domain. In that case the command returns an actionable `webmcp_unsupported` error.
 

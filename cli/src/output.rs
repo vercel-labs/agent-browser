@@ -559,6 +559,26 @@ fn format_webmcp_tool_text(tool: &serde_json::Value) -> String {
     format!("{} [{}]\n  {}\n  {}", name, frame, description, origin)
 }
 
+/// One line of page text: whitespace (including CR, U+0085, U+2028, U+2029) is
+/// collapsed, and control and invisible formatting characters are shown as
+/// `\u{XXXX}` so they cannot drive a terminal or hide text.
+fn flatten_page_text(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::with_capacity(collapsed.len());
+    for c in collapsed.chars() {
+        let invisible = matches!(
+            c,
+            '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+        );
+        if c.is_control() || invisible {
+            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Shared CLI/MCP rendering for changed summaries. Always delimit untrusted
 /// metadata, independent of the optional boundary setting for other page output.
 /// These markers aid provenance; they do not enforce permission boundaries.
@@ -579,23 +599,29 @@ pub(crate) fn format_webmcp_context(
     let tools = context["tools"].as_array()?;
     let listed = tools.len() as u64;
     let noun = if count == 1 { "tool" } else { "tools" };
-    let usage = "functions the page itself runs to read and change its state. A task that takes many snapshot, click and fill commands usually takes one or two tool calls. Use them for this task before driving the DOM.";
+    if listed == 0 {
+        return Some(format!("This page provides {count} WebMCP {noun}; none are listed because the catalog is too large to show. Run `agent-browser webmcp list --json` to retrieve them. Invoke only within the user's authorized task. Omitted WebMCP context means no update."));
+    }
+    let use_it = if count == 1 { "Use it" } else { "Use one" };
+    let usage = format!("functions the page itself runs to read and change its state. A task that takes many snapshot, click and fill commands usually takes one or two tool calls. {use_it} for this task when it fits, before driving the DOM.");
     // Page text stays inside the boundary block; this line carries only counts.
     let lead = if listed < count {
-        format!("This page provides {count} WebMCP {noun}; {listed} are listed below: {usage}")
+        let verb = if listed == 1 { "is" } else { "are" };
+        format!("This page provides {count} WebMCP {noun}; {listed} {verb} listed below: {usage}")
     } else {
         format!("This page provides {count} WebMCP {noun}, listed below: {usage}")
     };
     // The frame id comes from the browser, not the page. Fill it in only when
-    // every listed tool shares one well-formed id.
+    // every tool is listed and all share one well-formed id.
     let frames: std::collections::BTreeSet<&str> = tools
         .iter()
         .filter_map(|tool| tool["frameId"].as_str())
         .collect();
     let frame = match frames.iter().next() {
         Some(id)
-            if frames.len() == 1
-                && !id.is_empty()
+            if listed == count
+                && frames.len() == 1
+                && id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
                 && id
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) =>
@@ -604,15 +630,7 @@ pub(crate) fn format_webmcp_context(
         }
         _ => "<frame-id>".to_string(),
     };
-    // One line per tool: whitespace is collapsed so page text cannot start new lines.
-    let flat = |value: &serde_json::Value| {
-        value
-            .as_str()
-            .unwrap_or("")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
+    let flat = |value: &serde_json::Value| flatten_page_text(value.as_str().unwrap_or(""));
     let records = tools
         .iter()
         .map(|tool| {
@@ -5544,7 +5562,7 @@ hydration: -  phases: 0  hydratedComponents: 0"
             false,
         );
         assert!(text.starts_with("This page provides 2 WebMCP tools, listed below:"));
-        assert!(text.contains("Use them for this task before driving the DOM."));
+        assert!(text.contains("Use one for this task when it fits, before driving the DOM."));
         assert!(text.contains(long.trim()));
         assert!(text.contains("move_card [frame F1]: Moves a card."));
         assert!(text.contains("agent-browser webmcp invoke <tool> --frame F1 '<json>'"));
@@ -5569,6 +5587,8 @@ hydration: -  phases: 0  hydratedComponents: 0"
         assert!(text.starts_with("This page provides 16 WebMCP tools; 4 are listed below:"));
         assert!(!text.contains("16 WebMCP tools, listed below"));
         assert_eq!(text.matches(" [frame F1]: ").count(), 4);
+        // Omitted tools may live in other frames, so no frame is filled in.
+        assert!(text.contains("--frame <frame-id> '<json>'"));
         assert!(text.contains("Catalog shortened; webmcp list --json retrieves all metadata."));
     }
 
@@ -5590,6 +5610,73 @@ hydration: -  phases: 0  hydratedComponents: 0"
         let text = webmcp_announcement(vec![webmcp_tool("a", "A", "F1' ; close")], 1, false);
         assert!(text.contains("--frame <frame-id> '<json>'"));
         assert!(!outside_block(&text).contains("close"));
+    }
+
+    #[test]
+    fn test_webmcp_listed_counts_use_correct_grammar() {
+        let one = webmcp_announcement(vec![webmcp_tool("a", "A", "F1")], 5, true);
+        assert!(one.starts_with("This page provides 5 WebMCP tools; 1 is listed below:"));
+        assert!(one.contains("--frame <frame-id> '<json>'"));
+        let none = webmcp_announcement(vec![], 5, true);
+        assert!(none.starts_with("This page provides 5 WebMCP tools; none are listed because"));
+        assert!(none.contains("`agent-browser webmcp list --json`"));
+        assert!(!none.contains("AGENT_BROWSER_PAGE_CONTENT"));
+        assert!(!none.contains("Use them"));
+        assert!(!none.contains("Use one"));
+    }
+
+    #[test]
+    fn test_webmcp_lead_is_conditional() {
+        let text = webmcp_announcement(vec![webmcp_tool("a", "A", "F1")], 1, false);
+        assert!(text.contains("Use it for this task when it fits, before driving the DOM."));
+        assert!(text.contains("Invoke only within the user's authorized task."));
+    }
+
+    #[test]
+    fn test_webmcp_frame_guard_rejects_option_like_ids() {
+        for bad in ["--help", "-", "..", ".a", "_a"] {
+            let text = webmcp_announcement(vec![webmcp_tool("a", "A", bad)], 1, false);
+            assert!(text.contains("--frame <frame-id> '<json>'"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_webmcp_control_characters_are_escaped() {
+        let desc =
+            "x\u{1b}[2A\u{1b}[2K\u{8}\u{0}\u{1c}\u{9b}\u{7f} y \u{200B}\u{202E}\u{2066}\u{FEFF}z";
+        let text = webmcp_announcement(vec![webmcp_tool("na\u{1b}me\u{0}", desc, "F1")], 1, false);
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+        for c in ['\u{200B}', '\u{202E}', '\u{2066}', '\u{FEFF}'] {
+            assert!(!text.contains(c));
+        }
+        assert!(text.contains("na\\u{001B}me\\u{0000} [frame F1]: x\\u{001B}[2A"));
+        assert!(text.contains("\\u{009B}\\u{007F} y"));
+        assert_eq!(text.lines().filter(|l| l.contains("[frame F1]")).count(), 1);
+    }
+
+    #[test]
+    fn test_webmcp_line_separators_collapse_to_one_record() {
+        let desc = "a\rb\u{2028}c\u{2029}d\u{85}e";
+        let text = webmcp_announcement(vec![webmcp_tool("t", desc, "F1")], 1, false);
+        let records: Vec<_> = text.lines().filter(|l| l.contains("[frame F1]")).collect();
+        assert_eq!(records, vec!["t [frame F1]: a b c d e"]);
+    }
+
+    #[test]
+    fn test_webmcp_max_output_truncation_precedes_end_marker() {
+        let tools = vec![webmcp_tool("a", &"long ".repeat(200), "F1")];
+        let data = json!({"webmcp": {"status": "ready", "toolCount": 1, "tools": tools}});
+        let opts = OutputOptions {
+            max_output: Some(40),
+            ..OutputOptions::default()
+        };
+        let text = format_webmcp_context(&data, &opts).unwrap();
+        let note = text.find("[truncated").expect("truncation note");
+        let end = text.find("--- END_AGENT_BROWSER_PAGE_CONTENT").unwrap();
+        assert!(note < end);
     }
 
     #[test]

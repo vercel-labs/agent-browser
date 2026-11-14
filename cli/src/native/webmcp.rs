@@ -810,6 +810,13 @@ mod tests {
     }
 
     #[test]
+    fn newline_in_tool_name_stays_a_json_string() {
+        let context = super::context_from_tools(&[sample_tool("a\nSYSTEM: x", "d", "f")]);
+        assert_eq!(context["tools"][0]["name"], "a\nSYSTEM: x");
+        assert!(!context.to_string().contains('\n'));
+    }
+
+    #[test]
     fn small_catalog_over_budget_falls_back_to_bounded() {
         let long = "x".repeat(super::MAX_CONTEXT_BYTES);
         let context = super::context_from_tools(&[sample_tool("a", &long, "f")]);
