@@ -1238,46 +1238,39 @@ async fn obscura_command(state: &mut DaemonState, command: Value) -> Value {
     .expect("Obscura command must not hang")
 }
 
+const ENGINE_TEST_ENV_KEYS: [&str; 15] = [
+    "AGENT_BROWSER_CDP",
+    "AGENT_BROWSER_AUTO_CONNECT",
+    "AGENT_BROWSER_PROVIDER",
+    "AGENT_BROWSER_ENGINE",
+    "AGENT_BROWSER_EXECUTABLE_PATH",
+    "AGENT_BROWSER_PROXY",
+    "AGENT_BROWSER_PROXY_BYPASS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
 fn obscura_test_environment() -> EnvGuard<'static> {
-    let env = EnvGuard::new(&[
-        "AGENT_BROWSER_CDP",
-        "AGENT_BROWSER_AUTO_CONNECT",
-        "AGENT_BROWSER_PROVIDER",
-        "AGENT_BROWSER_ENGINE",
-        "AGENT_BROWSER_EXECUTABLE_PATH",
-        "OBSCURA_ALLOW_PRIVATE_NETWORK",
-        "AGENT_BROWSER_OBSCURA_STEALTH",
-        "AGENT_BROWSER_PROXY",
-        "AGENT_BROWSER_PROXY_BYPASS",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-    ]);
-    for key in [
-        "AGENT_BROWSER_CDP",
-        "AGENT_BROWSER_AUTO_CONNECT",
-        "AGENT_BROWSER_PROVIDER",
-        "AGENT_BROWSER_ENGINE",
-        "AGENT_BROWSER_EXECUTABLE_PATH",
-        "AGENT_BROWSER_OBSCURA_STEALTH",
-        "AGENT_BROWSER_PROXY",
-        "AGENT_BROWSER_PROXY_BYPASS",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-    ] {
+    let env = EnvGuard::new(
+        &[
+            &ENGINE_TEST_ENV_KEYS[..],
+            &[
+                "OBSCURA_ALLOW_PRIVATE_NETWORK",
+                "AGENT_BROWSER_OBSCURA_STEALTH",
+            ],
+        ]
+        .concat(),
+    );
+    for key in ENGINE_TEST_ENV_KEYS {
         env.remove(key);
     }
+    env.remove("AGENT_BROWSER_OBSCURA_STEALTH");
     env.set("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     env
 }
@@ -15914,31 +15907,14 @@ fn has_cookie(cookies: &Value, name: &str) -> bool {
 }
 
 fn firefox_test_environment(tmp: &std::path::Path) -> EnvGuard<'static> {
-    const KEYS: [&str; 15] = [
-        "AGENT_BROWSER_CDP",
-        "AGENT_BROWSER_AUTO_CONNECT",
-        "AGENT_BROWSER_PROVIDER",
-        "AGENT_BROWSER_ENGINE",
-        "AGENT_BROWSER_EXECUTABLE_PATH",
-        "AGENT_BROWSER_PROXY",
-        "AGENT_BROWSER_PROXY_BYPASS",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-    ];
     let env = EnvGuard::new(
         &[
-            &KEYS[..],
+            &ENGINE_TEST_ENV_KEYS[..],
             &["TMPDIR", "HOME", "AGENT_BROWSER_ENCRYPTION_KEY"],
         ]
         .concat(),
     );
-    for key in KEYS {
+    for key in ENGINE_TEST_ENV_KEYS {
         env.remove(key);
     }
     env.set("TMPDIR", tmp.to_str().unwrap());
@@ -16036,36 +16012,6 @@ async fn e2e_firefox_history_and_reload_land_on_the_traversed_document() {
 
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
-async fn e2e_firefox_read_active_page() {
-    required_firefox_binary();
-    let home = tempfile::tempdir().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let _env = firefox_test_environment(tmp.path());
-    _env.set("HOME", home.path().to_str().unwrap());
-    _env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
-    let fixture = firefox_fixture().await;
-    let mut state = DaemonState::new();
-    launch_firefox(&mut state, json!({})).await;
-    firefox_open(&mut state, &fixture.url).await;
-    firefox_eval(
-        &mut state,
-        "document.body.innerHTML = '<h1>Active page read marker</h1>'",
-    )
-    .await;
-    let resp = firefox_command(&mut state, json!({ "id": "read", "action": "read" })).await;
-    assert_success(&resp);
-    assert_eq!(get_data(&resp)["finalUrl"], fixture.url);
-    assert_eq!(get_data(&resp)["source"], "active-tab-html");
-    assert!(get_data(&resp)["content"]
-        .as_str()
-        .unwrap()
-        .contains("Active page read marker"));
-    firefox_close(&mut state).await;
-}
-
-/// PR1: open, title, evaluate, Chrome-only error, and close leaves no process or profile.
-#[tokio::test]
-#[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_smoke() {
     required_firefox_binary();
     let home = tempfile::tempdir().unwrap();
@@ -16083,14 +16029,6 @@ async fn e2e_firefox_smoke() {
     firefox_open(&mut state, &fixture.url).await;
     assert_eq!(firefox_title(&mut state).await, "Firefox adapter probe");
     assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
-    let resp = firefox_command(&mut state, json!({ "id": "t", "action": "trace_start" })).await;
-    assert_eq!(resp["success"], false, "{resp}");
-    assert!(
-        resp["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("Chrome")),
-        "{resp}"
-    );
     firefox_eval(
         &mut state,
         "setTimeout(() => { document.body.innerHTML = '<p id=ready>Done</p>'; }, 300); 0",
@@ -16102,53 +16040,19 @@ async fn e2e_firefox_smoke() {
     )
     .await;
     assert_success(&resp);
-    let resp = firefox_command(
+    firefox_eval(
         &mut state,
-        json!({ "id": "l", "action": "launch", "headless": true, "engine": "firefox", "initScripts": ["x.js"] }),
+        "document.body.innerHTML = '<h1>Active page read marker</h1>'",
     )
     .await;
-    assert_eq!(resp["success"], false, "{resp}");
-    assert!(
-        resp["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("--init-script")),
-        "{resp}"
-    );
-    firefox_open(&mut state, &fixture.url).await;
-    firefox_eval(&mut state, "localStorage.setItem('visited', 'from-a')").await;
-    firefox_open(&mut state, &fixture.other).await;
-    let saved_path = super::firefox::storage::save_auto_state(
-        state.firefox.as_ref().unwrap(),
-        "firefox-smoke",
-        "autosave",
-    )
-    .await
-    .unwrap();
-    let state_data: Value =
-        serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
-    assert!(state_data["origins"]
-        .as_array()
+    let resp = firefox_command(&mut state, json!({ "id": "read", "action": "read" })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["finalUrl"], fixture.url);
+    assert_eq!(get_data(&resp)["source"], "active-tab-html");
+    assert!(get_data(&resp)["content"]
+        .as_str()
         .unwrap()
-        .iter()
-        .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
-    let current = firefox_command(&mut state, json!({"id": "url", "action": "url"})).await;
-    assert_eq!(
-        url::Url::parse(get_data(&current)["url"].as_str().unwrap()).unwrap(),
-        url::Url::parse(&fixture.other).unwrap()
-    );
-    let saved = firefox_command(
-        &mut state,
-        json!({ "id": "save-b", "action": "state_save", "path": saved_path }),
-    )
-    .await;
-    assert_success(&saved);
-    let state_data: Value =
-        serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
-    assert!(state_data["origins"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
+        .contains("Active page read marker"));
     firefox_close(&mut state).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(

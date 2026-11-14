@@ -24605,24 +24605,22 @@ mod firefox_routing_tests {
     }
 
     #[tokio::test]
-    async fn implicit_launch_uses_the_firefox_branch_and_a_live_session_is_reused() {
+    async fn explicit_launch_reuses_a_live_session_with_the_same_options() {
         let guard = clean_env();
         guard.set("AGENT_BROWSER_EXECUTABLE_PATH", "/nonexistent/firefox");
-        let mut state = DaemonState::new();
-        let resp = execute_command(&json!({"id":"1","action":"url"}), &mut state).await;
+        let mut implicit_state = DaemonState::new();
+        let resp = execute_command(&json!({"id":"1","action":"url"}), &mut implicit_state).await;
         let error = resp["error"].as_str().unwrap();
         assert!(error.contains("Firefox executable not found"), "{error}");
 
-        let (mut state, _calls) = firefox_state().await;
-        let resp = execute_command(&json!({"id":"2","action":"tab_list"}), &mut state).await;
+        let (mut implicit_state, _calls) = firefox_state().await;
+        let resp =
+            execute_command(&json!({"id":"2","action":"tab_list"}), &mut implicit_state).await;
         assert_eq!(resp["success"], true, "{resp}");
         assert_eq!(resp["data"]["lifecycle"]["reused"], true);
         assert_eq!(resp["data"]["lifecycle"]["launched"], false);
-    }
 
-    #[tokio::test]
-    async fn explicit_launch_reuses_a_live_session_with_the_same_options() {
-        let _guard = clean_env();
+        guard.remove("AGENT_BROWSER_EXECUTABLE_PATH");
         let (mut state, _calls) = firefox_state().await;
         state
             .settings

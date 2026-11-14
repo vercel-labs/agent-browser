@@ -670,24 +670,20 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap()
             .is_none());
-    }
 
-    #[tokio::test]
-    async fn race_prompt_returns_none_when_a_prompt_opens_on_the_active_context() {
-        let (s, tx, _) = fake_session().await;
-        let hang = std::future::pending::<Result<(), String>>();
-        let racer = s.race_prompt(hang);
+        session.auto_dialog.store(false, Ordering::Release);
+        let racer = session.race_prompt(std::future::pending::<Result<(), String>>());
         tokio::pin!(racer);
         assert!(tokio::time::timeout(Duration::from_millis(50), &mut racer)
             .await
             .is_err());
         let background = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"other"}});
-        tx.send(background).unwrap();
+        events.send(background).unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(100), &mut racer)
             .await
             .is_err());
         let ours = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"ctx-active"}});
-        tx.send(ours).unwrap();
+        events.send(ours).unwrap();
         assert!(racer.await.unwrap().is_none());
     }
 }

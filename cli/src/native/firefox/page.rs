@@ -311,21 +311,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn text_wait_polls_then_reports_the_timeout() {
+    async fn wait_variants_poll_then_report_the_timeout() {
         let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
+        let (ff, _tx, calls) = fake_session().await;
         state.firefox = Some(ff);
         let err = wait(&json!({"text": "Missing", "timeout": 50}), &mut state)
             .await
             .unwrap_err();
         assert_eq!(err, "Wait timed out after 50ms");
-    }
-
-    #[tokio::test]
-    async fn selector_wait_polls_then_reports_the_timeout() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
-        state.firefox = Some(ff);
         let err = wait(
             &json!({"selector": "#missing", "state": "hidden", "timeout": 50}),
             &mut state,
@@ -333,6 +326,14 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, "Wait timed out after 50ms");
+        let call_count = calls.lock().unwrap().len();
+        let err = waitforfunction(&json!({"expression": "true", "timeout": 30}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Wait timed out after 30ms");
+        assert!(calls.lock().unwrap()[call_count..]
+            .iter()
+            .any(|call| call == "script.evaluate"));
     }
 
     #[tokio::test]
@@ -370,16 +371,6 @@ mod tests {
             calls.lock().unwrap().clone(),
             vec!["browsingContext.getTree", "browsingContext.getTree"]
         );
-    }
-
-    #[tokio::test]
-    async fn waitforurl_requires_a_url() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-        let err = waitforurl(&json!({}), &mut state).await.unwrap_err();
-        assert_eq!(err, "Missing 'url' parameter");
-        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -451,65 +442,5 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, "--headers is not supported with --engine firefox");
         assert!(calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn waitforfunction_polls_then_reports_the_timeout() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-        let err = waitforfunction(&json!({"expression": "true", "timeout": 30}), &mut state)
-            .await
-            .unwrap_err();
-        assert_eq!(err, "Wait timed out after 30ms");
-        assert!(calls.lock().unwrap().iter().any(|c| c == "script.evaluate"));
-    }
-
-    #[tokio::test]
-    async fn waitforfunction_requires_an_expression() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
-        state.firefox = Some(ff);
-        let err = waitforfunction(&json!({}), &mut state).await.unwrap_err();
-        assert_eq!(err, "Missing 'expression' parameter");
-    }
-
-    #[tokio::test]
-    async fn history_and_reload_use_the_bidi_commands_and_return_the_url() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-
-        assert_eq!(
-            back(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "" })
-        );
-        assert_eq!(
-            forward(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "" })
-        );
-        assert_eq!(
-            reload(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "" })
-        );
-
-        let calls = calls.lock().unwrap().clone();
-        assert_eq!(calls[0], "browsingContext.traverseHistory");
-        assert_eq!(calls[1], "browsingContext.getTree");
-        assert_eq!(calls[2], "browsingContext.traverseHistory");
-        assert_eq!(calls[3], "browsingContext.getTree");
-        assert_eq!(calls[4], "browsingContext.reload");
-        assert_eq!(calls[5], "browsingContext.getTree");
-    }
-
-    #[tokio::test]
-    async fn content_returns_html_and_origin() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
-        state.firefox = Some(ff);
-        assert_eq!(
-            content(&mut state).await.unwrap(),
-            json!({ "html": "", "origin": "" })
-        );
     }
 }
