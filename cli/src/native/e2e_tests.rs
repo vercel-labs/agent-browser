@@ -4251,6 +4251,218 @@ async fn e2e_press_dispatches_single_keystroke() {
     assert_success(&resp);
 }
 
+/// `press` must not return until the page has run the frame and macrotask a
+/// keydown handler queued. Regression test for #2510: a key sequence used to
+/// return as soon as Chrome had dispatched the key events, so a click issued
+/// right after could land before a `setTimeout(0)` the keys scheduled had
+/// fired (e.g. MUI's ClickAwayListener arming itself on mount).
+#[tokio::test]
+#[ignore]
+async fn e2e_press_waits_for_queued_macrotasks() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true, "args": ["--no-sandbox", "--disable-dev-shm-usage"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The keydown handler arms the flag behind one animation frame and one
+    // macrotask, but the frame callback first burns 120ms of render work,
+    // like the React app in the issue (whose keystrokes delayed the
+    // mount-time timer by 86-95ms). Headless frames run too fast for a
+    // plain frame gate to fail without the fix, so the busy frame makes the
+    // race deterministic: `press` must have waited for both before
+    // returning, so the flag is already true; without the settle it would
+    // still be false.
+    let html = concat!(
+        "data:text/html,<html><body><script>",
+        "window.__armed=false;",
+        "addEventListener('keydown',e=>{if(e.key==='Enter'){requestAnimationFrame(()=>{var t=performance.now();while(performance.now()-t<120){}setTimeout(()=>{window.__armed=true;},0);});}});",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "press", "key": "Enter" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The flag can only be true if `press` waited out the busy frame and
+    // the macrotask queued after it.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "window.__armed" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!(true),
+        "press must wait for the frame and macrotask the keydown handler queued"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `press` must return promptly when a key handler opens a `confirm`
+/// dialog inside an animation-frame callback. Regression test for the
+/// Vercel review on #2521: the settle probe's five-second fallback timer
+/// is paused while a modal dialog is open, so the old settle evaluation
+/// blocked for the full 30-second CDP timeout. The settle must be bounded
+/// by a timer the dialog cannot pause, so `press` returns promptly once
+/// the dialog opens (and within six seconds even if it was already open)
+/// and the dialog stays pending for the agent.
+#[tokio::test]
+#[ignore]
+async fn e2e_press_returns_when_dialog_opens_in_animation_frame() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true, "args": ["--no-sandbox", "--disable-dev-shm-usage"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The keydown handler opens a confirm dialog inside a rAF callback.
+    // `confirm` is not auto-dismissed (only `alert` and `beforeunload`
+    // are), so the dialog stays open and pauses the page's timers while
+    // the settle probe is waiting.
+    let html = concat!(
+        "data:text/html,<html><body><script>",
+        "addEventListener('keydown',e=>{if(e.key==='Enter'){requestAnimationFrame(()=>{confirm('from frame');});}});",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let started = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "press", "key": "Enter" }),
+        &mut state,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_success(&resp);
+    // The settle returns as soon as the dialog opens, and is capped at
+    // six seconds by a host-side timer the dialog cannot pause; without
+    // the fix the probe waits out the 30-second CDP timeout. Fifteen
+    // seconds leaves ample headroom for slow runners.
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "press blocked {elapsed:?} on a dialog the settle should have given up on"
+    );
+
+    // The dialog is still open for the agent: dismiss it and confirm the
+    // page recovers.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "dialog", "response": "dismiss" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "document.title" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_press_returns_promptly_when_key_opens_dialog() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true, "args": ["--no-sandbox", "--disable-dev-shm-usage"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The keydown handler opens a confirm dialog from an animation-frame
+    // callback. A dialog pauses the page's timers, so without the
+    // dialog-aware settle the press would hang until the 30s CDP timeout.
+    let html = concat!(
+        "data:text/html,<html><body><script>",
+        "addEventListener('keydown',e=>{if(e.key==='Enter'){requestAnimationFrame(()=>{confirm('are you sure?');});}});",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let start = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "press", "key": "Enter" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(15),
+        "press must return when a dialog opens instead of hanging for the 30s CDP timeout; took {:?}",
+        start.elapsed()
+    );
+
+    // The dialog stays open for the agent to handle: wait until it is
+    // tracked as pending, then dismiss it and check the page is alive.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let resp = execute_command(
+            &json!({ "id": "4", "action": "dialog", "response": "status" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        if get_data(&resp)["hasDialog"] == json!(true) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "dialog opened by the key handler must be pending"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "dialog", "response": "dismiss" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.title" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Raw mouse regressions
 // ---------------------------------------------------------------------------

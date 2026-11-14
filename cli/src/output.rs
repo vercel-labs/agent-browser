@@ -2292,6 +2292,7 @@ agent-browser type - Type text into an element
 Usage: agent-browser type <selector> [--clear] [--delay <ms>] [--] <text>
 
 Types text into the specified element character by character.
+Returns after the page has run one animation frame and one macrotask, so timers queued by a key handler have already run before the next command.
 Use --clear to clear existing content first. Use --delay to set the delay between keystrokes in milliseconds.
 Use -- before text that looks like a flag to pass it literally. Put options before --.
 
@@ -2472,6 +2473,7 @@ agent-browser press - Press a key or key combination
 Usage: agent-browser press <key>
 
 Presses a key or key combination. Supports special keys and modifiers.
+Returns after the page has run one animation frame and one macrotask, so timers queued by a key handler have already run before the next command.
 
 Aliases: key
 
@@ -2541,6 +2543,7 @@ Sends keyboard input to whatever element currently has focus.
 Unlike 'type' which requires a selector, 'keyboard' operates on
 the current focus — essential for contenteditable editors like
 Lexical, ProseMirror, CodeMirror, and Monaco.
+The 'type' and 'inserttext' subcommands return after the page has run one animation frame and one macrotask, so timers queued by a key handler have already run before the next command.
 
 Subcommands:
   type <text>          Type text character-by-character with real

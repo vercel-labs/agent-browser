@@ -7351,6 +7351,9 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.iframe_sessions,
     )
     .await?;
+    // Let the page run the frame and macrotask the keystrokes queued
+    // before returning, so the next command cannot land before them.
+    interaction::wait_for_settle(&mgr.client, &session_id).await;
     Ok(json!({ "typed": text }))
 }
 
@@ -7366,6 +7369,9 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let (actual_key, modifiers) = parse_key_chord(key);
 
     interaction::press_key_with_modifiers(&mgr.client, &session_id, &actual_key, modifiers).await?;
+    // Let the page run the frame and macrotask the key events queued
+    // before returning, so the next command cannot land before them.
+    interaction::wait_for_settle(&mgr.client, &session_id).await;
     Ok(json!({ "pressed": key }))
 }
 
@@ -8437,6 +8443,9 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
                 .ok_or("Missing 'text' parameter")?;
             interaction::type_text_into_active_context(&mgr.client, &session_id, text, None)
                 .await?;
+            // Let the page run the frame and macrotask the keystrokes queued
+            // before returning, so the next command cannot land before them.
+            interaction::wait_for_settle(&mgr.client, &session_id).await;
             return Ok(json!({ "typed": text }));
         }
         Some("insertText") => {
@@ -8451,6 +8460,9 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
                     Some(&session_id),
                 )
                 .await?;
+            // Let the page run the frame and macrotask the insertion queued
+            // before returning, so the next command cannot land before them.
+            interaction::wait_for_settle(&mgr.client, &session_id).await;
             return Ok(json!({ "inserted": true }));
         }
         _ => {}
@@ -15193,6 +15205,9 @@ async fn handle_inserttext(cmd: &Value, state: &DaemonState) -> Result<Value, St
             Some(&session_id),
         )
         .await?;
+    // Let the page run the frame and macrotask the insertion queued
+    // before returning, so the next command cannot land before them.
+    interaction::wait_for_settle(&mgr.client, &session_id).await;
     Ok(json!({ "inserted": true }))
 }
 
