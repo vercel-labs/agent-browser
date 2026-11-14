@@ -2,10 +2,11 @@
 
 use serde_json::{json, Value};
 
+use super::bidi::SANDBOX;
 use super::daemon::session;
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
-use crate::native::element::{build_find_element_js, parse_ref, RefEntry, IS_CONNECTED_JS};
+use crate::native::element::{build_find_element_js, parse_ref, RefEntry};
 
 /// A node handle: the BiDi browsing context that owns it and its `sharedId`.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,21 +32,24 @@ pub async fn find_element(
     Ok(found["sharedId"].as_str().map(String::from))
 }
 
+/// Whether `this` is attached to the document its browsing context shows now. A node of a
+/// document the page has since replaced stays connected to that old document, so both are checked.
+pub(crate) const IN_DOCUMENT_JS: &str =
+    "function() { return this.isConnected && this.ownerDocument === document; }";
+
+/// Whether the node is still in the page. It is asked in the sandbox, where the page cannot
+/// answer for it.
 async fn is_connected(ff: &FirefoxSession, target: &Target) -> bool {
     let r = ff
         .bidi
-        .call_function(
-            &target.context,
-            IS_CONNECTED_JS,
-            Some(target.node_ref()),
-            vec![],
-        )
+        .call_function_on_in_sandbox(&target.context, SANDBOX, IN_DOCUMENT_JS, target.node_ref())
         .await;
     r.is_ok_and(|v| v == true)
 }
 
 /// Resolves `@eN`, `eN`, `ref=eN`, a CSS selector or `xpath=...` to a live node.
-/// A ref whose node is gone is recovered by role and name only when exactly one element matches and the ref had no `nth`.
+/// A ref whose node is gone is recovered by role and name only when exactly one element matches,
+/// the ref had no `nth`, and the match is in the document the ref was taken from.
 pub async fn resolve_target(
     state: &mut DaemonState,
     selector_or_ref: &str,
@@ -80,6 +84,24 @@ pub async fn resolve_target(
         }
     }
     recover(ff, &entry, known.map(|t| t.context)).await
+}
+
+/// Whether the node belongs to the document the last snapshot recorded for `context`. A page
+/// that navigated since then has a new document, and a ref must not carry over to it.
+async fn in_snapshot_document(ff: &FirefoxSession, context: &str, shared_id: &str) -> bool {
+    let Some(recorded) = ff.documents.get(context) else {
+        return false;
+    };
+    let document = ff
+        .bidi
+        .call_function_on_in_sandbox(
+            context,
+            SANDBOX,
+            "function() { return this.ownerDocument; }",
+            json!({ "sharedId": shared_id }),
+        )
+        .await;
+    document.is_ok_and(|document| document["sharedId"] == recorded.as_str())
 }
 
 async fn recover(
@@ -119,6 +141,9 @@ async fn recover(
                 .as_str()
                 .ok_or("Firefox returned a node without a sharedId")?
                 .to_string();
+            if !in_snapshot_document(ff, &context, &shared_id).await {
+                return Err(format!("Stale ref for role={role} name={name}: the page changed since the snapshot. Run snapshot again and use a fresh ref."));
+            }
             if let Some(id) = entry.backend_node_id {
                 ff.refs.retain(|_, v| *v != id);
                 ff.refs.insert((context.clone(), shared_id.clone()), id);
@@ -132,7 +157,59 @@ async fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session, fake_session_with_script, Calls};
+    use crate::native::firefox::session::tests::{
+        fake_session, fake_session_with, fake_session_with_script, Calls,
+    };
+
+    /// A state whose ref `e1` lost its node, where one element still matches its role and name
+    /// and belongs to the document `current`, while the snapshot recorded `doc-1`.
+    async fn state_with_a_match_in(current: &'static str) -> DaemonState {
+        let (mut ff, _, _) = fake_session_with(move |v: &Value| {
+            let remote = |value: Value| json!({"type": "success", "result": value});
+            match v["method"].as_str() {
+                Some("browsingContext.locateNodes") => json!({"nodes": [{"sharedId": "found"}]}),
+                Some("script.callFunction") if v["params"]["target"]["sandbox"].is_string() => {
+                    remote(json!({"type": "node", "sharedId": current}))
+                }
+                Some("script.callFunction") => remote(json!({"type": "boolean", "value": false})),
+                _ => json!({}),
+            }
+        })
+        .await;
+        ff.refs.insert(("ctx-active".into(), "sid".into()), 7);
+        ff.documents.insert("ctx-active".into(), "doc-1".into());
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state
+            .ref_map
+            .add_with_frame("e1".into(), Some(7), "button", "OK", None, None);
+        state
+    }
+
+    #[tokio::test]
+    async fn a_ref_is_recovered_inside_the_document_it_was_taken_from() {
+        let mut state = state_with_a_match_in("doc-1").await;
+
+        let target = resolve_target(&mut state, "@e1").await.unwrap();
+
+        assert_eq!(target.shared_id, "found");
+    }
+
+    #[tokio::test]
+    async fn a_ref_is_not_recovered_in_a_document_that_replaced_its_own() {
+        let mut state = state_with_a_match_in("doc-2").await;
+
+        let error = resolve_target(&mut state, "@e1").await.unwrap_err();
+
+        assert!(
+            error.contains("the page changed since the snapshot"),
+            "{error}"
+        );
+        let ff = state.firefox.as_ref().unwrap();
+        assert!(ff
+            .refs
+            .contains_key(&("ctx-active".to_string(), "sid".to_string())));
+    }
 
     async fn state_with_ref(nth: Option<usize>) -> (DaemonState, Calls) {
         let mut state = DaemonState::new();
