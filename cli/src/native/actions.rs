@@ -36,6 +36,7 @@ use super::element::RefMap;
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
+use super::pointer::{ClickPlan, ClickSpec, Modifiers, MouseButton};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
 use super::react;
@@ -3729,8 +3730,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "close" => handle_close(state).await,
         "snapshot" => handle_snapshot(cmd, state).await,
         "screenshot" => handle_screenshot(cmd, state).await,
-        "click" => handle_click(cmd, state).await,
-        "dblclick" => handle_dblclick(cmd, state).await,
+        "click" => handle_click(cmd, state, 1).await,
+        "dblclick" => handle_click(cmd, state, 2).await,
         "fill" => handle_fill(cmd, state).await,
         "type" => handle_type(cmd, state).await,
         "press" => handle_press(cmd, state).await,
@@ -7635,7 +7636,12 @@ fn record_click_animation(
     }
 }
 
-async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_click(
+    cmd: &Value,
+    state: &mut DaemonState,
+    default_count: u8,
+) -> Result<Value, String> {
+    let plan = ClickPlan::from_command(cmd, default_count)?;
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -7643,89 +7649,92 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
-            wb.click(selector).await?;
-            return Ok(json!({ "clicked": selector }));
+            match plan {
+                ClickPlan::Pointer(spec) if spec.is_plain() => {
+                    wb.click(selector).await?;
+                    return Ok(json!({ "clicked": selector }));
+                }
+                _ => return Err("This backend only supports a plain left click".to_string()),
+            }
         }
     }
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    if new_tab {
-        use super::element::resolve_element_object_id;
-        let (object_id, effective_session_id) = resolve_element_object_id(
-            &mgr.client,
-            &session_id,
-            &state.ref_map,
-            selector,
-            &state.iframe_sessions,
-        )
-        .await?;
-        let call_params = json!({
-            "objectId": object_id,
-            "functionDeclaration": interaction::CLICK_HREF_JS,
-            "returnByValue": true
-        });
-        let call_result = mgr
-            .client
-            .send_command(
-                "Runtime.callFunctionOn",
-                Some(call_params),
-                Some(&effective_session_id),
+    let spec = match plan {
+        ClickPlan::NewTab => {
+            use super::element::resolve_element_object_id;
+            let (object_id, effective_session_id) = resolve_element_object_id(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                &state.iframe_sessions,
             )
             .await?;
-        let href = call_result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                format!(
+            let call_params = json!({
+                "objectId": object_id,
+                "functionDeclaration": interaction::CLICK_HREF_JS,
+                "returnByValue": true
+            });
+            let call_result = mgr
+                .client
+                .send_command(
+                    "Runtime.callFunctionOn",
+                    Some(call_params),
+                    Some(&effective_session_id),
+                )
+                .await?;
+            let href = call_result
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    format!(
                     "Element '{}' does not have an href attribute. --new-tab only works on links.",
                     selector
                 )
-            })?
-            .to_string();
+                })?
+                .to_string();
 
-        let domain_filter = state.domain_filter.read().await.clone();
-        let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-        let defer_url_until_controls = should_defer_url_until_network_controls(
-            domain_filter.as_ref(),
-            has_proxy_creds,
-            Some(&href),
-        )?;
-        // `click --new-tab` creates the same kind of daemon-owned tab as
-        // `tab new`, so it must use the same pre-navigation setup path.
-        let defer_url = defer_url_until_controls || session_setup_pending(state).await;
+            let domain_filter = state.domain_filter.read().await.clone();
+            let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+            let defer_url_until_controls = should_defer_url_until_network_controls(
+                domain_filter.as_ref(),
+                has_proxy_creds,
+                Some(&href),
+            )?;
+            // `click --new-tab` creates the same kind of daemon-owned tab as
+            // `tab new`, so it must use the same pre-navigation setup path.
+            let defer_url = defer_url_until_controls || session_setup_pending(state).await;
 
-        state.ref_map.begin_snapshot();
-        state.active_iframe_sessions.clear();
-        state.active_frame_id = None;
-        state.webmcp.clear_invocations();
-        let new_session_id = {
-            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-            mgr.tab_new(if defer_url { None } else { Some(&href) }, None)
-                .await?;
-            mgr.active_session_id()?.to_string()
-        };
+            state.ref_map.begin_snapshot();
+            state.active_iframe_sessions.clear();
+            state.active_frame_id = None;
+            state.webmcp.clear_invocations();
+            let new_session_id = {
+                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+                mgr.tab_new(if defer_url { None } else { Some(&href) }, None)
+                    .await?;
+                mgr.active_session_id()?.to_string()
+            };
 
-        apply_session_setup(state, &new_session_id).await?;
-        install_network_controls_or_close(state, has_proxy_creds).await?;
-        state.drain_cdp_events_background().await?;
+            apply_session_setup(state, &new_session_id).await?;
+            install_network_controls_or_close(state, has_proxy_creds).await?;
+            state.drain_cdp_events_background().await?;
 
-        if defer_url {
-            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-            mgr.navigate(&href, WaitUntil::Load).await?;
+            if defer_url {
+                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+                mgr.navigate(&href, WaitUntil::Load).await?;
+            }
+
+            state.refresh_active_iframe_sessions().await;
+
+            return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
         }
-
-        state.refresh_active_iframe_sessions().await;
-
-        return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
-    }
-
-    let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left");
-    let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+        ClickPlan::Pointer(spec) => spec,
+    };
 
     let options = PointerMoveOptions::from_cmd(cmd, state);
     if options.mode != "instant" {
@@ -7769,8 +7778,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &session_id,
         &state.ref_map,
         selector,
-        button,
-        click_count,
+        spec,
         &state.iframe_sessions,
     )
     .await?;
@@ -7780,34 +7788,6 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &state.recording_state.shared_cursor,
     );
 
-    if result.dialog_opened {
-        state.pending_pointer_release = result.pending_release;
-        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
-    }
-    Ok(json!({ "clicked": selector }))
-}
-
-async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-    let selector = cmd
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'selector' parameter")?;
-
-    let result = interaction::dblclick(
-        &mgr.client,
-        &session_id,
-        &state.ref_map,
-        selector,
-        &state.iframe_sessions,
-    )
-    .await?;
-    record_click_animation(
-        &result,
-        &mut state.mouse_state,
-        &state.recording_state.shared_cursor,
-    );
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
         return Ok(json!({ "clicked": selector, "dialogOpened": true }));
@@ -7904,12 +7884,10 @@ fn parse_key_chord(input: &str) -> (String, Option<i32>) {
     let mut key_parts: Vec<&str> = Vec::new();
 
     for part in &parts {
-        match part.to_lowercase().as_str() {
-            "alt" => modifiers |= 1,
-            "control" | "ctrl" => modifiers |= 2,
-            "meta" | "cmd" | "command" => modifiers |= 4,
-            "shift" => modifiers |= 8,
-            _ => key_parts.push(part),
+        if let Some(bit) = Modifiers::bit(part) {
+            modifiers |= bit;
+        } else {
+            key_parts.push(part);
         }
     }
 
@@ -8952,8 +8930,12 @@ async fn handle_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     state.mouse_state.x = x;
     state.mouse_state.y = y;
     match event_type {
-        "mousePressed" => state.mouse_state.buttons |= mouse_button_mask(button),
-        "mouseReleased" => state.mouse_state.buttons &= !mouse_button_mask(button),
+        "mousePressed" => {
+            state.mouse_state.buttons |= MouseButton::parse(button).map_or(0, MouseButton::mask)
+        }
+        "mouseReleased" => {
+            state.mouse_state.buttons &= !MouseButton::parse(button).map_or(0, MouseButton::mask)
+        }
         _ => {}
     }
     if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
@@ -9335,8 +9317,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &session_id,
         &state.ref_map,
         selector,
-        "left",
-        1,
+        ClickSpec::default(),
         &state.iframe_sessions,
     )
     .await?;
@@ -11605,8 +11586,7 @@ async fn execute_subaction(
                 &session_id,
                 &state.ref_map,
                 selector,
-                "left",
-                1,
+                ClickSpec::default(),
                 &state.iframe_sessions,
             )
             .await?;
@@ -15345,8 +15325,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         &session_id,
         &submit_element.ref_map,
         AUTH_LOGIN_ELEMENT_REF,
-        "left",
-        1,
+        ClickSpec::default(),
         &state.iframe_sessions,
     )
     .await?;
@@ -15601,30 +15580,7 @@ async fn handle_device_list() -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn mouse_button_mask(button: &str) -> i32 {
-    match button {
-        "left" => 1,
-        "right" => 2,
-        "middle" => 4,
-        "back" => 8,
-        "forward" => 16,
-        _ => 0,
-    }
-}
-
-fn primary_button_from_mask(buttons: i32) -> &'static str {
-    if buttons & 1 != 0 {
-        "left"
-    } else if buttons & 2 != 0 {
-        "right"
-    } else if buttons & 4 != 0 {
-        "middle"
-    } else if buttons & 8 != 0 {
-        "back"
-    } else if buttons & 16 != 0 {
-        "forward"
-    } else {
-        "none"
-    }
+    MouseButton::parse(button).map_or(0, MouseButton::mask)
 }
 
 /// The key fields a raw keyboard command may carry: logical key, physical code
@@ -15730,7 +15686,7 @@ fn build_mouse_event_params(
         y,
         button: Some(
             button
-                .unwrap_or(primary_button_from_mask(next_buttons))
+                .unwrap_or(MouseButton::primary(next_buttons).map_or("none", MouseButton::name))
                 .to_string(),
         ),
         buttons: Some(next_buttons),
