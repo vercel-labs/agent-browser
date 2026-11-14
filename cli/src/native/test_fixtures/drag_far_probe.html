@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Drag Far Probe</title>
+  <style>
+    body {
+      margin: 16px;
+      font: 14px/1.4 sans-serif;
+      background: #fafafa;
+    }
+
+    .box {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 110px;
+      height: 60px;
+      margin-right: 12px;
+      border-radius: 6px;
+      color: white;
+      font-weight: 600;
+    }
+
+    #src { background: #0070f3; }
+    #near { background: #7c4dff; }
+    #far { background: #0f9d58; }
+
+    #gap {
+      height: 3000px;
+      margin: 16px 0;
+      border: 1px dashed #aaa;
+      color: #777;
+      text-align: center;
+    }
+
+    #offscreen {
+      position: fixed;
+      left: -500px;
+      top: 20px;
+      background: #555;
+    }
+
+    #hidden { display: none; }
+
+    #out {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      min-width: 240px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: #111;
+      color: #ddd;
+      font-family: ui-monospace, monospace;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="box" id="src">source</div>
+  <div class="box" id="near">near target</div>
+  <div id="gap">3000px of page between source and far target</div>
+  <div class="box" id="far">far target</div>
+  <div class="box" id="offscreen">off-screen</div>
+  <div class="box" id="hidden">hidden</div>
+  <pre id="out">mouse events</pre>
+  <script>
+    window.__dragFarProbe = { events: [] };
+    const out = document.getElementById("out");
+
+    for (const type of ["mousedown", "mouseup"]) {
+      document.addEventListener(type, (event) => {
+        const target = event.target.id || event.target.tagName;
+        window.__dragFarProbe.events.push(`${type} on ${target}`);
+        const line = document.createElement("div");
+        line.textContent = `${type} on ${target}`;
+        out.appendChild(line);
+      }, true);
+    }
+  </script>
+</body>
+</html>
