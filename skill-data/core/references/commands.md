@@ -168,7 +168,7 @@ Needs `ffmpeg` on PATH; use a path with an extension. `--fps` accepts 1 to 60 an
 agent-browser wait @e1                     # Wait for element
 agent-browser wait 2000                    # Wait milliseconds
 agent-browser wait --text "Success"        # Wait for text (or -t)
-agent-browser wait --url "**/dashboard"    # Wait for URL pattern (or -u)
+agent-browser wait --url "**/dashboard"    # Wait for URL pattern (or -u), then for the page to load (up to 3s)
 agent-browser wait --load domcontentloaded # Wait for DOMContentLoaded (or -l)
 agent-browser wait --load load             # Wait for the load event
 agent-browser wait --load networkidle      # Wait for network idle on known-quiet pages

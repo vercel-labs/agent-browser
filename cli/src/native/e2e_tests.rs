@@ -3767,6 +3767,63 @@ async fn e2e_wait() {
     assert_success(&resp);
 }
 
+// wait --url must not return while the page it matched is still loading: the URL
+// changes when the navigation commits, before the document has loaded.
+#[tokio::test]
+#[ignore]
+async fn e2e_wait_url_returns_after_the_new_page_has_loaded() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                let n = stream.read(&mut request).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..n]);
+                let body = if request.starts_with("GET /slow") {
+                    // The page's `load` event waits for this response.
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    String::new()
+                } else if request.starts_with("GET /next") {
+                    "<h1>Next</h1><img src=\"/slow\">".to_string()
+                } else {
+                    "<script>setTimeout(() => { location.href = '/next'; }, 200)</script>"
+                        .to_string()
+                };
+                let _ = stream.write_all(html_response(&body).as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": format!("{base}/start") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "waitforurl", "url": "**/next", "timeout": 8000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "4", "document.readyState", json!("complete")).await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+    assert_success(&resp);
+}
+
 // wait --load on a page that already finished loading must resolve
 // immediately instead of waiting for a Page.loadEventFired that will never
 // come (the common case after a click that triggers an SPA navigation).
