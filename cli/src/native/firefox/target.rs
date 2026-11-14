@@ -86,24 +86,6 @@ pub async fn resolve_target(
     recover(ff, &entry, known.map(|t| t.context)).await
 }
 
-/// Whether the node belongs to the document the last snapshot recorded for `context`. A page
-/// that navigated since then has a new document, and a ref must not carry over to it.
-async fn in_snapshot_document(ff: &FirefoxSession, context: &str, shared_id: &str) -> bool {
-    let Some(recorded) = ff.documents.get(context) else {
-        return false;
-    };
-    let document = ff
-        .bidi
-        .call_function_on_in_sandbox(
-            context,
-            SANDBOX,
-            "function() { return this.ownerDocument; }",
-            json!({ "sharedId": shared_id }),
-        )
-        .await;
-    document.is_ok_and(|document| document["sharedId"] == recorded.as_str())
-}
-
 async fn recover(
     ff: &mut FirefoxSession,
     entry: &RefEntry,
@@ -122,6 +104,17 @@ async fn recover(
     let context = context
         .or_else(|| entry.frame_id.clone())
         .unwrap_or_else(|| ff.contexts.active().to_string());
+    let document = ff
+        .bidi
+        .call_function_in_sandbox(&context, SANDBOX, "() => document", vec![])
+        .await
+        .ok()
+        .and_then(|d| d["sharedId"].as_str().map(String::from));
+    if document.is_none()
+        || document.as_deref() != ff.ref_documents.get(&context).map(String::as_str)
+    {
+        return Err(format!("Stale ref for role={role} name={name}: the page changed since the snapshot. Run snapshot again and use a fresh ref."));
+    }
     let found = ff
         .bidi
         .send(
@@ -141,9 +134,6 @@ async fn recover(
                 .as_str()
                 .ok_or("Firefox returned a node without a sharedId")?
                 .to_string();
-            if !in_snapshot_document(ff, &context, &shared_id).await {
-                return Err(format!("Stale ref for role={role} name={name}: the page changed since the snapshot. Run snapshot again and use a fresh ref."));
-            }
             if let Some(id) = entry.backend_node_id {
                 ff.refs.retain(|_, v| *v != id);
                 ff.refs.insert((context.clone(), shared_id.clone()), id);
@@ -157,63 +147,25 @@ async fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{
-        fake_session, fake_session_with, fake_session_with_script, Calls,
-    };
+    use crate::native::firefox::session::tests::{fake_session_with_script, Calls};
+    use serde_json::Value;
 
-    /// A state whose ref `e1` lost its node, where one element still matches its role and name
-    /// and belongs to the document `current`, while the snapshot recorded `doc-1`.
-    async fn state_with_a_match_in(current: &'static str) -> DaemonState {
-        let (mut ff, _, _) = fake_session_with(move |v: &Value| {
-            let remote = |value: Value| json!({"type": "success", "result": value});
-            match v["method"].as_str() {
-                Some("browsingContext.locateNodes") => json!({"nodes": [{"sharedId": "found"}]}),
-                Some("script.callFunction") if v["params"]["target"]["sandbox"].is_string() => {
-                    remote(json!({"type": "node", "sharedId": current}))
-                }
-                Some("script.callFunction") => remote(json!({"type": "boolean", "value": false})),
-                _ => json!({}),
-            }
-        })
-        .await;
-        ff.refs.insert(("ctx-active".into(), "sid".into()), 7);
-        ff.documents.insert("ctx-active".into(), "doc-1".into());
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-        state
-            .ref_map
-            .add_with_frame("e1".into(), Some(7), "button", "OK", None, None);
-        state
-    }
-
-    #[tokio::test]
-    async fn a_ref_is_recovered_inside_the_document_it_was_taken_from() {
-        let mut state = state_with_a_match_in("doc-1").await;
-
-        let target = resolve_target(&mut state, "@e1").await.unwrap();
-
-        assert_eq!(target.shared_id, "found");
-    }
-
-    #[tokio::test]
-    async fn a_ref_is_not_recovered_in_a_document_that_replaced_its_own() {
-        let mut state = state_with_a_match_in("doc-2").await;
-
-        let error = resolve_target(&mut state, "@e1").await.unwrap_err();
-
-        assert!(
-            error.contains("the page changed since the snapshot"),
-            "{error}"
-        );
-        let ff = state.firefox.as_ref().unwrap();
-        assert!(ff
-            .refs
-            .contains_key(&("ctx-active".to_string(), "sid".to_string())));
+    fn document_responder(document: &'static str) -> impl Fn(&Value) -> Value + Send + 'static {
+        move |_: &Value| json!({"type": "success", "result": {"type": "node", "sharedId": document}})
     }
 
     async fn state_with_ref(nth: Option<usize>) -> (DaemonState, Calls) {
+        state_with_document(nth, "doc1").await
+    }
+
+    async fn state_with_document(
+        nth: Option<usize>,
+        document: &'static str,
+    ) -> (DaemonState, Calls) {
         let mut state = DaemonState::new();
-        let (mut ff, _tx, calls) = fake_session().await;
+        let (mut ff, _tx, calls) = fake_session_with_script(document_responder(document)).await;
+        ff.documents.insert("ctx-active".into(), document.into());
+        ff.ref_documents.insert("ctx-active".into(), "doc1".into());
         ff.refs.insert(("ctx-active".into(), "sid".into()), 7);
         state.firefox = Some(ff);
         state
@@ -223,13 +175,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ref_from_an_earlier_document_is_never_recovered() {
+        let (mut state, calls) = state_with_document(None, "doc2").await;
+        let e = resolve_target(&mut state, "@e1").await.unwrap_err();
+        assert!(e.contains("the page changed since the snapshot"), "{e}");
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .contains(&"browsingContext.locateNodes".to_string()));
+    }
+
+    #[tokio::test]
     async fn disconnected_ref_with_no_match_is_stale() {
         let (mut state, calls) = state_with_ref(None).await;
         let e = resolve_target(&mut state, "@e1").await.unwrap_err();
         assert!(e.contains("the ref is stale"), "{e}");
         assert_eq!(
             *calls.lock().unwrap(),
-            ["script.callFunction", "browsingContext.locateNodes"]
+            [
+                "script.callFunction",
+                "script.callFunction",
+                "browsingContext.locateNodes"
+            ]
         );
     }
 
