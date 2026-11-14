@@ -14866,6 +14866,75 @@ async fn e2e_auto_attached_foreign_tab_does_not_steal_pinned_tab() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_discovered_popup_following_resets_old_refs() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let page = concat!(
+        "data:text/html,<html><body>",
+        "<button>Keep</button>",
+        "<a href='data:text/html,click-popup' target='_blank'>Open tab</a>",
+        "<script>setTimeout(() => window.open('data:text/html,timer-popup'), 2000)</script>",
+        "</body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let initial_url = get_data(&resp)["url"].clone();
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(snapshot.contains("ref=e1"));
+    assert!(snapshot.contains("ref=e2"));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "wait", "timeout": 2500 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let warning = resp["warning"].as_str().unwrap_or_default();
+    assert!(
+        warning.contains("New tab t2 opened in the background"),
+        "{warning}"
+    );
+
+    let resp = execute_command(&json!({ "id": "5", "action": "url" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], initial_url);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "click", "selector": "e2" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "7", "action": "url" }), &mut state).await;
+    assert_success(&resp);
+    assert_ne!(get_data(&resp)["url"], initial_url);
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "click", "selector": "e1" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+
+    let resp = execute_command(&json!({ "id": "9", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // SCRATCH (finding #3): explicit agent commands must still end up active
 // even under the same auto-attach shared browser, proving the fix does not
 // regress `tab new`.
