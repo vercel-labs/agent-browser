@@ -20862,6 +20862,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         );
     }
 
+    #[tokio::test]
+    async fn test_firefox_attach_detection_preserves_explicit_devtools() {
+        for (suffix, explicit) in [
+            ("/session", false),
+            ("/session?devtools=6080", true),
+            ("/session?devtools=6000", true),
+        ] {
+            let target = format!("ws://127.0.0.1:9333{suffix}");
+            let AttachConnection::Firefox(parsed) =
+                detect_attach_connection(&target, None).await.unwrap()
+            else {
+                panic!("expected a Firefox attach target");
+            };
+            assert_eq!(parsed.bidi_url, "ws://127.0.0.1:9333/session");
+            assert_eq!(parsed.devtools_explicit, explicit);
+        }
+    }
+
     async fn bare_cdp_server() -> (String, tokio::task::JoinHandle<()>) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
@@ -25679,6 +25697,24 @@ mod firefox_routing_tests {
         close_all_browser_backends(&mut state).await.unwrap();
         assert!(state.dialog_handler_task.is_none());
         assert!(client.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_the_firefox_engine_like_cdp_settings() {
+        let _guard = clean_env();
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({"id":"1","action":"launch","cdpPort":9,"settings":{"engine":"firefox"}}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false);
+        let error = resp["error"].as_str().unwrap();
+        assert!(
+            error.contains("connect and --cdp are not supported with --engine firefox"),
+            "{error}"
+        );
+        assert!(state.browser.is_none());
     }
 
     #[tokio::test]

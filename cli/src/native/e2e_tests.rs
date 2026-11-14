@@ -16503,6 +16503,11 @@ async fn e2e_firefox_attach_undoes_changes_with_a_privileged_tab_open() {
 
     firefox_switch_to_title(&mut state, "Firefox adapter probe").await;
     let own = firefox_eval(&mut state, "navigator.userAgent").await;
+    assert!(
+        own.as_str()
+            .is_some_and(|user_agent| user_agent.contains("Firefox")),
+        "the attached browser must report its own user agent: {own}"
+    );
     let own_language = firefox_eval(&mut state, "navigator.language").await;
     let page =
         "[innerWidth, navigator.language, Intl.DateTimeFormat().resolvedOptions().timeZone].join()";
