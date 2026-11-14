@@ -2274,6 +2274,13 @@ Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
 Put flags before --. Text after -- is literal, including values that look like flags.
 
+Date, time, datetime-local, month, week, color and range inputs have no text to
+type into, so fill sets their value directly and fires input and change. The
+value must be in the control's format (YYYY-MM-DD, HH:MM, YYYY-MM-DDTHH:MM,
+YYYY-MM, YYYY-Www, #rrggbb, a number within min and max). A value the browser
+would silently drop, a disabled control and a read-only control fail with an
+error that says why.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only

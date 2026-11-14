@@ -17599,3 +17599,167 @@ async fn e2e_flow_a_route_limited_by_resource_type_applies_the_same_on_both_tier
     }
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
+
+// Date, time, color and range inputs have no text to type into: fill sets the
+// value and fires input and change, and reports a value the browser would drop.
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_date_time_color_and_range_inputs() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<html><body>",
+        "<input id='d' type='date' value='2026-01-01'>",
+        "<input id='t' type='time'>",
+        "<input id='dt' type='datetime-local'>",
+        "<input id='m' type='month'>",
+        "<input id='w' type='week'>",
+        "<input id='c' type='color' value='%23112233'>",
+        "<input id='r' type='range' min='0' max='100' value='10'>",
+        "<input id='ro' type='date' readonly>",
+        "<input id='off' type='time' disabled>",
+        "<input id='n' type='text'>",
+        "<script>",
+        "window.log = [];",
+        "for (const id of ['d','t','dt','m','w','c','r']) for (const ev of ['input','change'])",
+        "document.getElementById(id).addEventListener(ev, () => log.push(id + ':' + ev));",
+        "</script>",
+        "</body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Accepted values land in the control, with an input and a change event each.
+    for (i, (id, value)) in [
+        ("d", "2026-03-14"),
+        ("t", "19:30"),
+        ("dt", "2026-03-14T19:30"),
+        ("m", "2026-03"),
+        ("w", "2026-W11"),
+        ("c", "#ff8800"),
+        ("r", "70"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = execute_command(
+            &json!({ "id": format!("f{i}"), "action": "fill", "selector": format!("#{id}"), "value": value }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_evaluate(
+            &mut state,
+            &format!("v{i}"),
+            &format!("document.getElementById('{id}').value"),
+            json!(value),
+        )
+        .await;
+    }
+    assert_evaluate(
+        &mut state,
+        "events",
+        "log.join(',')",
+        json!("d:input,d:change,t:input,t:change,dt:input,dt:change,m:input,m:change,w:input,w:change,c:input,c:change,r:input,r:change"),
+    )
+    .await;
+
+    // A value the browser would sanitize away is an error that names the format
+    // and leaves the old value in place.
+    for (id, value, expected, old) in [
+        ("d", "next friday", "YYYY-MM-DD", "2026-03-14"),
+        ("t", "7pm", "HH:MM", "19:30"),
+        ("c", "orange", "#rrggbb", "#ff8800"),
+        ("r", "500", "min 0, max 100", "70"),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": format!("bad-{id}"), "action": "fill", "selector": format!("#{id}"), "value": value }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
+        let error = resp["error"].as_str().unwrap_or_default();
+        assert!(error.contains(expected), "unexpected error: {error}");
+        assert_evaluate(
+            &mut state,
+            &format!("old-{id}"),
+            &format!("document.getElementById('{id}').value"),
+            json!(old),
+        )
+        .await;
+    }
+
+    // An empty value clears a date input.
+    let resp = execute_command(
+        &json!({ "id": "clear", "action": "fill", "selector": "#d", "value": "" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "cleared", "d.value", json!("")).await;
+
+    // Read-only and disabled inputs are rejected with the reason.
+    for (id, value, reason) in [
+        ("ro", "2026-03-14", "read-only"),
+        ("off", "19:30", "disabled"),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": format!("blocked-{id}"), "action": "fill", "selector": format!("#{id}"), "value": value }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(
+            resp["error"].as_str().unwrap_or_default().contains(reason),
+            "unexpected error: {resp}"
+        );
+    }
+
+    // Text inputs still take typed text.
+    let resp = execute_command(
+        &json!({ "id": "text", "action": "fill", "selector": "#n", "value": "hello" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "text-value", "n.value", json!("hello")).await;
+
+    // Filling the day segment of a date input fills the whole input.
+    let resp = execute_command(
+        &json!({ "id": "nav", "action": "navigate", "url": "data:text/html,<input id='d' type='date'>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "snap", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let segment_ref = get_data(&resp)["refs"]
+        .as_object()
+        .and_then(|refs| {
+            refs.iter()
+                .find(|(_, meta)| meta["role"] == "spinbutton")
+                .map(|(key, _)| key.clone())
+        })
+        .expect("a date input exposes its segments as spinbuttons");
+    let resp = execute_command(
+        &json!({ "id": "segment", "action": "fill", "selector": format!("@{segment_ref}"), "value": "2026-12-24" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "segment-value", "d.value", json!("2026-12-24")).await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}

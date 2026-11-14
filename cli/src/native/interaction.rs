@@ -152,6 +152,76 @@ pub async fn hover(
     Ok((x + offset.0, y + offset.1))
 }
 
+/// Runs on the filled element with the value as its argument. Date, time, color and range inputs
+/// have no text to type into, so keyboard insertion goes nowhere. This sets their value and fires
+/// the events a person's input would, and returns one of:
+/// - `{status: "text"}` for anything else, which keeps the keyboard-insertion path;
+/// - `{status: "filled"}` once the control holds the value;
+/// - `{status: "rejected", ...}` when the control is disabled or read-only, or the browser
+///   sanitized the value away (an invalid date, a color name, a slider value out of range).
+///   The old value is put back.
+const FILL_STRUCTURED_INPUT_JS: &str = r#"function(value) {
+  const formats = {
+    'time': ['HH:MM', '19:30'],
+    'date': ['YYYY-MM-DD', '2026-03-14'],
+    'datetime-local': ['YYYY-MM-DDTHH:MM', '2026-03-14T19:30'],
+    'month': ['YYYY-MM', '2026-03'],
+    'week': ['YYYY-Www', '2026-W11'],
+    'color': ['#rrggbb', '#ff8800'],
+    'range': ['a number within the min and max of the slider', '50'],
+  };
+  // The day, month or hour segments of a date or time input are separate elements inside the
+  // input's shadow root. Filling any of them fills the whole input.
+  let el = this;
+  const root = el.getRootNode && el.getRootNode();
+  if (root && root.host && root.host.tagName === 'INPUT') el = root.host;
+  if (el.tagName !== 'INPUT' || !formats[el.type]) return { status: 'text' };
+  const type = el.type;
+  if (el.disabled || el.readOnly) {
+    return { status: 'rejected', type, reason: el.disabled ? 'is disabled' : 'is read-only' };
+  }
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  el.focus();
+  const previous = el.value;
+  setter.call(el, value);
+  // Chrome sanitizes silently: an invalid date or time becomes '', an invalid color '#000000',
+  // and a slider value is clamped to min and max and rounded to step. Compare what is there now.
+  let accepted = value === '' || el.value !== '';
+  if (accepted && type === 'color') accepted = el.value === value.toLowerCase();
+  if (accepted && type === 'range') accepted = Number(el.value) === Number(value);
+  if (!accepted) {
+    const now = type === 'range'
+      ? 'it became ' + el.value + '; min ' + (el.min || 0) + ', max ' + (el.max || 100) + ', step ' + (el.step || 1)
+      : '';
+    setter.call(el, previous);
+    return { status: 'rejected', type, format: formats[type][0] + ', e.g. ' + formats[type][1], now };
+  }
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return { status: 'filled', type };
+}"#;
+
+/// The error for a `{status: "rejected", ...}` outcome of `FILL_STRUCTURED_INPUT_JS`.
+fn structured_input_error(outcome: &Value, value: &str) -> String {
+    let kind = outcome
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("structured");
+    if let Some(reason) = outcome.get("reason").and_then(Value::as_str) {
+        return format!("This {kind} input {reason}");
+    }
+    let now = outcome.get("now").and_then(Value::as_str).unwrap_or("");
+    let format = outcome
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("a valid value");
+    if now.is_empty() {
+        format!("This {kind} input did not accept {value:?}; it expects {format}")
+    } else {
+        format!("This {kind} input did not accept {value:?} ({now}); it expects {format}")
+    }
+}
+
 pub async fn fill(
     client: &CdpClient,
     session_id: &str,
@@ -168,6 +238,31 @@ pub async fn fill(
         iframe_sessions,
     )
     .await?;
+
+    // Date, time, color and range inputs are set by value; everything else is typed below.
+    let structured: Value = client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: FILL_STRUCTURED_INPUT_JS.to_string(),
+                object_id: Some(object_id.clone()),
+                arguments: Some(vec![CallArgument {
+                    value: Some(Value::String(value.to_string())),
+                    object_id: None,
+                }]),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+    if let Some(outcome) = structured.pointer("/result/value") {
+        match outcome.get("status").and_then(Value::as_str) {
+            Some("filled") => return Ok(()),
+            Some("rejected") => return Err(structured_input_error(outcome, value)),
+            _ => {}
+        }
+    }
 
     // Focus the element
     client
@@ -1513,5 +1608,38 @@ mod tests {
         assert_eq!(key_text("ArrowUp"), None);
         assert_eq!(key_text("Backspace"), None);
         assert_eq!(key_text("Delete"), None);
+    }
+}
+
+#[cfg(test)]
+mod structured_input_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rejected_value_error_names_the_expected_format() {
+        let outcome = json!({ "status": "rejected", "type": "date", "format": "YYYY-MM-DD, e.g. 2026-03-14", "now": "" });
+        assert_eq!(
+            structured_input_error(&outcome, "tomorrow"),
+            "This date input did not accept \"tomorrow\"; it expects YYYY-MM-DD, e.g. 2026-03-14"
+        );
+    }
+
+    #[test]
+    fn rejected_range_error_says_what_the_slider_did() {
+        let outcome = json!({ "status": "rejected", "type": "range", "format": "a number", "now": "it became 100; min 0, max 100, step 1" });
+        assert_eq!(
+            structured_input_error(&outcome, "150"),
+            "This range input did not accept \"150\" (it became 100; min 0, max 100, step 1); it expects a number"
+        );
+    }
+
+    #[test]
+    fn disabled_and_read_only_inputs_are_reported_as_such() {
+        let outcome = json!({ "status": "rejected", "type": "time", "reason": "is read-only" });
+        assert_eq!(
+            structured_input_error(&outcome, "19:30"),
+            "This time input is read-only"
+        );
     }
 }
