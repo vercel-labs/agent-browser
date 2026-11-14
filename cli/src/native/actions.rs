@@ -11050,6 +11050,8 @@ fn validate_find_subaction(action: &str, cmd: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the command sends input or script to the page, so a tab the
+/// active tab opens while it runs counts as opened by the command.
 fn should_follow_opened_tabs(action: &str, cmd: &Value) -> bool {
     if matches!(
         action,
@@ -11087,18 +11089,20 @@ fn should_follow_opened_tabs(action: &str, cmd: &Value) -> bool {
             | "keydown"
             | "keyup"
             | "inserttext"
+            | "multiselect"
     ) {
         return true;
     }
-    if action == "find" || FIND_SUBACTION_COMMANDS.contains(&action) {
-        return matches!(
+    if action == "clipboard" {
+        return cmd.get("operation").and_then(Value::as_str) == Some("paste");
+    }
+    FIND_SUBACTION_COMMANDS.contains(&action)
+        && matches!(
             cmd.get("subaction")
                 .and_then(Value::as_str)
                 .unwrap_or("click"),
-            "click" | "fill"
-        );
-    }
-    false
+            "click" | "fill" | "check" | "hover"
+        )
 }
 
 async fn execute_subaction(
