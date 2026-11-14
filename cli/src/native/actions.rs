@@ -5039,12 +5039,15 @@ async fn auto_launch_inner(
     cmd: &Value,
     strict_state: bool,
 ) -> Result<Value, String> {
-    if has_active_browser_session(state) {
-        close_before_implicit_relaunch(state).await?;
-    }
     let mut options = state.settings.launch_options();
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
+    if state.settings.engine().as_deref() == Some("firefox") {
+        validate_firefox_launch(state, &options, &plugins, &state.settings.connection())?;
+    }
+    if has_active_browser_session(state) {
+        close_before_implicit_relaunch(state).await?;
+    }
     state.plugin_init_scripts.clear();
     state.session_setup = SessionSetup::default();
 
@@ -5980,6 +5983,25 @@ async fn firefox_session_has_exited(session: &mut bidi::session::FirefoxSession)
 const FIREFOX_ATTACH_PIN_TAB_ERROR: &str =
     "--pin-tab is not supported with Firefox attach; pass --no-pin-tab to disable it";
 
+/// Rejects the settings Firefox cannot start or attach with. It runs before a relaunch closes
+/// the running browser, so a rejected option leaves that browser and its pages alone.
+fn validate_firefox_launch(
+    state: &DaemonState,
+    options: &LaunchOptions,
+    plugins: &[crate::plugins::PluginConfig],
+    connection: &Connection,
+) -> Result<(), String> {
+    if state.settings.captures_flow() {
+        return Err("--capture flow is not supported with --engine firefox".to_string());
+    }
+    bidi::firefox::validate_firefox_options(options, connection)?;
+    bidi::firefox::validate_firefox_settings(
+        &state.settings.enable_features(),
+        &state.settings.init_scripts(),
+        plugins,
+    )
+}
+
 /// Starts or attaches to Firefox with the session's resolved settings.
 async fn launch_firefox(
     state: &mut DaemonState,
@@ -5989,15 +6011,7 @@ async fn launch_firefox(
     allowed_domains: Vec<String>,
     strict_state: bool,
 ) -> Result<Value, String> {
-    if state.settings.captures_flow() {
-        return Err("--capture flow is not supported with --engine firefox".to_string());
-    }
-    bidi::firefox::validate_firefox_options(&options, &connection)?;
-    bidi::firefox::validate_firefox_settings(
-        &state.settings.enable_features(),
-        &state.settings.init_scripts(),
-        &plugins,
-    )?;
+    validate_firefox_launch(state, &options, &plugins, &connection)?;
     let cdp = match connection {
         Connection::Cdp(cdp) => Some(cdp),
         _ => None,
@@ -21683,6 +21697,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_handle_har_stop_without_path_uses_default_location() {
+        let _env = crate::test_utils::EnvGuard::new(&["HOME", "USERPROFILE"]);
         let mut state = DaemonState::new();
         state.har_recording = true;
         state.har_entries.push(HarEntry {
@@ -22613,6 +22628,28 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    async fn a_rejected_firefox_option_leaves_the_running_browser_open() {
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        let rejected = Patch::from_entries([
+            (Key::Engine, Requested::Set(json!("firefox"))),
+            (Key::Capture, Requested::Set(json!(["flow"]))),
+        ]);
+        state.settings = state.settings.plan(&rejected).next;
+
+        let error = auto_launch_inner(&mut state, Vec::new(), &json!({}), false)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "--capture flow is not supported with --engine firefox"
+        );
+        assert!(state.firefox.is_some());
+    }
+
+    #[tokio::test]
     async fn steps_list_failed_commands_and_close_reports_unsaved() {
         let mut state = DaemonState::new();
         state.flow.begin_capture(None);
@@ -22901,9 +22938,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     async fn test_credentials_roundtrip_via_actions() {
         let _lock = crate::native::auth::AUTH_TEST_MUTEX.lock().unwrap();
         let key_var = "AGENT_BROWSER_ENCRYPTION_KEY";
-        let original = std::env::var(key_var).ok();
-        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
-        unsafe { std::env::set_var(key_var, "a".repeat(64)) };
+        let env = crate::test_utils::EnvGuard::new(&["HOME", "USERPROFILE", key_var]);
+        env.set(key_var, &"a".repeat(64));
 
         let mut state = DaemonState::new();
 
@@ -22937,12 +22973,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         });
         let result = execute_command(&del_cmd, &mut state).await;
         assert_eq!(result["success"], true);
-
-        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
-        match original {
-            Some(val) => unsafe { std::env::set_var(key_var, val) },
-            None => unsafe { std::env::remove_var(key_var) },
-        }
     }
 
     #[tokio::test]

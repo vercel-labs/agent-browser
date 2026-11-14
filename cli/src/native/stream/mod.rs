@@ -295,6 +295,14 @@ impl StreamServer {
     }
 
     /// JPEG quality (1-100) the stream is configured to use.
+    /// The configured cap on frame width and height, each `None` when unset.
+    pub fn screencast_max_size(&self) -> (Option<u32>, Option<u32>) {
+        (
+            self.screencast_config.max_width,
+            self.screencast_config.max_height,
+        )
+    }
+
     pub fn screencast_quality(&self) -> i32 {
         self.screencast_config.quality
     }

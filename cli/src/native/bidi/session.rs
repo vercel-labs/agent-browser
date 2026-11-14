@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
 
 use super::attach::AttachTarget;
-use super::client::{remote_to_json, BidiClient};
+use super::client::{remote_to_json, BidiClient, SANDBOX};
 use super::contexts::{Contexts, Removed};
 use super::emulation::{self, Settings as EmulationSettings};
 use super::firefox::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
@@ -81,7 +81,8 @@ pub struct FirefoxSession {
 
 /// The tab the user is looking at in a running Firefox: the focused one, else a visible one, else
 /// any tab that runs scripts. `None` when no tab does, as with the privileged `about:home` of a
-/// fresh profile.
+/// fresh profile. Focus and visibility are read in the sandbox, where a page cannot fake them
+/// to be taken for the tab the session should act on.
 async fn selected_tab(bidi: &BidiClient, tree: &Value) -> Option<String> {
     const SELECTED_JS: &str =
         "() => 1 + (document.hasFocus() ? 4 : 0) + (document.visibilityState === 'visible' ? 2 : 0)";
@@ -90,10 +91,9 @@ async fn selected_tab(bidi: &BidiClient, tree: &Value) -> Option<String> {
         .iter()
         .filter_map(|tab| tab["context"].as_str())
         .collect();
-    let scores = futures_util::future::join_all(
-        tabs.iter()
-            .map(|tab| bidi.call_function_timeout(tab, SELECTED_JS, ATTACHED_RESET_TIMEOUT)),
-    )
+    let scores = futures_util::future::join_all(tabs.iter().map(|tab| {
+        bidi.call_function_in_sandbox_timeout(tab, SANDBOX, SELECTED_JS, ATTACHED_RESET_TIMEOUT)
+    }))
     .await;
     let scores: Vec<u64> = scores
         .iter()
@@ -105,14 +105,20 @@ async fn selected_tab(bidi: &BidiClient, tree: &Value) -> Option<String> {
 }
 
 /// Builds the BiDi `proxy` capability from a `--proxy` value such as `http://host:3128`.
-fn proxy_capability(proxy: &str, bypass: Option<&str>) -> Value {
+/// The capability cannot ask for TLS to the proxy, so a scheme it cannot honour is rejected.
+pub(super) fn proxy_capability(proxy: &str, bypass: Option<&str>) -> Result<Value, String> {
     let (scheme, hostport) = proxy.split_once("://").unwrap_or(("http", proxy));
-    let mut cap = match scheme {
+    let mut cap = match scheme.to_ascii_lowercase().as_str() {
+        "http" => json!({"proxyType": "manual", "httpProxy": hostport, "sslProxy": hostport}),
         "socks5" | "socks5h" | "socks" => {
             json!({"proxyType": "manual", "socksProxy": hostport, "socksVersion": 5})
         }
         "socks4" => json!({"proxyType": "manual", "socksProxy": hostport, "socksVersion": 4}),
-        _ => json!({"proxyType": "manual", "httpProxy": hostport, "sslProxy": hostport}),
+        other => {
+            return Err(format!(
+                "{other}:// proxy is not supported with --engine firefox; use http://, socks4://, or socks5://"
+            ))
+        }
     };
     let no_proxy: Vec<&str> = bypass
         .unwrap_or("")
@@ -123,7 +129,7 @@ fn proxy_capability(proxy: &str, bypass: Option<&str>) -> Value {
     if !no_proxy.is_empty() {
         cap["noProxy"] = json!(no_proxy);
     }
-    cap
+    Ok(cap)
 }
 
 async fn within_attach_deadline<T>(
@@ -234,7 +240,7 @@ impl FirefoxSession {
             "unhandledPromptBehavior": {"default": "ignore"},
         });
         if let Some(proxy) = options.proxy.as_deref() {
-            caps["proxy"] = proxy_capability(proxy, options.proxy_bypass.as_deref());
+            caps["proxy"] = proxy_capability(proxy, options.proxy_bypass.as_deref())?;
         }
         let create_session = bidi.send(
             "session.new",
@@ -367,6 +373,7 @@ impl FirefoxSession {
                 media: None,
                 features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
             }),
+            tab_scoped: attached,
             ..EmulationSettings::default()
         }));
         let permissions = Arc::new(tokio::sync::Mutex::new(permissions::Grants::default()));
@@ -1680,6 +1687,7 @@ pub(crate) mod tests {
                 let to = v["to"].as_str().unwrap_or("");
                 let kind = v["type"].as_str().unwrap_or("");
                 let reply = match (to, kind) {
+                    ("root", "getRoot") => json!({"from": "root", "preferenceActor": "prefs1"}),
                     ("root", "listTabs") => json!({
                         "from": "root",
                         "tabs": [{"actor": "tab1", "selected": true}],
@@ -1705,10 +1713,16 @@ pub(crate) mod tests {
 
     /// A session whose DevTools stream replies through `responder` and follows each
     /// `evaluateJSAsync` reply with an `evaluationResult` event carrying the reply's `result`.
+    /// A `true` result stands for the page that holds the marker, so the event carries its secret.
     pub(crate) async fn fake_session_with_rdp_replies(
         responder: impl Fn(&Value) -> Value + Send + 'static,
     ) -> (FirefoxSession, Messages) {
-        let (url, _tx, _calls, _) = fake_bidi_with(|v: &Value| {
+        let secret = Arc::new(std::sync::Mutex::new(String::new()));
+        let placed = secret.clone();
+        let (url, _tx, _calls, _) = fake_bidi_with(move |v: &Value| {
+            if let Some(value) = v["params"]["arguments"][1]["value"].as_str() {
+                *placed.lock().unwrap() = value.to_string();
+            }
             if v["method"] == "browsingContext.getTree" {
                 json!({"contexts": [{"context": "ctx-active"}]})
             } else {
@@ -1728,13 +1742,17 @@ pub(crate) mod tests {
                 let reply = responder(&v);
                 put(&mut b, reply.clone()).await;
                 if v["type"] == "evaluateJSAsync" {
+                    let result = match reply.get("result") {
+                        Some(Value::Bool(true)) => json!(secret.lock().unwrap().clone()),
+                        other => other.cloned().unwrap_or(Value::Null),
+                    };
                     put(
                         &mut b,
                         json!({
                             "from": v["to"],
                             "type": "evaluationResult",
                             "resultID": reply["resultID"],
-                            "result": reply.get("result").cloned().unwrap_or(Value::Null),
+                            "result": result,
                             "exception": reply.get("exception").cloned().unwrap_or(Value::Null),
                         }),
                     )
@@ -1748,11 +1766,11 @@ pub(crate) mod tests {
 
     #[test]
     fn proxy_capability_maps_http_and_socks() {
-        let http = proxy_capability("http://proxy:3128", Some("a.com, b.com"));
+        let http = proxy_capability("http://proxy:3128", Some("a.com, b.com")).unwrap();
         assert_eq!(http["httpProxy"], "proxy:3128");
         assert_eq!(http["sslProxy"], "proxy:3128");
         assert_eq!(http["noProxy"], json!(["a.com", "b.com"]));
-        let socks = proxy_capability("socks5://proxy:1080", None);
+        let socks = proxy_capability("socks5://proxy:1080", None).unwrap();
         assert_eq!(socks["socksProxy"], "proxy:1080");
         assert_eq!(socks["socksVersion"], 5);
         assert!(socks.get("noProxy").is_none());

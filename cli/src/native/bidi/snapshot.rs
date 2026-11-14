@@ -5,6 +5,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
+use super::client::SANDBOX;
 use super::firefox_devtools::{actor_is_gone, RdpClient, Tab};
 use super::session::FirefoxSession;
 use super::target::find_element;
@@ -28,6 +29,7 @@ const SETTLE_JS: &str =
 
 /// Resolves selectors across all open roots, marking collisions for exact accessible-actor lookup.
 /// A text leaf resolves to the element that holds the text when that element has no node of its own.
+/// It returns frame windows, so it must run in the sandbox, where a page cannot replace `contentWindow`.
 const RESOLVE_JS: &str = r#"(tree) => {
   const roots = [document];
   for (let i = 0; i < roots.length; i++) {
@@ -69,6 +71,7 @@ const RESOLVE_JS: &str = r#"(tree) => {
 }"#;
 
 /// Resolves an exact sequence of root-local selectors through shadow hosts.
+/// It returns a frame window, so it must run in the sandbox like `RESOLVE_JS`.
 const RESOLVE_CHAIN_JS: &str = r#"(input) => {
   const [chain, role] = JSON.parse(input);
   let root = document;
@@ -439,10 +442,10 @@ async fn resolve_collisions(
         let role = node_at(doc, path)["role"].clone();
         *result = ff
             .bidi
-            .call_function(
+            .call_function_in_sandbox(
                 context,
+                SANDBOX,
                 RESOLVE_CHAIN_JS,
-                None,
                 vec![json!({"type": "string", "value": json!([chain, role]).to_string()})],
             )
             .await?;
@@ -547,7 +550,7 @@ async fn annotate(
     let arg = json!({"type": "string", "value": shape(doc).to_string()});
     let resolved = ff
         .bidi
-        .call_function(context, RESOLVE_JS, None, vec![arg])
+        .call_function_in_sandbox(context, SANDBOX, RESOLVE_JS, vec![arg])
         .await?;
     let mut results = resolved.as_array().cloned().unwrap_or_default();
     resolve_collisions(ff, context, doc, source, &mut results).await?;
@@ -577,7 +580,15 @@ async fn annotate(
             ff.shadow_ids.retain(|id| !stale_ids.contains(id));
         }
     }
+    if !frames.is_empty() {
+        ff.refresh_frame_tree().await?;
+    }
     for (path, window) in frames {
+        if !ff.contexts.is_child_of(&window, context) {
+            return Err(
+                "The page's frames changed during the snapshot. Run snapshot again.".into(),
+            );
+        }
         let child_source = if node_at(doc, &path)["useChildTargetToFetchChildren"] == true {
             let target = frame_actor(ff, tab, &window, deadline).await?;
             let (snapshot, source) = document_snapshot(&ff.rdp, &target).await?;
@@ -793,14 +804,20 @@ pub async fn diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     result
 }
 
-/// Returns the tab's target when the page behind it carries `marker`, or `None` when it does not.
-async fn probe_tab(rdp: &RdpClient, actor: &str, marker: &str) -> Result<Option<Value>, String> {
+/// Returns the tab's target when the page behind it holds `secret` under `marker`, or `None` when it does not.
+/// A page decides what its own globals return, so only a secret no other page can read identifies it.
+async fn probe_tab(
+    rdp: &RdpClient,
+    actor: &str,
+    marker: &str,
+    secret: &str,
+) -> Result<Option<Value>, String> {
     let target = rdp.request(actor, "getTarget", json!({})).await?;
     let console = target["frame"]["consoleActor"]
         .as_str()
         .ok_or("Firefox DevTools returned no console actor for the tab")?
         .to_string();
-    let text = format!("Boolean(window[{}])", json!(marker));
+    let text = format!("window[{}]", json!(marker));
     let mut events = rdp.subscribe();
     let pending = rdp
         .request(&console, "evaluateJSAsync", json!({"text": text}))
@@ -817,7 +834,7 @@ async fn probe_tab(rdp: &RdpClient, actor: &str, marker: &str) -> Result<Option<
             if !event["exception"].is_null() {
                 return Err("Firefox DevTools could not inspect the tab".to_string());
             }
-            return Ok((event["result"] == true).then_some(target));
+            return Ok((event["result"] == secret).then_some(target));
         }
     }
 }
@@ -829,14 +846,15 @@ async fn active_tab_target(
     deadline: tokio::time::Instant,
 ) -> Result<(String, Value), String> {
     let marker = format!("agent-browser-{}", uuid::Uuid::new_v4());
+    let secret = uuid::Uuid::new_v4().to_string();
     ff.bidi.call_function(
         top,
-        "function(key) { Object.defineProperty(window, key, { value: true, configurable: true }); }",
+        "function(key, secret) { Object.defineProperty(window, key, { value: secret, configurable: true }); }",
         None,
-        vec![json!(marker)],
+        vec![json!(marker), json!(secret)],
     ).await?;
     let result = tokio::time::timeout_at(deadline, async {
-        let marker = marker.as_str();
+        let (marker, secret) = (marker.as_str(), secret.as_str());
         let mut loaded: Vec<&Tab> = tabs.iter().filter(|tab| tab.loaded).collect();
         if let Some(index) = loaded.iter().position(|tab| tab.selected) {
             let selected = loaded.remove(index);
@@ -844,7 +862,7 @@ async fn active_tab_target(
         }
         let mut unasked = loaded
             .into_iter()
-            .map(|tab| async move { (tab, probe_tab(&ff.rdp, &tab.actor, marker).await) });
+            .map(|tab| async move { (tab, probe_tab(&ff.rdp, &tab.actor, marker, secret).await) });
         let mut probes = FuturesUnordered::new();
         probes.extend(unasked.next());
         let mut failure = None;
@@ -975,11 +993,23 @@ mod tests {
         assert!(error.contains("event stream closed"), "{error}");
     }
 
-    #[tokio::test]
-    async fn a_stalled_tab_does_not_block_finding_the_active_tab() {
+    /// A session whose DevTools peer lists a console per tab and lets `answer` decide what each
+    /// console evaluates the marker to, given the secret the daemon placed. `None` never answers.
+    async fn tab_lookup_session(
+        answer: impl Fn(&str, &str) -> Option<Value> + Send + 'static,
+    ) -> FirefoxSession {
         use crate::native::bidi::firefox_devtools::tests::{get, pair, put};
 
-        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
+        let secret = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let placed = secret.clone();
+        let (mut ff, _, _) =
+            crate::native::bidi::session::tests::fake_session_with(move |v: &Value| {
+                if let Some(value) = v["params"]["arguments"][1]["value"].as_str() {
+                    *placed.lock().unwrap() = value.to_string();
+                }
+                json!({})
+            })
+            .await;
         let (rdp, mut peer) = pair().await;
         ff.rdp = rdp;
         tokio::spawn(async move {
@@ -997,10 +1027,11 @@ mod tests {
                     }
                     "evaluateJSAsync" => {
                         put(&mut peer, json!({"from": to, "resultID": "result"})).await;
-                        if to == "console-active" {
+                        let secret = secret.lock().unwrap().clone();
+                        if let Some(result) = answer(&to, &secret) {
                             put(
                                 &mut peer,
-                                json!({"from": to, "type": "evaluationResult", "resultID": "result", "result": true}),
+                                json!({"from": to, "type": "evaluationResult", "resultID": "result", "result": result}),
                             )
                             .await;
                         }
@@ -1009,6 +1040,24 @@ mod tests {
                 }
             }
         });
+        ff
+    }
+
+    async fn looked_up_tab(ff: &FirefoxSession, tabs: &[Tab]) -> String {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let (tab, target) = active_tab_target(ff, "ctx-active", tabs, deadline)
+            .await
+            .unwrap();
+        assert_eq!(target["frame"]["consoleActor"], format!("console-{tab}"));
+        tab
+    }
+
+    #[tokio::test]
+    async fn a_stalled_tab_does_not_block_finding_the_active_tab() {
+        let ff = tab_lookup_session(|console, secret| {
+            (console == "console-active").then(|| json!(secret))
+        })
+        .await;
         let tabs = [
             Tab {
                 actor: "blocked".into(),
@@ -1022,17 +1071,33 @@ mod tests {
             },
         ];
 
-        let (tab, target) = active_tab_target(
-            &ff,
-            "ctx-active",
-            &tabs,
-            tokio::time::Instant::now() + Duration::from_secs(5),
-        )
-        .await
-        .unwrap();
+        assert_eq!(looked_up_tab(&ff, &tabs).await, "active");
+    }
 
-        assert_eq!(tab, "active");
-        assert_eq!(target["frame"]["consoleActor"], "console-active");
+    #[tokio::test]
+    async fn a_tab_that_forges_the_marker_reply_is_not_taken_for_the_active_tab() {
+        let ff = tab_lookup_session(|console, secret| {
+            Some(if console == "console-active" {
+                json!(secret)
+            } else {
+                json!(true)
+            })
+        })
+        .await;
+        let tabs = [
+            Tab {
+                actor: "forged".into(),
+                selected: true,
+                loaded: true,
+            },
+            Tab {
+                actor: "active".into(),
+                selected: false,
+                loaded: true,
+            },
+        ];
+
+        assert_eq!(looked_up_tab(&ff, &tabs).await, "active");
     }
 
     fn tag_snapshot_nodes(node: &mut Value, context: &str, document_id: &str, is_root: bool) {

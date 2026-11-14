@@ -11,7 +11,8 @@ use crate::native::actions::{DaemonState, EmulatedMedia};
 
 pub(crate) type Command = (&'static str, Value);
 
-/// Emulation applied to the active tab and replayed onto tabs the daemon opens.
+/// Emulation applied to the cookie jar of the active tab, so a tab a page opens has it too, or
+/// to the session's tabs alone in a browser it attached to.
 #[derive(Debug, Default, Clone)]
 pub struct Settings {
     pub viewport: Option<(i64, i64, f64)>,
@@ -21,6 +22,28 @@ pub struct Settings {
     pub geolocation: Option<(f64, f64, Option<f64>)>,
     pub offline: Option<bool>,
     pub media: Option<EmulatedMedia>,
+    /// True for a browser the session attached to, whose other tabs are not its to change.
+    pub tab_scoped: bool,
+}
+
+/// Where an override applies.
+#[derive(Clone, Copy)]
+pub(crate) enum Scope<'a> {
+    /// Every tab of a cookie jar, including one a page opens there later.
+    Jar(&'a str),
+    /// One tab only.
+    Tab,
+}
+
+impl Settings {
+    /// A browser the session owns takes overrides per cookie jar; one it attached to, per tab.
+    fn scope<'a>(&self, jar: &'a str) -> Scope<'a> {
+        if self.tab_scoped {
+            Scope::Tab
+        } else {
+            Scope::Jar(jar)
+        }
+    }
 }
 
 /// Maps a viewport size and device pixel ratio to `browsingContext.setViewport`.
@@ -107,10 +130,13 @@ pub(crate) fn validate_media(media: &EmulatedMedia) -> Result<Value, String> {
         }
         match name.as_str() {
             "prefers-color-scheme" => {
-                config.insert(
-                    "colorSchemeSimulation".to_string(),
-                    Value::String(value.clone()),
-                );
+                let scheme = value.to_ascii_lowercase();
+                if color_scheme_pref(&scheme).is_none() {
+                    return Err(format!(
+                        "Unsupported color scheme '{value}'. Supported color schemes: dark, light"
+                    ));
+                }
+                config.insert("colorSchemeSimulation".to_string(), Value::String(scheme));
             }
             other => {
                 return Err(format!(
@@ -135,18 +161,19 @@ fn media_config(media: &EmulatedMedia) -> Result<Value, String> {
     Ok(config)
 }
 
-/// Sends an emulation command scoped to one browsing context.
+/// Sends an emulation command for the tab `context` in the scope the session uses.
 async fn send_scoped(ff: &FirefoxSession, context: &str, command: Command) -> Result<(), String> {
-    send_scoped_bidi(&ff.bidi, context, command).await
+    let scope = ff.emulation.read().unwrap().scope(ff.contexts.jar(context));
+    send_scoped_bidi(&ff.bidi, context, scope, command).await
 }
 
-/// Scopes `command` to one tab, through `context` for the viewport command and `contexts` for
-/// the rest.
-fn scoped(context: &str, (method, mut params): Command) -> Command {
-    if method == "browsingContext.setViewport" {
-        params["context"] = json!(context);
-    } else {
-        params["contexts"] = json!([context]);
+/// Scopes `command`: a viewport always to the tab `context` it sizes, the rest to `scope`. A
+/// cookie jar covers a tab a page opens there before its first request.
+fn scoped(context: &str, scope: Scope<'_>, (method, mut params): Command) -> Command {
+    match scope {
+        _ if method == "browsingContext.setViewport" => params["context"] = json!(context),
+        Scope::Jar(jar) => params["userContexts"] = json!([jar]),
+        Scope::Tab => params["contexts"] = json!([context]),
     }
     (method, params)
 }
@@ -154,9 +181,10 @@ fn scoped(context: &str, (method, mut params): Command) -> Command {
 async fn send_scoped_bidi(
     bidi: &BidiClient,
     context: &str,
+    scope: Scope<'_>,
     command: Command,
 ) -> Result<(), String> {
-    let (method, params) = scoped(context, command);
+    let (method, params) = scoped(context, scope, command);
     bidi.send(method, params).await.map(|_| ())
 }
 
@@ -169,7 +197,7 @@ pub(crate) async fn send_to_tabs(
     timeout: Duration,
 ) -> Vec<Result<(), String>> {
     join_all(tabs.iter().map(|tab| async move {
-        let (method, params) = scoped(tab, command.clone());
+        let (method, params) = scoped(tab, Scope::Tab, command.clone());
         bidi.send_timeout(method, params, timeout).await.map(|_| ())
     }))
     .await
@@ -220,7 +248,50 @@ pub(crate) fn resets(settings: &Settings) -> Vec<Command> {
     viewports.into_iter().chain(shared).collect()
 }
 
-/// Applies color scheme and print media to the selected tab through its DevTools configuration actor.
+const COLOR_SCHEME_PREF: &str = "layout.css.prefers-color-scheme.content-override";
+
+/// The value Firefox's content color scheme preference takes for `scheme`.
+fn color_scheme_pref(scheme: &str) -> Option<i64> {
+    match scheme {
+        "dark" => Some(0),
+        "light" => Some(1),
+        _ => None,
+    }
+}
+
+/// Sets the color scheme every page of the browser reports, or follows the system for `None`.
+/// It is a browser preference, so a tab a page opens has it before it loads.
+async fn set_color_scheme(rdp: &RdpClient, scheme: Option<&str>) -> Result<(), String> {
+    let root = rdp.request("root", "getRoot", json!({})).await?;
+    let preferences = root["preferenceActor"]
+        .as_str()
+        .ok_or("Firefox DevTools did not expose the preference actor")?;
+    match scheme.and_then(color_scheme_pref) {
+        Some(value) => {
+            let pref = json!({"name": COLOR_SCHEME_PREF, "value": value});
+            rdp.request(preferences, "setIntPref", pref).await?;
+        }
+        None => {
+            let pref = json!({"name": COLOR_SCHEME_PREF});
+            rdp.request(preferences, "clearUserPref", pref).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Applies a media configuration. A browser the session owns takes the color scheme as a
+/// preference for every tab and print simulation for the selected tab. One it attached to takes
+/// both for the selected tab only, which leaves the user's preferences alone.
+async fn apply_media(ff: &FirefoxSession, context: &str, config: &Value) -> Result<(), String> {
+    if ff.emulation.read().unwrap().tab_scoped {
+        return update_tab_configuration(&ff.bidi, &ff.rdp, context, config).await;
+    }
+    set_color_scheme(&ff.rdp, config["colorSchemeSimulation"].as_str()).await?;
+    let print = json!({"printSimulationEnabled": config["printSimulationEnabled"]});
+    update_tab_configuration(&ff.bidi, &ff.rdp, context, &print).await
+}
+
+/// Applies a media configuration to the selected tab through its DevTools configuration actor.
 pub(crate) async fn update_tab_configuration(
     bidi: &BidiClient,
     rdp: &RdpClient,
@@ -256,40 +327,45 @@ pub(crate) async fn update_tab_configuration(
 }
 
 /// Replays every stored setting onto `context` as it becomes the active tab, including the
-/// media configuration Firefox only accepts for the selected tab.
+/// print simulation Firefox only accepts for the selected tab.
 pub async fn apply_to_context(ff: &FirefoxSession, context: &str) -> Result<(), String> {
     let settings = ff.emulation.read().unwrap().clone();
-    apply_overrides(&ff.bidi, &settings, context).await?;
+    apply_overrides(&ff.bidi, &settings, context, ff.contexts.jar(context)).await?;
     if let Some(ref media) = settings.media {
-        update_tab_configuration(&ff.bidi, &ff.rdp, context, &media_config(media)?).await?;
+        apply_media(ff, context, &media_config(media)?).await?;
     }
     Ok(())
 }
 
-/// Replays the per-context overrides only. The media configuration is left to `apply_to_context`,
-/// because Firefox accepts it through DevTools for the selected tab alone.
+/// Replays the overrides onto the tab `context` or its cookie jar `jar`, whichever the session
+/// uses, and the viewport onto `context`. The media configuration is left to `apply_to_context`.
 pub(crate) async fn apply_overrides(
     bidi: &BidiClient,
     settings: &Settings,
     context: &str,
+    jar: &str,
 ) -> Result<(), String> {
+    let mut commands = Vec::new();
     if let Some((width, height, ratio)) = settings.viewport {
-        send_scoped_bidi(bidi, context, viewport(width, height, ratio)).await?;
+        commands.push(viewport(width, height, ratio));
     }
     if let Some(ref user_agent) = settings.user_agent {
-        send_scoped_bidi(bidi, context, self::user_agent(user_agent)).await?;
+        commands.push(self::user_agent(user_agent));
     }
     if let Some(ref locale) = settings.locale {
-        send_scoped_bidi(bidi, context, self::locale(locale)).await?;
+        commands.push(self::locale(locale));
     }
     if let Some(ref timezone) = settings.timezone {
-        send_scoped_bidi(bidi, context, self::timezone(timezone)).await?;
+        commands.push(self::timezone(timezone));
     }
     if let Some((latitude, longitude, accuracy)) = settings.geolocation {
-        send_scoped_bidi(bidi, context, geolocation(latitude, longitude, accuracy)).await?;
+        commands.push(geolocation(latitude, longitude, accuracy));
     }
     if let Some(offline) = settings.offline {
-        send_scoped_bidi(bidi, context, self::offline(offline)).await?;
+        commands.push(self::offline(offline));
+    }
+    for command in commands {
+        send_scoped_bidi(bidi, context, settings.scope(jar), command).await?;
     }
     Ok(())
 }
@@ -395,14 +471,14 @@ pub async fn set_offline(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     Ok(json!({ "offline": offline }))
 }
 
-/// Applies color scheme and print media to the active tab.
+/// Applies the color scheme and print media, to every tab where the session owns the browser.
 pub async fn set_media(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let media = parse_media(cmd);
     let config = media_config(&media)?;
     {
         let ff = session(state)?;
         let context = ff.contexts.active_tab().to_string();
-        update_tab_configuration(&ff.bidi, &ff.rdp, &context, &config).await?;
+        apply_media(ff, &context, &config).await?;
     }
     session(state)?.emulation.write().unwrap().media = Some(media);
     Ok(json!({ "set": true }))
@@ -648,15 +724,16 @@ mod tests {
         .unwrap();
 
         let messages = rdp.lock().unwrap().clone();
-        let update = messages
+        let pref = messages
             .iter()
-            .find(|m| m["type"] == "updateConfiguration")
-            .expect("no updateConfiguration message");
-        assert_eq!(update["configuration"]["colorSchemeSimulation"], "dark");
+            .find(|m| m["type"] == "setIntPref")
+            .expect("no setIntPref message");
+        assert_eq!(pref["name"], COLOR_SCHEME_PREF);
+        assert_eq!(pref["value"], 0);
     }
 
     #[tokio::test]
-    async fn timezone_locale_and_offline_are_scoped_to_the_active_context() {
+    async fn timezone_locale_and_offline_are_scoped_to_the_cookie_jar_of_the_active_tab() {
         let (ff, _, _, bidi, _) = fake_session_with_rdp().await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
@@ -683,8 +760,8 @@ mod tests {
             "Asia/Tokyo"
         );
         assert_eq!(
-            find("emulation.setTimezoneOverride")["params"]["contexts"],
-            json!(["ctx-active"])
+            find("emulation.setTimezoneOverride")["params"]["userContexts"],
+            json!(["default"])
         );
         assert_eq!(
             find("emulation.setLocaleOverride")["params"]["locale"],
@@ -728,23 +805,23 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
+                "getRoot",
+                "setIntPref",
                 "listTabs",
                 "getWatcher",
                 "getTargetConfigurationActor",
                 "updateConfiguration",
             ]
         );
-        assert_eq!(messages[0]["to"], "root");
-        assert_eq!(messages[1]["to"], "tab1");
-        assert_eq!(messages[2]["to"], "watcher1");
-        assert_eq!(messages[3]["to"], "cfg1");
+        assert_eq!(messages[1]["to"], "prefs1");
+        assert_eq!(messages[1]["name"], COLOR_SCHEME_PREF);
+        assert_eq!(messages[1]["value"], 0);
+        assert_eq!(messages[3]["to"], "tab1");
+        assert_eq!(messages[4]["to"], "watcher1");
+        assert_eq!(messages[5]["to"], "cfg1");
         assert_eq!(
-            messages[3]["configuration"]["colorSchemeSimulation"],
-            "dark"
-        );
-        assert_eq!(
-            messages[3]["configuration"]["printSimulationEnabled"],
-            false
+            messages[5]["configuration"],
+            json!({"printSimulationEnabled": false})
         );
         assert_eq!(
             state
@@ -783,6 +860,7 @@ mod tests {
             },
         )
         .await;
+        ff.emulation.write().unwrap().tab_scoped = true;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
 
@@ -823,7 +901,7 @@ mod tests {
             .filter(|m| m["method"] == "emulation.setTimezoneOverride")
             .collect();
         assert_eq!(timezones.len(), 2);
-        assert_eq!(timezones[0]["params"]["contexts"], json!(["ctx-active"]));
-        assert_eq!(timezones[1]["params"]["contexts"], json!(["ctx-new"]));
+        assert_eq!(timezones[0]["params"]["userContexts"], json!(["default"]));
+        assert_eq!(timezones[1]["params"]["userContexts"], json!(["default"]));
     }
 }

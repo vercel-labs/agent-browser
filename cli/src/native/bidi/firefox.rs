@@ -79,6 +79,9 @@ pub fn validate_firefox_options(
     if options.ca_cert.is_some() {
         return unsupported("--ca-cert");
     }
+    if let Some(proxy) = options.proxy.as_deref() {
+        super::session::proxy_capability(proxy, None)?;
+    }
     Ok(())
 }
 
@@ -466,6 +469,10 @@ mod tests {
         let e = validate_firefox_options(&ok(), &Connection::Provider("browserbase".into()))
             .unwrap_err();
         assert!(e.contains("--provider"), "{e}");
+        let mut o = ok();
+        o.proxy = Some("https://proxy:443".into());
+        let e = validate_firefox_options(&o, &Connection::Local).unwrap_err();
+        assert!(e.contains("https:// proxy is not supported"), "{e}");
     }
 
     #[test]

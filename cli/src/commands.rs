@@ -2420,6 +2420,75 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+const INVOKE_USAGE: &str =
+    "webmcp invoke <tool> [<json|@file> | --params <json|@file>] [--frame <frame-id>] [--detach] [--timeout <ms>]";
+
+/// Reads the value that follows an invoke flag. A dash-prefixed token is the next
+/// option with its value missing, never the value itself.
+fn invoke_flag_value<'a>(
+    rest: &'a [&'a str],
+    index: usize,
+    flag: &str,
+    usage: &'static str,
+) -> Result<&'a str, ParseError> {
+    match rest.get(index + 1) {
+        Some(value) if !value.starts_with('-') => Ok(value),
+        _ => Err(ParseError::MissingArguments {
+            context: format!("webmcp invoke {}", flag),
+            usage,
+        }),
+    }
+}
+
+/// Reads a tool's input from inline JSON or `@file`, given as `--params` or as the
+/// argument after the tool name. Giving it twice is an error, not a silent override.
+fn set_invoke_params(
+    command: &mut Value,
+    has_params: &mut bool,
+    raw: &str,
+) -> Result<(), ParseError> {
+    if *has_params {
+        return Err(ParseError::InvalidValue {
+            message: "WebMCP params given twice; pass them once, as JSON after the tool name or with --params".to_string(),
+            usage: INVOKE_USAGE,
+        });
+    }
+    let payload = if let Some(path) = raw.strip_prefix('@') {
+        let metadata = std::fs::metadata(path).map_err(|error| ParseError::InvalidValue {
+            message: format!("Unable to read WebMCP params file '{}': {}", path, error),
+            usage: "webmcp invoke <tool> --params @input.json",
+        })?;
+        if metadata.len() as usize > crate::native::webmcp::MAX_INPUT_BYTES {
+            return Err(ParseError::InvalidValue {
+                message: format!(
+                    "WebMCP params file is {} bytes; maximum is {} bytes",
+                    metadata.len(),
+                    crate::native::webmcp::MAX_INPUT_BYTES
+                ),
+                usage: "webmcp invoke <tool> --params @input.json",
+            });
+        }
+        std::fs::read_to_string(path).map_err(|error| ParseError::InvalidValue {
+            message: format!("Unable to read WebMCP params file '{}': {}", path, error),
+            usage: "webmcp invoke <tool> --params @input.json",
+        })?
+    } else {
+        raw.to_string()
+    };
+    let params: Value =
+        serde_json::from_str(&payload).map_err(|error| ParseError::InvalidValue {
+            message: format!("Invalid JSON for WebMCP params: {}", error),
+            usage: "webmcp invoke <tool> --params '{\"key\":\"value\"}'",
+        })?;
+    crate::native::webmcp::validate_input(&params).map_err(|message| ParseError::InvalidValue {
+        message,
+        usage: "webmcp invoke <tool> --params <json|@file>",
+    })?;
+    command["params"] = params;
+    *has_params = true;
+    Ok(())
+}
+
 fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     let subcommand = rest.first().ok_or_else(|| ParseError::MissingArguments {
         context: "webmcp".to_string(),
@@ -2452,7 +2521,7 @@ fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "invoke" => {
             let tool = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "webmcp invoke".to_string(),
-                usage: "webmcp invoke <tool> [--params <json|@file>] [--frame <frame-id>] [--detach] [--timeout <ms>]",
+                usage: INVOKE_USAGE,
             })?;
             let mut command = json!({
                 "id": id,
@@ -2460,95 +2529,47 @@ fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 "tool": tool,
                 "params": {},
             });
+            let mut has_params = false;
             let mut index = 2;
             while index < rest.len() {
                 match rest[index] {
                     "--params" => {
-                        let raw = rest.get(index + 1).ok_or_else(|| {
-                            ParseError::MissingArguments {
-                                context: "webmcp invoke --params".to_string(),
-                                usage: "webmcp invoke <tool> [--params <json|@file>] [--frame <frame-id>] [--detach] [--timeout <ms>]",
-                            }
-                        })?;
-                        let payload = if let Some(path) = raw.strip_prefix('@') {
-                            let metadata =
-                                std::fs::metadata(path).map_err(|error| ParseError::InvalidValue {
-                                    message: format!(
-                                        "Unable to read WebMCP params file '{}': {}",
-                                        path, error
-                                    ),
-                                    usage: "webmcp invoke <tool> --params @input.json",
-                                })?;
-                            if metadata.len() as usize > crate::native::webmcp::MAX_INPUT_BYTES {
-                                return Err(ParseError::InvalidValue {
-                                    message: format!(
-                                        "WebMCP params file is {} bytes; maximum is {} bytes",
-                                        metadata.len(),
-                                        crate::native::webmcp::MAX_INPUT_BYTES
-                                    ),
-                                    usage: "webmcp invoke <tool> --params @input.json",
-                                });
-                            }
-                            std::fs::read_to_string(path).map_err(|error| {
-                                ParseError::InvalidValue {
-                                    message: format!(
-                                        "Unable to read WebMCP params file '{}': {}",
-                                        path, error
-                                    ),
-                                    usage: "webmcp invoke <tool> --params @input.json",
-                                }
-                            })?
-                        } else {
-                            raw.to_string()
-                        };
-                        let params: Value = serde_json::from_str(&payload).map_err(|error| {
-                            ParseError::InvalidValue {
-                                message: format!("Invalid JSON for --params: {}", error),
-                                usage: "webmcp invoke <tool> --params '{\"key\":\"value\"}'",
-                            }
-                        })?;
-                        crate::native::webmcp::validate_input(&params).map_err(|message| {
-                            ParseError::InvalidValue {
-                                message,
-                                usage: "webmcp invoke <tool> --params <json|@file>",
-                            }
-                        })?;
-                        command["params"] = params;
+                        let raw = invoke_flag_value(rest, index, "--params", INVOKE_USAGE)?;
+                        set_invoke_params(&mut command, &mut has_params, raw)?;
                         index += 1;
                     }
                     "--frame" => {
-                        let frame = rest.get(index + 1).ok_or_else(|| {
-                            ParseError::MissingArguments {
-                                context: "webmcp invoke --frame".to_string(),
-                                usage: "webmcp invoke <tool> --frame <frame-id>",
-                            }
-                        })?;
+                        let frame = invoke_flag_value(
+                            rest,
+                            index,
+                            "--frame",
+                            "webmcp invoke <tool> --frame <frame-id>",
+                        )?;
                         command["frameId"] = json!(frame);
                         index += 1;
                     }
                     "--detach" => command["detach"] = json!(true),
                     "--timeout" => {
-                        let raw = rest.get(index + 1).ok_or_else(|| {
-                            ParseError::MissingArguments {
-                                context: "webmcp invoke --timeout".to_string(),
-                                usage: "webmcp invoke <tool> --timeout <ms>",
-                            }
+                        let raw = invoke_flag_value(
+                            rest,
+                            index,
+                            "--timeout",
+                            "webmcp invoke <tool> --timeout <ms>",
+                        )?;
+                        let timeout = raw.parse::<u64>().map_err(|_| ParseError::InvalidValue {
+                            message: format!("--timeout expects a number in ms, got '{}'", raw),
+                            usage: "webmcp invoke <tool> --timeout <ms>",
                         })?;
-                        let timeout =
-                            raw.parse::<u64>().map_err(|_| ParseError::InvalidValue {
-                                message: format!(
-                                    "--timeout expects a number in ms, got '{}'",
-                                    raw
-                                ),
-                                usage: "webmcp invoke <tool> --timeout <ms>",
-                            })?;
                         command["timeout"] = json!(timeout);
                         index += 1;
+                    }
+                    raw if !raw.starts_with('-') => {
+                        set_invoke_params(&mut command, &mut has_params, raw)?;
                     }
                     other => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unknown webmcp invoke option: {}", other),
-                            usage: "webmcp invoke <tool> [--params <json|@file>] [--frame <frame-id>] [--detach] [--timeout <ms>]",
+                            usage: INVOKE_USAGE,
                         })
                     }
                 }
@@ -6706,12 +6727,91 @@ mod tests {
     }
 
     #[test]
+    fn test_webmcp_invoke_takes_params_after_tool_name() {
+        let positional = parse_command(
+            &args(r#"webmcp invoke search {"query":"agents"} --frame frame-1"#),
+            &default_flags(),
+        )
+        .unwrap();
+        let flagged = parse_command(
+            &args(r#"webmcp invoke search --params {"query":"agents"} --frame frame-1"#),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(positional["params"]["query"], "agents");
+        assert_eq!(positional["frameId"], "frame-1");
+        assert_eq!(positional["params"], flagged["params"]);
+        assert_eq!(positional["frameId"], flagged["frameId"]);
+    }
+
+    #[test]
+    fn test_webmcp_invoke_rejects_params_given_twice() {
+        for input in [
+            r#"webmcp invoke search {"a":1} --params {"b":2}"#,
+            r#"webmcp invoke search --params {"a":1} {"b":2}"#,
+            r#"webmcp invoke search {"a":1} {"b":2}"#,
+            r#"webmcp invoke search --params {"a":1} --params {"b":2}"#,
+        ] {
+            let err = parse_command(&args(input), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(message.contains("given twice"), "{input} gave: {message}");
+        }
+    }
+
+    #[test]
+    fn test_webmcp_invoke_rejects_malformed_positional_params() {
+        let err =
+            parse_command(&args("webmcp invoke search not-json"), &default_flags()).unwrap_err();
+        let message = err.format();
+        assert!(
+            message.contains("Invalid JSON for WebMCP params"),
+            "gave: {message}"
+        );
+    }
+
+    #[test]
+    fn test_webmcp_invoke_reports_single_dash_arguments_as_unknown_options() {
+        for input in [
+            "webmcp invoke search -frame f1",
+            r#"webmcp invoke search {"a":1} -d"#,
+        ] {
+            let err = parse_command(&args(input), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(
+                message.contains("Unknown webmcp invoke option"),
+                "{input} gave: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_webmcp_invoke_does_not_read_a_flag_as_a_value() {
+        for input in [
+            r#"webmcp invoke search --params --frame frame-1"#,
+            "webmcp invoke search --frame --detach",
+            "webmcp invoke search --timeout --detach",
+        ] {
+            let err = parse_command(&args(input), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(
+                message.contains("Missing arguments for: webmcp invoke --"),
+                "{input} gave: {message}"
+            );
+        }
+    }
+
+    #[test]
     fn test_webmcp_rejects_malformed_params() {
-        let result = parse_command(
+        let err = parse_command(
             &args("webmcp invoke search --params not-json"),
             &default_flags(),
+        )
+        .unwrap_err();
+        let message = err.format();
+        assert!(
+            message.contains("Invalid JSON for WebMCP params"),
+            "gave: {message}"
         );
-        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
     }
 
     #[test]
@@ -6736,28 +6836,38 @@ mod tests {
 
     #[test]
     fn test_webmcp_rejects_non_object_params() {
-        let result = parse_command(
+        let err = parse_command(
             &args(r#"webmcp invoke search --params ["agents"]"#),
             &default_flags(),
+        )
+        .unwrap_err();
+        let message = err.format();
+        assert!(
+            message.contains("WebMCP params must be a JSON object"),
+            "gave: {message}"
         );
-        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
     }
 
     #[test]
     fn test_webmcp_rejects_unexpected_arguments() {
-        for command in [
-            "webmcp list search extra",
-            "webmcp list --frame",
-            "webmcp result invocation-1 extra",
-            "webmcp cancel invocation-1 extra",
+        for (command, expected) in [
+            (
+                "webmcp list search extra",
+                "Unexpected argument for webmcp list",
+            ),
+            ("webmcp list --frame", "Unexpected argument for webmcp list"),
+            (
+                "webmcp result invocation-1 extra",
+                "Unknown webmcp result option",
+            ),
+            (
+                "webmcp cancel invocation-1 extra",
+                "Unexpected argument for webmcp cancel",
+            ),
         ] {
-            assert!(
-                matches!(
-                    parse_command(&args(command), &default_flags()),
-                    Err(ParseError::InvalidValue { .. })
-                ),
-                "{command} should reject trailing arguments"
-            );
+            let err = parse_command(&args(command), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(message.contains(expected), "{command} gave: {message}");
         }
     }
 

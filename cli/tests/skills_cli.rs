@@ -3,9 +3,21 @@
 
 use std::fs;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
+
+/// Held by every test here. A child forked by one test would otherwise inherit the descriptor
+/// another test is still copying the binary through, and running that copy fails as busy.
+static SPAWNS: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SPAWNS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[test]
 fn standalone_binary_ignores_unrelated_skills_and_loads_home_skill_through_cli_and_mcp() {
+    let _serial = serial();
     let temp = tempfile::tempdir().unwrap();
     fs::create_dir(temp.path().join("skills")).unwrap();
     let home = temp.path().join("home");
@@ -56,6 +68,7 @@ fn standalone_binary_ignores_unrelated_skills_and_loads_home_skill_through_cli_a
 
 #[test]
 fn skills_get_ref_loads_one_reference_through_cli_and_mcp() {
+    let _serial = serial();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let binary = temp.path().join("agent-browser");
@@ -125,6 +138,7 @@ fn skills_get_ref_loads_one_reference_through_cli_and_mcp() {
 
 #[test]
 fn skills_get_unknown_name_points_to_skills_list() {
+    let _serial = serial();
     let temp = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_agent-browser"))
         .args(["skills", "get", "missing-skill"])

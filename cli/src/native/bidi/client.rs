@@ -202,6 +202,24 @@ impl BidiClient {
             .await
     }
 
+    /// Runs a function in a named sandbox with a bounded timeout.
+    pub(crate) async fn call_function_in_sandbox_timeout(
+        &self,
+        context: &str,
+        sandbox: &str,
+        js: &str,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        self.call_function_target(
+            json!({"context": context, "sandbox": sandbox}),
+            js,
+            None,
+            vec![],
+            timeout,
+        )
+        .await
+    }
+
     /// Runs a function in a named sandbox, isolated from the page's JavaScript globals.
     pub(crate) async fn call_function_in_sandbox(
         &self,
