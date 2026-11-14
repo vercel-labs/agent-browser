@@ -2410,7 +2410,11 @@ agent-browser drag - Drag and drop
 
 Usage: agent-browser drag <source> <target> [--human]
 
-Drags an element from source to target location.
+Drags an element from source to target location. The source is pressed
+before the target is scrolled into view, so the two can be far apart.
+
+Drag fails, instead of reporting success, when the source or target is
+hidden or cannot be scrolled into the viewport.
 
 Global Options:
   --json               Output as JSON

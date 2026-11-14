@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Drop Overlay Probe</title>
+  <style>
+    body {
+      margin: 16px;
+      font: 14px/1.4 sans-serif;
+    }
+
+    #card {
+      width: 120px;
+      height: 60px;
+      background: #0070f3;
+      color: white;
+      user-select: none;
+    }
+
+    #wrap {
+      position: relative;
+      width: 300px;
+      height: 200px;
+      margin-top: 24px;
+    }
+
+    #column {
+      width: 300px;
+      height: 200px;
+      background: #eee;
+    }
+
+    #drop-overlay {
+      display: none;
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 157, 88, 0.4);
+    }
+
+    #drop-overlay.on {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="card">card</div>
+  <div id="wrap">
+    <div id="column">column</div>
+    <div id="drop-overlay">Drop here</div>
+  </div>
+  <script>
+    window.__dropOverlayProbe = { events: [] };
+    const overlay = document.getElementById("drop-overlay");
+
+    for (const type of ["mousedown", "mouseup"]) {
+      document.addEventListener(type, (event) => {
+        const target = event.target.id || event.target.tagName;
+        window.__dropOverlayProbe.events.push(`${type} on ${target}`);
+      }, true);
+    }
+
+    // Like a board that reveals its drop zones once a card is pressed.
+    document.getElementById("card").addEventListener("mousedown", () => {
+      overlay.classList.add("on");
+    });
+    document.addEventListener("mouseup", () => overlay.classList.remove("on"));
+  </script>
+</body>
+</html>
