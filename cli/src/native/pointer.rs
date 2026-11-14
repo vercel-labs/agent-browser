@@ -66,15 +66,20 @@ impl MouseButton {
 pub struct Modifiers(i32);
 
 impl Modifiers {
-    /// The CDP bit for a modifier name, case-insensitive.
+    pub const NAMES: [&'static str; 4] = ["alt", "control", "meta", "shift"];
+
+    /// The CDP bit for a modifier name, case-insensitive, with the `ctrl`, `cmd`, and `command` aliases.
     pub fn bit(name: &str) -> Option<i32> {
-        match name.to_lowercase().as_str() {
-            "alt" => Some(1),
-            "control" | "ctrl" => Some(2),
-            "meta" | "cmd" | "command" => Some(4),
-            "shift" => Some(8),
-            _ => None,
-        }
+        let name = name.to_lowercase();
+        let canonical = match name.as_str() {
+            "ctrl" => "control",
+            "cmd" | "command" => "meta",
+            other => other,
+        };
+        Self::NAMES
+            .iter()
+            .position(|known| *known == canonical)
+            .map(|index| 1 << index)
     }
 
     /// Parses a comma or plus separated modifier list such as `ctrl+shift`.

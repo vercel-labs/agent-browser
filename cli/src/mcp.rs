@@ -10,6 +10,8 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+
+use crate::native::pointer::{Modifiers, MouseButton};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
@@ -2074,7 +2076,7 @@ fn key_schema() -> Value {
 fn mouse_button_schema() -> Value {
     json!({
         "type": "string",
-        "enum": crate::native::pointer::MouseButton::ALL.map(crate::native::pointer::MouseButton::name),
+        "enum": MouseButton::ALL.map(|button| button.name()),
         "default": "left",
         "description": "Mouse button. Defaults to left.",
     })
@@ -2085,7 +2087,7 @@ fn click_modifiers_schema() -> Value {
         "type": "array",
         "items": {
             "type": "string",
-            "enum": ["alt", "control", "meta", "shift"],
+            "enum": Modifiers::NAMES,
         },
         "minItems": 1,
         "description": "Modifier keys held during the click.",
