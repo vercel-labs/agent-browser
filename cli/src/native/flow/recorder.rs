@@ -4,7 +4,10 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use super::{build_flow, write_flow, SaveInput};
+use super::{
+    build_flow, carries_secret, classify_header, describe_command, dropped_name,
+    may_become_candidate, save_start_url, write_flow, HeaderClass, HostPolicy, SaveInput,
+};
 use crate::native::actions::{HarEntry, FIND_ACTIONS};
 use crate::native::element::RefMap;
 
@@ -36,6 +39,8 @@ pub struct SaveArgs<'a> {
     pub entries: &'a [HarEntry],
     /// The page shows a password field at save time.
     pub login_wall: bool,
+    /// See `SaveInput::local_names`.
+    pub local_names: &'a [(String, super::net::Reach)],
 }
 
 /// What the recorder knows about a command besides its arguments.
@@ -53,6 +58,7 @@ pub struct StepMeta {
 #[derive(Default)]
 pub struct FlowRecorder {
     capturing: bool,
+    suspended: bool,
     pub(super) commands: Vec<(u64, Value)>,
     pub(super) meta: HashMap<u64, StepMeta>,
     /// HAR request id to the sequence number of the command that was
@@ -208,6 +214,7 @@ impl FlowRecorder {
             output: args.output,
             created_at: chrono::Utc::now().to_rfc3339(),
             login_wall: args.login_wall,
+            local_names: args.local_names,
         })?;
         let path = write_flow(&flow)?;
         self.mark_saved(last);
@@ -241,10 +248,18 @@ impl FlowRecorder {
             .count()
     }
 
+    /// Commands run by a replay are not part of the recording.
+    pub fn set_suspended(&mut self, suspended: bool) {
+        if suspended && !self.suspended {
+            self.windows.push((now(), None));
+        }
+        self.suspended = suspended;
+    }
+
     /// Record a command and return its sequence number. The step counts as
     /// failed until `finish_command` says otherwise.
     pub fn records(&self, action: &str) -> bool {
-        self.active() && is_recordable(action)
+        self.active() && !self.suspended && is_recordable(action)
     }
 
     pub(super) fn begin_command(
@@ -265,7 +280,7 @@ impl FlowRecorder {
         from_url: Option<String>,
         traits: Option<&FieldTraits>,
     ) -> Option<u64> {
-        if !self.active() || !is_recordable(action) {
+        if !self.active() || self.suspended || !is_recordable(action) {
             return None;
         }
         self.next_seq += 1;
@@ -277,6 +292,7 @@ impl FlowRecorder {
         if !is_key {
             self.reset_keys();
         }
+        self.secrets.extend(redact_headers(&mut recorded));
         if let Some(secret) = redact_secret(&mut recorded, traits) {
             self.secrets.push(secret);
         } else if is_key {
@@ -381,6 +397,47 @@ impl FlowRecorder {
         self.tag(request_id, now());
     }
 
+    /// The start host of a save, when named by a domain, its port, and the
+    /// addresses the browser reached it at in the steps the save covers.
+    pub fn start_host_addresses(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+    ) -> Option<(String, u16, Vec<std::net::SocketAddr>)> {
+        let (first, last) = self.resolve_range(from, to).ok()?;
+        let commands: Vec<(u64, Value)> = self
+            .commands
+            .iter()
+            .filter(|(seq, _)| *seq >= first && *seq <= last)
+            .cloned()
+            .collect();
+        let start = super::save_start_url(&commands, self)?;
+        let start = url::Url::parse(&start).ok()?;
+        let Some(url::Host::Domain(host)) = start.host() else {
+            return None;
+        };
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let port = start.port_or_known_default()?;
+        let addrs = entries
+            .iter()
+            .filter(|e| {
+                self.request_tags
+                    .get(&e.request_id)
+                    .is_some_and(|seq| *seq >= first && *seq <= last)
+            })
+            .filter(|e| {
+                url::Url::parse(&e.url).ok().is_some_and(|u| {
+                    u.host_str()
+                        .is_some_and(|h| h.trim_end_matches('.').eq_ignore_ascii_case(&host))
+                        && u.port_or_known_default() == Some(port)
+                })
+            })
+            .filter_map(|e| e.remote_addr)
+            .collect();
+        Some((host, port, addrs))
+    }
+
     /// The first and last step a save covers. Without `from` the save
     /// starts at the last navigation after the previous save.
     pub(super) fn resolve_range(
@@ -419,6 +476,89 @@ impl FlowRecorder {
             ));
         }
         Ok((from, to))
+    }
+
+    /// A gap for each request that could become a flow request, tagged to a
+    /// step in the range, that has not finished loading, so its response body
+    /// is not on the entry yet. Third-party, telemetry and streaming requests
+    /// never count. The gap names the step that started the request and the
+    /// request by method and path, with a secret hidden as a dropped request is.
+    pub fn loading_gaps(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+    ) -> Vec<Value> {
+        self.gaps_of_loading(from, to, entries, None)
+    }
+
+    /// Whether a request of the range is still loading and worth waiting
+    /// on: one the last step started that has no response yet, or one whose
+    /// body is still arriving (not `stalled`).
+    pub fn awaiting_response(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+        stalled: &dyn Fn(&HarEntry) -> bool,
+    ) -> bool {
+        !self
+            .gaps_of_loading(from, to, entries, Some(stalled))
+            .is_empty()
+    }
+
+    fn gaps_of_loading(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        entries: &[HarEntry],
+        stalled: Option<&dyn Fn(&HarEntry) -> bool>,
+    ) -> Vec<Value> {
+        let Ok((first, last)) = self.resolve_range(from, to) else {
+            return Vec::new();
+        };
+        let commands: Vec<(u64, Value)> = self
+            .commands
+            .iter()
+            .filter(|(seq, _)| *seq >= first && *seq <= last)
+            .cloned()
+            .collect();
+        let Some(start) = save_start_url(&commands, self) else {
+            return Vec::new();
+        };
+        let policy = HostPolicy::from_start(&start);
+        entries
+            .iter()
+            .filter(|e| e.loading_finished_timestamp.is_none() && may_become_candidate(e, &policy))
+            .filter(|e| match stalled {
+                None => true,
+                // A request with no answer yet is waited on only if the last
+                // step started it; one from an earlier step outlived the
+                // steps after it, as a long poll does.
+                Some(_) if e.status.is_none() => {
+                    self.request_tags.get(&e.request_id) == Some(&last)
+                }
+                Some(s) => !s(e),
+            })
+            .filter_map(|e| {
+                let seq = *self.request_tags.get(&e.request_id)?;
+                let index = commands.iter().position(|(s, _)| *s == seq)?;
+                let known = carries_secret(e, &self.secrets);
+                let label = if known || self.unknown_secret_seqs.contains(&seq) {
+                    dropped_name(e, &self.secrets, known)
+                } else {
+                    let path = url::Url::parse(&e.url)
+                        .map(|u| u.path().to_string())
+                        .unwrap_or_else(|_| e.url.clone());
+                    format!("{} {}", e.method, path)
+                };
+                Some(json!({
+                    "step": index + 1,
+                    "command": describe_command(&commands[index].1),
+                    "reason": format!("still loading at save: {label}"),
+                }))
+            })
+            .collect()
     }
 
     /// A command that is not recorded starts: requests it sends belong to no
@@ -591,7 +731,7 @@ fn has_secret_marker(text: &str) -> bool {
     SECRET_MARKERS.iter().any(|m| text.contains(m))
 }
 
-const SECRET_MARKERS: &[&str] = &[
+pub(super) const SECRET_MARKERS: &[&str] = &[
     "pass",
     "contraseña",
     "secret",
@@ -620,8 +760,33 @@ fn typed_field(cmd: &Value) -> Option<&'static str> {
     cmd[field].as_str().map(|_| field)
 }
 
+/// Headers a command sends, such as `navigate --headers`, are classified like
+/// a request's: a credential or cookie value is never stored. The step is
+/// marked redacted, and the values count as secrets.
+fn redact_headers(cmd: &mut Value) -> Vec<String> {
+    let mut found = Vec::new();
+    let Some(headers) = cmd.get_mut("headers").and_then(|h| h.as_object_mut()) else {
+        return found;
+    };
+    for (name, value) in headers.iter_mut() {
+        let lower = name.to_ascii_lowercase();
+        let secret = classify_header(&lower) == HeaderClass::Credential
+            || matches!(lower.as_str(), "cookie" | "set-cookie");
+        if secret {
+            if let Some(text) = value.as_str().filter(|t| !t.is_empty()) {
+                found.push(text.to_string());
+            }
+            *value = json!(REDACTED);
+        }
+    }
+    if !found.is_empty() || headers.values().any(|v| v == REDACTED) {
+        cmd["redacted"] = json!(true);
+    }
+    found
+}
+
 /// A value typed into a field that looks like a password or code is never
-/// stored; the flow keeps a marker only.
+/// stored; the flow keeps a marker and cannot be replayed through the UI.
 /// Returns the removed value. `fill` stores input in `value`, `type` in `text`.
 fn redact_secret(cmd: &mut Value, traits: Option<&FieldTraits>) -> Option<String> {
     let typed = typed_field(cmd);

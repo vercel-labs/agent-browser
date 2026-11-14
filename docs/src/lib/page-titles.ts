@@ -3,6 +3,7 @@ export const PAGE_TITLES: Record<string, string> = {
   installation: "Installation",
   "quick-start": "Quick Start",
   skills: "Skills",
+  "modern-web-guidance": "Modern Web Guidance",
   commands: "Commands",
   webmcp: "WebMCP",
   configuration: "Configuration",
