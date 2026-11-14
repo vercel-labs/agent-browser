@@ -5228,9 +5228,9 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         }
     };
     if let Some(path) = state::find_auto_state_file(&session_name) {
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                match state::load_state(&mgr.client, session_id, &path).await {
+        if let Some(ref mut mgr) = state.browser {
+            if let Ok(session_id) = mgr.active_session_id().map(str::to_string) {
+                match mgr.load_state(&session_id, &path).await {
                     Ok(skipped) => {
                         state.restore_status = "loaded".to_string();
                         state.restore_status_detail = None;
@@ -5453,9 +5453,9 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
         ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
             .await?;
         let mut skipped = None;
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                skipped = Some(state::load_state(&mgr.client, session_id, path).await?);
+        if let Some(ref mut mgr) = state.browser {
+            if let Ok(session_id) = mgr.active_session_id().map(str::to_string) {
+                skipped = Some(mgr.load_state(&session_id, path).await?);
             }
         }
         if let Some(skipped) = skipped {
@@ -8195,7 +8195,12 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .ok_or("Missing 'path' parameter")?;
 
     ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    let skipped = state::load_state(&mgr.client, &session_id, path).await?;
+    let skipped = state
+        .browser
+        .as_mut()
+        .unwrap()
+        .load_state(&session_id, path)
+        .await?;
     mark_explicit_storage_state_loaded(state, path);
     Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
 }
@@ -18430,41 +18435,58 @@ mod tests {
         assert!(only_security.get("settings").is_none());
     }
 
-    #[tokio::test]
-    async fn test_a_confirmed_launch_keeps_the_allowed_domains_it_was_parked_with() {
-        let (_env, mut state) = isolated_state();
-        let dir = tempfile::tempdir().unwrap();
-        let policy = dir.path().join("policy.json");
-        fs::write(&policy, r#"{"confirm":["navigate"]}"#).unwrap();
+    // A confirmed replay nests execute_command, which needs more stack than a
+    // test thread's default in debug builds.
+    #[test]
+    fn test_a_confirmed_launch_keeps_the_allowed_domains_it_was_parked_with() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let (_env, mut state) = isolated_state();
+                        let dir = tempfile::tempdir().unwrap();
+                        let policy = dir.path().join("policy.json");
+                        fs::write(&policy, r#"{"confirm":["navigate"]}"#).unwrap();
 
-        let parked = execute_command(
-            &json!({
-                "id": "parked",
-                "action": "navigate",
-                "url": "https://a.example",
-                "settings": {
-                    "action-policy": policy.to_str().unwrap(),
-                    "allowed-domains": ["a.example"],
-                    "executable-path": "/missing/chrome-for-test"
-                }
-            }),
-            &mut state,
-        )
-        .await;
-        assert_eq!(parked["data"]["confirmation_required"], true);
-        assert!(
-            state.domain_filter.read().await.is_none(),
-            "deferred to the launch"
-        );
+                        let parked = execute_command(
+                            &json!({
+                                "id": "parked",
+                                "action": "navigate",
+                                "url": "https://a.example",
+                                "settings": {
+                                    "action-policy": policy.to_str().unwrap(),
+                                    "allowed-domains": ["a.example"],
+                                    "executable-path": "/missing/chrome-for-test"
+                                }
+                            }),
+                            &mut state,
+                        )
+                        .await;
+                        assert_eq!(parked["data"]["confirmation_required"], true);
+                        assert!(
+                            state.domain_filter.read().await.is_none(),
+                            "deferred to the launch"
+                        );
 
-        // The launch fails (no browser binary) after the settings apply.
-        let _ = execute_command(&json!({ "id": "c", "action": "confirm" }), &mut state).await;
+                        // The launch fails (no browser binary) after the settings apply.
+                        let _ =
+                            execute_command(&json!({ "id": "c", "action": "confirm" }), &mut state)
+                                .await;
 
-        assert_eq!(
-            state.settings.security().allowed_domains,
-            Some(vec!["a.example".to_string()])
-        );
-        assert!(state.domain_filter.read().await.is_some());
+                        assert_eq!(
+                            state.settings.security().allowed_domains,
+                            Some(vec!["a.example".to_string()])
+                        );
+                        assert!(state.domain_filter.read().await.is_some());
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[tokio::test]
