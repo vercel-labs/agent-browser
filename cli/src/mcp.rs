@@ -10,6 +10,8 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+
+use crate::native::pointer::{Modifiers, MouseButton};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
@@ -976,9 +978,11 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLICK,
             "Click element",
-            "Click an element by @ref or CSS selector.",
+            "Click an element by @ref or CSS selector, optionally with another mouse button or held modifier keys.",
             json!({
                 "selector": selector_schema(),
+                "button": mouse_button_schema(),
+                "modifiers": click_modifiers_schema(),
                 "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab after applying session setup." },
                 "human": { "type": "boolean", "default": false, "description": "Approach the target with seeded, curved mouse movement." }
             }),
@@ -1119,8 +1123,13 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DBLCLICK,
             "Double-click element",
-            "Double-click an element.",
-            json!({ "selector": selector_schema() }),
+            "Double-click an element, optionally with another mouse button or held modifier keys.",
+            json!({
+                "selector": selector_schema(),
+                "button": mouse_button_schema(),
+                "modifiers": click_modifiers_schema(),
+                "human": { "type": "boolean", "default": false, "description": "Approach the target with seeded, curved mouse movement." }
+            }),
             &["selector"],
         ),
         tool(
@@ -2067,8 +2076,21 @@ fn key_schema() -> Value {
 fn mouse_button_schema() -> Value {
     json!({
         "type": "string",
-        "enum": ["left", "right", "middle"],
+        "enum": MouseButton::ALL.map(|button| button.name()),
         "default": "left",
+        "description": "Mouse button. Defaults to left.",
+    })
+}
+
+fn click_modifiers_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "string",
+            "enum": Modifiers::NAMES,
+        },
+        "minItems": 1,
+        "description": "Modifier keys held during the click.",
     })
 }
 
@@ -2445,11 +2467,11 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_OPEN => call_open(arguments),
         TOOL_READ => call_read(arguments),
         TOOL_SNAPSHOT => call_snapshot(arguments),
-        TOOL_CLICK => call_click(arguments),
+        TOOL_CLICK => call_click(arguments, "click"),
         TOOL_BACK => call_literal(arguments, &["back"]),
         TOOL_FORWARD => call_literal(arguments, &["forward"]),
         TOOL_RELOAD => call_literal(arguments, &["reload"]),
-        TOOL_DBLCLICK => call_simple_selector(arguments, "dblclick"),
+        TOOL_DBLCLICK => call_click(arguments, "dblclick"),
         TOOL_FILL => call_fill(arguments),
         TOOL_TYPE => call_type(arguments),
         TOOL_PRESS => call_press(arguments),
@@ -3092,20 +3114,28 @@ fn call_simple_selector(arguments: &Value, command: &str) -> Result<Value, Proto
     call_cli_tool(arguments, vec![command.to_string(), selector], None)
 }
 
-fn click_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+fn click_command_args(arguments: &Value, command: &str) -> Result<Vec<String>, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
-    let mut args = vec!["click".to_string(), selector];
-    if optional_bool(arguments, "newTab")?.unwrap_or(false) {
+    let mut args = vec![command.to_string(), selector];
+    if command == "click" && optional_bool(arguments, "newTab")?.unwrap_or(false) {
         args.push("--new-tab".to_string());
     }
     if optional_bool(arguments, "human")?.unwrap_or(false) {
         args.push("--human".to_string());
     }
+    if let Some(button) = optional_string(arguments, "button")? {
+        args.push("--button".to_string());
+        args.push(button);
+    }
+    if let Some(modifiers) = optional_string_array(arguments, "modifiers")? {
+        args.push("--modifiers".to_string());
+        args.push(modifiers.join(","));
+    }
     Ok(args)
 }
 
-fn call_click(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, click_command_args(arguments)?, None)
+fn call_click(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, click_command_args(arguments, command)?, None)
 }
 
 fn call_fill(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -5532,13 +5562,49 @@ mod tests {
 
     #[test]
     fn click_command_args_include_new_tab() {
-        let args = click_command_args(&json!({
-            "selector": "@e1",
-            "newTab": true,
-        }))
+        let args = click_command_args(
+            &json!({
+                "selector": "@e1",
+                "newTab": true,
+            }),
+            "click",
+        )
         .unwrap();
 
         assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+    }
+
+    #[test]
+    fn click_tools_forward_button_and_modifiers_to_cli_parser() {
+        for command in ["click", "dblclick"] {
+            let args = click_command_args(
+                &json!({
+                    "selector": "@e1",
+                    "button": "right",
+                    "modifiers": ["control", "shift"],
+                }),
+                command,
+            )
+            .unwrap();
+
+            assert_eq!(
+                args,
+                vec![
+                    command,
+                    "@e1",
+                    "--button",
+                    "right",
+                    "--modifiers",
+                    "control,shift"
+                ]
+            );
+
+            let flags = crate::flags::parse_flags(&args);
+            let parsed = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(parsed["action"], json!(command));
+            assert_eq!(parsed["button"], json!("right"));
+            assert_eq!(parsed["modifiers"], json!(10));
+        }
     }
 
     #[test]
@@ -6115,7 +6181,8 @@ mod tests {
     async fn mcp_human_click_preserves_session_mode() {
         let mut state = crate::native::actions::DaemonState::new();
         for human in [true, false] {
-            let args = click_command_args(&json!({"selector": "#target", "human": human})).unwrap();
+            let args = click_command_args(&json!({"selector": "#target", "human": human}), "click")
+                .unwrap();
             let flags = crate::flags::parse_flags(&args);
             let mut command = crate::commands::parse_command(&args, &flags).unwrap();
             assert_eq!(command.get("inputMode"), human.then_some(&json!("human")));

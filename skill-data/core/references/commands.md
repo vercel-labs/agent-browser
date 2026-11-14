@@ -76,7 +76,11 @@ Delta history is per tab and option set. Responses are `full`, `unchanged`, or `
 ```bash
 agent-browser click @e1           # Click
 agent-browser click @e1 --new-tab # Click and open in new tab
+agent-browser click @e1 --button right  # Right-click (fires contextmenu)
+agent-browser click @e1 --button middle  # Middle-click (fires auxclick)
+agent-browser click @e1 --modifiers control,shift  # Hold keys during the click
 agent-browser dblclick @e1        # Double-click
+agent-browser dblclick @e1 --modifiers shift  # Double-click with Shift held
 agent-browser focus @e1           # Focus element
 agent-browser fill @e2 "text"     # Clear and fill
 agent-browser type @e2 "text"     # Type without clearing
@@ -103,6 +107,8 @@ For `fill` and `type`, put options before the optional `--` marker. Text after t
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
+
+`--button` presses `left` (default), `right`, `middle`, `back`, or `forward`; a right click fires the page's `contextmenu` event and a middle click fires `auxclick`. `--modifiers` holds `alt`, `control` (alias `ctrl`), `meta` (aliases `cmd`, `command`), and `shift` during the click, joined by a comma or a plus, such as `control,shift`. Flags go before or after the selector, unknown flags are rejected, and `--new-tab` cannot be combined with `--button` or `--modifiers`. `dblclick` takes `--button`, `--modifiers`, and `--human`, follows the session input mode, and sends two full clicks, so the page receives `click`, `click`, `dblclick`.
 
 ## Get Information
 
@@ -534,7 +540,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`. The typed `relaunch` argument maps to `--relaunch`; `open` and `tab_new` list it in their schema.
+Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`. The typed `relaunch` argument maps to `--relaunch`; `open` and `tab_new` list it in their schema. The typed `button` and `modifiers` arguments on `agent_browser_click` and `agent_browser_dblclick` map to `--button` and `--modifiers`; `agent_browser_dblclick` also accepts `human`.
 
 For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__open`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, backed by agent-browser inside the eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship in `@agent-browser/eve/sandbox`.
 
