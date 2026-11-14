@@ -103,6 +103,8 @@ Launching with `open` and no URL leaves the browser on `about:blank`, which give
 
 ## Saved flows
 
+Firefox does not support `--capture flow`.
+
 Saved flows are experimental. Open a session with `--capture flow`, do a browser task once, and agent-browser keeps the requests behind it. Later runs send those requests again and return only the data the task needs. A run sends the requests directly and uses the page, then a replay of the recorded commands, only when that does not work.
 
 ```bash

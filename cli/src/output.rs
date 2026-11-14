@@ -3140,7 +3140,7 @@ Usage: agent-browser cookies [operation] [args]
 Manage browser cookies for the current context.
 
 Operations:
-  get                                Get all cookies (default)
+  get                                Get cookies (Firefox defaults to active page and frames)
   set <name> <value> [options]       Set a cookie with optional properties
   clear                              Clear all cookies
 
@@ -3181,7 +3181,7 @@ Examples:
   # Set cookie with expiration (Unix timestamp)
   agent-browser cookies set temp_token "temp123" --expires 1735689600
 
-  # Get all cookies
+  # Get cookies for the active context
   agent-browser cookies
 
   # Clear all cookies
@@ -3637,7 +3637,7 @@ Usage: agent-browser state <operation> [args]
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
 
 Operations:
-  save <path>                        Save current state to file
+  save <path>                        Save current state, overwriting the file
   load <path>                        Load state from file (origins that redirect
                                      elsewhere are skipped and listed)
   list                               List saved state files
@@ -3650,6 +3650,8 @@ Automatic State Persistence:
   Use --restore to auto-save/restore state across restarts:
   agent-browser --session myapp --restore open https://example.com
   Or set AGENT_BROWSER_RESTORE environment variable.
+  Firefox saves visited local storage and preserves previously saved session storage
+  for origins no longer open. It cannot recover unsaved session storage after navigation.
 
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.
@@ -4706,13 +4708,14 @@ Options:
   --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --capture <list>           Record the session as it runs; only flow is supported (or AGENT_BROWSER_CAPTURE)
                              On a running session without capture, passing it relaunches with capture on
+                             Firefox does not support --capture flow
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
                              (default: 1h; 0 disables; dashboard input resets the timer)
                              Values too large to convert to milliseconds produce a warning and are ignored
-  --engine <name>            Browser engine: chrome (default), lightpanda, obscura (experimental)
+  --engine <name>            Browser engine: chrome (default), lightpanda, obscura, firefox
                              (or AGENT_BROWSER_ENGINE); Obscura rejects --proxy-bypass,
                              proxyBypass config, AGENT_BROWSER_PROXY_BYPASS, NO_PROXY/no_proxy,
                              --webgpu, --ca-cert, --args, profiles, state, extensions,
@@ -4721,6 +4724,10 @@ Options:
                              Explicit Obscura launches validate this invocation's resolved
                              bypass settings, even with an existing daemon; stale daemon
                              environment values are not reused when bypass is cleared.
+                             Firefox rejects --allowed-domains, authenticated proxies, --user-agent,
+                             --color-scheme, and networkidle waits. Firefox takes http://,
+                             socks4://, and socks5:// proxies and rejects https:// proxies
+                             instead of connecting to them without TLS.
                              Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --relaunch                 Relaunch the session's browser even when no setting changed

@@ -1346,6 +1346,92 @@ fn local_only_settings_are_ignored_for_external_sessions() {
 }
 
 #[test]
+fn external_connections_drop_inherited_engines_and_preserve_explicit_firefox() {
+    let targets = [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::AutoConnect, json!(true)),
+        (Key::Provider, json!("browserbase")),
+    ];
+
+    for (key, target) in targets {
+        let plan = Running::defaults().plan(&patch_of(&[
+            is(key, target.clone()),
+            is(Key::Engine, json!("firefox")),
+        ]));
+        assert_eq!(plan.next.get(Key::Engine), Some(&json!("firefox")));
+        assert!(!plan.ignored.iter().any(|change| change.key == Key::Engine));
+
+        let inherited = running_with(&[(Key::Engine, json!("firefox"))]);
+        let plan = inherited.plan(&patch_of(&[is(key, target.clone())]));
+        assert_eq!(plan.next.get(Key::Engine), None);
+        assert!(plan
+            .ignored
+            .iter()
+            .any(|change| { change.key == Key::Engine && change.requested == Requested::Default }));
+
+        let attached = running_with(&[(key, target.clone()), (Key::Engine, json!("firefox"))]);
+        let plan = attached.plan(&Patch::default());
+        assert_eq!(plan.next, attached);
+
+        let plan = attached.plan(&patch_of(&[is(key, target.clone())]));
+        assert_eq!(plan.next, attached);
+
+        let (changed_key, changed_target) = match key {
+            Key::Cdp | Key::AutoConnect => {
+                (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/y"))
+            }
+            Key::Provider => (Key::Provider, json!("lambdatest")),
+            _ => unreachable!(),
+        };
+        let plan = attached.plan(&patch_of(&[is(changed_key, changed_target.clone())]));
+        assert_eq!(plan.next.get(Key::Engine), None);
+        assert!(plan
+            .ignored
+            .iter()
+            .any(|change| { change.key == Key::Engine && change.requested == Requested::Default }));
+
+        let plan = attached.plan(&patch_of(&[
+            is(changed_key, changed_target),
+            is(Key::Engine, json!("firefox")),
+        ]));
+        assert_eq!(plan.next.get(Key::Engine), Some(&json!("firefox")));
+        assert!(!plan.ignored.iter().any(|change| change.key == Key::Engine));
+    }
+
+    for requested in [
+        Requested::Set(json!("chrome")),
+        Requested::Set(json!("lightpanda")),
+        Requested::Default,
+    ] {
+        let inherited = running_with(&[(Key::Engine, json!("firefox"))]);
+        let plan = inherited.plan(&patch_of(&[
+            is(Key::Provider, json!("browserbase")),
+            (Key::Engine, requested),
+        ]));
+        assert_ne!(plan.next.engine().as_deref(), Some("firefox"));
+    }
+
+    for key in [Key::Cdp, Key::AutoConnect] {
+        let target = match key {
+            Key::Cdp => json!("ws://127.0.0.1:9999/devtools/browser/x"),
+            Key::AutoConnect => json!(true),
+            _ => unreachable!(),
+        };
+        for engine in ["chrome", "lightpanda"] {
+            let running = running_with(&[(Key::Engine, json!(engine))]);
+            let plan = running.plan(&patch_of(&[is(key, target.clone())]));
+            assert_eq!(plan.next.get(Key::Engine), None, "{key:?} {engine}");
+            assert!(
+                plan.ignored.iter().any(|change| {
+                    change.key == Key::Engine && change.requested == Requested::Default
+                }),
+                "{key:?} {engine}"
+            );
+        }
+    }
+}
+
+#[test]
 fn local_only_settings_apply_to_a_local_session() {
     let plan = Running::defaults().plan(&patch_of(&[is(Key::Args, json!(["--x"]))]));
     assert!(plan.relaunch && plan.ignored.is_empty());
