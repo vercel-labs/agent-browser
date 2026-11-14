@@ -2411,6 +2411,7 @@ agent-browser drag - Drag and drop
 Usage: agent-browser drag <source> <target> [--human]
 
 Drags an element from source to target location.
+On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
 
 Global Options:
   --json               Output as JSON
@@ -4442,7 +4443,7 @@ Core Commands:
   type <sel> <text>          Type into element
   fill <sel> <text>          Clear and fill
   press <key>                Press key (Enter, Tab, Control+a)
-  keyboard type <text>       Type text with real keystrokes (no selector)
+  keyboard type <text>       Type at current focus (no selector)
   keyboard inserttext <text> Insert text without key events
   hover <sel>                Hover element
   focus <sel>                Focus element

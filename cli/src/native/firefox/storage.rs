@@ -4,6 +4,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+use super::bidi::SANDBOX;
 use super::daemon::session;
 use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
@@ -12,8 +13,6 @@ use crate::native::cookies::Cookie;
 use crate::native::state::{self, OriginStorage, StorageState};
 use crate::native::storage::storage_js_name;
 use crate::validation::{is_valid_session_name, session_name_error};
-
-const STORAGE_SANDBOX: &str = "agent-browser";
 
 /// Reads one origin's storage through a sandbox and returns `null` unless the page is still on
 /// `expectedOrigin`, checked in the same call so a navigation cannot race the read.
@@ -210,7 +209,7 @@ async fn cookie_urls(ff: &FirefoxSession) -> Result<Vec<url::Url>, String> {
         .bidi
         .send(
             "browsingContext.getTree",
-            json!({"root": ff.contexts.active()}),
+            json!({"root": ff.contexts.active_tab()}),
         )
         .await?;
     let contexts = tree["contexts"]
@@ -371,14 +370,12 @@ async fn read_origin_storage(
         .bidi
         .call_function_in_sandbox(
             context,
-            STORAGE_SANDBOX,
+            SANDBOX,
             ORIGIN_STORAGE_JS,
             vec![json!(expected_origin)],
         )
         .await?;
-    Ok(serde_json::from_value::<OriginStorage>(data)
-        .ok()
-        .filter(|storage| storage.origin == expected_origin))
+    Ok(state::parse_origin_storage(&data).filter(|storage| storage.origin == expected_origin))
 }
 
 fn collect_context_origins(
@@ -689,7 +686,7 @@ pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<
             .bidi
             .call_function_in_sandbox(
                 &landing.context,
-                STORAGE_SANDBOX,
+                SANDBOX,
                 RESTORE_STORAGE_JS,
                 vec![json!(origin.origin), json!(payload)],
             )
@@ -819,6 +816,32 @@ mod tests {
             call["params"]["arguments"],
             json!([{"type": "string", "value": "https://real.example"}])
         );
+    }
+
+    #[tokio::test]
+    async fn cookie_urls_use_the_top_page_and_its_frames() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let (mut ff, _tx, _) = super::super::session::tests::fake_session_with(move |request| {
+            seen.lock().unwrap().push(request.clone());
+            json!({"contexts": [{
+                "context": "ctx-page",
+                "url": "https://page.example/",
+                "children": [{"context": "ctx-frame", "url": "https://frame.example/"}]
+            }]})
+        })
+        .await;
+        ff.contexts
+            .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
+        ff.contexts.activate("ctx-frame");
+
+        let urls = cookie_urls(&ff).await.unwrap();
+
+        assert_eq!(
+            urls.iter().map(|url| url.as_str()).collect::<Vec<_>>(),
+            ["https://page.example/", "https://frame.example/"]
+        );
+        assert_eq!(requests.lock().unwrap()[0]["params"]["root"], "ctx-active");
     }
 
     #[tokio::test]

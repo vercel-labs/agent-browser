@@ -91,11 +91,11 @@ pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, St
     };
     daemon::reset_page(state);
     let ff = daemon::session(state)?;
-    let context = ff.contexts.active().to_string();
+    let context = ff.contexts.active_tab().to_string();
     let mut params = params;
     params["context"] = json!(context);
     let landed = ff
-        .race_prompt(ff.bidi.send(method, params))
+        .race_prompt(&context, ff.bidi.send(method, params))
         .await
         .map_err(|error| format!("{failure} failed: {error}"))?;
     let (url, prompt) = match landed {

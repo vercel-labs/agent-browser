@@ -17,7 +17,7 @@ pub struct Tab {
     pub user_context: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Node {
     Tab(Tab),
     Frame { parent: String },
@@ -34,7 +34,7 @@ pub struct Removed {
 
 /// Every browsing context of one Firefox session. All questions about tab ownership, cookie
 /// jars and the active context are answered here and nowhere else.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Contexts {
     nodes: HashMap<String, Node>,
     active: String,
@@ -79,12 +79,9 @@ impl Contexts {
         };
         match info["parent"].as_str().or(parent) {
             Some(parent) => {
-                self.nodes.insert(
-                    context.to_string(),
-                    Node::Frame {
-                        parent: parent.to_string(),
-                    },
-                );
+                if !self.record_frame(context, parent) {
+                    return;
+                }
             }
             None => {
                 let user_context = info["userContext"]
@@ -109,6 +106,39 @@ impl Contexts {
         }
         for child in info["children"].as_array().into_iter().flatten() {
             self.record_under(child, Some(context));
+        }
+    }
+
+    /// Records `context` as a frame under `parent`, refusing a relationship that would make it its
+    /// own ancestor or replace a known tab.
+    fn record_frame(&mut self, context: &str, parent: &str) -> bool {
+        if matches!(self.nodes.get(context), Some(Node::Tab(_)))
+            || self.ancestors(parent).any(|ancestor| ancestor == context)
+        {
+            return false;
+        }
+        self.nodes.insert(
+            context.to_string(),
+            Node::Frame {
+                parent: parent.to_string(),
+            },
+        );
+        true
+    }
+
+    /// Applies a `contextCreated` or `contextDestroyed` event, reporting the contexts that left
+    /// the tree and whether the active context changed.
+    pub fn apply(&mut self, event: &Value) -> Removed {
+        let params = &event["params"];
+        match event["method"].as_str() {
+            Some("browsingContext.contextCreated") => Removed {
+                contexts: HashSet::new(),
+                active_changed: self.record(params),
+            },
+            Some("browsingContext.contextDestroyed") => {
+                self.remove(params["context"].as_str().unwrap_or_default())
+            }
+            _ => Removed::default(),
         }
     }
 
@@ -174,12 +204,14 @@ impl Contexts {
         }
     }
 
-    /// `context` followed by its parent chain up to its tab.
+    /// `context` followed by its parent chain up to its tab, at most one step per recorded node so
+    /// a malformed graph ends the walk.
     fn ancestors<'a>(&'a self, context: &'a str) -> impl Iterator<Item = &'a str> {
         std::iter::successors(Some(context), |context| match self.nodes.get(*context)? {
             Node::Frame { parent } => Some(parent.as_str()),
             Node::Tab(_) => None,
         })
+        .take(self.nodes.len() + 1)
     }
 
     /// The context commands act on.
@@ -197,6 +229,11 @@ impl Contexts {
         self.active = context.to_string();
     }
 
+    /// Makes the tab holding the active frame the context commands act on.
+    pub fn leave_frame(&mut self) {
+        self.active = self.active_tab().to_string();
+    }
+
     /// The tab `context` belongs to: itself for a tab, the top of its parent chain for a frame.
     pub fn tab_of<'a>(&'a self, context: &'a str) -> Option<&'a str> {
         self.ancestors(context)
@@ -209,6 +246,17 @@ impl Contexts {
             Node::Tab(tab) => Some(tab),
             Node::Frame { .. } => None,
         }
+    }
+
+    /// Whether `context` is recorded as a frame inside the tab `tab`.
+    pub fn is_frame_of(&self, context: &str, tab: &str) -> bool {
+        matches!(self.nodes.get(context), Some(Node::Frame { .. }))
+            && self.tab_of(context) == Some(tab)
+    }
+
+    /// Whether the browser reported `context` as a frame directly inside `parent`.
+    pub fn is_child_of(&self, context: &str, parent: &str) -> bool {
+        matches!(self.nodes.get(context), Some(Node::Frame { parent: recorded }) if recorded == parent)
     }
 
     /// Every tab with its context id.
@@ -346,5 +394,40 @@ mod tests {
         contexts.remove("tab-b");
         assert_eq!(contexts.take_unused_user_contexts(), ["jar"]);
         assert!(contexts.take_unused_user_contexts().is_empty());
+    }
+
+    #[test]
+    fn a_tab_recorded_under_itself_stays_the_active_tab() {
+        let mut contexts = Contexts::from_tree(&tree()).unwrap();
+        contexts.record(&json!({"context": "tab-a", "parent": "tab-a"}));
+        assert_eq!(contexts.tab("tab-a").unwrap().id, 1);
+        assert_eq!(contexts.tab_of("tab-a"), Some("tab-a"));
+        assert_eq!(contexts.active_tab(), "tab-a");
+    }
+
+    #[test]
+    fn a_cycle_is_refused_and_every_context_keeps_its_real_tab() {
+        let mut contexts = Contexts::from_tree(&tree()).unwrap();
+        contexts.record(&json!({"context": "A", "parent": "tab-a"}));
+        contexts.record(&json!({"context": "B", "parent": "A"}));
+        contexts.record(&json!({"context": "A", "parent": "B"}));
+        contexts.record(&json!({"context": "tab-a", "parent": "A"}));
+        assert_eq!(contexts.tab_of("A"), Some("tab-a"));
+        assert_eq!(contexts.tab_of("B"), Some("tab-a"));
+        assert_eq!(contexts.tab_of("tab-a"), Some("tab-a"));
+        assert!(contexts.tab("A").is_some());
+    }
+
+    #[test]
+    fn is_frame_of_accepts_only_frames_inside_that_tab() {
+        let contexts = Contexts::from_tree(&tree()).unwrap();
+        assert!(contexts.is_frame_of("frame-a", "tab-a"));
+        assert!(contexts.is_frame_of("frame-a-inner", "tab-a"));
+        assert!(!contexts.is_frame_of("tab-a", "tab-a"));
+        assert!(!contexts.is_frame_of("frame-a", "tab-b"));
+        assert!(!contexts.is_frame_of("unknown", "tab-a"));
+        assert!(contexts.is_child_of("frame-a-inner", "frame-a"));
+        assert!(!contexts.is_child_of("frame-a-inner", "tab-a"));
+        assert!(!contexts.is_child_of("tab-a", "tab-a"));
     }
 }

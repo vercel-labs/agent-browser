@@ -1,0 +1,1830 @@
+//! Firefox element pointer commands, raw input, scrolling and dialogs.
+
+use serde_json::{json, Value};
+
+use super::daemon::session;
+use super::input::{
+    modifier_actions, modifier_names, mouse_button_mask, mouse_button_name, pointer_click,
+    pointer_down, pointer_hover, pointer_mousemove, pointer_move_buttons, pointer_press,
+    pointer_release, pointer_up, pointer_wheel, touch_event, touch_swipe_path, touch_tap, Origin,
+};
+use super::session::FirefoxSession;
+use super::target::{resolve_target, Target};
+use crate::native::actions::{
+    next_mouse_buttons, raw_mouse, DaemonState, MouseState, PendingDialog, PointerMoveOptions,
+};
+use crate::native::element::{
+    intercepted_error, not_actionable_error, ACTIONABILITY_JS, BLOCKER_AT_JS,
+};
+use crate::native::interaction::PendingRelease;
+use crate::native::interaction::{
+    dispatch_event_js, CLICK_HREF_JS, FOCUS_JS, HIGHLIGHT_JS, SCROLL_BY_JS, SCROLL_INTO_VIEW_JS,
+};
+
+/// Reports BiDi's in-view center plus the shared actionability and blocker verdicts.
+fn prepare_js() -> String {
+    format!(
+        r#"function() {{
+            const el = this;
+            const inView = (r) => r && r.width > 0 && r.height > 0 &&
+                r.bottom > 0 && r.right > 0 &&
+                r.top < (window.innerHeight || document.documentElement.clientHeight) &&
+                r.left < (window.innerWidth || document.documentElement.clientWidth);
+            let rect = el.getClientRects()[0];
+            if (!inView(rect)) {{
+                el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
+                rect = el.getClientRects()[0];
+            }}
+            if (!rect || rect.width <= 0 || rect.height <= 0) {{
+                return {{ x: 0, y: 0, reason: 'not visible', blocker: null }};
+            }}
+            const left = Math.max(0, Math.min(rect.x, rect.x + rect.width));
+            const right = Math.min(window.innerWidth, Math.max(rect.x, rect.x + rect.width));
+            const top = Math.max(0, Math.min(rect.y, rect.y + rect.height));
+            const bottom = Math.min(window.innerHeight, Math.max(rect.y, rect.y + rect.height));
+            const x = Math.floor((left + right) / 2);
+            const y = Math.floor((top + bottom) / 2);
+            const blockerAt = {BLOCKER_AT_JS};
+            const notActionable = {ACTIONABILITY_JS};
+            let blocker = blockerAt(document, el, x, y);
+            let doc = el.ownerDocument;
+            let parentX = x;
+            let parentY = y;
+            while (!blocker && doc.defaultView && doc.defaultView.frameElement) {{
+                const frame = doc.defaultView.frameElement;
+                const frameRect = frame.getBoundingClientRect();
+                parentX += frameRect.x + frame.clientLeft;
+                parentY += frameRect.y + frame.clientTop;
+                doc = frame.ownerDocument;
+                blocker = blockerAt(doc, frame, parentX, parentY);
+            }}
+            const reachable = x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight;
+            return {{ x: x, y: y, reason: notActionable(el, reachable), blocker: blocker }};
+        }}"#
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PointerAction {
+    Click,
+    DoubleClick,
+    Hover,
+    Tap,
+    Drag,
+    Check,
+    Raw,
+}
+
+impl PointerAction {
+    fn requires_actionable(self) -> bool {
+        matches!(self, Self::Click | Self::DoubleClick)
+    }
+
+    fn reports_dialog(self) -> bool {
+        matches!(
+            self,
+            Self::Click | Self::DoubleClick | Self::Tap | Self::Drag
+        )
+    }
+}
+
+pub(super) struct ActionOutcome {
+    pub dialog_opened: bool,
+    pub value: Value,
+}
+
+struct PointerState<'a> {
+    mouse: &'a mut MouseState,
+    pending_release: &'a mut Option<PendingRelease>,
+}
+
+struct PointerPlan {
+    context: String,
+    position: (f64, f64),
+    action: PointerAction,
+    actions: Value,
+    value: Value,
+}
+
+/// Scrolls the target into view and applies the shared actionability and blocker checks.
+pub(super) async fn prepare(
+    ff: &FirefoxSession,
+    target: &Target,
+    label: &str,
+    action: PointerAction,
+) -> Result<(f64, f64), String> {
+    let result = ff
+        .bidi
+        .call_function(
+            &target.context,
+            &prepare_js(),
+            Some(target.node_ref()),
+            Vec::new(),
+        )
+        .await?;
+    if action.requires_actionable() {
+        if let Some(reason) = result["reason"].as_str() {
+            return Err(not_actionable_error(label, reason));
+        }
+    }
+    if let Some(blocker) = result["blocker"].as_str() {
+        return Err(intercepted_error(label, blocker));
+    }
+    Ok((
+        result["x"].as_f64().unwrap_or(0.0),
+        result["y"].as_f64().unwrap_or(0.0),
+    ))
+}
+
+pub(super) async fn perform_actions(
+    ff: &FirefoxSession,
+    context: &str,
+    actions: Value,
+) -> Result<bool, String> {
+    let reply = ff
+        .race_prompt(
+            context,
+            ff.bidi.send(
+                "input.performActions",
+                json!({"context": context, "actions": actions}),
+            ),
+        )
+        .await?;
+    Ok(reply.is_none())
+}
+
+const MAP_POINT_JS: &str = r#"function(x, y, direction) {
+    let win = window;
+    while (win && win.frameElement) {
+        const frame = win.frameElement;
+        const rect = frame.getBoundingClientRect();
+        x += direction * (rect.left + frame.clientLeft);
+        y += direction * (rect.top + frame.clientTop);
+        win = win.parent;
+    }
+    return [x, y, win === win.top];
+}"#;
+
+const FRAME_OFFSETS_JS: &str = r#"function() {
+    const frames = [];
+    const visit = root => {
+        for (const el of root.querySelectorAll('*')) {
+            if ((el.tagName === 'IFRAME' || el.tagName === 'FRAME') && el.contentWindow) {
+                const rect = el.getBoundingClientRect();
+                frames.push([el.contentWindow, rect.left + el.clientLeft, rect.top + el.clientTop]);
+            }
+            if (el.shadowRoot) visit(el.shadowRoot);
+        }
+    };
+    visit(document);
+    return frames;
+}"#;
+
+fn context_path(node: &Value, target: &str, path: &mut Vec<(String, String)>) -> bool {
+    let Some(parent) = node["context"].as_str() else {
+        return false;
+    };
+    if parent == target {
+        return true;
+    }
+    if let Some(children) = node["children"].as_array() {
+        for child in children {
+            let Some(id) = child["context"].as_str() else {
+                continue;
+            };
+            path.push((parent.to_string(), id.to_string()));
+            if context_path(child, target, path) {
+                return true;
+            }
+            path.pop();
+        }
+    }
+    false
+}
+
+async fn map_mouse_position(
+    ff: &FirefoxSession,
+    context: &str,
+    position: (f64, f64),
+    direction: i32,
+) -> Result<(f64, f64), String> {
+    if context == ff.contexts.active_tab() {
+        return Ok(position);
+    }
+    let point = ff
+        .bidi
+        .call_function(
+            context,
+            MAP_POINT_JS,
+            None,
+            vec![json!(position.0), json!(position.1), json!(direction)],
+        )
+        .await?;
+    if point[2] == false {
+        let tree = ff
+            .bidi
+            .send(
+                "browsingContext.getTree",
+                json!({"root": ff.contexts.active_tab()}),
+            )
+            .await?;
+        let mut path = Vec::new();
+        if !tree["contexts"].as_array().is_some_and(|roots| {
+            roots
+                .iter()
+                .any(|root| context_path(root, context, &mut path))
+        }) {
+            return Err("Firefox could not find the mouse context".to_string());
+        }
+        let mut mapped = position;
+        for (parent, child) in path {
+            let frames = ff
+                .bidi
+                .call_function_in_sandbox(&parent, super::bidi::SANDBOX, FRAME_OFFSETS_JS, vec![])
+                .await?;
+            let frame = frames
+                .as_array()
+                .and_then(|frames| {
+                    frames
+                        .iter()
+                        .find(|frame| frame[0].as_str() == Some(child.as_str()))
+                })
+                .ok_or("Firefox could not find the mouse frame")?;
+            mapped.0 += f64::from(direction)
+                * frame[1]
+                    .as_f64()
+                    .ok_or("Firefox returned an invalid frame offset")?;
+            mapped.1 += f64::from(direction)
+                * frame[2]
+                    .as_f64()
+                    .ok_or("Firefox returned an invalid frame offset")?;
+        }
+        return Ok(mapped);
+    }
+    Ok((
+        point[0]
+            .as_f64()
+            .ok_or("Firefox returned an invalid mouse position")?,
+        point[1]
+            .as_f64()
+            .ok_or("Firefox returned an invalid mouse position")?,
+    ))
+}
+
+async fn local_mouse_position(state: &DaemonState) -> Result<(f64, f64), String> {
+    let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
+    map_mouse_position(
+        ff,
+        ff.contexts.active(),
+        (state.mouse_state.x, state.mouse_state.y),
+        -1,
+    )
+    .await
+}
+
+async fn commit_mouse_position(
+    ff: &FirefoxSession,
+    mouse_state: &mut MouseState,
+    context: &str,
+    position: (f64, f64),
+) {
+    if let Ok(position) = map_mouse_position(ff, context, position, 1).await {
+        (mouse_state.x, mouse_state.y) = position;
+    }
+}
+
+fn apply_mouse_action(mouse_state: &mut MouseState, action: &Value) {
+    let mask = action["button"]
+        .as_u64()
+        .map(|button| mouse_button_mask(button as u8))
+        .unwrap_or_default();
+    match action["type"].as_str() {
+        Some("pointerDown") => mouse_state.buttons |= mask,
+        Some("pointerUp") => mouse_state.buttons &= !mask,
+        _ => {}
+    }
+}
+
+/// Notes a button a dialog left held, so it is released once the dialog closes.
+fn defer_release(
+    mouse: &MouseState,
+    pending_release: &mut Option<PendingRelease>,
+    context: &str,
+    position: (f64, f64),
+) {
+    let held = (0..=4).find(|button| mouse.buttons & mouse_button_mask(*button) != 0);
+    if let (None, Some(button)) = (pending_release.as_ref(), held) {
+        *pending_release = Some(PendingRelease {
+            session_id: context.to_string(),
+            x: position.0,
+            y: position.1,
+            button: mouse_button_name(button).to_string(),
+        });
+    }
+}
+
+/// Moves the mouse along the planned path and records where it landed.
+async fn move_mouse(
+    ff: &FirefoxSession,
+    mouse_state: &mut MouseState,
+    context: &str,
+    to: (f64, f64),
+    options: &PointerMoveOptions,
+) -> Result<bool, String> {
+    let from = map_mouse_position(ff, context, (mouse_state.x, mouse_state.y), -1).await?;
+    let dialog_opened = perform_actions(ff, context, pointer_mousemove(from, to, options)).await?;
+    commit_mouse_position(ff, mouse_state, context, to).await;
+    Ok(dialog_opened)
+}
+
+/// Performs a pointer batch. With motion, the shared path moves the pointer first and the
+/// batch's own moves are dropped.
+async fn perform_pointer(
+    ff: &FirefoxSession,
+    state: PointerState<'_>,
+    plan: PointerPlan,
+    motion: Option<&PointerMoveOptions>,
+) -> Result<ActionOutcome, String> {
+    let PointerPlan {
+        context,
+        position,
+        action,
+        actions,
+        mut value,
+    } = plan;
+    let mouse_source = actions
+        .as_array()
+        .and_then(|sources| sources.first())
+        .filter(|source| {
+            source["type"] == "pointer" && source["parameters"]["pointerType"] == "mouse"
+        });
+    let mut dialog_opened = match (motion, mouse_source) {
+        (Some(options), Some(_)) => {
+            move_mouse(ff, state.mouse, &context, position, options).await?
+        }
+        _ => false,
+    };
+    if let Some(source) = mouse_source {
+        for pointer_action in source["actions"].as_array().cloned().unwrap_or_default() {
+            if dialog_opened {
+                break;
+            }
+            if motion.is_some() && pointer_action["type"] == "pointerMove" {
+                continue;
+            }
+            let request = json!([{
+                "type": "pointer",
+                "id": source["id"],
+                "parameters": source["parameters"],
+                "actions": [pointer_action],
+            }]);
+            dialog_opened = perform_actions(ff, &context, request).await?;
+            if pointer_action["type"] == "pointerMove" {
+                let point = if pointer_action["origin"] == "viewport" {
+                    match (pointer_action["x"].as_f64(), pointer_action["y"].as_f64()) {
+                        (Some(x), Some(y)) => (x, y),
+                        _ => position,
+                    }
+                } else {
+                    position
+                };
+                commit_mouse_position(ff, state.mouse, &context, point).await;
+            }
+            apply_mouse_action(state.mouse, &pointer_action);
+            match pointer_action["type"].as_str() {
+                Some("pointerDown") if dialog_opened => {
+                    if let Some(button) = pointer_action["button"].as_u64() {
+                        *state.pending_release = Some(PendingRelease {
+                            session_id: context.clone(),
+                            x: position.0,
+                            y: position.1,
+                            button: mouse_button_name(button as u8).to_string(),
+                        });
+                    }
+                }
+                Some("pointerUp") => *state.pending_release = None,
+                _ => {}
+            }
+        }
+    } else {
+        dialog_opened = perform_actions(ff, &context, actions).await?;
+        if !matches!(action, PointerAction::Tap) {
+            commit_mouse_position(ff, state.mouse, &context, position).await;
+        }
+    }
+    if dialog_opened {
+        defer_release(state.mouse, state.pending_release, &context, position);
+    }
+    if dialog_opened && action.reports_dialog() {
+        value["dialogOpened"] = json!(true);
+    }
+    Ok(ActionOutcome {
+        dialog_opened,
+        value,
+    })
+}
+
+/// Runs one element pointer action: positions the pointer, then presses its buttons.
+async fn act_pointer(
+    state: &mut DaemonState,
+    cmd: &Value,
+    target: &Target,
+    label: &str,
+    action: PointerAction,
+    actions: Value,
+    value: Value,
+) -> Result<ActionOutcome, String> {
+    let options = PointerMoveOptions::from_cmd(cmd, state);
+    let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
+    let position = prepare(ff, target, label, action).await?;
+    perform_pointer(
+        ff,
+        PointerState {
+            mouse: &mut state.mouse_state,
+            pending_release: &mut state.pending_pointer_release,
+        },
+        PointerPlan {
+            context: target.context.clone(),
+            position,
+            action,
+            actions,
+            value,
+        },
+        Some(&options),
+    )
+    .await
+}
+
+/// Performs one pointer step of a drag, reporting whether it opened a dialog.
+async fn drag_step(
+    ff: &FirefoxSession,
+    mouse: &mut MouseState,
+    pending_release: &mut Option<PendingRelease>,
+    context: &str,
+    position: (f64, f64),
+    actions: Value,
+) -> Result<bool, String> {
+    perform_pointer(
+        ff,
+        PointerState {
+            mouse,
+            pending_release,
+        },
+        PointerPlan {
+            context: context.to_string(),
+            position,
+            action: PointerAction::Drag,
+            actions,
+            value: json!({}),
+        },
+        None,
+    )
+    .await
+    .map(|outcome| outcome.dialog_opened)
+}
+
+pub(super) async fn act_element(
+    state: &mut DaemonState,
+    target: &Target,
+    label: &str,
+    action: PointerAction,
+    actions: Value,
+    value: Value,
+) -> Result<ActionOutcome, String> {
+    act_pointer(state, &Value::Null, target, label, action, actions, value).await
+}
+
+async fn act_raw(
+    state: &mut DaemonState,
+    actions: Value,
+    position: (f64, f64),
+    value: Value,
+) -> Result<ActionOutcome, String> {
+    let (ff, mouse_state, pending_release) = (
+        &state.firefox,
+        &mut state.mouse_state,
+        &mut state.pending_pointer_release,
+    );
+    let ff = ff.as_ref().ok_or("Browser not launched")?;
+    let context = ff.contexts.active().to_string();
+    perform_pointer(
+        ff,
+        PointerState {
+            mouse: mouse_state,
+            pending_release,
+        },
+        PointerPlan {
+            context,
+            position,
+            action: PointerAction::Raw,
+            actions,
+            value,
+        },
+        None,
+    )
+    .await
+}
+
+/// Clicks a ref or selector, returning Chrome's `{clicked}` shape.
+pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+
+    if cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false) {
+        return click_new_tab(selector, state).await;
+    }
+
+    let target = resolve_target(state, selector).await?;
+    let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
+    let click_count = cmd
+        .get("clickCount")
+        .and_then(Value::as_i64)
+        .unwrap_or(1)
+        .max(0) as u32;
+    let actions = pointer_click(
+        &Origin::Element(target.shared_id.clone()),
+        button,
+        click_count,
+    );
+    Ok(act_pointer(
+        state,
+        cmd,
+        &target,
+        selector,
+        PointerAction::Click,
+        actions,
+        json!({ "clicked": selector }),
+    )
+    .await?
+    .value)
+}
+
+/// Opens the target link in a new tab, returning Chrome's `{clicked, newTab, url}` shape.
+async fn click_new_tab(selector: &str, state: &mut DaemonState) -> Result<Value, String> {
+    let target = resolve_target(state, selector).await?;
+    let href = session(state)?
+        .bidi
+        .call_function(
+            &target.context,
+            CLICK_HREF_JS,
+            Some(target.node_ref()),
+            Vec::new(),
+        )
+        .await?;
+    let Some(href) = href.as_str().map(str::to_string) else {
+        return Err(format!(
+            "Element '{selector}' does not have an href attribute. --new-tab only works on links."
+        ));
+    };
+    super::tabs::tab_new(&json!({ "url": href }), state).await?;
+    Ok(json!({ "clicked": selector, "newTab": true, "url": href }))
+}
+
+/// Double-clicks a ref or selector.
+pub async fn dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+    let target = resolve_target(state, selector).await?;
+    let actions = pointer_click(&Origin::Element(target.shared_id.clone()), "left", 2);
+    Ok(act_pointer(
+        state,
+        cmd,
+        &target,
+        selector,
+        PointerAction::DoubleClick,
+        actions,
+        json!({ "clicked": selector }),
+    )
+    .await?
+    .value)
+}
+
+/// Moves the mouse over a ref or selector.
+pub async fn hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+    let target = resolve_target(state, selector).await?;
+    let actions = pointer_hover(&Origin::Element(target.shared_id.clone()));
+    Ok(act_pointer(
+        state,
+        cmd,
+        &target,
+        selector,
+        PointerAction::Hover,
+        actions,
+        json!({ "hovered": selector }),
+    )
+    .await?
+    .value)
+}
+
+/// Focuses a ref or selector.
+pub async fn focus(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+    let target = resolve_target(state, selector).await?;
+    session(state)?
+        .bidi
+        .call_function(
+            &target.context,
+            FOCUS_JS,
+            Some(target.node_ref()),
+            Vec::new(),
+        )
+        .await?;
+    Ok(json!({ "focused": selector }))
+}
+
+/// Taps a ref or selector with a touch pointer.
+pub async fn tap(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+    let target = resolve_target(state, selector).await?;
+    let actions = touch_tap(&Origin::Element(target.shared_id.clone()));
+    Ok(act_element(
+        state,
+        &target,
+        selector,
+        PointerAction::Tap,
+        actions,
+        json!({ "tapped": selector }),
+    )
+    .await?
+    .value)
+}
+
+/// Swipes by direction or between two viewport points.
+pub async fn swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let start_x = cmd.get("startX").and_then(Value::as_f64).unwrap_or(200.0);
+    let start_y = cmd.get("startY").and_then(Value::as_f64).unwrap_or(400.0);
+
+    let (end_x, end_y, direction) = match cmd.get("direction").and_then(Value::as_str) {
+        Some(direction) => {
+            let distance = cmd.get("distance").and_then(Value::as_f64).unwrap_or(300.0);
+            let (dx, dy) = match direction {
+                "down" => (0.0, distance),
+                "left" => (-distance, 0.0),
+                "right" => (distance, 0.0),
+                _ => (0.0, -distance),
+            };
+            (start_x + dx, start_y + dy, Some(direction))
+        }
+        None => (
+            cmd.get("endX").and_then(Value::as_f64).unwrap_or(200.0),
+            cmd.get("endY").and_then(Value::as_f64).unwrap_or(100.0),
+            None,
+        ),
+    };
+
+    let actions = touch_swipe_path(
+        &Origin::Viewport {
+            x: start_x,
+            y: start_y,
+        },
+        &Origin::Viewport { x: end_x, y: end_y },
+        10,
+    );
+    let ff = session(state)?;
+    perform_actions(ff, ff.contexts.active(), actions).await?;
+    ff.touches.clear();
+
+    Ok(match direction {
+        Some(direction) => json!({ "swiped": direction }),
+        None => json!({
+            "swiped": true,
+            "from": [start_x, start_y],
+            "to": [end_x, end_y],
+        }),
+    })
+}
+
+/// Drags between selectors or refs using DOM events for HTML5 sources and pointer input otherwise.
+pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let source = cmd
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'source' parameter")?;
+    let target_selector = cmd
+        .get("target")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'target' parameter")?;
+    let source_target = resolve_target(state, source).await?;
+    let target = resolve_target(state, target_selector).await?;
+    if source_target.context != target.context {
+        return Err("Dragging between different frames is not supported on Firefox".to_string());
+    }
+
+    let options = PointerMoveOptions::from_cmd(cmd, state);
+    let (firefox, mouse_state, pending_release) = (
+        &state.firefox,
+        &mut state.mouse_state,
+        &mut state.pending_pointer_release,
+    );
+    let ff = firefox.as_ref().ok_or("Browser not launched")?;
+    let top_level = source_target.context == ff.contexts.active_tab();
+    let context = source_target.context.clone();
+    let (sx, sy) = prepare(ff, &source_target, source, PointerAction::Drag).await?;
+    let html5 = ff
+        .bidi
+        .call_function(
+            &source_target.context,
+            "function() { return this.draggable === true; }",
+            Some(source_target.node_ref()),
+            vec![],
+        )
+        .await?;
+    if html5 == true {
+        let (tx, ty) = prepare(ff, &target, target_selector, PointerAction::Drag).await?;
+        let completed = ff.race_prompt(
+            &source_target.context,
+            ff.bidi.call_function(
+                &source_target.context,
+                r#"function(target, points) {
+                    const dataTransfer = new DataTransfer();
+                    dataTransfer.effectAllowed = 'all';
+                    const uri = this.localName === 'a' ? this.href
+                        : this.localName === 'img' ? this.currentSrc || this.src : null;
+                    if (uri) {
+                        dataTransfer.setData('text/uri-list', uri);
+                        dataTransfer.setData('text/plain', uri);
+                        dataTransfer.setData('text/html', this.outerHTML);
+                    }
+                    const fire = (node, type, x, y) => node.dispatchEvent(new DragEvent(type, {
+                        bubbles: true, cancelable: true, composed: true,
+                        clientX: x, clientY: y, dataTransfer,
+                    }));
+                    const rect = this.getBoundingClientRect();
+                    const sx = rect.x + rect.width / 2;
+                    const sy = rect.y + rect.height / 2;
+                    const [tx, ty] = points;
+                    if (!fire(this, 'dragstart', sx, sy)) return;
+                    const allowed = {
+                        none: [], copy: ['copy'], link: ['link'], move: ['move'],
+                        copyLink: ['copy', 'link'], copyMove: ['copy', 'move'],
+                        linkMove: ['link', 'move'], all: ['copy', 'link', 'move'],
+                        uninitialized: ['copy', 'link', 'move'],
+                    }[dataTransfer.effectAllowed];
+                    dataTransfer.dropEffect = allowed[0] || 'none';
+                    fire(target, 'dragenter', tx, ty);
+                    if (!fire(target, 'dragover', tx, ty) && allowed.includes(dataTransfer.dropEffect)) {
+                        fire(target, 'drop', tx, ty);
+                    } else {
+                        dataTransfer.dropEffect = 'none';
+                    }
+                    fire(this, 'dragend', tx, ty);
+                }"#,
+                Some(source_target.node_ref()),
+                vec![target.node_ref(), json!([tx, ty])],
+            ),
+        )
+        .await?;
+        if completed.is_none() {
+            return Ok(json!({
+                "dragged": false,
+                "source": source,
+                "target": target_selector,
+                "dialogOpened": true,
+            }));
+        }
+        commit_mouse_position(ff, mouse_state, &source_target.context, (tx, ty)).await;
+        if top_level {
+            mouse_state.buttons = 0;
+        }
+        return Ok(json!({ "dragged": true, "source": source, "target": target_selector }));
+    }
+    let mut release_at = (sx, sy);
+    let mut dialog_opened = false;
+    let result: Result<(), String> = async {
+        dialog_opened = move_mouse(ff, mouse_state, &context, (sx, sy), &options).await?;
+        if !dialog_opened {
+            dialog_opened = drag_step(
+                ff,
+                mouse_state,
+                pending_release,
+                &context,
+                (sx, sy),
+                pointer_press("left"),
+            )
+            .await?;
+        }
+        if !dialog_opened {
+            let point = prepare(ff, &target, target_selector, PointerAction::Drag).await?;
+            release_at = point;
+            dialog_opened = move_mouse(ff, mouse_state, &context, point, &options).await?;
+            if !dialog_opened {
+                dialog_opened = drag_step(
+                    ff,
+                    mouse_state,
+                    pending_release,
+                    &context,
+                    point,
+                    pointer_release("left"),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = drag_step(
+            ff,
+            mouse_state,
+            pending_release,
+            &context,
+            release_at,
+            pointer_release("left"),
+        )
+        .await;
+        return Err(error);
+    }
+    if dialog_opened {
+        defer_release(mouse_state, pending_release, &context, release_at);
+        return Ok(json!({
+            "dragged": false,
+            "source": source,
+            "target": target_selector,
+            "dialogOpened": true,
+        }));
+    }
+    Ok(json!({ "dragged": true, "source": source, "target": target_selector }))
+}
+
+/// Scrolls an element, or the page when no selector is given.
+pub async fn scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let (mut dx, mut dy) = (
+        cmd.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+        cmd.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+    );
+    if let Some(direction) = cmd.get("direction").and_then(Value::as_str) {
+        let amount = cmd.get("amount").and_then(Value::as_f64).unwrap_or(300.0);
+        match direction {
+            "up" => dy = -amount,
+            "down" => dy = amount,
+            "left" => dx = -amount,
+            "right" => dx = amount,
+            _ => {}
+        }
+    }
+
+    if let Some(selector) = cmd.get("selector").and_then(Value::as_str) {
+        let target = resolve_target(state, selector).await?;
+        session(state)?
+            .bidi
+            .call_function(
+                &target.context,
+                SCROLL_BY_JS,
+                Some(target.node_ref()),
+                vec![json!(dx), json!(dy)],
+            )
+            .await?;
+    } else {
+        session(state)?
+            .eval(&format!("window.scrollBy({dx}, {dy})"))
+            .await?;
+    }
+    Ok(json!({ "scrolled": true }))
+}
+
+/// Scrolls a ref or selector into view.
+pub async fn scrollintoview(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+    let target = resolve_target(state, selector).await?;
+    session(state)?
+        .bidi
+        .call_function(
+            &target.context,
+            SCROLL_INTO_VIEW_JS,
+            Some(target.node_ref()),
+            Vec::new(),
+        )
+        .await?;
+    Ok(json!({ "scrolled": selector }))
+}
+
+/// Dispatches a DOM event on a ref or selector.
+pub async fn dispatch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+    let event_type = cmd
+        .get("event")
+        .or_else(|| cmd.get("eventType"))
+        .and_then(Value::as_str)
+        .ok_or("Missing 'event' parameter")?;
+    let js = dispatch_event_js(event_type, cmd.get("eventInit"));
+    let target = resolve_target(state, selector).await?;
+    super::forms::run(session(state)?, &target, &js, vec![]).await?;
+    Ok(json!({ "dispatched": event_type, "selector": selector }))
+}
+
+/// Highlights a ref or selector with a temporary red outline.
+pub async fn highlight(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+    let target = resolve_target(state, selector).await?;
+    session(state)?
+        .bidi
+        .call_function(
+            &target.context,
+            HIGHLIGHT_JS,
+            Some(target.node_ref()),
+            Vec::new(),
+        )
+        .await?;
+    Ok(json!({ "highlighted": selector }))
+}
+
+fn validate_raw_mouse(cmd: &Value) -> Result<(), String> {
+    if cmd.get("clickCount").is_some() {
+        return Err("Raw clickCount is not supported on Firefox".to_string());
+    }
+    Ok(())
+}
+
+/// Raw mouse dispatch: move, press, release or wheel at viewport coordinates.
+pub async fn mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    validate_raw_mouse(cmd)?;
+    let event_type = cmd
+        .get("eventType")
+        .and_then(Value::as_str)
+        .unwrap_or("mouseMoved");
+    let x = cmd.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+    let y = cmd.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+    let button = cmd.get("button").and_then(Value::as_str).unwrap_or("none");
+    let origin = Origin::Viewport { x, y };
+    let actions = match event_type {
+        "mousePressed" => pointer_down(&origin, button),
+        "mouseReleased" => pointer_up(&origin, button),
+        "mouseWheel" => pointer_wheel(&origin, 0.0, 0.0),
+        _ => pointer_hover(&origin),
+    };
+
+    Ok(
+        act_raw(state, actions, (x, y), json!({ "dispatched": event_type }))
+            .await?
+            .value,
+    )
+}
+
+/// Moves to viewport coordinates using the requested timing, steps and input mode.
+pub async fn mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let x = cmd.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+    let y = cmd.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+    let options = PointerMoveOptions::from_cmd(cmd, state);
+    let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
+    let context = ff.contexts.active().to_string();
+    move_mouse(ff, &mut state.mouse_state, &context, (x, y), &options).await?;
+    Ok(json!({ "moved": true, "x": x, "y": y }))
+}
+
+/// Presses a mouse button at the last known position.
+pub async fn mousedown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
+    let position = local_mouse_position(state).await?;
+    let origin = Origin::Viewport {
+        x: position.0,
+        y: position.1,
+    };
+    Ok(act_raw(
+        state,
+        pointer_down(&origin, button),
+        position,
+        json!({ "pressed": true }),
+    )
+    .await?
+    .value)
+}
+
+/// Releases a mouse button at the last known position.
+pub async fn mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
+    let position = local_mouse_position(state).await?;
+    let origin = Origin::Viewport {
+        x: position.0,
+        y: position.1,
+    };
+    Ok(act_raw(
+        state,
+        pointer_up(&origin, button),
+        position,
+        json!({ "released": true }),
+    )
+    .await?
+    .value)
+}
+
+async fn raw_position(cmd: &Value, state: &DaemonState) -> Result<(f64, f64), String> {
+    let x = cmd.get("x").and_then(Value::as_f64);
+    let y = cmd.get("y").and_then(Value::as_f64);
+    match (x, y) {
+        (Some(x), Some(y)) => Ok((x, y)),
+        _ => {
+            let position = local_mouse_position(state).await?;
+            Ok((x.unwrap_or(position.0), y.unwrap_or(position.1)))
+        }
+    }
+}
+
+/// Scrolls at explicit coordinates or the last accepted pointer position.
+pub async fn wheel(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let (x, y) = raw_position(cmd, state).await?;
+    let delta_x = cmd.get("deltaX").and_then(Value::as_f64).unwrap_or(0.0);
+    let delta_y = cmd.get("deltaY").and_then(Value::as_f64).unwrap_or(0.0);
+    let actions = pointer_wheel(&Origin::Viewport { x, y }, delta_x, delta_y);
+
+    Ok(act_raw(
+        state,
+        actions,
+        (x, y),
+        json!({ "scrolled": true, "deltaX": delta_x, "deltaY": delta_y }),
+    )
+    .await?
+    .value)
+}
+
+/// Low-level mouse input, defaulting coordinates to the last known position.
+pub async fn input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    validate_raw_mouse(cmd)?;
+    let raw = raw_mouse(cmd);
+    let (x, y) = raw_position(cmd, state).await?;
+    let origin = Origin::Viewport { x, y };
+    let held = state.mouse_state.buttons;
+    let actions = match raw.event_type {
+        "mouseWheel" => pointer_wheel(
+            &origin,
+            raw.delta_x.unwrap_or(0.0),
+            raw.delta_y.unwrap_or(0.0),
+        ),
+        event_type => pointer_move_buttons(
+            &origin,
+            held,
+            next_mouse_buttons(held, event_type, raw.button, raw.buttons),
+        ),
+    };
+    let value = json!({ "dispatched": raw.event_type });
+    let modifiers = modifier_names(raw.modifiers.unwrap_or(0));
+    if modifiers.is_empty() {
+        return Ok(act_raw(state, actions, (x, y), value).await?.value);
+    }
+
+    let context = session(state)?.contexts.active().to_string();
+    perform_actions(
+        session(state)?,
+        &context,
+        modifier_actions("keyDown", &modifiers),
+    )
+    .await?;
+    let outcome = act_raw(state, actions, (x, y), value).await;
+    perform_actions(
+        session(state)?,
+        &context,
+        modifier_actions("keyUp", &modifiers),
+    )
+    .await?;
+    Ok(outcome?.value)
+}
+
+/// Low-level touch input over the supplied points, releasing the previous ones on end.
+pub async fn input_touch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let event_type = cmd
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("touchStart");
+    let points: Vec<(f64, f64)> = cmd
+        .get("touchPoints")
+        .and_then(Value::as_array)
+        .map(|points| {
+            points
+                .iter()
+                .filter_map(|p| Some((p.get("x")?.as_f64()?, p.get("y")?.as_f64()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let ff = session(state)?;
+    let effective = if matches!(event_type, "touchEnd" | "touchCancel") && points.is_empty() {
+        ff.touches.clone()
+    } else {
+        points.clone()
+    };
+    let actions = touch_event(event_type, &effective);
+    if actions
+        .as_array()
+        .is_some_and(|sources| !sources.is_empty())
+    {
+        perform_actions(ff, ff.contexts.active(), actions).await?;
+    }
+    if matches!(event_type, "touchEnd" | "touchCancel") {
+        ff.touches.clear();
+    } else {
+        ff.touches = points;
+    }
+    Ok(json!({ "dispatched": event_type }))
+}
+
+/// Reports, accepts or dismisses the pending JavaScript dialog.
+pub async fn dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let response = cmd.get("response").and_then(Value::as_str);
+
+    if response == Some("status") {
+        return Ok(dialog_status(state.pending_dialog.as_ref()));
+    }
+
+    let accept = response
+        .map(|r| r == "accept")
+        .or_else(|| cmd.get("accept").and_then(Value::as_bool))
+        .unwrap_or(true);
+    let prompt_text = cmd.get("promptText").and_then(Value::as_str);
+    let context = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|d| d.session_id.clone())
+        .or_else(|| {
+            state
+                .firefox
+                .as_ref()
+                .map(|ff| ff.contexts.active().to_string())
+        })
+        .ok_or("Browser not launched")?;
+
+    let mut params = json!({ "context": context, "accept": accept });
+    if let Some(text) = prompt_text {
+        params["userText"] = json!(text);
+    }
+    let result = session(state)?
+        .bidi
+        .send("browsingContext.handleUserPrompt", params)
+        .await;
+    state.pending_dialog = None;
+    result?;
+    if let Some(release) = state.pending_pointer_release.take() {
+        let origin = Origin::Viewport {
+            x: release.x,
+            y: release.y,
+        };
+        if let Ok(ff) = session(state) {
+            let _ = perform_actions(
+                ff,
+                &release.session_id,
+                pointer_up(&origin, &release.button),
+            )
+            .await;
+        }
+        state.mouse_state.buttons = 0;
+    }
+
+    Ok(json!({ "handled": true, "accepted": accept }))
+}
+
+fn dialog_status(dialog: Option<&PendingDialog>) -> Value {
+    match dialog {
+        Some(dialog) => {
+            let mut obj = json!({
+                "hasDialog": true,
+                "type": dialog.dialog_type,
+                "message": dialog.message,
+            });
+            if let Some(ref prompt) = dialog.default_prompt {
+                obj["defaultPrompt"] = json!(prompt);
+            }
+            obj
+        }
+        None => json!({ "hasDialog": false }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native::firefox::session::tests::{
+        fake_session_with, fake_session_with_script, Calls,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn mousemove_honors_session_modes_overrides_and_explicit_timing() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        for (mode, options, count, duration) in [
+            ("instant", json!({}), 1, 0),
+            ("smooth", json!({}), 10, 0),
+            ("human", json!({}), 10, 122),
+            ("human", json!({"inputMode": "instant"}), 1, 0),
+            (
+                "instant",
+                json!({"inputMode": "human", "seed": 42}),
+                10,
+                122,
+            ),
+            ("instant", json!({"steps": 3}), 3, 0),
+            ("instant", json!({"duration": 101}), 10, 101),
+            ("instant", json!({"duration": 101, "steps": 4}), 4, 101),
+        ] {
+            state.input_mode = mode.into();
+            state.mouse_state.x = 10.0;
+            state.mouse_state.y = 20.0;
+            state.mouse_state.buttons = 1;
+            let mut command = json!({"x": 130, "y": 20});
+            command
+                .as_object_mut()
+                .unwrap()
+                .extend(options.as_object().unwrap().clone());
+            mousemove(&command, &mut state).await.unwrap();
+            let request = requests.lock().unwrap().pop().unwrap();
+            let moves = request["params"]["actions"][0]["actions"]
+                .as_array()
+                .unwrap();
+            assert_eq!(moves.len(), count, "{mode}: {command}");
+            assert_eq!(
+                moves
+                    .iter()
+                    .map(|action| action["duration"].as_u64().unwrap())
+                    .sum::<u64>(),
+                duration
+            );
+            assert_eq!(moves.last().unwrap()["x"], json!(130.0));
+            assert_eq!(moves.last().unwrap()["y"], json!(20.0));
+            assert!(moves.iter().all(|action| action["type"] == "pointerMove"));
+            assert_eq!(
+                (
+                    state.mouse_state.x,
+                    state.mouse_state.y,
+                    state.mouse_state.buttons
+                ),
+                (130.0, 20.0, 1)
+            );
+            assert_eq!(state.input_mode, mode);
+        }
+    }
+
+    #[tokio::test]
+    async fn extra_buttons_dispatch_and_track_the_same_button() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        for (button, code, mask) in [("back", 3, 8), ("forward", 4, 16)] {
+            mousedown(&json!({"button": button}), &mut state)
+                .await
+                .unwrap();
+            assert_eq!(state.mouse_state.buttons, mask);
+            mouseup(&json!({"button": button}), &mut state)
+                .await
+                .unwrap();
+            assert_eq!(state.mouse_state.buttons, 0);
+            let requests = requests.lock().unwrap();
+            let down = &requests[requests.len() - 3]["params"]["actions"][0]["actions"][0];
+            let up = &requests[requests.len() - 1]["params"]["actions"][0]["actions"][0];
+            assert_eq!(down, &json!({"type": "pointerDown", "button": code}));
+            assert_eq!(up, &json!({"type": "pointerUp", "button": code}));
+        }
+    }
+
+    #[tokio::test]
+    async fn input_mouse_holds_modifiers_around_the_pointer_action() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.mouse_state.x = 10.0;
+        state.mouse_state.y = 20.0;
+
+        assert_eq!(
+            input_mouse(
+                &json!({"type": "mousePressed", "x": 40, "y": 50, "modifiers": 8}),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({"dispatched": "mousePressed"})
+        );
+
+        let requests = requests.lock().unwrap();
+        let actions: Vec<Value> = requests
+            .iter()
+            .map(|request| request["params"]["actions"][0]["actions"][0].clone())
+            .collect();
+        assert_eq!(
+            actions.first(),
+            Some(&json!({"type": "keyDown", "value": "\u{E008}"}))
+        );
+        assert_eq!(
+            actions.last(),
+            Some(&json!({"type": "keyUp", "value": "\u{E008}"}))
+        );
+        assert!(actions.contains(&json!({"type": "pointerDown", "button": 0})));
+        assert_eq!(state.mouse_state.buttons, 1);
+    }
+
+    #[tokio::test]
+    async fn input_mouse_presses_the_buttons_a_mask_holds_around_a_move() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        assert_eq!(
+            input_mouse(
+                &json!({"type": "mouseMoved", "x": 40, "y": 50, "buttons": 1}),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({"dispatched": "mouseMoved"})
+        );
+
+        let actions: Vec<Value> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request["params"]["actions"][0]["actions"][0].clone())
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                json!({"type": "pointerMove", "x": 40.0, "y": 50.0, "origin": "viewport"}),
+                json!({"type": "pointerDown", "button": 0}),
+            ]
+        );
+        assert_eq!(state.mouse_state.buttons, 1);
+    }
+
+    #[tokio::test]
+    async fn wheel_uses_and_commits_each_coordinate_independently() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (ff, _tx, _) = fake_session_with(move |request| {
+            captured.lock().unwrap().push(request.clone());
+            json!({})
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.mouse_state.x = 17.0;
+        state.mouse_state.y = 23.0;
+        state.mouse_state.buttons = 1;
+        for (command, expected) in [
+            (json!({"deltaY": 12}), (17.0, 23.0)),
+            (json!({"x": 80, "deltaY": 12}), (80.0, 23.0)),
+            (json!({"y": 90, "deltaY": 12}), (80.0, 90.0)),
+            (json!({"deltaY": 12}), (80.0, 90.0)),
+        ] {
+            wheel(&command, &mut state).await.unwrap();
+            let request = requests.lock().unwrap().pop().unwrap();
+            let scroll = &request["params"]["actions"][0]["actions"][0];
+            assert_eq!(scroll["x"], json!(expected.0));
+            assert_eq!(scroll["y"], json!(expected.1));
+            assert_eq!(scroll["deltaY"], json!(12.0));
+            assert_eq!((state.mouse_state.x, state.mouse_state.y), expected);
+            assert_eq!(state.mouse_state.buttons, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_pointer_dispatches_preserve_coordinates_and_buttons() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (mut ff, _tx, _) = fake_session_with(|_| json!({})).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for _ in 0..6 {
+                let message = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                let request: Value = serde_json::from_str(&message).unwrap();
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "type": "error", "id": request["id"],
+                            "error": "invalid argument", "message": "rejected pointer action"
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        ff.bidi = super::super::bidi::BidiClient::connect(&address)
+            .await
+            .unwrap()
+            .into();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.mouse_state.x = 17.0;
+        state.mouse_state.y = 23.0;
+        state.mouse_state.buttons = 1;
+        let command = json!({"x": 80, "y": 90, "deltaY": 12, "button": "right", "eventType": "mousePressed", "type": "mousePressed"});
+        for action in [
+            "mouse",
+            "mousemove",
+            "wheel",
+            "input_mouse",
+            "mousedown",
+            "mouseup",
+        ] {
+            let result = match action {
+                "mouse" => mouse(&command, &mut state).await,
+                "mousemove" => mousemove(&command, &mut state).await,
+                "wheel" => wheel(&command, &mut state).await,
+                "input_mouse" => input_mouse(&command, &mut state).await,
+                "mousedown" => mousedown(&command, &mut state).await,
+                _ => mouseup(&json!({"button": "left"}), &mut state).await,
+            };
+            assert!(result.unwrap_err().contains("rejected pointer action"));
+            assert_eq!(
+                (
+                    state.mouse_state.x,
+                    state.mouse_state.y,
+                    state.mouse_state.buttons
+                ),
+                (17.0, 23.0, 1),
+                "{action}"
+            );
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn element_pointer_tracking_commits_the_pointer_position() {
+        for action in ["click", "dblclick", "hover"] {
+            for (selected_context, target_context) in [
+                ("ctx-active", "ctx-active"),
+                ("ctx-active", "ctx-frame"),
+                ("ctx-frame", "ctx-frame"),
+                ("ctx-frame", "ctx-active"),
+            ] {
+                let (mut state, _) = state_with_refs(connected).await;
+                let ff = state.firefox.as_mut().unwrap();
+                ff.contexts.activate(selected_context);
+                ff.refs.retain(|(_, shared_id), _| shared_id != "sid-1");
+                ff.refs.insert((target_context.into(), "sid-1".into()), 7);
+                state.mouse_state.x = 17.0;
+                state.mouse_state.y = 23.0;
+                let command = json!({"selector": "@e1"});
+                match action {
+                    "click" => click(&command, &mut state).await.unwrap(),
+                    "dblclick" => dblclick(&command, &mut state).await.unwrap(),
+                    _ => hover(&command, &mut state).await.unwrap(),
+                };
+                assert_eq!(
+                    (state.mouse_state.x, state.mouse_state.y),
+                    (40.0, 50.0),
+                    "{action}: selected={selected_context}, target={target_context}"
+                );
+            }
+        }
+    }
+
+    fn connected(params: &Value) -> Value {
+        if params["functionDeclaration"] == MAP_POINT_JS {
+            return json!({ "type": "success", "result": { "type": "array", "value": [
+                { "type": "number", "value": params["arguments"][0]["value"] },
+                { "type": "number", "value": params["arguments"][1]["value"] }
+            ] } });
+        }
+        if params["functionDeclaration"]
+            .as_str()
+            .is_some_and(|js| js.contains("isConnected"))
+        {
+            return json!({ "type": "success", "result": { "type": "boolean", "value": true } });
+        }
+        located(None)
+    }
+
+    fn located(blocker: Option<&str>) -> Value {
+        let mut entries = vec![
+            json!(["x", { "type": "number", "value": 40 }]),
+            json!(["y", { "type": "number", "value": 50 }]),
+            json!(["reason", { "type": "null" }]),
+            json!(["blocker", { "type": "null" }]),
+        ];
+        if let Some(blocker) = blocker {
+            entries[3] = json!(["blocker", { "type": "string", "value": blocker }]);
+        }
+        json!({ "type": "success", "result": { "type": "object", "value": entries } })
+    }
+
+    fn blocked(params: &Value) -> Value {
+        if params["functionDeclaration"]
+            .as_str()
+            .is_some_and(|js| js.contains("isConnected"))
+        {
+            return json!({ "type": "success", "result": { "type": "boolean", "value": true } });
+        }
+        located(Some("div#overlay"))
+    }
+
+    fn disabled(params: &Value) -> Value {
+        let mut result = located(None);
+        if !params["functionDeclaration"]
+            .as_str()
+            .is_some_and(|js| js.contains("isConnected"))
+        {
+            result["result"]["value"][2] =
+                json!(["reason", {"type": "string", "value": "disabled"}]);
+        }
+        result
+    }
+
+    async fn state_with_refs(reply: fn(&Value) -> Value) -> (DaemonState, Calls) {
+        let mut state = DaemonState::new();
+        let (mut ff, _tx, calls) = fake_session_with_script(reply).await;
+        ff.refs.insert(("ctx-active".into(), "sid-1".into()), 7);
+        ff.refs.insert(("ctx-active".into(), "sid-2".into()), 8);
+        state.firefox = Some(ff);
+        state
+            .ref_map
+            .add_with_frame("e1".into(), Some(7), "button", "OK", None, None);
+        state
+            .ref_map
+            .add_with_frame("e2".into(), Some(8), "button", "Cancel", None, None);
+        (state, calls)
+    }
+
+    #[tokio::test]
+    async fn action_kind_owns_the_actionability_policy() {
+        let (ff, _, _) = fake_session_with_script(disabled).await;
+        let target = Target {
+            context: "ctx-active".into(),
+            shared_id: "sid-1".into(),
+        };
+
+        assert_eq!(
+            prepare(&ff, &target, "@e1", PointerAction::Hover)
+                .await
+                .unwrap(),
+            (40.0, 50.0)
+        );
+        assert!(prepare(&ff, &target, "@e1", PointerAction::Click)
+            .await
+            .unwrap_err()
+            .contains("disabled"));
+    }
+
+    #[tokio::test]
+    async fn click_scrolls_checks_and_performs_the_pointer_action() {
+        let (mut state, calls) = state_with_refs(connected).await;
+
+        let result = click(&json!({ "selector": "@e1" }), &mut state)
+            .await
+            .unwrap();
+
+        assert_eq!(result, json!({ "clicked": "@e1" }));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "script.callFunction",
+                "script.callFunction",
+                "input.performActions",
+                "input.performActions",
+                "input.performActions"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_covered_target_fails_before_any_pointer_action() {
+        let (mut state, calls) = state_with_refs(blocked).await;
+
+        let error = click(&json!({ "selector": "@e1" }), &mut state)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("covered by <div#overlay>"), "{error}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["script.callFunction", "script.callFunction"]
+        );
+    }
+
+    #[tokio::test]
+    async fn element_commands_return_chrome_shapes() {
+        let (mut state, _calls) = state_with_refs(connected).await;
+
+        assert_eq!(
+            focus(&json!({ "selector": "@e1" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "focused": "@e1" })
+        );
+        assert_eq!(
+            scrollintoview(&json!({ "selector": "@e1" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "scrolled": "@e1" })
+        );
+        assert_eq!(
+            highlight(&json!({ "selector": "@e1" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "highlighted": "@e1" })
+        );
+        assert_eq!(
+            dispatch(
+                &json!({ "selector": "@e1", "event": "click", "eventInit": { "bubbles": true } }),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({ "dispatched": "click", "selector": "@e1" })
+        );
+        assert_eq!(
+            scroll(
+                &json!({ "selector": "@e1", "direction": "down", "amount": 120 }),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({ "scrolled": true })
+        );
+        assert_eq!(
+            scroll(&json!({ "y": 80 }), &mut state).await.unwrap(),
+            json!({ "scrolled": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn drag_updates_position_for_following_wheel() {
+        let (mut state, _) = state_with_refs(connected).await;
+        state.mouse_state.x = 17.0;
+        state.mouse_state.y = 23.0;
+        drag(&json!({"source": "@e1", "target": "@e2"}), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                state.mouse_state.x,
+                state.mouse_state.y,
+                state.mouse_state.buttons
+            ),
+            (40.0, 50.0, 0)
+        );
+        wheel(&json!({"deltaY": 12}), &mut state).await.unwrap();
+        assert_eq!((state.mouse_state.x, state.mouse_state.y), (40.0, 50.0));
+    }
+
+    #[tokio::test]
+    async fn raw_pointer_commands_return_chrome_shapes() {
+        let (mut state, _calls) = state_with_refs(connected).await;
+
+        assert_eq!(
+            wheel(&json!({ "x": 5, "y": 6, "deltaY": 100 }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "scrolled": true, "deltaX": 0.0, "deltaY": 100.0 })
+        );
+        assert_eq!(
+            swipe(&json!({ "direction": "up" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "swiped": "up" })
+        );
+        assert_eq!(
+            swipe(&json!({}), &mut state).await.unwrap(),
+            json!({ "swiped": true, "from": [200.0, 400.0], "to": [200.0, 100.0] })
+        );
+        assert_eq!(
+            drag(&json!({ "source": "@e1", "target": "@e2" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "dragged": true, "source": "@e1", "target": "@e2" })
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_click_count_is_rejected_without_action_or_state_change() {
+        let (mut state, calls) = state_with_refs(connected).await;
+        state.mouse_state.x = 17.0;
+        state.mouse_state.y = 23.0;
+        state.mouse_state.buttons = 1;
+
+        let error = input_mouse(
+            &json!({ "type": "mousePressed", "x": 80, "y": 90, "clickCount": 2 }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Raw clickCount is not supported on Firefox");
+        let error = mouse(
+            &json!({ "eventType": "mousePressed", "x": 80, "y": 90, "clickCount": 2 }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Raw clickCount is not supported on Firefox");
+        assert_eq!(state.mouse_state.x, 17.0);
+        assert_eq!(state.mouse_state.y, 23.0);
+        assert_eq!(state.mouse_state.buttons, 1);
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn input_touch_releases_the_points_a_previous_start_recorded() {
+        let (mut state, calls) = state_with_refs(connected).await;
+
+        assert_eq!(
+            input_touch(
+                &json!({ "type": "touchStart", "touchPoints": [{ "x": 1, "y": 2 }] }),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({ "dispatched": "touchStart" })
+        );
+        assert_eq!(
+            input_touch(&json!({ "type": "touchEnd" }), &mut state)
+                .await
+                .unwrap(),
+            json!({ "dispatched": "touchEnd" })
+        );
+
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|method| *method == "input.performActions")
+                .count(),
+            2
+        );
+        assert!(state.firefox.as_ref().unwrap().touches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dialog_reports_and_dismisses_the_pending_prompt() {
+        let (mut state, calls) = state_with_refs(connected).await;
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "prompt".into(),
+            message: "name?".into(),
+            default_prompt: Some("Ada".into()),
+            session_id: Some("ctx-active".into()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            dialog(&json!({ "response": "status" }), &mut state)
+                .await
+                .unwrap(),
+            json!({
+                "hasDialog": true,
+                "type": "prompt",
+                "message": "name?",
+                "defaultPrompt": "Ada",
+            })
+        );
+        assert_eq!(
+            dialog(
+                &json!({ "response": "dismiss", "promptText": "Bob" }),
+                &mut state
+            )
+            .await
+            .unwrap(),
+            json!({ "handled": true, "accepted": false })
+        );
+
+        assert!(state.pending_dialog.is_none());
+        assert_eq!(*calls.lock().unwrap(), ["browsingContext.handleUserPrompt"]);
+    }
+}

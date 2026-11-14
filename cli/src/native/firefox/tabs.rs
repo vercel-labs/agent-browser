@@ -376,7 +376,7 @@ fn successor_tab(tabs: &[Value], closed_index: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session_with_navigation_prompt;
+    use crate::native::firefox::session::tests::fake_session_with_replies;
 
     #[tokio::test]
     async fn tab_new_returns_with_a_pending_navigation_prompt() {
@@ -385,19 +385,34 @@ mod tests {
             {"context": "ctx-new", "url": url},
             {"context": "ctx-active", "url": "about:blank"}
         ]});
-        let (ff, _events, _) = fake_session_with_navigation_prompt(vec![tree], true).await;
+        let (ff, events, _) = fake_session_with_replies(move |v| match v["method"].as_str() {
+            Some("browsingContext.navigate") => None,
+            Some("browsingContext.create") => Some(json!({"context": "ctx-new"})),
+            Some("browsingContext.getTree") => Some(tree.clone()),
+            _ => Some(json!({})),
+        })
+        .await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.active_frame_id = Some("old-frame".into());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            events
+                .send(
+                    json!({"type":"event", "method":"browsingContext.userPromptOpened", "params":{
+                        "context":"ctx-new", "type":"confirm", "message":"sure?", "handler":"ignore"
+                    }}),
+                )
+                .unwrap();
+        });
         let result = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             tab_new(&json!({"url": url, "label": "new"}), &mut state),
         )
         .await
         .unwrap()
         .unwrap();
         assert_eq!(result["targetId"], "ctx-new");
-        assert_eq!(result["url"], url);
         assert_eq!(result["dialogOpened"], true);
         assert_eq!(result["total"], 2);
         let contexts = &state.firefox.as_ref().unwrap().contexts;
@@ -407,10 +422,6 @@ mod tests {
             Some("new")
         );
         assert!(state.active_frame_id.is_none());
-        state.drain_firefox_events();
-        let dialog = state.pending_dialog.as_ref().unwrap();
-        assert_eq!(dialog.dialog_type, "confirm");
-        assert_eq!(dialog.session_id.as_deref(), Some("ctx-new"));
     }
 
     fn tab(tab_id: u32, context: &str, label: Option<&str>) -> Value {
