@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, RwLock};
 
-use super::bidi::BidiClient;
+use super::client::BidiClient;
 use super::daemon::session;
 use super::session::FirefoxSession;
 use super::target::resolve_target;
@@ -516,17 +516,27 @@ fn auth_response(
 /// Drains buffered BiDi events into the daemon: tab bookkeeping and dialogs first, then the
 /// recorders, which only see events from the active tab. When the drained events dropped the
 /// active context, or its tab, the daemon's element refs and frame scope go with it.
-pub async fn drain(state: &mut DaemonState) {
+pub async fn drain(state: &mut DaemonState) -> bool {
     if let Some(ff) = state.firefox.as_mut() {
         let active = ff.contexts.active().to_string();
         let events = ff.drain_events(&mut state.pending_dialog);
+        let tabs_changed = events.iter().any(top_level_context_changed);
         if ff.contexts.active() != active {
             state.ref_map.invalidate_all_documents();
             state.active_iframe_sessions.clear();
             state.active_frame_id = None;
         }
         apply_events(state, events).await;
+        return tabs_changed;
     }
+    false
+}
+
+fn top_level_context_changed(event: &Value) -> bool {
+    matches!(
+        event["method"].as_str(),
+        Some("browsingContext.contextCreated" | "browsingContext.contextDestroyed")
+    ) && event["params"]["parent"].is_null()
 }
 
 /// The browsing context an event reports, when the event carries one.
@@ -1033,7 +1043,7 @@ impl DownloadStage {
     fn create() -> Result<Self, String> {
         let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
         let dir = std::env::temp_dir().join(format!("agent-browser-download-{id}"));
-        super::process::create_private_dir(&dir)
+        super::firefox::create_private_dir(&dir)
             .map_err(|e| format!("Failed to create download staging directory: {e}"))?;
         Ok(Self { dir })
     }
@@ -1045,7 +1055,7 @@ impl DownloadStage {
 
 impl Drop for DownloadStage {
     fn drop(&mut self) {
-        super::process::remove_private_dir(&self.dir);
+        super::firefox::remove_private_dir(&self.dir);
     }
 }
 
@@ -1203,7 +1213,7 @@ pub async fn waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Val
 mod tests {
     use super::*;
     use crate::native::actions::RouteResponse;
-    use crate::native::firefox::session::tests::{fake_session_with_replies, FakeReply};
+    use crate::native::bidi::session::tests::{fake_session_with_replies, FakeReply};
 
     fn mock_route(pattern: &str, body: &str, status: u16) -> RouteEntry {
         RouteEntry {
@@ -1218,6 +1228,24 @@ mod tests {
             abort: false,
             resource_types: Vec::new(),
         }
+    }
+
+    #[test]
+    fn only_top_level_lifecycle_events_change_the_tab_set() {
+        for method in [
+            "browsingContext.contextCreated",
+            "browsingContext.contextDestroyed",
+        ] {
+            assert!(top_level_context_changed(
+                &json!({"method":method, "params":{"context":"tab", "parent":null}})
+            ));
+            assert!(!top_level_context_changed(
+                &json!({"method":method, "params":{"context":"frame", "parent":"tab"}})
+            ));
+        }
+        assert!(!top_level_context_changed(
+            &json!({"method":"log.entryAdded", "params":{}})
+        ));
     }
 
     #[tokio::test]
@@ -1543,7 +1571,7 @@ mod tests {
     #[tokio::test]
     async fn storage_context_requests_receive_blank_page() {
         let (ff, _tx, _, messages, _) =
-            crate::native::firefox::session::tests::fake_session_with_rdp().await;
+            crate::native::bidi::session::tests::fake_session_with_rdp().await;
         let net = NetContext::default();
         net.blank_contexts
             .write()
@@ -1565,7 +1593,7 @@ mod tests {
     #[tokio::test]
     async fn blank_context_bypasses_abort_route() {
         let (ff, _tx, _, messages, _) =
-            crate::native::firefox::session::tests::fake_session_with_rdp().await;
+            crate::native::bidi::session::tests::fake_session_with_rdp().await;
         let net = NetContext::default();
         net.blank_contexts
             .write()
@@ -1591,7 +1619,7 @@ mod tests {
     #[tokio::test]
     async fn mocked_responses_preserve_json_cors_and_base64_over_bidi() {
         let (ff, _tx, _, messages, _) =
-            crate::native::firefox::session::tests::fake_session_with_rdp().await;
+            crate::native::bidi::session::tests::fake_session_with_rdp().await;
         let net = NetContext::default();
         let mut route = mock_route("*", r#"{"mock":true}"#, 201);
         route.response.as_mut().unwrap().allow_origin = Some("https://page.example".to_string());
@@ -1711,7 +1739,7 @@ mod tests {
         assert_eq!(decision, NetworkDecision::Continue { headers: None });
     }
 
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::bidi::session::tests::fake_session;
 
     fn request_event(method: &str, id: &str, url: &str, blocked: bool) -> Value {
         json!({
@@ -1904,7 +1932,7 @@ mod tests {
 
     #[tokio::test]
     async fn har_captures_request_body_and_bidi_timestamps() {
-        let (ff, _, _) = crate::native::firefox::session::tests::fake_session_with(|v| {
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(|v| {
             if v["params"]["dataType"] == "request" {
                 json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD1oYXItcHJvYmU="}})
             } else {
@@ -1968,7 +1996,7 @@ mod tests {
 
     #[tokio::test]
     async fn tracked_requests_include_request_body() {
-        let (ff, _, _) = crate::native::firefox::session::tests::fake_session_with(|v| {
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(|v| {
             if v["params"]["dataType"] == "request" {
                 json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD10cmFja2Vk"}})
             } else {
@@ -2016,7 +2044,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_request_body_is_left_out_of_the_har() {
-        let (ff, _, _) = crate::native::firefox::session::tests::fake_session_with(
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(
             |_| json!({"bytes": {"type": "string", "value": ""}}),
         )
         .await;
@@ -2053,11 +2081,11 @@ mod tests {
 
     #[tokio::test]
     async fn request_recording_excludes_background_tabs() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session_with(
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session_with(
             |_| json!({"bytes": {"type": "string", "value": "body"}}),
         )
         .await;
-        ff.contexts = crate::native::firefox::contexts::Contexts::from_tree(
+        ff.contexts = crate::native::bidi::contexts::Contexts::from_tree(
             &json!({"contexts": [{"context": "active", "children": [{"context": "frame"}]}]}),
         )
         .unwrap();
@@ -2092,8 +2120,8 @@ mod tests {
     #[tokio::test]
     async fn log_entries_exclude_background_tabs() {
         let (mut ff, _, _) =
-            crate::native::firefox::session::tests::fake_session_with(|_| json!({})).await;
-        ff.contexts = crate::native::firefox::contexts::Contexts::from_tree(
+            crate::native::bidi::session::tests::fake_session_with(|_| json!({})).await;
+        ff.contexts = crate::native::bidi::contexts::Contexts::from_tree(
             &json!({"contexts": [{"context": "active", "children": [{"context": "frame"}]}]}),
         )
         .unwrap();

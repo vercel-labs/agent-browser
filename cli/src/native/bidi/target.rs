@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use super::bidi::SANDBOX;
+use super::client::SANDBOX;
 use super::daemon::session;
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
@@ -147,7 +147,7 @@ async fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session_with_script, Calls};
+    use crate::native::bidi::session::tests::{fake_session_with_script, Calls};
     use serde_json::Value;
 
     fn document_responder(document: &'static str) -> impl Fn(&Value) -> Value + Send + 'static {

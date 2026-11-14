@@ -1,15 +1,18 @@
-//! Firefox tab and window commands. Tab ids are stable `t<N>` ids over BiDi browsing contexts.
-
-use serde_json::{json, Value};
 use std::time::Duration;
 
-use super::bidi::{remote_to_json, BidiClient};
+use futures_util::future::join_all;
+use serde_json::{json, Value};
+
+use super::client::{remote_to_json, BidiClient};
+use super::contexts::Contexts;
 use super::daemon::{reset_page, session};
 use super::emulation;
 use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
+
+const TREE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Opens a tab and makes it active. Must return what Chrome's `handle_tab_new` returns,
 /// honouring `url` and `label`.
@@ -142,42 +145,81 @@ async fn tab_title(bidi: &BidiClient, context: &str) -> Value {
 
 /// Lists top-level tabs as `{tabs: [{tabId, targetId, label, title, url, type, active}]}`.
 pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
-    let tree = session(state)?
+    let ff = session(state)?;
+    let tree = ff
         .bidi
-        .send("browsingContext.getTree", json!({"maxDepth": 0}))
+        .send_timeout(
+            "browsingContext.getTree",
+            json!({"maxDepth": 0}),
+            TREE_TIMEOUT,
+        )
         .await?;
-    let contexts: Vec<Value> = tree["contexts"].as_array().cloned().unwrap_or_default();
+    let contexts = tree["contexts"].as_array().cloned().unwrap_or_default();
     for info in &contexts {
-        session(state)?.contexts.record(info);
+        ff.contexts.record(info);
     }
-    let titles = {
-        let bidi = &session(state)?.bidi;
-        futures_util::future::join_all(
-            contexts
-                .iter()
-                .map(|c| tab_title(bidi, c["context"].as_str().unwrap_or_default())),
+    let titles = join_all(
+        contexts
+            .iter()
+            .map(|context| tab_title(&ff.bidi, context["context"].as_str().unwrap_or_default())),
+    )
+    .await;
+    let active = ff.contexts.active_tab();
+    Ok(json!({ "tabs": build_tab_list(&contexts, &titles, &ff.contexts, active) }))
+}
+
+/// Builds the dashboard tab list from Firefox, or `None` when it does not answer in time.
+pub(crate) async fn stream_tabs(
+    bidi: &BidiClient,
+    index: &Contexts,
+    active: &str,
+) -> Option<Vec<Value>> {
+    let tree = bidi
+        .send_timeout(
+            "browsingContext.getTree",
+            json!({"maxDepth": 0}),
+            TREE_TIMEOUT,
         )
         .await
-    };
-    let mut tabs = Vec::with_capacity(contexts.len());
-    for (c, title) in contexts.iter().zip(titles) {
-        let context = c["context"].as_str().unwrap_or_default().to_string();
-        let ff = session(state)?;
-        let Some(tab) = ff.contexts.tab(&context) else {
-            continue;
-        };
-        let active = context == ff.contexts.active_tab();
-        tabs.push(json!({
-            "tabId": format_tab_id(tab.id),
-            "targetId": context,
-            "label": tab.label,
-            "title": title,
-            "url": c["url"],
-            "type": "page",
-            "active": active,
-        }));
-    }
-    Ok(json!({ "tabs": tabs }))
+        .ok()?;
+    let contexts = tree["contexts"].as_array()?.clone();
+    let titles = join_all(
+        contexts
+            .iter()
+            .map(|context| tab_title(bidi, context["context"].as_str().unwrap_or_default())),
+    )
+    .await;
+    let titles: Vec<Value> = titles
+        .iter()
+        .map(|title| Value::String(title.as_str().unwrap_or_default().to_string()))
+        .collect();
+    Some(build_tab_list(&contexts, &titles, index, active))
+}
+
+/// Maps a BiDi tree and titles to the shared CLI and stream tab shape.
+fn build_tab_list(
+    contexts: &[Value],
+    titles: &[Value],
+    index: &Contexts,
+    active: &str,
+) -> Vec<Value> {
+    contexts
+        .iter()
+        .zip(titles)
+        .filter_map(|(c, title)| {
+            let context = c["context"].as_str().unwrap_or_default();
+            let tab = index.tab(context)?;
+            Some(json!({
+                "tabId": format_tab_id(tab.id),
+                "targetId": context,
+                "label": tab.label,
+                "title": title,
+                "url": c["url"],
+                "type": "page",
+                "active": context == active,
+            }))
+        })
+        .collect()
 }
 
 /// Switches the active tab by `t<N>` id, label, or context UUID. Must return what Chrome's
@@ -373,7 +415,226 @@ fn successor_tab(tabs: &[Value], closed_index: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session_with_replies, FakeReply};
+    use crate::native::bidi::session::tests::fake_session_with;
+
+    #[tokio::test]
+    async fn stream_and_cli_lists_share_ids_labels_titles_and_active_context() {
+        let (mut ff, _events, _) = fake_session_with(|request| match request["method"].as_str() {
+            Some("browsingContext.getTree") => json!({"contexts": [
+                {"context": "ctx-active", "url": "https://one.test/"},
+                {"context": "ctx-other", "url": "https://two.test/"}
+            ]}),
+            Some("script.callFunction") => json!({"type": "success", "result": {
+                "type": "string", "value": request["params"]["target"]["context"]
+            }}),
+            _ => json!({}),
+        })
+        .await;
+        ff.contexts.record(&json!({"context": "ctx-other"}));
+        ff.contexts.set_label("ctx-other", "docs");
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        let cli = tab_list(&mut state).await.unwrap();
+        let ff = state.firefox.as_mut().unwrap();
+        let stream = stream_tabs(&ff.bidi, &ff.contexts, ff.contexts.active_tab())
+            .await
+            .unwrap();
+        assert_eq!(cli["tabs"], json!(stream));
+        assert_eq!(
+            stream,
+            vec![
+                json!({"tabId":"t1", "targetId":"ctx-active", "label":null, "title":"ctx-active", "url":"https://one.test/", "type":"page", "active":true}),
+                json!({"tabId":"t2", "targetId":"ctx-other", "label":"docs", "title":"ctx-other", "url":"https://two.test/", "type":"page", "active":false}),
+            ]
+        );
+
+        ff.contexts.activate("ctx-other");
+        let remaining = build_tab_list(
+            &[json!({"context":"ctx-other", "url":"about:blank"})],
+            &[json!("Other")],
+            &ff.contexts,
+            ff.contexts.active_tab(),
+        );
+        assert_eq!(remaining[0]["tabId"], "t2");
+        assert_eq!(remaining[0]["active"], true);
+        assert!(build_tab_list(&[], &[], &ff.contexts, ff.contexts.active_tab()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_title_fallback_is_a_string_without_changing_cli_output() {
+        let (ff, _events, _) = fake_session_with(|request| match request["method"].as_str() {
+            Some("browsingContext.getTree") => {
+                json!({"contexts": [{"context":"ctx-active", "url":"about:blank"}]})
+            }
+            _ => json!({}),
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        let cli = tab_list(&mut state).await.unwrap();
+        assert!(cli["tabs"][0]["title"].is_null());
+        let ff = state.firefox.as_mut().unwrap();
+        let tabs = stream_tabs(&ff.bidi, &ff.contexts, ff.contexts.active_tab())
+            .await
+            .unwrap();
+        assert_eq!(tabs[0]["title"], "");
+    }
+
+    #[tokio::test]
+    async fn stream_tracks_commands_and_external_context_changes() {
+        use crate::native::stream::{IdleActivity, StreamServer};
+        use futures_util::StreamExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let fail_first_tree = AtomicBool::new(true);
+        let tree = Arc::new(Mutex::new(vec![
+            json!({"context":"ctx-active", "url":"about:blank"}),
+        ]));
+        let browser_tree = tree.clone();
+        let (ff, events, _calls) =
+            fake_session_with(move |request| match request["method"].as_str() {
+                Some("browsingContext.getTree") => {
+                    if fail_first_tree.swap(false, Ordering::Relaxed) {
+                        json!({})
+                    } else {
+                        json!({"contexts": *browser_tree.lock().unwrap()})
+                    }
+                }
+                Some("browsingContext.create") => {
+                    browser_tree
+                        .lock()
+                        .unwrap()
+                        .push(json!({"context":"ctx-new", "url":"about:blank"}));
+                    json!({"context":"ctx-new"})
+                }
+                Some("browsingContext.close") => {
+                    browser_tree
+                        .lock()
+                        .unwrap()
+                        .retain(|c| c["context"] != request["params"]["context"]);
+                    json!({})
+                }
+                Some("script.callFunction") => json!({"type":"success", "result":{
+                    "type":"string", "value": request["params"]["target"]["context"]
+                }}),
+                _ => json!({}),
+            })
+            .await;
+        let mut seen_events = ff.bidi.subscribe_buffered();
+        let activity = Arc::new(IdleActivity::new());
+        let (server, slot) =
+            StreamServer::start_without_client(0, "firefox-test".into(), true, activity.clone())
+                .await
+                .unwrap();
+        let server = Arc::new(server);
+        let mut state = DaemonState::new_with_stream(
+            crate::session_settings::Running::defaults(),
+            Arc::new(crate::session_settings::MemStore::default()),
+            Some(slot),
+            Some(server.clone()),
+            activity,
+        );
+        state.engine = "firefox".into();
+        state.firefox = Some(ff);
+
+        async fn next_tabs(
+            ws: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            until: impl Fn(&Value) -> bool,
+        ) -> Value {
+            loop {
+                let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("timed out waiting for the dashboard tab list")
+                    .expect("stream ended")
+                    .expect("ws error");
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let payload: Value = serde_json::from_str(text).unwrap();
+                if payload["type"] == "tabs" && until(&payload["tabs"]) {
+                    return payload["tabs"].clone();
+                }
+            }
+        }
+
+        state.update_stream_client().await;
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}", server.port()))
+                .await
+                .unwrap();
+        let initial = next_tabs(&mut ws, |tabs| tabs[0]["tabId"] == "t1").await;
+        assert_eq!(initial[0]["active"], true);
+
+        let run = |action: &str, id: &str| json!({"id":id, "action":action});
+        let created = crate::native::actions::execute_command(
+            &json!({"id":"1", "action":"tab_new", "label":"docs"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+        assert_eq!(created["data"]["tabId"], "t2");
+        let tabs = next_tabs(&mut ws, |tabs| tabs[1]["label"] == "docs").await;
+        assert_eq!(tabs[1]["active"], true);
+        let listed =
+            crate::native::actions::execute_command(&run("tab_list", "2"), &mut state).await;
+        assert_eq!(listed["data"]["tabs"], tabs);
+        let switched = crate::native::actions::execute_command(
+            &json!({"id":"3", "action":"tab_switch", "tabId":"t1"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(switched["success"], true, "{switched}");
+        let tabs = next_tabs(&mut ws, |tabs| tabs[0]["active"] == true).await;
+        assert_eq!(tabs[0]["active"], true);
+        assert_eq!(
+            server.firefox_live_context().await.as_deref(),
+            Some("ctx-active")
+        );
+        let closed = crate::native::actions::execute_command(
+            &json!({"id":"4", "action":"tab_close", "tabId":"docs"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(closed["success"], true, "{closed}");
+        let tabs = next_tabs(&mut ws, |tabs| tabs.as_array().unwrap().len() == 1).await;
+        assert_eq!(tabs.as_array().unwrap().len(), 1);
+
+        tree.lock()
+            .unwrap()
+            .push(json!({"context":"ctx-external", "url":"https://external.test/"}));
+        events.send(json!({"type":"event", "method":"browsingContext.contextCreated", "params":{"context":"ctx-external", "parent":null}})).unwrap();
+        seen_events.recv().await.unwrap();
+        state.drain_cdp_events_background().await.unwrap();
+        let tabs = next_tabs(&mut ws, |tabs| tabs[1]["url"] == "https://external.test/").await;
+        assert_eq!(tabs[1]["tabId"], "t3");
+
+        tree.lock()
+            .unwrap()
+            .retain(|c| c["context"] != "ctx-active");
+        events.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
+        seen_events.recv().await.unwrap();
+        state.drain_cdp_events_background().await.unwrap();
+        let tabs = next_tabs(&mut ws, |tabs| tabs[0]["tabId"] == "t3").await;
+        assert_eq!(tabs.as_array().unwrap().len(), 1);
+        assert_eq!(tabs[0]["active"], true);
+        assert_eq!(
+            server.firefox_live_context().await.as_deref(),
+            Some("ctx-external")
+        );
+
+        tree.lock().unwrap().clear();
+        events.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-external", "parent":null}})).unwrap();
+        seen_events.recv().await.unwrap();
+        state.drain_cdp_events_background().await.unwrap();
+        assert_eq!(next_tabs(&mut ws, Value::is_array).await, json!([]));
+        server.shutdown().await;
+    }
+
+    use crate::native::bidi::session::tests::{fake_session_with_replies, FakeReply};
 
     #[tokio::test]
     async fn tab_new_returns_with_a_pending_navigation_prompt() {

@@ -5818,7 +5818,12 @@ mod tests {
             let error = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap_err();
             assert!(error.message.contains("may not set"), "{:?}", bad);
         }
-        for ok in [vec!["--engine", "obscura"], vec!["--full"], vec!["-i"]] {
+        for ok in [
+            vec!["--engine", "obscura"],
+            vec!["--engine", "firefox"],
+            vec!["--full"],
+            vec!["-i"],
+        ] {
             let arguments = json!({ "extraArgs": ok });
             assert!(cli_tool_args(&arguments, vec!["open".to_string()], None).is_ok());
         }

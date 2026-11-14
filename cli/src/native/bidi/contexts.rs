@@ -15,6 +15,8 @@ pub struct Tab {
     pub label: Option<String>,
     /// BiDi user context, the cookie jar Firefox reports for this tab.
     pub user_context: String,
+    /// The tab that opened this one as a popup.
+    opener: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,31 +44,45 @@ pub struct Contexts {
     owned_user_contexts: HashSet<String>,
 }
 
+impl Default for Contexts {
+    fn default() -> Self {
+        Self {
+            nodes: HashMap::new(),
+            active: String::new(),
+            next_tab: 1,
+            owned_user_contexts: HashSet::new(),
+        }
+    }
+}
+
 impl Contexts {
     /// Builds the registry from a full `browsingContext.getTree` reply with its first tab active.
     pub fn from_tree(tree: &Value) -> Result<Self, String> {
-        let active = tree["contexts"][0]["context"]
-            .as_str()
-            .ok_or("Firefox reported no browsing context")?
-            .to_string();
         let mut contexts = Self {
-            nodes: HashMap::new(),
-            active,
-            next_tab: 1,
-            owned_user_contexts: HashSet::new(),
+            active: tree["contexts"][0]["context"]
+                .as_str()
+                .ok_or("Firefox reported no browsing context")?
+                .to_string(),
+            ..Self::default()
         };
         contexts.sync(tree);
         Ok(contexts)
     }
 
     /// Records one `browsingContext.Info`, a `getTree` entry or a `contextCreated` event, along
-    /// with the contexts nested in it. Returns true when it became the active context because
-    /// no open tab was active.
+    /// with the contexts nested in it. Returns true when it became the active context: no open
+    /// tab was active, or it is a popup the active tab just opened.
     pub fn record(&mut self, info: &Value) -> bool {
-        self.record_under(info, None);
         let context = info["context"].as_str().unwrap_or_default();
-        let adopted = !self.nodes.contains_key(&self.active)
-            && matches!(self.nodes.get(context), Some(Node::Tab(_)));
+        let known = self.nodes.contains_key(context);
+        self.record_under(info, None);
+        let adopted = match self.nodes.get(context) {
+            Some(Node::Tab(tab)) => {
+                !self.nodes.contains_key(&self.active)
+                    || (!known && tab.opener.as_deref() == Some(self.active_tab()))
+            }
+            _ => false,
+        };
         if adopted {
             self.active = context.to_string();
         }
@@ -93,12 +109,17 @@ impl Contexts {
                 } else {
                     let id = self.next_tab;
                     self.next_tab += 1;
+                    let opener = info["originalOpener"]
+                        .as_str()
+                        .and_then(|opener| self.tab_of(opener))
+                        .map(str::to_string);
                     self.nodes.insert(
                         context.to_string(),
                         Node::Tab(Tab {
                             id,
                             label: None,
                             user_context,
+                            opener,
                         }),
                     );
                 }
@@ -186,17 +207,20 @@ impl Contexts {
             return Removed::default();
         }
         let active_tab = self.active_tab().to_string();
+        let opener = self.tab(&active_tab).and_then(|tab| tab.opener.clone());
         self.nodes.retain(|context, _| !gone.contains(context));
         let active_changed = gone.contains(&self.active);
         if active_changed {
-            self.active = if self.nodes.contains_key(&active_tab) {
-                active_tab
-            } else {
-                self.tabs()
-                    .min_by_key(|(_, tab)| tab.id)
-                    .map(|(context, _)| context.to_string())
-                    .unwrap_or_default()
-            };
+            self.active = [Some(active_tab), opener]
+                .into_iter()
+                .flatten()
+                .find(|context| self.nodes.contains_key(context))
+                .or_else(|| {
+                    self.tabs()
+                        .min_by_key(|(_, tab)| tab.id)
+                        .map(|(context, _)| context.to_string())
+                })
+                .unwrap_or_default();
         }
         Removed {
             contexts: gone,
@@ -390,6 +414,21 @@ mod tests {
         let tab = contexts.tab("tab-b").unwrap();
         assert_eq!((tab.id, tab.label.as_deref()), (2, Some("docs")));
         assert_eq!(contexts.tab("tab-c").unwrap().id, 3);
+    }
+
+    #[test]
+    fn a_popup_takes_over_from_the_tab_that_opened_it_and_hands_back_on_close() {
+        let mut contexts = Contexts::from_tree(&tree()).unwrap();
+        contexts.activate("frame-a");
+        let popup = json!({"context": "popup", "parent": null, "originalOpener": "frame-a-inner"});
+        assert!(contexts.record(&popup));
+        assert_eq!(contexts.active(), "popup");
+        assert!(!contexts.record(&popup));
+        assert!(contexts.remove("popup").active_changed);
+        assert_eq!(contexts.active(), "tab-a");
+        let background = json!({"context": "other", "parent": null, "originalOpener": "tab-b"});
+        assert!(!contexts.record(&background));
+        assert_eq!(contexts.active(), "tab-a");
     }
 
     #[test]

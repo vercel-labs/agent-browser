@@ -4,7 +4,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-use super::bidi::SANDBOX;
+use super::client::SANDBOX;
 use super::daemon::session;
 use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
@@ -359,9 +359,24 @@ pub async fn storage_clear(cmd: &Value, state: &mut DaemonState) -> Result<Value
     Ok(json!({ "cleared": true }))
 }
 
+fn collect_context_ids(contexts: &[Value], out: &mut Vec<(String, String, bool)>, top_level: bool) {
+    for context in contexts {
+        let url = context["url"].as_str().unwrap_or("");
+        if let Some(id) = context["context"]
+            .as_str()
+            .filter(|_| !url.starts_with("about:"))
+        {
+            out.push((id.to_string(), url.to_string(), top_level));
+        }
+        if let Some(children) = context["children"].as_array() {
+            collect_context_ids(children, out, false);
+        }
+    }
+}
+
 /// Reads the storage the browser attributes to `expected_origin` in a sandbox realm, so page
 /// scripts cannot alter the result and a reply claiming another origin is dropped.
-async fn read_origin_storage(
+async fn read_origin(
     ff: &FirefoxSession,
     context: &str,
     expected_origin: &str,
@@ -374,90 +389,17 @@ async fn read_origin_storage(
             ORIGIN_STORAGE_JS,
             vec![json!(expected_origin)],
         )
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to read storage: {e}"))?;
     Ok(state::parse_origin_storage(&data).filter(|storage| storage.origin == expected_origin))
 }
 
-fn collect_context_origins(
-    contexts: &[Value],
-    context_origins: &mut Vec<(String, String)>,
-    active: &mut HashSet<String>,
-) {
-    for context in contexts {
-        if let Some(url) = context["url"]
-            .as_str()
-            .and_then(|url| url::Url::parse(url).ok())
-        {
-            let origin = url.origin();
-            if matches!(url.scheme(), "http" | "https") {
-                active.insert(origin.ascii_serialization());
-            }
-            if origin.is_tuple() {
-                if let Some(id) = context["context"].as_str() {
-                    context_origins.push((id.to_string(), origin.ascii_serialization()));
-                }
-            }
-        }
-        if let Some(children) = context["children"].as_array() {
-            collect_context_origins(children, context_origins, active);
-        }
-    }
+fn has_entries(origin: &OriginStorage) -> bool {
+    !origin.local_storage.is_empty() || !origin.session_storage.is_empty()
 }
 
-async fn collect_origins(
-    ff: &mut FirefoxSession,
-) -> Result<(Vec<OriginStorage>, HashSet<String>, HashSet<String>), String> {
-    let tree = ff.bidi.send("browsingContext.getTree", json!({})).await?;
-    let contexts = tree["contexts"]
-        .as_array()
-        .ok_or("Failed to read active browsing contexts")?;
-    let mut context_origins = Vec::new();
-    let mut active = HashSet::new();
-    for info in contexts
-        .iter()
-        .filter(|info| ff.contexts.in_active_jar(info))
-    {
-        collect_context_origins(
-            std::slice::from_ref(info),
-            &mut context_origins,
-            &mut active,
-        );
-    }
-    let mut seen = HashSet::new();
-    let mut temporary = HashSet::new();
-    let mut origins = Vec::new();
-    for (context, expected_origin) in context_origins {
-        let Ok(Some(origin)) = read_origin_storage(ff, &context, &expected_origin).await else {
-            continue;
-        };
-        if !seen.insert(origin.origin.clone()) {
-            continue;
-        }
-        if !origin.local_storage.is_empty() || !origin.session_storage.is_empty() {
-            origins.push(origin);
-        }
-    }
-
-    let remaining: Vec<_> = ff
-        .visited_origins
-        .difference(&active)
-        .filter(|origin| origin.starts_with("http://") || origin.starts_with("https://"))
-        .cloned()
-        .collect();
-    if !remaining.is_empty() {
-        for mut storage in collect_via_temp_context(ff, &remaining).await? {
-            seen.insert(storage.origin.clone());
-            temporary.insert(storage.origin.clone());
-            storage.session_storage.clear();
-            if !storage.local_storage.is_empty() {
-                origins.push(storage);
-            }
-        }
-    }
-
-    Ok((origins, seen, temporary))
-}
-
+/// Reads each origin's storage from a throwaway background tab whose requests are answered
+/// with a blank page, so the active page never moves and no origin's server is contacted.
 async fn collect_via_temp_context(
     ff: &mut FirefoxSession,
     origins: &[String],
@@ -473,35 +415,113 @@ async fn collect_via_temp_context(
         .ok_or("Firefox did not return a context id for the storage tab")?
         .to_string();
     ff.net.blank_contexts.write().await.insert(context.clone());
-    let result = async {
-        let mut found = Vec::new();
-        for origin in origins {
-            let allowed = {
-                let filter = ff.net.domain_filter.read().await;
-                crate::native::network::check_navigation_allowed(filter.as_ref(), origin).is_ok()
-            };
-            if !allowed {
-                continue;
-            }
-            ff.bidi
-                .send(
-                    "browsingContext.navigate",
-                    json!({"context": context, "url": format!("{origin}/"), "wait": "complete"}),
-                )
-                .await?;
-            if let Some(storage) = read_origin_storage(ff, &context, origin).await? {
-                found.push(storage);
-            }
-        }
-        Ok(found)
-    }
-    .await;
+    let result = read_origins_in(ff, &context, origins).await;
     ff.net.blank_contexts.write().await.remove(&context);
     let _ = ff
         .bidi
         .send("browsingContext.close", json!({"context": context}))
         .await;
     result
+}
+
+async fn read_origins_in(
+    ff: &FirefoxSession,
+    context: &str,
+    origins: &[String],
+) -> Result<Vec<OriginStorage>, String> {
+    let mut found = Vec::new();
+    for origin in origins {
+        let allowed = {
+            let filter = ff.net.domain_filter.read().await;
+            crate::native::network::check_navigation_allowed(filter.as_ref(), origin).is_ok()
+        };
+        if !allowed {
+            continue;
+        }
+        ff.bidi
+            .send(
+                "browsingContext.navigate",
+                json!({"context": context, "url": format!("{origin}/"), "wait": "complete"}),
+            )
+            .await
+            .map_err(|e| format!("Failed to read storage for {origin}: {e}"))?;
+        if let Some(data) = read_origin(ff, context, origin).await? {
+            found.push(data);
+        }
+    }
+    Ok(found)
+}
+
+/// Collects open and previously visited origins, returning which origins were readable, including empty ones.
+/// Protocol failures abort the save; unavailable storage is omitted so autosave can keep its previous value.
+async fn collect_origins(
+    ff: &mut FirefoxSession,
+) -> Result<(Vec<OriginStorage>, HashSet<String>, HashSet<String>), String> {
+    let tree = ff.bidi.send("browsingContext.getTree", json!({})).await?;
+    let contexts = tree["contexts"]
+        .as_array()
+        .ok_or("Failed to read active browsing contexts")?;
+    let mut ids = Vec::new();
+    for info in contexts
+        .iter()
+        .filter(|info| ff.contexts.in_active_jar(info))
+    {
+        collect_context_ids(std::slice::from_ref(info), &mut ids, true);
+    }
+    let mut open = HashSet::new();
+    let mut read = HashSet::new();
+    let mut seen = HashSet::new();
+    let mut temporary = HashSet::new();
+    let mut origins = Vec::new();
+    for (id, url, top_level) in ids {
+        let Some(expected_origin) = url::Url::parse(&url)
+            .ok()
+            .map(|url| url.origin())
+            .filter(url::Origin::is_tuple)
+            .map(|origin| origin.ascii_serialization())
+        else {
+            continue;
+        };
+        ff.visited_origins.insert(expected_origin.clone());
+        open.insert(expected_origin.clone());
+        let origin = match read_origin(ff, &id, &expected_origin).await {
+            Ok(origin) => origin,
+            Err(error) if !top_level => {
+                eprintln!("Skipping unreadable Firefox child context {id}: {error}");
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(origin) = origin else {
+            continue;
+        };
+        ff.visited_origins.insert(origin.origin.clone());
+        open.insert(origin.origin.clone());
+        read.insert(origin.origin.clone());
+        if has_entries(&origin) && seen.insert(origin.origin.clone()) {
+            origins.push(origin);
+        }
+    }
+    let remaining: Vec<String> = ff
+        .visited_origins
+        .iter()
+        .filter(|origin| {
+            (origin.starts_with("http://") || origin.starts_with("https://"))
+                && !open.contains(*origin)
+        })
+        .cloned()
+        .collect();
+    if !remaining.is_empty() {
+        for mut origin in collect_via_temp_context(ff, &remaining).await? {
+            read.insert(origin.origin.clone());
+            temporary.insert(origin.origin.clone());
+            origin.session_storage.clear();
+            if has_entries(&origin) && seen.insert(origin.origin.clone()) {
+                origins.push(origin);
+            }
+        }
+    }
+    Ok((origins, read, temporary))
 }
 
 async fn write_state_to(
@@ -702,6 +722,141 @@ pub async fn state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::bidi::session::tests::fake_session_with;
+    use crate::test_utils::EnvGuard;
+    use std::fs;
+
+    fn origin_result(origin: &str) -> Value {
+        json!({
+            "type": "success",
+            "result": {
+                "type": "object",
+                "value": [
+                    ["origin", {"type": "string", "value": origin}],
+                    ["localStorage", {"type": "array", "value": []}],
+                    ["sessionStorage", {"type": "array", "value": []}]
+                ]
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn collect_origins_marks_every_read_origin_as_visited() {
+        let (mut ff, tx, _calls) = fake_session_with(|req| match req["method"].as_str() {
+            Some("browsingContext.getTree") => json!({
+                "contexts": [
+                    {"context": "ctx-1", "url": "https://one.test/"},
+                    {"context": "ctx-2", "url": "https://two.test/"}
+                ]
+            }),
+            Some("script.callFunction") => {
+                let context = req["params"]["target"]["context"].as_str().unwrap_or("");
+                let origin = if context == "ctx-1" {
+                    "https://one.test"
+                } else {
+                    "https://two.test"
+                };
+                origin_result(origin)
+            }
+            _ => json!({}),
+        })
+        .await;
+        std::mem::forget(tx);
+
+        let (origins, seen, _) = collect_origins(&mut ff).await.unwrap();
+
+        assert!(origins.is_empty());
+        assert_eq!(seen, ff.visited_origins);
+        assert_eq!(
+            ff.visited_origins,
+            HashSet::from([
+                "https://one.test".to_string(),
+                "https://two.test".to_string()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_open_storage_is_unread_and_is_not_retried_in_a_blank_tab() {
+        let (mut ff, tx, calls) = fake_session_with(|req| match req["method"].as_str() {
+            Some("browsingContext.getTree") => json!({
+                "contexts": [{"context": "ctx-1", "url": "https://one.test/"}]
+            }),
+            Some("script.callFunction") => json!({
+                "type": "success", "result": {"type": "null"}
+            }),
+            _ => json!({}),
+        })
+        .await;
+        std::mem::forget(tx);
+
+        let (origins, seen, _) = collect_origins(&mut ff).await.unwrap();
+
+        assert!(origins.is_empty());
+        assert!(seen.is_empty());
+        assert!(ff.visited_origins.contains("https://one.test"));
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|method| method == "browsingContext.create"));
+    }
+
+    #[tokio::test]
+    async fn unreadable_child_context_does_not_abort_state_collection() {
+        let (mut ff, tx, _calls) = fake_session_with(|req| match req["method"].as_str() {
+            Some("browsingContext.getTree") => json!({
+                "contexts": [{
+                    "context": "ctx-page",
+                    "url": "https://one.test/",
+                    "children": [{"context": "ctx-frame", "url": "https://frame.test/"}]
+                }]
+            }),
+            Some("script.callFunction") if req["params"]["target"]["context"] == "ctx-frame" => {
+                json!({
+                    "type": "exception",
+                    "exceptionDetails": {"text": "no such frame"}
+                })
+            }
+            Some("script.callFunction") => origin_result("https://one.test"),
+            _ => json!({}),
+        })
+        .await;
+        std::mem::forget(tx);
+
+        let (_, seen, _) = collect_origins(&mut ff).await.unwrap();
+
+        assert_eq!(seen, HashSet::from(["https://one.test".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn failed_collection_keeps_the_previous_auto_state_file() {
+        let guard = EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
+        let home = tempfile::tempdir().unwrap();
+        guard.set("HOME", home.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        let (_, final_path) = state::auto_state_paths("saved", "id").unwrap();
+        fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+        fs::write(&final_path, "previous").unwrap();
+
+        let (mut ff, tx, _calls) = fake_session_with(|req| match req["method"].as_str() {
+            Some("browsingContext.getTree") => json!({
+                "contexts": [{"context": "ctx-1", "url": "https://one.test/"}]
+            }),
+            Some("script.callFunction") => json!({
+                "type": "exception",
+                "exceptionDetails": {"text": "storage unavailable"}
+            }),
+            _ => json!({}),
+        })
+        .await;
+        std::mem::forget(tx);
+
+        let error = save_auto_state(&mut ff, "saved", "id").await.unwrap_err();
+
+        assert!(error.contains("storage unavailable"), "{error}");
+        assert_eq!(fs::read_to_string(&final_path).unwrap(), "previous");
+    }
 
     type Requests = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
 
@@ -737,7 +892,7 @@ mod tests {
             }
         });
         let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
-        ff.bidi = super::super::bidi::BidiClient::connect(&url)
+        ff.bidi = super::super::client::BidiClient::connect(&url)
             .await
             .unwrap()
             .into();
@@ -885,7 +1040,11 @@ mod tests {
             }
         });
         let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
-        ff.bidi = std::sync::Arc::new(super::super::bidi::BidiClient::connect(&url).await.unwrap());
+        ff.bidi = std::sync::Arc::new(
+            super::super::client::BidiClient::connect(&url)
+                .await
+                .unwrap(),
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(

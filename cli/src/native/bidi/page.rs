@@ -305,7 +305,7 @@ pub async fn waitforfunction(cmd: &Value, state: &mut DaemonState) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{
+    use crate::native::bidi::session::tests::{
         fake_session, fake_session_with, fake_session_with_replies, FakeReply,
     };
 

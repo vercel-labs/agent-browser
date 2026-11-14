@@ -53,7 +53,7 @@ The CLI sends each command to a background daemon that starts on the first comma
 
 Chrome for Testing is the default browser. You can also attach to a running Chrome with `--cdp` or `--auto-connect` ([CDP mode](https://agent-browser.dev/cdp-mode)), select the [Lightpanda](https://agent-browser.dev/engines/lightpanda) or [Obscura](https://agent-browser.dev/engines/obscura) engine with `--engine`, drive Mobile Safari in the [iOS Simulator](https://agent-browser.dev/ios), or use a cloud browser provider such as [Browserbase](https://agent-browser.dev/providers/browserbase), [Browserless](https://agent-browser.dev/providers/browserless), [Browser Use](https://agent-browser.dev/providers/browser-use), [Kernel](https://agent-browser.dev/providers/kernel), or [AgentCore](https://agent-browser.dev/providers/agentcore).
 
-Select Firefox with `--engine firefox`.
+Select Firefox with `--engine firefox`. It requires Firefox 150 or newer, uses WebDriver BiDi and Firefox's DevTools accessibility tree for snapshots, and starts with a fresh temporary profile. See the [Firefox engine guide](https://agent-browser.dev/engines/firefox).
 
 ## For AI agents
 

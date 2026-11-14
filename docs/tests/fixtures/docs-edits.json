@@ -2,8 +2,8 @@
   "pages": {
     "/commands": [
       {
-        "from": "# Browser engine: chrome (default), lightpanda, obscura (experimental)",
-        "to": "# Browser engine: chrome (default), lightpanda, obscura, firefox"
+        "from": "--engine <name>          # Browser engine: chrome (default), lightpanda, obscura (experimental)",
+        "to": "--engine <name>          # Browser engine: chrome (default), lightpanda, obscura, firefox"
       },
       {
         "from": "agent-browser type <sel> <text>       # Type into element",
@@ -75,6 +75,14 @@
       }
     ],
     "/configuration": [
+      {
+        "from": "Browser engine to use: chrome (default), lightpanda, obscura (experimental).",
+        "to": "Browser engine to use: chrome (default), lightpanda, firefox, obscura (experimental)."
+      },
+      {
+        "from": "<code>chrome</code> (default), <code>lightpanda</code>, <code>obscura</code> (experimental)",
+        "to": "<code>chrome</code> (default), <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code> (experimental)"
+      },
       {
         "from": "This initial implementation does not support",
         "to": "Browser trust does not support"
@@ -178,6 +186,14 @@
       {
         "from": "<tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance.</td><td>(disabled)</td></tr>",
         "to": "<tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance. <code>0</code>, <code>false</code>, <code>no</code> or an empty value leave it off.</td><td>(disabled)</td></tr>"
+      },
+      {
+        "from": "<tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>obscura</code>)</td></tr>",
+        "to": "<tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code>)</td></tr>"
+      },
+      {
+        "from": "string (chrome, lightpanda, obscura)",
+        "to": "string (chrome, lightpanda, firefox, obscura)"
       },
       {
         "from": "anthropic/claude-sonnet-4.6",
@@ -302,6 +318,22 @@
       {
         "from": "Or in your agent-browser.json config:",
         "to": "Or in ~/.agent-browser/config.json or a file loaded with --config:"
+      },
+      {
+        "from": "Use the `--engine` flag to select Obscura:",
+        "to": "Set `--engine` on the command that launches the browser. Later commands in the same session use Obscura without the flag:"
+      },
+      {
+        "from": "Use the --engine flag to select Obscura:",
+        "to": "Set --engine on the command that launches the browser. Later commands in the same session use Obscura without the flag:"
+      },
+      {
+        "from": "agent-browser --engine obscura snapshot",
+        "to": "agent-browser snapshot"
+      },
+      {
+        "from": "agent-browser --engine obscura screenshot",
+        "to": "agent-browser screenshot"
       }
     ],
     "/eve": [
@@ -346,6 +378,16 @@
         "to": "vercel: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens, and view them at a different feature flag variant with a per-browser override cookie."
       }
     ],
+    "/streaming": [
+      {
+        "from": "Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.",
+        "to": "Browser clients must load over HTTP or HTTPS from the same loopback host and port as the stream socket (`localhost`, `127.0.0.1` or `::1`). Any other origin, including `file://`, gets a 403 on the upgrade and needs a proxy. A client that sends no Origin header, such as a server-side bridge, can connect."
+      },
+      {
+        "from": "Browser clients must load from localhost, 127.0.0.1, ::1 or file://. Any other origin gets a 403 on the upgrade and needs a proxy.",
+        "to": "Browser clients must load over HTTP or HTTPS from the same loopback host and port as the stream socket (localhost, 127.0.0.1 or ::1). Any other origin, including file://, gets a 403 on the upgrade and needs a proxy. A client that sends no Origin header, such as a server-side bridge, can connect."
+      }
+    ],
     "/webgpu": [
       {
         "from": "Also available as the `AGENT_BROWSER_WEBGPU` environment variable or `\"webgpu\": true` in `agent-browser.json`.",
@@ -381,8 +423,8 @@
   },
   "resources": {
     "/schema.json": {
-      "size": 9813,
-      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
+      "size": 9824,
+      "sha256": "843f3ccc1c53733d751a2d91c518f22734f59125aff081e0592c4b9701482603"
     }
   }
 }

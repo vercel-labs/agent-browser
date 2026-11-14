@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use serde_json::{json, Value};
 
-use super::bidi::BidiClient;
+use super::client::BidiClient;
 use super::daemon::session;
 use crate::native::actions::DaemonState;
 
@@ -139,8 +139,8 @@ fn set_permission(name: &str, state: &str, origin: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::network::spawn_dispatcher;
-    use crate::native::firefox::session::tests::{
+    use crate::native::bidi::network::spawn_dispatcher;
+    use crate::native::bidi::session::tests::{
         fake_session, fake_session_with_rdp, fake_session_with_replies, FakeReply,
     };
     use std::time::Duration;
@@ -152,7 +152,7 @@ mod tests {
             .collect()
     }
 
-    fn state_with(ff: crate::native::firefox::session::FirefoxSession) -> DaemonState {
+    fn state_with(ff: crate::native::bidi::session::FirefoxSession) -> DaemonState {
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state
@@ -291,7 +291,7 @@ mod tests {
         let ff = state.firefox.as_ref().unwrap();
         let _dispatcher = spawn_dispatcher(
             bidi.clone(),
-            crate::native::firefox::network::NetContext::default(),
+            crate::native::bidi::network::NetContext::default(),
             bidi.subscribe_buffered(),
             ff.emulation.clone(),
             ff.permissions.clone(),

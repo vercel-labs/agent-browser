@@ -145,13 +145,38 @@ fn is_same_origin_command_request(request: &str) -> bool {
     }
 }
 
-fn command_cors_headers(request: &str) -> String {
+/// Allows session metadata reads from same-origin pages and local clients: an
+/// `Origin` must match the loopback `Host`, and a request without `Origin`
+/// must still name a loopback `Host` so DNS rebinding cannot borrow the name.
+fn is_trusted_read_request(request: &str) -> bool {
+    if request_header_value(request, "origin").is_some() {
+        header_authority_matches_host(request, "origin")
+    } else {
+        request_header_value(request, "host")
+            .map(normalize_host_authority)
+            .is_some_and(|host| is_loopback_authority(&host))
+    }
+}
+
+fn reflected_cors_headers(request: &str, allowed_methods: &str, same_origin: bool) -> String {
     match request_header_value(request, "origin") {
-        Some(origin) if is_same_origin_command_request(request) => format!(
-            "Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\n"
+        Some(origin) if same_origin => format!(
+            "Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: {allowed_methods}\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\n"
         ),
         _ => String::new(),
     }
+}
+
+fn command_cors_headers(request: &str) -> String {
+    reflected_cors_headers(
+        request,
+        "POST, OPTIONS",
+        is_same_origin_command_request(request),
+    )
+}
+
+fn tabs_cors_headers(request: &str) -> String {
+    reflected_cors_headers(request, "GET, OPTIONS", is_trusted_read_request(request))
 }
 
 async fn write_json_error_response_no_cors(
@@ -189,18 +214,26 @@ pub(super) async fn handle_http_request(
     let origin = parse_origin(peeked);
 
     if method == "OPTIONS" {
-        if path == "/api/command" {
-            if !is_same_origin_command_request(&request) {
-                write_json_error_response_no_cors(
-                    &mut stream,
-                    "403 Forbidden",
+        if path == "/api/command" || path == "/api/tabs" {
+            let (trusted, cors_headers, error) = if path == "/api/tabs" {
+                (
+                    is_trusted_read_request(&request),
+                    tabs_cors_headers(&request),
+                    "Origin does not match Host header.",
+                )
+            } else {
+                (
+                    is_same_origin_command_request(&request),
+                    command_cors_headers(&request),
                     "Origin or Referer does not match Host header.",
                 )
-                .await;
+            };
+
+            if !trusted {
+                write_json_error_response_no_cors(&mut stream, "403 Forbidden", error).await;
                 return;
             }
 
-            let cors_headers = command_cors_headers(&request);
             let response = format!(
                 "HTTP/1.1 204 No Content\r\n{cors_headers}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
@@ -300,20 +333,35 @@ pub(super) async fn handle_http_request(
         return;
     }
 
+    if method == "GET" && path == "/api/tabs" {
+        if !is_trusted_read_request(&request) {
+            write_json_error_response_no_cors(
+                &mut stream,
+                "403 Forbidden",
+                "Origin does not match Host header.",
+            )
+            .await;
+            return;
+        }
+
+        let body = serde_json::to_string(&*last_tabs.read().await)
+            .unwrap_or_else(|_| "[]".to_string())
+            .into_bytes();
+        let cors_headers = tabs_cors_headers(&request);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.write_all(&body).await;
+        return;
+    }
+
     let (status, content_type, body): (&str, &str, Vec<u8>) = if path == "/api/sessions" {
         (
             "200 OK",
             "application/json; charset=utf-8",
             discover_sessions().into_bytes(),
-        )
-    } else if path == "/api/tabs" {
-        let tabs = last_tabs.read().await;
-        (
-            "200 OK",
-            "application/json; charset=utf-8",
-            serde_json::to_string(&*tabs)
-                .unwrap_or_else(|_| "[]".to_string())
-                .into_bytes(),
         )
     } else if path == "/api/status" {
         let engine = last_engine.read().await;
@@ -523,10 +571,18 @@ mod tests {
     }
 
     async fn send_request_to_handler(request: &str, session_name: &str) -> String {
+        send_request_to_handler_with_tabs(request, session_name, Vec::new()).await
+    }
+
+    async fn send_request_to_handler_with_tabs(
+        request: &str,
+        session_name: &str,
+        tabs: Vec<Value>,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let peeked = request.as_bytes().to_vec();
-        let last_tabs = Arc::new(RwLock::new(Vec::new()));
+        let last_tabs = Arc::new(RwLock::new(tabs));
         let last_engine = Arc::new(RwLock::new("chrome".to_string()));
         let session_name = session_name.to_string();
 
@@ -748,5 +804,133 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(relayed.contains(r#""action":"tabs""#), "{relayed}");
+    }
+
+    fn cached_tabs() -> Vec<Value> {
+        vec![json!({
+            "title": "Secret Account",
+            "url": "https://secret.example/account",
+            "active": true,
+        })]
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_tabs_get_is_rejected_without_tab_data() {
+        let request = concat!(
+            "GET /api/tabs HTTP/1.1\r\n",
+            "Host: 127.0.0.1:7777\r\n",
+            "Origin: https://evil.example\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler_with_tabs(request, "x", cached_tabs()).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin"),
+            "forbidden tabs response exposed CORS: {response}"
+        );
+        assert!(
+            !response.contains("secret.example"),
+            "forbidden tabs response leaked tab data: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tabs_get_with_dns_rebinding_host_is_rejected() {
+        let request = concat!(
+            "GET /api/tabs HTTP/1.1\r\n",
+            "Host: attacker.example:7777\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler_with_tabs(request, "x", cached_tabs()).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("secret.example"),
+            "forbidden tabs response leaked tab data: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_tabs_preflight_is_rejected_without_wildcard_cors() {
+        let request = concat!(
+            "OPTIONS /api/tabs HTTP/1.1\r\n",
+            "Host: 127.0.0.1:7777\r\n",
+            "Origin: https://evil.example\r\n",
+            "Access-Control-Request-Method: GET\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler(request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin"),
+            "forbidden tabs preflight exposed CORS: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loopback_tabs_get_returns_tabs_without_wildcard_cors() {
+        let request = concat!(
+            "GET /api/tabs HTTP/1.1\r\n",
+            "Host: 127.0.0.1:7777\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler_with_tabs(request, "x", cached_tabs()).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            response.contains("https://secret.example/account"),
+            "loopback tabs response did not return tab data: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin"),
+            "loopback tabs response exposed CORS: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_origin_tabs_get_reflects_origin() {
+        let request = concat!(
+            "GET /api/tabs HTTP/1.1\r\n",
+            "Host: 127.0.0.1:7777\r\n",
+            "Origin: http://127.0.0.1:7777\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler_with_tabs(request, "x", cached_tabs()).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            response.contains("https://secret.example/account"),
+            "same-origin tabs response did not return tab data: {response}"
+        );
+        assert!(
+            response.contains("Access-Control-Allow-Origin: http://127.0.0.1:7777"),
+            "same-origin tabs response did not reflect origin: {response}"
+        );
+        assert!(
+            response.contains("Vary: Origin"),
+            "same-origin tabs response did not vary on origin: {response}"
+        );
     }
 }

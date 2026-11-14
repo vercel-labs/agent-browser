@@ -470,7 +470,7 @@ pub async fn upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session, fake_session_with, Calls};
+    use crate::native::bidi::session::tests::{fake_session, fake_session_with, Calls};
 
     fn state_with(ff: FirefoxSession) -> DaemonState {
         let mut state = DaemonState::new();
@@ -553,6 +553,51 @@ mod tests {
         assert!(paths[0].ends_with("fixture.txt"));
         assert!(Path::new(&files[1]).is_absolute(), "{}", files[1]);
         assert_eq!(paths[1], absolute);
+    }
+
+    #[tokio::test]
+    async fn insert_text_scripts_the_literal_text_without_key_events() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let (ff, _tx, calls) = fake_session_with(move |req| {
+            if req["method"] == "script.callFunction" {
+                log.lock().unwrap().push(req["params"].clone());
+                if req["params"]["functionDeclaration"] == FOCUSED_FRAME_CONTEXT_JS {
+                    return json!({"type": "success", "result": {"type": "null"}});
+                }
+            }
+            json!({"type": "success", "result": {"type": "string", "value": "ok"}})
+        })
+        .await;
+        let mut state = state_with(ff);
+
+        inserttext(&json!({"text": "a\n\tb"}), &mut state)
+            .await
+            .unwrap();
+        keyboard(
+            &json!({"subaction": "insertText", "text": "c\nd"}),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), ["script.callFunction"; 4]);
+        let params: Vec<_> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p["functionDeclaration"] != FOCUSED_FRAME_CONTEXT_JS)
+            .cloned()
+            .collect();
+        assert_eq!(params.len(), 2);
+        assert_eq!(
+            params[0]["arguments"][0],
+            json!({"type": "string", "value": "a\n\tb"})
+        );
+        assert_eq!(
+            params[1]["arguments"][0],
+            json!({"type": "string", "value": "c\nd"})
+        );
     }
 
     #[tokio::test]

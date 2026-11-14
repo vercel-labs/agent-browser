@@ -209,7 +209,7 @@ fn neterror_message(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::bidi::session::tests::fake_session;
 
     #[test]
     fn neterror_url_becomes_chromes_message() {
@@ -330,7 +330,7 @@ mod tests {
     async fn reload_and_history_report_the_url_of_the_tab() {
         let tree = json!({"contexts": [{"context": "ctx-active", "url": "https://tab.example/"}]});
         let (ff, _events, calls) =
-            crate::native::firefox::session::tests::fake_session_with_trees(vec![tree]).await;
+            crate::native::bidi::session::tests::fake_session_with_trees(vec![tree]).await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
 

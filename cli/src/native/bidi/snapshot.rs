@@ -5,8 +5,8 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
-use super::bidi::SANDBOX;
-use super::rdp::RdpClient;
+use super::client::SANDBOX;
+use super::firefox_devtools::RdpClient;
 use super::session::FirefoxSession;
 use super::target::find_element;
 use crate::native::actions::{self as chrome, DaemonState};
@@ -903,7 +903,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_frame_actor_fails_before_snapshot_returns_partial_tree() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         ff.frames = Some(FrameWatch {
             events: ff.rdp.subscribe(),
             actors: HashMap::new(),
@@ -925,7 +925,7 @@ mod tests {
 
     #[tokio::test]
     async fn lagged_frame_events_do_not_abort_wait() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         let (tx, events) = broadcast::channel(1024);
         ff.frames = Some(FrameWatch {
             events,
@@ -958,7 +958,7 @@ mod tests {
 
     #[tokio::test]
     async fn closed_frame_events_report_a_terminal_error() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         let (tx, events) = broadcast::channel(1024);
         drop(tx);
         ff.frames = Some(FrameWatch {
@@ -984,12 +984,12 @@ mod tests {
     async fn tab_lookup_session(
         answer: impl Fn(&str, &str) -> Option<Value> + Send + 'static,
     ) -> FirefoxSession {
-        use crate::native::firefox::rdp::tests::{get, pair, put};
+        use crate::native::bidi::firefox_devtools::tests::{get, pair, put};
 
         let secret = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let placed = secret.clone();
         let (mut ff, _, _) =
-            crate::native::firefox::session::tests::fake_session_with(move |v: &Value| {
+            crate::native::bidi::session::tests::fake_session_with(move |v: &Value| {
                 if let Some(value) = v["params"]["arguments"][1]["value"].as_str() {
                     *placed.lock().unwrap() = value.to_string();
                 }
@@ -1262,7 +1262,7 @@ mod tests {
         let mut state = DaemonState::new();
         state.ref_map = map;
         let error =
-            crate::native::firefox::target::resolve_target(&mut state, &format!("@{stale_ref}"))
+            crate::native::bidi::target::resolve_target(&mut state, &format!("@{stale_ref}"))
                 .await
                 .unwrap_err();
         assert_eq!(error, format!("Unknown ref: {stale_ref}"));
@@ -1338,7 +1338,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_capture_without_a_document_change_rolls_back_tracking() {
-        let (mut ff, tx, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, tx, _) = crate::native::bidi::session::tests::fake_session().await;
         std::mem::forget(tx);
         ff.documents.insert("ctx-active".into(), "loader-1".into());
         ff.refs.insert(("ctx-active".into(), "node-1".into()), 7);
@@ -1365,7 +1365,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_capture_after_a_document_change_invalidates_old_refs() {
-        let (mut ff, tx, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, tx, _) = crate::native::bidi::session::tests::fake_session().await;
         std::mem::forget(tx);
         ff.documents.insert("ctx-active".into(), "loader-1".into());
         ff.refs.insert(("ctx-active".into(), "node-1".into()), 7);

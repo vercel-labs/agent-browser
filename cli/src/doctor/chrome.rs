@@ -111,7 +111,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                 );
             }
         } else if engine == "firefox" {
-            match crate::native::firefox::process::find_firefox(None) {
+            match crate::native::bidi::firefox::find_firefox(None) {
                 Ok(path) => {
                     let version = query_chrome_version(&path)
                         .map(|v| format!("{v} at "))

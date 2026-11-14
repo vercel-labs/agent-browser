@@ -1,52 +1,21 @@
-//! Firefox screenshots and PDF.
+use std::collections::HashMap;
 
 use base64::Engine;
 use serde_json::{json, Value};
 
-use super::bidi::remote_to_json;
+use super::client::remote_to_json;
 use super::daemon::session;
 use super::query;
 use super::target::{resolve_target, Target};
-use crate::native::actions::DaemonState;
+use crate::native::actions::{pdf_save_path, DaemonState};
 use crate::native::screenshot::{
     annotation_overlay_js, annotation_removal_js, filter_annotations, parse_rect,
-    project_annotations, save_screenshot, RawAnnotation, Rect, ScreenshotOptions,
+    project_annotations, save_screenshot, screenshot_format, screenshot_options, RawAnnotation,
+    Rect,
 };
 use crate::native::snapshot::SnapshotOptions;
 
 const NOT_YET: &str = "not yet supported on Firefox";
-
-fn screenshot_format(cmd: &Value) -> String {
-    cmd.get("format")
-        .or_else(|| cmd.get("type"))
-        .and_then(Value::as_str)
-        .unwrap_or("png")
-        .to_string()
-}
-
-fn screenshot_options(cmd: &Value) -> ScreenshotOptions {
-    ScreenshotOptions {
-        selector: cmd
-            .get("selector")
-            .and_then(Value::as_str)
-            .map(String::from),
-        path: cmd.get("path").and_then(Value::as_str).map(String::from),
-        full_page: cmd
-            .get("fullPage")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        format: screenshot_format(cmd),
-        quality: cmd.get("quality").and_then(Value::as_i64).map(|q| q as i32),
-        annotate: cmd
-            .get("annotate")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        output_dir: cmd
-            .get("screenshotDir")
-            .and_then(Value::as_str)
-            .map(String::from),
-    }
-}
 
 fn reject_unsupported_screenshot_options(cmd: &Value) -> Result<(), String> {
     if cmd
@@ -107,27 +76,6 @@ fn pdf_params(cmd: &Value, context: &str) -> Value {
         "orientation": if landscape { "landscape" } else { "portrait" },
         "shrinkToFit": !prefer_css_page_size,
     })
-}
-
-fn pdf_save_path(cmd: &Value) -> String {
-    match cmd.get("path").and_then(Value::as_str) {
-        Some(path) => path.to_string(),
-        None => {
-            let dir = std::env::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".agent-browser")
-                .join("tmp")
-                .join("pdfs");
-            let _ = std::fs::create_dir_all(&dir);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            dir.join(format!("page-{}.pdf", timestamp))
-                .to_string_lossy()
-                .to_string()
-        }
-    }
 }
 
 async fn evaluate(
@@ -198,7 +146,7 @@ async fn frame_offset(
         let parent = parent_context(&tree["contexts"], &current)?;
         let rows = ff
             .bidi
-            .call_function_in_sandbox(&parent, super::bidi::SANDBOX, FRAME_RECTS_JS, vec![])
+            .call_function_in_sandbox(&parent, super::client::SANDBOX, FRAME_RECTS_JS, vec![])
             .await
             .ok()?;
         let row = rows.as_array()?.iter().find(|r| r[0] == current.as_str())?;
@@ -224,14 +172,17 @@ async fn collect_annotations(
             json!({"root": ff.contexts.active_tab()}),
         )
         .await?;
+    let mut targets_by_id = HashMap::with_capacity(ff.refs.len());
+    for (target, id) in &ff.refs {
+        targets_by_id.entry(*id).or_insert(target);
+    }
     let mut annotations = Vec::new();
     let mut overlay_annotations = Vec::new();
     for (ref_id, entry) in state.ref_map.entries_sorted() {
         let Some(id) = entry.backend_node_id else {
             continue;
         };
-        let Some(((context, shared_id), _)) = ff.refs.iter().find(|(_, value)| **value == id)
-        else {
+        let Some(&(context, shared_id)) = targets_by_id.get(&id) else {
             continue;
         };
         let target = Target {

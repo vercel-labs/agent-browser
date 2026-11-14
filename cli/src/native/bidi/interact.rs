@@ -240,7 +240,7 @@ async fn map_mouse_position(
         for (parent, child) in path {
             let frames = ff
                 .bidi
-                .call_function_in_sandbox(&parent, super::bidi::SANDBOX, FRAME_OFFSETS_JS, vec![])
+                .call_function_in_sandbox(&parent, super::client::SANDBOX, FRAME_OFFSETS_JS, vec![])
                 .await?;
             let frame = frames
                 .as_array()
@@ -1213,9 +1213,7 @@ fn dialog_status(dialog: Option<&PendingDialog>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{
-        fake_session_with, fake_session_with_script, Calls,
-    };
+    use crate::native::bidi::session::tests::{fake_session_with, fake_session_with_script, Calls};
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
@@ -1411,9 +1409,9 @@ mod tests {
             wheel(&command, &mut state).await.unwrap();
             let request = requests.lock().unwrap().pop().unwrap();
             let scroll = &request["params"]["actions"][0]["actions"][0];
-            assert_eq!(scroll["x"], json!(expected.0));
-            assert_eq!(scroll["y"], json!(expected.1));
-            assert_eq!(scroll["deltaY"], json!(12.0));
+            assert_eq!(scroll["x"].as_f64(), Some(expected.0));
+            assert_eq!(scroll["y"].as_f64(), Some(expected.1));
+            assert_eq!(scroll["deltaY"].as_f64(), Some(12.0));
             assert_eq!((state.mouse_state.x, state.mouse_state.y), expected);
             assert_eq!(state.mouse_state.buttons, 1);
         }
@@ -1445,7 +1443,7 @@ mod tests {
                     .unwrap();
             }
         });
-        ff.bidi = super::super::bidi::BidiClient::connect(&address)
+        ff.bidi = super::super::client::BidiClient::connect(&address)
             .await
             .unwrap()
             .into();
@@ -1826,5 +1824,39 @@ mod tests {
 
         assert!(state.pending_dialog.is_none());
         assert_eq!(*calls.lock().unwrap(), ["browsingContext.handleUserPrompt"]);
+    }
+    #[tokio::test]
+    async fn dialog_targets_the_tab_that_opened_the_prompt() {
+        use crate::native::bidi::session::tests::{fake_session_with_replies, FakeReply};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let (mut ff, _tx, _calls) = fake_session_with_replies(move |request| {
+            recorded.lock().unwrap().push(request.clone());
+            FakeReply::Result(json!({}))
+        })
+        .await;
+        ff.contexts.activate("ctx-active");
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "confirm".into(),
+            message: "sure?".into(),
+            session_id: Some("ctx-other".into()),
+            ..Default::default()
+        });
+
+        dialog(&json!({ "response": "accept" }), &mut state)
+            .await
+            .unwrap();
+
+        let params = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request["method"] == "browsingContext.handleUserPrompt")
+            .map(|request| request["params"].clone())
+            .expect("the prompt command is sent");
+        assert_eq!(params["context"], "ctx-other");
+        assert!(state.pending_dialog.is_none());
     }
 }

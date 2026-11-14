@@ -30,7 +30,7 @@ pub fn forget_context(state: &mut DaemonState, context: &str) -> Result<bool, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::bidi::session::tests::fake_session;
     use serde_json::json;
 
     #[tokio::test]

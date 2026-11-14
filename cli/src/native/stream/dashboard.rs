@@ -1650,4 +1650,66 @@ mod tests {
         assert_eq!(parsed.1, "application/json; charset=utf-8");
         assert_eq!(parsed.2, b"{\"ok\":true}".to_vec());
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn proxied_tabs_request_reaches_session_server_with_loopback_host() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let temp_parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("t");
+        std::fs::create_dir_all(&temp_parent).unwrap();
+        let socket_dir = tempfile::Builder::new()
+            .prefix("dash-")
+            .tempdir_in(temp_parent)
+            .unwrap();
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            socket_dir.path().to_str().unwrap(),
+        );
+        guard.remove("XDG_RUNTIME_DIR");
+
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        std::fs::write(socket_dir.path().join("s.stream"), port.to_string()).unwrap();
+        std::fs::write(
+            socket_dir.path().join("s.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+
+        let upstream_request = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let read = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n[{\"url\":\"/x\"}]",
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&request[..read]).to_string()
+        });
+
+        let (status, _content_type, body) =
+            proxy_session_http_route(port, SessionProxyEndpoint::Tabs)
+                .await
+                .unwrap();
+
+        assert_eq!(status, "200 OK");
+        assert_eq!(body, b"[{\"url\":\"/x\"}]".to_vec());
+
+        let request = upstream_request.await.unwrap();
+        assert!(
+            request.starts_with("GET /api/tabs HTTP/1.1\r\n"),
+            "unexpected upstream request: {request}"
+        );
+        assert!(
+            request.contains(&format!("Host: 127.0.0.1:{port}")),
+            "upstream request did not carry a loopback Host: {request}"
+        );
+        assert!(
+            !request.to_ascii_lowercase().contains("\r\norigin:"),
+            "upstream request unexpectedly carried an Origin: {request}"
+        );
+    }
 }

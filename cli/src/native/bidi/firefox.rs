@@ -76,7 +76,7 @@ pub fn validate_launch(options: &LaunchOptions, flags: LaunchFlags<'_>) -> Resul
         return Err("--capture flow is not supported with --engine firefox".to_string());
     }
     if flags.cdp.is_some() {
-        return unsupported("--cdp");
+        return Err("connect and --cdp are not supported with --engine firefox".to_string());
     }
     if flags.auto_connect {
         return unsupported("--auto-connect");
@@ -179,7 +179,11 @@ fn user_js(download_path: Option<&str>, restrict_webrtc: bool) -> String {
          user_pref(\"dom.w3c_touch_events.enabled\", 1);\n\
          user_pref(\"browser.download.useDownloadDir\", true);\n\
          user_pref(\"browser.download.always_ask_before_handling_new_types\", false);\n\
-         user_pref(\"browser.download.manager.showWhenStarting\", false);\n",
+         user_pref(\"browser.download.manager.showWhenStarting\", false);\n\
+         user_pref(\"permissions.default.geo\", 2);\n\
+         user_pref(\"permissions.default.desktop-notification\", 2);\n\
+         user_pref(\"permissions.default.camera\", 2);\n\
+         user_pref(\"permissions.default.microphone\", 2);\n",
     );
     if restrict_webrtc {
         js.push_str("user_pref(\"media.peerconnection.enabled\", false);\n");
