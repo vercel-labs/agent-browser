@@ -42,7 +42,7 @@ fn unused_loopback_port() -> u16 {
         .port()
 }
 
-fn wait_for_dashboard(address: SocketAddr, host: &str, origin: &str) -> String {
+fn wait_for_dashboard(address: SocketAddr, host: &str, origin: &str, path: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match TcpStream::connect_timeout(&address, Duration::from_millis(100)) {
@@ -50,7 +50,7 @@ fn wait_for_dashboard(address: SocketAddr, host: &str, origin: &str) -> String {
                 stream
                     .write_all(
                         format!(
-                            "GET /api/sessions HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nConnection: close\r\n\r\n"
+                            "GET {path} HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nConnection: close\r\n\r\n"
                         )
                         .as_bytes(),
                     )
@@ -102,6 +102,9 @@ fn run_dashboard(tmp: &TempDir, args: &[&str]) -> Output {
         .args(args)
         .env("AGENT_BROWSER_SOCKET_DIR", socket_dir)
         .env_remove("AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS")
+        .env_remove("AGENT_BROWSER_DASHBOARD_ENGINES")
+        .env_remove("AGENT_BROWSER_DASHBOARD_PROVIDERS")
+        .env_remove("AI_GATEWAY_API_KEY")
         .env("NO_COLOR", "1")
         .output()
         .expect("failed to invoke agent-browser dashboard")
@@ -188,10 +191,56 @@ fn dashboard_listens_on_and_authorizes_ipv6_loopback() {
         SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
         &format!("[::1]:{port}"),
         &format!("http://[::1]:{port}"),
+        "/api/sessions",
     );
     assert!(
         response.starts_with("HTTP/1.1 200 OK"),
         "unexpected IPv6 dashboard response: {response}"
+    );
+}
+
+#[test]
+fn dashboard_config_reports_the_started_engines_and_providers() {
+    let tmp = TempDir::new().unwrap();
+    let _cleanup = DashboardCleanup(&tmp);
+    let port = unused_loopback_port();
+    let port_arg = port.to_string();
+
+    let started = run_dashboard(
+        &tmp,
+        &[
+            "dashboard",
+            "start",
+            "--port",
+            &port_arg,
+            "--engines",
+            "chrome",
+            "--providers",
+            "none",
+            "--json",
+        ],
+    );
+    assert!(
+        started.status.success(),
+        "dashboard start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+
+    let response = wait_for_dashboard(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        &format!("127.0.0.1:{port}"),
+        &format!("http://127.0.0.1:{port}"),
+        "/api/dashboard/config",
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let config: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(
+        config,
+        serde_json::json!({
+            "engines": ["chrome"],
+            "providers": [],
+            "chat": { "enabled": false },
+        })
     );
 }
 
@@ -216,6 +265,8 @@ fn invalid_dashboard_options_fail_without_starting_a_server() {
             "https://dashboard.example.com,invalid",
             "--json",
         ],
+        &["dashboard", "start", "--engines", "firefox", "--json"],
+        &["dashboard", "start", "--providers", "kernel,ios", "--json"],
     ];
 
     for args in cases {
@@ -303,4 +354,25 @@ fn running_dashboard_rejects_configuration_changes() {
     assert!(json_output(&changed)["error"]
         .as_str()
         .is_some_and(|error| error.contains("dashboard stop")));
+
+    let changed = run_dashboard(
+        &tmp,
+        &[
+            "dashboard",
+            "start",
+            "--port",
+            &port_arg,
+            "--allowed-origins",
+            "https://dashboard.example.com,https://second.example.com",
+            "--providers",
+            "none",
+            "--json",
+        ],
+    );
+    assert!(
+        !changed.status.success(),
+        "changed providers unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&changed.stdout),
+        String::from_utf8_lossy(&changed.stderr)
+    );
 }

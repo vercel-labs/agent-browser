@@ -2,6 +2,14 @@
   "pages": {
     "/commands": [
       {
+        "from": "agent-browser dashboard start --allowed-origins <origins> # Allow exact HTTPS reverse-proxied browser origins",
+        "to": "agent-browser dashboard start --allowed-origins <origins> # Allow exact HTTPS reverse-proxied browser origins\nagent-browser dashboard start --engines chrome --providers none # Limit the New Session dialog's options"
+      },
+      {
+        "from": "Stop the running dashboard before changing the port or allowed origins.",
+        "to": "Stop the running dashboard before changing the port, allowed origins, engines, or providers."
+      },
+      {
         "from": "--auto-connect           # Auto-discover and connect to running Chrome",
         "to": "--auto-connect           # Auto-discover and connect to running Chrome\n--no-auto-connect        # Return an --auto-connect session to a local launch (overrides AGENT_BROWSER_AUTO_CONNECT)"
       },
@@ -368,6 +376,18 @@
       {
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
+      },
+      {
+        "from": "stop it before changing the port or allowed origins.",
+        "to": "stop it before changing the port, allowed origins, engines, or providers."
+      },
+      {
+        "from": "The Chat tab is always visible. Set the API key to enable responses:",
+        "to": "The Chat tab appears only when the API key is set. Without it, the dashboard shows no chat and opens on the Activity tab. Set the key before starting the dashboard:"
+      },
+      {
+        "from": "API key for the AI Gateway. Required to enable AI chat responses.",
+        "to": "API key for the AI Gateway. Required for AI chat; without it, the dashboard hides the Chat tab."
       }
     ]
   },

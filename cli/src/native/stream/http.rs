@@ -10,8 +10,8 @@ use crate::connection::resolve_port;
 #[cfg(unix)]
 use crate::session_files::SessionFile;
 
-use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
-use super::dashboard::spawn_session;
+use super::chat::{handle_chat_request, handle_models_request};
+use super::dashboard::{dashboard_config_json, spawn_session};
 use super::discovery::discover_sessions;
 
 #[derive(Embed)]
@@ -322,11 +322,11 @@ pub(super) async fn handle_http_request(
             "application/json; charset=utf-8",
             format!(r#"{{"engine":"{}"}}"#, *engine).into_bytes(),
         )
-    } else if path == "/api/chat/status" {
+    } else if path == "/api/dashboard/config" {
         (
             "200 OK",
             "application/json; charset=utf-8",
-            chat_status_json().into_bytes(),
+            dashboard_config_json().into_bytes(),
         )
     } else {
         serve_embedded_file(path)

@@ -20,7 +20,27 @@ Then open `http://localhost:4848` in your browser to see the live dashboard. If 
 agent-browser dashboard start --allowed-origins https://dashboard.example.com
 ```
 
-All sessions automatically stream to the dashboard. Local loopback origins are allowed automatically over IPv4 and IPv6 without an access token. For a reverse-proxied dashboard, use a comma-separated list of exact origins with `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS`; this lets the dashboard reject cross-origin requests and DNS-rebinding attacks. Every configured origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins. Open the matching URL once to establish the browser session and do not share it. Its unguessable token stays in the initial URL fragment, then the browser stores it in a Secure, host-bound, same-site cookie for dashboard API and stream requests. Open `http://localhost:<port>` directly for local access; the external token is never written to a loopback cookie. Configure the reverse proxy to redact cookies from logs. The browser stays on the dashboard origin while the server proxies per-session tabs, status, and stream traffic internally, so session ports do not need to be exposed. Repeated starts reuse the dashboard only when these settings match; stop it before changing the port or allowed origins.
+All sessions automatically stream to the dashboard. Local loopback origins are allowed automatically over IPv4 and IPv6 without an access token. For a reverse-proxied dashboard, use a comma-separated list of exact origins with `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS`; this lets the dashboard reject cross-origin requests and DNS-rebinding attacks. Every configured origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins. Open the matching URL once to establish the browser session and do not share it. Its unguessable token stays in the initial URL fragment, then the browser stores it in a Secure, host-bound, same-site cookie for dashboard API and stream requests. Open `http://localhost:<port>` directly for local access; the external token is never written to a loopback cookie. Configure the reverse proxy to redact cookies from logs. The browser stays on the dashboard origin while the server proxies per-session tabs, status, and stream traffic internally, so session ports do not need to be exposed. Repeated starts reuse the dashboard only when these settings match; stop it before changing the port, allowed origins, engines, or providers.
+
+### Limit the New Session options
+
+By default, the New Session dialog offers every local engine and cloud provider. To offer fewer, for example when another app embeds the dashboard and manages only local Chrome, pass `--engines` and `--providers`:
+
+```bash
+agent-browser dashboard start --engines chrome --providers none
+```
+
+<table>
+  <thead>
+    <tr><th>Flag</th><th>Environment variable</th><th>Values</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--engines &lt;list&gt;</code></td><td><code>AGENT_BROWSER_DASHBOARD_ENGINES</code></td><td>Comma-separated: <code>chrome</code>, <code>lightpanda</code></td><td>Every engine</td></tr>
+    <tr><td><code>--providers &lt;list|none&gt;</code></td><td><code>AGENT_BROWSER_DASHBOARD_PROVIDERS</code></td><td>Comma-separated: <code>agentcore</code>, <code>browserbase</code>, <code>browserless</code>, <code>browseruse</code>, <code>kernel</code>, or <code>none</code></td><td>Every provider</td></tr>
+  </tbody>
+</table>
+
+Unknown names fail without starting the server. When only one option is left, the dialog hides the browser picker and creates that kind of session. These options only change what the dashboard offers: its API still runs any CLI command.
 
 ### Custom stream port
 
@@ -137,7 +157,7 @@ The dashboard includes an optional AI chat panel powered by the [Vercel AI Gatew
 
 ### Setup
 
-The Chat tab is always visible. Set the API key to enable responses:
+The Chat tab appears only when the API key is set. Without it, the dashboard shows no chat and opens on the Activity tab. Set the key before starting the dashboard:
 
 ```bash
 export AI_GATEWAY_API_KEY=gw_your_key_here
@@ -163,7 +183,7 @@ Chat runs one agent-browser command per tool call. A `;` or `&&` inside a quoted
   </thead>
   <tbody>
     <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
-    <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the AI Gateway. Required to enable AI chat responses.</td><td>(none)</td></tr>
+    <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the AI Gateway. Required for AI chat; without it, the dashboard hides the Chat tab.</td><td>(none)</td></tr>
     <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for chat requests.</td><td><code>openai/gpt-6-luna-fast</code></td></tr>
   </tbody>
 </table>
