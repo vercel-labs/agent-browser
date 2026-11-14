@@ -17738,7 +17738,7 @@ async fn e2e_firefox_resolve_target() {
     tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
     let gone = resolve_target(&mut state, &go).await.unwrap_err();
     assert!(
-        gone.contains("Could not locate element with role=button name=Go"),
+        gone.contains("the page changed since the snapshot"),
         "{gone}"
     );
 

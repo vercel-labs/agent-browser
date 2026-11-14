@@ -43,6 +43,7 @@ pub struct FirefoxSession {
     pub frames: Option<super::snapshot::FrameWatch>,
     /// Document node `sharedId` last snapshotted per context, used to reset `refs` on a new document.
     pub documents: HashMap<String, String>,
+    pub ref_documents: HashMap<String, String>,
     /// Touch points of the active touch sequence, released by a later `input_touch` end.
     pub touches: Vec<(f64, f64)>,
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
@@ -166,6 +167,7 @@ impl FirefoxSession {
             next_node_id: 0,
             frames: None,
             documents: HashMap::new(),
+            ref_documents: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
             visited_origins: HashSet::new(),
@@ -318,6 +320,7 @@ impl FirefoxSession {
             .collect();
         self.refs.retain(|(id, _), _| !gone.contains(id));
         self.documents.retain(|id, _| !gone.contains(id));
+        self.ref_documents.retain(|id, _| !gone.contains(id));
         self.shadow_ids.retain(|id| !stale_ids.contains(id));
         if dialog.as_ref().is_some_and(|d| {
             [&d.owner_context, &d.session_id]
@@ -673,6 +676,7 @@ pub(crate) mod tests {
             next_node_id: 0,
             frames: None,
             documents: HashMap::new(),
+            ref_documents: HashMap::new(),
             touches: Vec::new(),
             shadow_ids: Default::default(),
             visited_origins: HashSet::new(),
