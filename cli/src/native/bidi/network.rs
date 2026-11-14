@@ -162,7 +162,7 @@ impl NetContext {
 }
 
 /// A background task that is aborted when dropped.
-pub struct AbortOnDrop(tokio::task::JoinHandle<()>);
+pub struct AbortOnDrop(pub(crate) tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -1060,7 +1060,14 @@ impl Drop for DownloadStage {
 }
 
 /// `download`: clicks the ref or selector and saves the resulting file at `path`.
+/// Only an owned browser may name files on the daemon's filesystem.
 pub async fn download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if !session(state)?.downloads_are_local() {
+        return Err(
+            "Saving downloads from an attached Firefox is not supported; launch Firefox with --engine firefox instead"
+                .to_string(),
+        );
+    }
     let result = download_to_path(cmd, state).await;
     if let Some(ff) = state.firefox.as_ref() {
         let behavior = match &ff.download_dir {
@@ -1146,7 +1153,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             saved.display()
         ));
     }
-    if !chrome::may_move_download(saved, true, Some(stage_dir)) {
+    if !chrome::may_move_download(saved, ff.downloads_are_local(), Some(stage_dir)) {
         return Err(format!(
             "Refusing to move downloaded file from {}",
             saved.display()
@@ -1156,6 +1163,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 }
 
 /// `waitfordownload`: waits for the next finished download.
+/// Attached browsers report remote paths; never check or move those files locally.
 pub async fn waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let timeout_ms = cmd
         .get("timeout")
@@ -1164,6 +1172,7 @@ pub async fn waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Val
     let ff = session(state)?;
     let downloads = ff.net.downloads.clone();
     let download_dir = ff.download_dir.clone();
+    let launched_locally = ff.downloads_are_local();
     let record = wait_download(
         &downloads,
         0,
@@ -1186,7 +1195,7 @@ pub async fn waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Val
         };
     };
     let saved = std::path::Path::new(&saved);
-    if !chrome::wait_for_downloaded_file(saved).await {
+    if launched_locally && !chrome::wait_for_downloaded_file(saved).await {
         return Err(format!(
             "Download completed but no file is at {}",
             saved.display()
@@ -1195,7 +1204,7 @@ pub async fn waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Val
     let Some(path) = cmd.get("path").and_then(Value::as_str) else {
         return Ok(json!({"path": saved.to_string_lossy()}));
     };
-    if !chrome::may_move_download(saved, true, download_dir.as_deref()) {
+    if !chrome::may_move_download(saved, launched_locally, download_dir.as_deref()) {
         downloads.lock().await.release(&record.guid);
         return Err(format!(
             "Refusing to move downloaded file from {}",
@@ -1278,7 +1287,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn waitfordownload_claims_a_download_that_finished_before_it_started() {
+    async fn attached_waitfordownload_reports_completed_paths_without_local_files() {
         let (ff, _tx, _) = fake_session().await;
         let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let saved = directory.path().join("b.txt");
@@ -1303,20 +1312,75 @@ mod tests {
                 &json!({"navigation": "n1", "download": "d2", "status": "complete", "filepath": saved_path}),
             );
         }
-        let writer_path = saved.clone();
-        let writer = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            std::fs::write(writer_path, b"download").unwrap();
-        });
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
-        let started = tokio::time::Instant::now();
-        let result = waitfordownload(&json!({"timeout": 1000}), &mut state)
-            .await
-            .unwrap();
-        assert!(started.elapsed() >= Duration::from_millis(80));
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            waitfordownload(&json!({"timeout": 1000}), &mut state),
+        )
+        .await
+        .expect("attached downloads must not wait for a local file")
+        .unwrap();
         assert_eq!(result["path"], json!(saved.to_string_lossy()));
-        writer.await.unwrap();
+        assert!(!saved.exists());
+    }
+
+    #[tokio::test]
+    async fn attached_waitfordownload_cannot_move_local_files() {
+        for configured_directory in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let saved = directory.path().join("private.txt");
+            let destination = directory.path().join("output.txt");
+            std::fs::write(&saved, b"private data").unwrap();
+            std::fs::write(&destination, b"keep destination").unwrap();
+            let (mut ff, _tx, _) = fake_session().await;
+            assert!(!ff.downloads_are_local());
+            if configured_directory {
+                ff.download_dir = Some(directory.path().to_string_lossy().into_owned());
+            }
+            ff.net.downloads.lock().await.observe(
+                "browsingContext.downloadEnd",
+                &json!({"download": "forged", "status": "complete", "filepath": saved}),
+            );
+            let mut state = DaemonState::new();
+            state.firefox = Some(ff);
+
+            let error = waitfordownload(&json!({"path": destination, "timeout": 1000}), &mut state)
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("Refusing to move downloaded file"),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&saved).unwrap(), b"private data");
+            assert_eq!(std::fs::read(&destination).unwrap(), b"keep destination");
+
+            // Refusing a local move must not consume the remote download.
+            let result = waitfordownload(&json!({"timeout": 1000}), &mut state)
+                .await
+                .unwrap();
+            assert_eq!(result["path"], json!(saved.to_string_lossy()));
+        }
+    }
+
+    #[tokio::test]
+    async fn attached_download_fails_before_browser_or_filesystem_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("new-directory/output.txt");
+        let (mut ff, _tx, calls) = fake_session().await;
+        ff.download_dir = Some(directory.path().to_string_lossy().into_owned());
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        let error = download(
+            &json!({"selector": "#download", "path": destination}),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("attached Firefox"), "{error}");
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(!destination.parent().unwrap().exists());
     }
 
     fn staged_download_folder(calls: &[Value]) -> std::path::PathBuf {
@@ -1353,7 +1417,7 @@ mod tests {
         .await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
-        let error = download(
+        let error = download_to_path(
             &json!({ "selector": "#dl", "path": dest.to_str().unwrap() }),
             &mut state,
         )

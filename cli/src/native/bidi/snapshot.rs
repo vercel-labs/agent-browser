@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use super::client::SANDBOX;
-use super::firefox_devtools::RdpClient;
+use super::firefox_devtools::{actor_is_gone, RdpClient, Tab};
 use super::session::FirefoxSession;
 use super::target::find_element;
 use crate::native::actions::{self as chrome, DaemonState};
@@ -19,6 +19,9 @@ use crate::native::snapshot::{
 
 const PAINT_WAIT: Duration = Duration::from_millis(500);
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long the selected tab is asked alone before the other tabs are asked too.
+const SELECTED_TAB_HEAD_START: Duration = Duration::from_millis(500);
 
 /// Waits two animation frames so Firefox has applied pending DOM changes to its accessibility tree.
 const SETTLE_JS: &str =
@@ -671,7 +674,7 @@ pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Resu
         ff.bidi.call_function(&top, SETTLE_JS, None, vec![]),
     )
     .await;
-    let tabs = ff.rdp.request("root", "listTabs", json!({})).await?;
+    let tabs = ff.rdp.tabs().await?;
     let (tab, target) = active_tab_target(ff, &top, &tabs, deadline).await?;
     let (mut doc, source) = document_snapshot(&ff.rdp, &target["frame"]).await?;
     Box::pin(annotate(ff, &top, &mut doc, &source, &tab, deadline)).await?;
@@ -839,7 +842,7 @@ async fn probe_tab(
 async fn active_tab_target(
     ff: &FirefoxSession,
     top: &str,
-    tabs: &Value,
+    tabs: &[Tab],
     deadline: tokio::time::Instant,
 ) -> Result<(String, Value), String> {
     let marker = format!("agent-browser-{}", uuid::Uuid::new_v4());
@@ -851,24 +854,35 @@ async fn active_tab_target(
         vec![json!(marker), json!(secret)],
     ).await?;
     let result = tokio::time::timeout_at(deadline, async {
-        let tabs = tabs["tabs"]
-            .as_array()
-            .ok_or("Firefox DevTools reported no tabs")?;
         let (marker, secret) = (marker.as_str(), secret.as_str());
-        let mut probes: FuturesUnordered<_> = tabs
-            .iter()
-            .filter_map(|tab| tab["actor"].as_str())
-            .map(|actor| async move { (actor, probe_tab(&ff.rdp, actor, marker, secret).await) })
-            .collect();
+        let mut loaded: Vec<&Tab> = tabs.iter().filter(|tab| tab.loaded).collect();
+        if let Some(index) = loaded.iter().position(|tab| tab.selected) {
+            let selected = loaded.remove(index);
+            loaded.insert(0, selected);
+        }
+        let mut unasked = loaded
+            .into_iter()
+            .map(|tab| async move { (tab, probe_tab(&ff.rdp, &tab.actor, marker, secret).await) });
+        let mut probes = FuturesUnordered::new();
+        probes.extend(unasked.next());
         let mut failure = None;
-        while let Some((actor, probed)) = probes.next().await {
-            match probed {
-                Ok(Some(target)) => return Ok((actor.to_string(), target)),
-                Ok(None) => {}
-                Err(error) => {
+        let mut answered = tokio::time::timeout(SELECTED_TAB_HEAD_START, probes.next())
+            .await
+            .ok()
+            .flatten();
+        loop {
+            match answered {
+                Some((tab, Ok(Some(target)))) => return Ok((tab.actor.clone(), target)),
+                Some((_, Err(error))) if !actor_is_gone(&error) => {
                     failure.get_or_insert(error);
                 }
+                _ => {}
             }
+            probes.extend(unasked.by_ref());
+            answered = match probes.next().await {
+                None => break,
+                answer => answer,
+            };
         }
         Err(failure.unwrap_or_else(|| "Firefox DevTools could not find the active tab".to_string()))
     })
@@ -1029,7 +1043,7 @@ mod tests {
         ff
     }
 
-    async fn looked_up_tab(ff: &FirefoxSession, tabs: &Value) -> String {
+    async fn looked_up_tab(ff: &FirefoxSession, tabs: &[Tab]) -> String {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let (tab, target) = active_tab_target(ff, "ctx-active", tabs, deadline)
             .await
@@ -1044,7 +1058,18 @@ mod tests {
             (console == "console-active").then(|| json!(secret))
         })
         .await;
-        let tabs = json!({"tabs": [{"actor": "blocked"}, {"actor": "active"}]});
+        let tabs = [
+            Tab {
+                actor: "blocked".into(),
+                selected: true,
+                loaded: true,
+            },
+            Tab {
+                actor: "active".into(),
+                selected: false,
+                loaded: true,
+            },
+        ];
 
         assert_eq!(looked_up_tab(&ff, &tabs).await, "active");
     }
@@ -1059,7 +1084,18 @@ mod tests {
             })
         })
         .await;
-        let tabs = json!({"tabs": [{"actor": "forged"}, {"actor": "active"}]});
+        let tabs = [
+            Tab {
+                actor: "forged".into(),
+                selected: true,
+                loaded: true,
+            },
+            Tab {
+                actor: "active".into(),
+                selected: false,
+                loaded: true,
+            },
+        ];
 
         assert_eq!(looked_up_tab(&ff, &tabs).await, "active");
     }
@@ -1361,6 +1397,102 @@ mod tests {
         assert_eq!(ff.next_node_id, 7);
         assert_eq!(ff.shadow_ids, HashSet::from([7]));
         assert_eq!(ff.documents["ctx-active"], "loader-1");
+    }
+
+    fn tab_descriptor(actor: &str, selected: bool, loaded: bool) -> Value {
+        json!({"actor": actor, "selected": selected, "isZombieTab": !loaded})
+    }
+
+    #[tokio::test]
+    async fn tab_lookup_skips_unloaded_tabs_and_asks_the_selected_tab_first() {
+        let (ff, messages) = crate::native::bidi::session::tests::fake_session_with_rdp_replies(
+            |v: &Value| match (v["to"].as_str().unwrap(), v["type"].as_str().unwrap()) {
+                ("root", "listTabs") => json!({"from": "root", "tabs": [
+                    tab_descriptor("tab-unloaded", false, false),
+                    tab_descriptor("tab-other", false, true),
+                    tab_descriptor("tab-selected", true, true),
+                ]}),
+                ("tab-selected", "getTarget") => {
+                    json!({"from": "tab-selected", "frame": {"consoleActor": "console-selected"}})
+                }
+                ("console-selected", "evaluateJSAsync") => {
+                    json!({"from": "console-selected", "resultID": "r1", "result": true})
+                }
+                ("tab-other", "getTarget") => {
+                    json!({"from": "tab-other", "frame": {"consoleActor": "console-other"}})
+                }
+                ("console-other", "evaluateJSAsync") => {
+                    json!({"from": "console-other", "resultID": "r2", "result": false})
+                }
+                _ => json!({"from": v["to"]}),
+            },
+        )
+        .await;
+
+        let tabs = ff.rdp.tabs().await.unwrap();
+        let (actor, target) = active_tab_target(
+            &ff,
+            "ctx-active",
+            &tabs,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(actor, "tab-selected");
+        assert_eq!(target["frame"]["consoleActor"], "console-selected");
+        let asked: Vec<String> = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m["type"] == "getTarget")
+            .map(|m| m["to"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(asked, vec!["tab-selected".to_string()], "{asked:?}");
+    }
+
+    #[tokio::test]
+    async fn tab_lookup_continues_past_a_tab_that_closed_mid_lookup() {
+        let (ff, _messages) = crate::native::bidi::session::tests::fake_session_with_rdp_replies(
+            |v: &Value| match (v["to"].as_str().unwrap(), v["type"].as_str().unwrap()) {
+                ("root", "listTabs") => json!({"from": "root", "tabs": [
+                    tab_descriptor("tab-selected", true, true),
+                    tab_descriptor("tab-closed", false, true),
+                    tab_descriptor("tab-marker", false, true),
+                ]}),
+                ("tab-selected", "getTarget") => {
+                    json!({"from": "tab-selected", "frame": {"consoleActor": "console-selected"}})
+                }
+                ("console-selected", "evaluateJSAsync") => {
+                    json!({"from": "console-selected", "resultID": "r1", "result": false})
+                }
+                ("tab-closed", "getTarget") => json!({
+                    "from": "tab-closed",
+                    "error": "noSuchActor",
+                    "message": "No such actor for ID: tab-closed",
+                }),
+                ("tab-marker", "getTarget") => {
+                    json!({"from": "tab-marker", "frame": {"consoleActor": "console-marker"}})
+                }
+                ("console-marker", "evaluateJSAsync") => {
+                    json!({"from": "console-marker", "resultID": "r2", "result": true})
+                }
+                _ => json!({"from": v["to"]}),
+            },
+        )
+        .await;
+
+        let tabs = ff.rdp.tabs().await.unwrap();
+        let (actor, _) = active_tab_target(
+            &ff,
+            "ctx-active",
+            &tabs,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(actor, "tab-marker");
     }
 
     #[tokio::test]

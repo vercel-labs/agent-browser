@@ -19,6 +19,7 @@ use crate::test_utils::EnvGuard;
 use super::actions::{
     close_current_browser, execute_command, maybe_autosave_restore_state, DaemonState,
 };
+use super::bidi::firefox as bidi_firefox;
 use super::bidi::target::{resolve_target, Target};
 
 fn assert_success(resp: &Value) {
@@ -16227,6 +16228,31 @@ async fn firefox_title(state: &mut DaemonState) -> String {
     get_data(&resp)["title"].as_str().unwrap().to_string()
 }
 
+async fn firefox_tab_list(state: &mut DaemonState) -> Vec<Value> {
+    let resp = firefox_command(state, json!({ "id": "tabs", "action": "tab_list" })).await;
+    assert_success(&resp);
+    get_data(&resp)["tabs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+async fn firefox_switch_to_title(state: &mut DaemonState, title: &str) {
+    let tabs = firefox_tab_list(state).await;
+    let tab_id = tabs
+        .iter()
+        .find(|tab| tab["title"] == title)
+        .and_then(|tab| tab["tabId"].as_str())
+        .unwrap_or_else(|| panic!("tab_list must include {title:?}: {tabs:?}"));
+    let resp = firefox_command(
+        state,
+        json!({ "id": "switch", "action": "tab_switch", "tabId": tab_id }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(firefox_title(state).await, title);
+}
+
 async fn firefox_ref(state: &mut DaemonState, name: &str) -> String {
     let resp = firefox_command(
         state,
@@ -16256,6 +16282,533 @@ async fn firefox_close(state: &mut DaemonState) {
     let resp = firefox_command(state, json!({ "id": "close", "action": "close" })).await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["closed"], true);
+}
+
+/// A Firefox the test started itself, so the daemon has to attach rather than launch it.
+struct RunningFirefox {
+    child: bidi_firefox::Child,
+    _profile: tempfile::TempDir,
+    bidi_port: u16,
+    devtools_port: u16,
+}
+
+impl RunningFirefox {
+    fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
+impl Drop for RunningFirefox {
+    fn drop(&mut self) {
+        bidi_firefox::kill_tree(&mut self.child);
+    }
+}
+
+fn available_port(exclude: Option<u16>) -> u16 {
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if Some(port) != exclude {
+            return port;
+        }
+    }
+}
+
+fn start_running_firefox(pages: &[&str]) -> RunningFirefox {
+    let bidi_port = available_port(None);
+    let devtools_port = available_port(Some(bidi_port));
+    let profile = tempfile::tempdir().unwrap();
+    std::fs::write(
+        profile.path().join("user.js"),
+        "user_pref(\"devtools.debugger.remote-enabled\", true);\n\
+         user_pref(\"devtools.chrome.enabled\", true);\n\
+         user_pref(\"devtools.debugger.prompt-connection\", false);\n",
+    )
+    .unwrap();
+    let mut args = bidi_firefox::base_args(true);
+    args.extend([
+        "--remote-debugging-port".into(),
+        bidi_port.to_string(),
+        "--start-debugger-server".into(),
+        devtools_port.to_string(),
+        "-profile".into(),
+        profile.path().to_string_lossy().into_owned(),
+        "-no-remote".into(),
+    ]);
+    args.extend(pages.iter().map(|page| (*page).to_string()));
+    let child = bidi_firefox::spawn(
+        std::path::Path::new(&required_firefox_binary()),
+        &args,
+        true,
+    )
+    .expect("Firefox must start");
+    let mut firefox = RunningFirefox {
+        child,
+        _profile: profile,
+        bidi_port,
+        devtools_port,
+    };
+    let stderr = firefox
+        .child
+        .stderr
+        .take()
+        .expect("Firefox stderr is piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut ready = false;
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if !ready && line.contains("WebDriver BiDi listening on") {
+                ready = true;
+                let _ = tx.send(());
+            }
+        }
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(30))
+        .expect("Firefox must report WebDriver BiDi readiness");
+    firefox
+}
+
+/// Attaching over WebDriver BiDi uses the running Firefox, keeps refs and snapshots working, and never owns the process.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_attach_to_running_firefox() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let forms_url = format!("{}forms.html", fixture.url);
+    let mut firefox = start_running_firefox(&[&fixture.url, &forms_url]);
+    let mut state = DaemonState::new();
+
+    let target = format!(
+        "http://127.0.0.1:{}?devtools={}",
+        firefox.bidi_port, firefox.devtools_port
+    );
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.engine, "firefox");
+
+    for _ in 0..100 {
+        let tabs = firefox_tab_list(&mut state).await;
+        let titles: Vec<&str> = tabs
+            .iter()
+            .filter_map(|tab| tab["title"].as_str())
+            .collect();
+        if ["Firefox adapter probe", "Firefox forms"]
+            .iter()
+            .all(|title| titles.contains(title))
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    for title in ["Firefox forms", "Firefox adapter probe"] {
+        firefox_switch_to_title(&mut state, title).await;
+    }
+
+    firefox_open(&mut state, &fixture.url).await;
+    let name = firefox_ref(&mut state, "Name").await;
+    let active_title = firefox_title(&mut state).await;
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "repeat-attach", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["reused"],
+        true,
+        "repeating the same Firefox target must reuse its live session: {resp}"
+    );
+    assert_eq!(firefox_title(&mut state).await, active_title);
+    assert_success(&firefox_act(&mut state, "fill", &name, json!({ "value": "Ada" })).await);
+    let go = firefox_ref(&mut state, "Go").await;
+    assert_success(&firefox_act(&mut state, "click", &go, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "Hello Ada");
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach-again", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["relaunchedBrowser"],
+        false,
+        "attaching to the same target must reuse the active session: {resp}"
+    );
+    firefox_switch_to_title(&mut state, "Hello Ada").await;
+
+    firefox_close(&mut state).await;
+    assert!(
+        firefox.alive(),
+        "close must not stop a Firefox the daemon attached to"
+    );
+
+    let ws_target = format!(
+        "ws://127.0.0.1:{}/session?devtools={}",
+        firefox.bidi_port, firefox.devtools_port
+    );
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach-ws", "action": "launch", "cdpUrl": ws_target }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.engine, "firefox");
+    firefox_switch_to_title(&mut state, "Hello Ada").await;
+    firefox_close(&mut state).await;
+
+    let wrong = available_port(Some(firefox.devtools_port));
+    let target = format!("http://127.0.0.1:{}?devtools={}", firefox.bidi_port, wrong);
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach-bad-devtools", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    let error = resp["error"].as_str().expect("attach must report an error");
+    assert!(
+        error.contains(&format!(
+            "Firefox DevTools server is not reachable at 127.0.0.1:{wrong}"
+        )),
+        "{resp}"
+    );
+    assert!(
+        error.contains(&format!("--start-debugger-server {wrong}")),
+        "{resp}"
+    );
+    assert!(!error.contains("default"), "{resp}");
+    assert!(!error.contains("?devtools="), "{resp}");
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach-after-failure", "action": "launch", "cdpUrl": ws_target }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.engine, "firefox");
+    firefox_switch_to_title(&mut state, "Hello Ada").await;
+    firefox_close(&mut state).await;
+}
+
+/// `--user-agent` reaches an attached Firefox in place, and `close` puts Firefox's own user agent back.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_attach_user_agent_applies_in_place_and_is_reset() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut firefox = start_running_firefox(&[&fixture.url]);
+    let mut state = DaemonState::new();
+
+    let target = format!(
+        "http://127.0.0.1:{}?devtools={}",
+        firefox.bidi_port, firefox.devtools_port
+    );
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    let own = firefox_eval(&mut state, "navigator.userAgent").await;
+    assert!(
+        own.as_str()
+            .is_some_and(|user_agent| user_agent.contains("Firefox")),
+        "the attached browser must report its own user agent: {own}"
+    );
+    let page =
+        "[innerWidth, navigator.language, Intl.DateTimeFormat().resolvedOptions().timeZone].join()";
+    let own_page = firefox_eval(&mut state, page).await;
+
+    let resp = firefox_command(
+        &mut state,
+        json!({
+            "id": "user-agent",
+            "action": "launch",
+            "cdpUrl": target,
+            "settings": { "user-agent": "AttachedUA/1" },
+        }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["relaunchedBrowser"],
+        false,
+        "an in-place setting must not reconnect: {resp}"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        json!("AttachedUA/1")
+    );
+
+    for step in [
+        json!({ "id": "command", "action": "useragent", "userAgent": "CommandUA/1" }),
+        json!({
+            "id": "timeout",
+            "action": "launch",
+            "cdpUrl": target,
+            "settings": { "default-timeout": 5000 },
+        }),
+    ] {
+        assert_success(&firefox_command(&mut state, step).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        json!("CommandUA/1"),
+        "changing an unrelated setting must keep the user agent a command set"
+    );
+    for step in [
+        json!({ "id": "viewport", "action": "viewport", "width": 500, "height": 400 }),
+        json!({ "id": "locale", "action": "locale", "locale": "fr-FR" }),
+        json!({ "id": "timezone", "action": "timezone", "timezoneId": "Asia/Tokyo" }),
+    ] {
+        assert_success(&firefox_command(&mut state, step).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, page).await,
+        json!("500,fr-FR,Asia/Tokyo")
+    );
+
+    firefox_close(&mut state).await;
+    assert!(
+        firefox.alive(),
+        "close must leave the attached Firefox running"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "clear", "action": "session_info", "settings": { "user-agent": null } }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach-again", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        own,
+        "close must put back the user agent Firefox had"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, page).await,
+        own_page,
+        "close must put back the viewport, locale and timezone Firefox had"
+    );
+    firefox_close(&mut state).await;
+}
+
+/// Overrides and grants reach the page tab of an attached Firefox and are put back on close, even
+/// with a privileged tab open that refuses every command naming it.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_attach_undoes_changes_with_a_privileged_tab_open() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut firefox = start_running_firefox(&["about:home", &fixture.url]);
+    let mut state = DaemonState::new();
+
+    let target = format!(
+        "http://127.0.0.1:{}?devtools={}",
+        firefox.bidi_port, firefox.devtools_port
+    );
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let bidi = state.firefox.as_ref().unwrap().bidi.clone();
+    let tree = bidi
+        .send("browsingContext.getTree", json!({"maxDepth": 0}))
+        .await
+        .unwrap();
+    let contexts: Vec<Value> = tree["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["context"].clone())
+        .collect();
+    assert_eq!(
+        contexts.len(),
+        2,
+        "the page must be open beside Firefox's own page: {tree}"
+    );
+    let refusal = bidi
+        .send(
+            "emulation.setUserAgentOverride",
+            json!({ "userAgent": "Refused/1", "contexts": contexts }),
+        )
+        .await
+        .expect_err("Firefox must refuse one user agent for every tab while about:home is open");
+    assert!(refusal.contains("System access is required"), "{refusal}");
+
+    firefox_switch_to_title(&mut state, "Firefox adapter probe").await;
+    let own = firefox_eval(&mut state, "navigator.userAgent").await;
+    let own_language = firefox_eval(&mut state, "navigator.language").await;
+
+    let resp = firefox_command(
+        &mut state,
+        json!({
+            "id": "user-agent",
+            "action": "launch",
+            "cdpUrl": target,
+            "settings": { "user-agent": "AttachedUA/1" },
+        }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["relaunchedBrowser"],
+        false,
+        "an in-place setting must not reconnect: {resp}"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        json!("AttachedUA/1")
+    );
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "locale", "action": "locale", "locale": "fr-FR" }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.language").await,
+        json!("fr-FR")
+    );
+
+    let permission_state = "navigator.permissions.query({name:'geolocation'}).then(p => p.state)";
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "permissions", "action": "permissions", "permissions": ["geolocation"] }),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, permission_state).await,
+        json!("granted")
+    );
+
+    firefox_close(&mut state).await;
+    assert!(
+        firefox.alive(),
+        "close must leave the attached Firefox running"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "clear", "action": "session_info", "settings": { "user-agent": null } }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach-again", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    firefox_switch_to_title(&mut state, "Firefox adapter probe").await;
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.userAgent").await,
+        own,
+        "close must put Firefox's own user agent back"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "navigator.language").await,
+        own_language,
+        "close must put Firefox's own locale back"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, permission_state).await,
+        json!("prompt"),
+        "close must take the geolocation grant back out of the profile"
+    );
+    firefox_close(&mut state).await;
+}
+
+/// Attaching adopts the tab the user has selected, not the oldest one.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_attach_adopts_the_selected_tab() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let firefox = start_running_firefox(&[&fixture.url]);
+    let target = format!(
+        "http://127.0.0.1:{}?devtools={}",
+        firefox.bidi_port, firefox.devtools_port
+    );
+    let selected = format!("{}two", fixture.url);
+    let mut state = DaemonState::new();
+    for step in [
+        json!({ "id": "attach", "action": "launch", "cdpUrl": target }),
+        json!({ "id": "tab", "action": "tab_new", "url": selected }),
+    ] {
+        assert_success(&firefox_command(&mut state, step).await);
+    }
+    firefox_close(&mut state).await;
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach-again", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        firefox_eval(&mut state, "location.href").await,
+        json!(selected),
+        "attach must act on the tab that is selected in the browser"
+    );
+    firefox_close(&mut state).await;
+}
+
+/// Attaching to a fresh profile, whose only tab refuses scripts, opens a tab it can drive.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_attach_opens_a_tab_when_none_runs_scripts() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let firefox = start_running_firefox(&["about:home"]);
+    let target = format!(
+        "http://127.0.0.1:{}?devtools={}",
+        firefox.bidi_port, firefox.devtools_port
+    );
+    let mut state = DaemonState::new();
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "attach", "action": "launch", "cdpUrl": target }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+    firefox_close(&mut state).await;
 }
 
 /// Fill replaces controlled values and reaches password inputs by ref, fill/type reach contenteditables and cross-origin frames, and inserttext and raw char succeed without editing when beforeinput is canceled, like Chrome.
@@ -19422,13 +19975,6 @@ async fn e2e_firefox_popup_has_the_session_emulation_before_it_loads() {
         r#"document.body.innerHTML = '<button id=pop onclick="window.open(\'/whoami\')">Open</button>'; true"#,
     )
     .await;
-    let original = state
-        .firefox
-        .as_ref()
-        .unwrap()
-        .contexts
-        .active_tab()
-        .to_string();
     assert_success(&firefox_act(&mut state, "click", "#pop", json!({})).await);
 
     let bidi = state.firefox.as_ref().unwrap().bidi.clone();
@@ -19463,10 +20009,6 @@ async fn e2e_firefox_popup_has_the_session_emulation_before_it_loads() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
     assert_eq!(probe, json!(["dark", "PopupCoverage/1.0"]));
-    assert_eq!(
-        state.firefox.as_ref().unwrap().contexts.active_tab(),
-        original
-    );
     firefox_close(&mut state).await;
 }
 

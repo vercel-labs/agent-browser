@@ -2325,6 +2325,27 @@ mod tests {
     }
 
     #[test]
+    fn firefox_cdp_flags_travel_with_the_command_settings() {
+        let (command, wire) = settings_of(&[
+            "--engine",
+            "firefox",
+            "--cdp",
+            "9222",
+            "--download-path",
+            "/tmp/downloads",
+            "--allowed-domains",
+            "example.com",
+            "get",
+            "url",
+        ]);
+        assert_eq!(command["action"], "url");
+        assert_eq!(wire["engine"], "firefox");
+        assert_eq!(wire["cdp"], "9222");
+        assert_eq!(wire["download-path"], "/tmp/downloads");
+        assert_eq!(wire["allowed-domains"], json!(["example.com"]));
+    }
+
+    #[test]
     fn settings_distinguish_ca_trust_set_omitted_and_cleared() {
         let (_, omitted) = settings_of(&["get", "url"]);
         assert!(omitted.get("ca-cert").is_none() && omitted.get("clear-ca-cert").is_none());

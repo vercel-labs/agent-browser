@@ -1,3 +1,4 @@
+use super::network::AbortOnDrop;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -9,8 +10,32 @@ use tokio::io::{
 use tokio::sync::{broadcast, oneshot};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_FRAME_SIZE: usize = 256 * 1024 * 1024;
 
 type Pending = Arc<Mutex<HashMap<String, VecDeque<(u64, oneshot::Sender<Value>)>>>>;
+
+/// A tab from DevTools `listTabs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Tab {
+    pub actor: String,
+    pub selected: bool,
+    /// False for a tab Firefox has not loaded, which has no page and no BiDi context.
+    pub loaded: bool,
+}
+
+const ACTOR_GONE_CODES: [&str; 2] = ["noSuchActor", "tabDestroyed"];
+
+/// The text `request` returns as the start of an error reply with `code`.
+fn code_prefix(code: &str) -> String {
+    format!("{code}: ")
+}
+
+/// Whether a request failed because its actor is gone, as when a tab closes or unloads mid-request.
+pub(crate) fn actor_is_gone(error: &str) -> bool {
+    ACTOR_GONE_CODES
+        .iter()
+        .any(|code| error.starts_with(&code_prefix(code)))
+}
 
 /// A connected DevTools protocol session; clones share the same connection.
 #[derive(Clone)]
@@ -23,22 +48,17 @@ pub struct RdpClient {
     _reader: Arc<AbortOnDrop>,
 }
 
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
+async fn read_frame<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> Option<Value> {
+    let mut length = Vec::new();
+    reader.take(21).read_until(b':', &mut length).await.ok()?;
+    let length = length.strip_suffix(b":")?;
+    let frame_size: usize = std::str::from_utf8(length).ok()?.parse().ok()?;
+    if frame_size > MAX_FRAME_SIZE {
+        return None;
     }
-}
-
-async fn read_frame<R: AsyncRead + Unpin>(r: &mut BufReader<R>) -> Option<Value> {
-    let mut len = Vec::new();
-    r.read_until(b':', &mut len).await.ok()?;
-    len.pop()?;
-    let n: usize = std::str::from_utf8(&len).ok()?.parse().ok()?;
-    let mut buf = vec![0; n];
-    r.read_exact(&mut buf).await.ok()?;
-    serde_json::from_slice(&buf).ok()
+    let mut buffer = vec![0; frame_size];
+    reader.read_exact(&mut buffer).await.ok()?;
+    serde_json::from_slice(&buffer).ok()
 }
 
 impl RdpClient {
@@ -51,9 +71,9 @@ impl RdpClient {
         Self::from_stream(s).await
     }
 
-    /// Connects to a DevTools server on a loopback TCP port.
-    pub async fn connect_tcp(port: u16) -> Result<Self, String> {
-        let s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+    /// Connects to a DevTools server on a TCP endpoint.
+    pub async fn connect_tcp(host: &str, port: u16) -> Result<Self, String> {
+        let s = tokio::net::TcpStream::connect((host, port))
             .await
             .map_err(|e| format!("DevTools connect failed: {e}"))?;
         Self::from_stream(s).await
@@ -116,6 +136,24 @@ impl RdpClient {
         self.request_timeout(to, kind, extra, DEFAULT_TIMEOUT).await
     }
 
+    /// Lists the browser's tabs, marking the ones Firefox has not loaded.
+    pub(crate) async fn tabs(&self) -> Result<Vec<Tab>, String> {
+        let reply = self.request("root", "listTabs", json!({})).await?;
+        let tabs = reply["tabs"]
+            .as_array()
+            .ok_or("Firefox DevTools reported no tabs")?;
+        Ok(tabs
+            .iter()
+            .filter_map(|tab| {
+                Some(Tab {
+                    actor: tab["actor"].as_str()?.to_string(),
+                    selected: tab["selected"].as_bool() == Some(true),
+                    loaded: tab["isZombieTab"] != true,
+                })
+            })
+            .collect())
+    }
+
     async fn request_timeout(
         &self,
         to: &str,
@@ -151,12 +189,11 @@ impl RdpClient {
                 return Err(format!("DevTools send failed: {e}"));
             }
         }
-        let reply = tokio::time::timeout(timeout, rx).await;
-        match reply {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(reply)) => match reply.get("error") {
                 Some(e) => Err(format!(
-                    "{}: {}",
-                    e.as_str().unwrap_or("error"),
+                    "{}{}",
+                    code_prefix(e.as_str().unwrap_or("error")),
                     reply["message"].as_str().unwrap_or("")
                 )),
                 None => Ok(reply),
@@ -175,7 +212,7 @@ impl RdpClient {
 pub(crate) mod tests {
     use super::*;
     use serde_json::json;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::io::{AsyncWriteExt, DuplexStream};
 
     pub(crate) async fn put(s: &mut DuplexStream, v: Value) {
         let b = v.to_string();
@@ -185,18 +222,9 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn get(s: &mut DuplexStream) -> Value {
-        let mut len = Vec::new();
-        loop {
-            let b = s.read_u8().await.unwrap();
-            if b == b':' {
-                break;
-            }
-            len.push(b);
-        }
-        let n: usize = String::from_utf8(len).unwrap().parse().unwrap();
-        let mut buf = vec![0; n];
-        s.read_exact(&mut buf).await.unwrap();
-        serde_json::from_slice(&buf).unwrap()
+        read_frame(&mut BufReader::with_capacity(1, s))
+            .await
+            .unwrap()
     }
 
     pub(crate) async fn pair() -> (RdpClient, DuplexStream) {
@@ -204,6 +232,86 @@ pub(crate) mod tests {
         put(&mut b, json!({"from":"root","applicationType":"browser"})).await;
         let c = RdpClient::from_stream(a).await.unwrap();
         (c, b)
+    }
+
+    #[tokio::test]
+    async fn actor_gone_errors_are_recognized_from_the_reply_code() {
+        let (c, mut s) = pair().await;
+        for (code, gone) in [
+            ("tabDestroyed", true),
+            ("noSuchActor", true),
+            ("unknownError", false),
+        ] {
+            let client = c.clone();
+            let call =
+                tokio::spawn(async move { client.request("root", "getTarget", json!({})).await });
+            assert_eq!(get(&mut s).await["type"], "getTarget");
+            put(
+                &mut s,
+                json!({"from": "root", "error": code, "message": "nope"}),
+            )
+            .await;
+            let error = call.await.unwrap().unwrap_err();
+            assert_eq!(actor_is_gone(&error), gone, "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tabs_report_loaded_and_selected_state() {
+        let (c, mut s) = pair().await;
+        let call = tokio::spawn(async move { c.tabs().await });
+        let request = get(&mut s).await;
+        assert_eq!(request["to"], "root");
+        assert_eq!(request["type"], "listTabs");
+        put(
+            &mut s,
+            json!({"from": "root", "tabs": [
+                {"actor": "tab-unloaded", "selected": false, "isZombieTab": true},
+                {"actor": "tab-other", "selected": false},
+                {"actor": "tab-selected", "selected": true, "isZombieTab": false},
+                {"selected": true},
+            ]}),
+        )
+        .await;
+
+        assert_eq!(
+            call.await.unwrap().unwrap(),
+            vec![
+                Tab {
+                    actor: "tab-unloaded".into(),
+                    selected: false,
+                    loaded: false,
+                },
+                Tab {
+                    actor: "tab-other".into(),
+                    selected: false,
+                    loaded: true,
+                },
+                Tab {
+                    actor: "tab-selected".into(),
+                    selected: true,
+                    loaded: true,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_before_reading_payload() {
+        for prefix in [
+            b"268435457:".as_slice(),
+            b"00000000000000000000000000000000",
+        ] {
+            let (mut writer, reader) = tokio::io::duplex(64);
+            writer.write_all(prefix).await.unwrap();
+            let mut reader = BufReader::new(reader);
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), read_frame(&mut reader))
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
     }
 
     #[tokio::test]

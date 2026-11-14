@@ -82,7 +82,7 @@ impl Patch {
     }
 
     /// The patch without its launch settings and without a forced relaunch:
-    /// what a command that never launches a browser can apply.
+    /// what a command the CLI knows never launches a browser can send.
     pub fn without_launch_settings(&self) -> Patch {
         let mut live = self.clone();
         live.relaunch = false;

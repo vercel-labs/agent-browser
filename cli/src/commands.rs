@@ -381,6 +381,23 @@ fn reject_batch_global_flag(batch_item: bool, arg: &str) -> Result<(), ParseErro
     }
 }
 
+pub fn attach_allowed_domains_to_launch_command(cmd: &mut Value, flags: &Flags) {
+    if let Some(ref domains) = flags.allowed_domains {
+        cmd["allowedDomains"] = json!(domains);
+    }
+}
+
+/// Adds the launch settings that also apply when attaching to a running browser.
+pub fn apply_attach_launch_options(cmd: &mut Value, flags: &Flags) {
+    attach_allowed_domains_to_launch_command(cmd, flags);
+    if let Some(ref path) = flags.download_path {
+        cmd["downloadPath"] = json!(path);
+    }
+    if let Some(ref engine) = flags.engine {
+        cmd["engine"] = json!(engine);
+    }
+}
+
 /// Stamps `timeout` on a wait-family command, `flow_save` or `flow_run` that
 /// has none, so the client read timeout follows it.
 pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
@@ -1395,6 +1412,7 @@ fn parse_command_inner(
                 || endpoint.starts_with("https://")
             {
                 let mut cmd = json!({ "id": id, "action": "launch", "cdpUrl": endpoint });
+                apply_attach_launch_options(&mut cmd, flags);
                 if let Some(ref raw) = flags.cdp_headers {
                     cmd["cdpHeaders"] =
                         parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
@@ -1433,6 +1451,7 @@ fn parse_command_inner(
                     }
                 };
                 let mut cmd = json!({ "id": id, "action": "launch", "cdpPort": port });
+                apply_attach_launch_options(&mut cmd, flags);
                 if let Some(ref raw) = flags.cdp_headers {
                     cmd["cdpHeaders"] =
                         parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
@@ -6633,6 +6652,27 @@ mod tests {
         let cmd = parse_command(&args("connect 1"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 1);
+    }
+
+    #[test]
+    fn test_connect_forwards_attach_launch_options() {
+        let mut flags = default_flags();
+        flags.download_path = Some("/tmp/downloads".to_string());
+        flags.allowed_domains = Some(vec!["example.com".to_string()]);
+        flags.engine = Some("firefox".to_string());
+        flags.profile = Some("/tmp/profile".to_string());
+        flags.init_scripts = vec!["/tmp/init.js".to_string()];
+
+        let port = parse_command(&args("connect 9222"), &flags).unwrap();
+        assert_eq!(port["downloadPath"], "/tmp/downloads");
+        assert_eq!(port["allowedDomains"], json!(["example.com"]));
+        assert_eq!(port["engine"], "firefox");
+        assert!(port.get("profile").is_none());
+        assert!(port.get("initScripts").is_none());
+
+        let url = parse_command(&args("connect ws://127.0.0.1:9222/session"), &flags).unwrap();
+        assert_eq!(url["downloadPath"], "/tmp/downloads");
+        assert_eq!(url["engine"], "firefox");
     }
 
     // === Runtime stream control tests ===

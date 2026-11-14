@@ -3848,12 +3848,13 @@ Examples:
         // === Connect ===
         "connect" => {
             r##"
-agent-browser connect - Connect to browser via CDP
+agent-browser connect - Connect to browser via CDP or Firefox WebDriver BiDi
 
 Usage: agent-browser connect <port|url>
 
-Connects to a running browser instance via Chrome DevTools Protocol (CDP).
-This allows controlling browsers, Electron apps, or remote browser services.
+Connects to a running browser instance via Chrome DevTools Protocol (CDP) or
+Firefox WebDriver BiDi. This allows controlling browsers, Electron apps, or
+remote browser services.
 
 Arguments:
   <port>               Local port number (e.g., 9222)
@@ -3864,6 +3865,12 @@ Supported URL formats:
   - WebSocket URL: ws://localhost:9222/devtools/browser/...
   - Remote service: wss://remote-browser.example.com/cdp?token=...
   - Root endpoint: wss://remote-browser.example.com?token=... (slash optional)
+  - Firefox BiDi: ws://localhost:9222/session?devtools=6080
+
+A WebSocket URL with a /session path is treated as Firefox BiDi. Other targets
+try CDP first, then probe for Firefox. Firefox uses DevTools port 6000 unless
+the URL sets ?devtools=<port>. Remote Firefox requires forwarding both ports
+through an encrypted tunnel because its DevTools connection is unencrypted.
 
 Options:
   --cdp-headers <json>  Headers for CDP discovery and handshake, e.g. Authorization
@@ -3876,6 +3883,10 @@ Examples:
   # Connect to local Chrome with remote debugging
   # Start Chrome: google-chrome --remote-debugging-port=9222
   agent-browser connect 9222
+
+  # Connect to Firefox 150 or newer over WebDriver BiDi
+  # Start Firefox with --remote-debugging-port 9333 --start-debugger-server 6000
+  agent-browser connect 9333
 
   # Connect using WebSocket URL from /json/version endpoint
   agent-browser connect "ws://localhost:9222/devtools/browser/abc123"
@@ -4665,6 +4676,8 @@ Options:
                              (or AGENT_BROWSER_ARGS). Commas inside a value are kept.
                              e.g., --args "--no-sandbox,--disable-features=Translate,HttpsUpgrades"
   --user-agent <ua>          Custom User-Agent (or AGENT_BROWSER_USER_AGENT)
+                             On an attached Firefox it applies in place and close
+                             resets it; other attached browsers ignore it.
   --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY)
                              When launching Chrome, agent-browser accepts a proxy URL with a trailing slash.
                              Supports authenticated proxies: --proxy "http://user:pass@127.0.0.1:7890"
@@ -4695,16 +4708,20 @@ Options:
                              (or AGENT_BROWSER_NO_WEBMCP env)
   --no-auto-connect          Return a session attached with --auto-connect to a local launch
                              (or --auto-connect false; overrides AGENT_BROWSER_AUTO_CONNECT)
-  --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
+  --cdp <port|url>           Connect via CDP or Firefox WebDriver BiDi; root query
+                             slash is optional, Firefox accepts ?devtools=<port>
   --cdp-headers <json>       Headers for --cdp discovery and handshake, e.g. Authorization
                              (or AGENT_BROWSER_CDP_HEADERS env)
-  --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
+  --pin-tab                  Pin the session to its bound tab (CDP only; Firefox
+                             attach rejects it) (or AGENT_BROWSER_PIN_TAB env)
                              Commands fail with a tab_gone error instead of falling back
                              to another tab when the bound tab is closed. JSON includes
                              data.targetId and optional sanitized data.lastUrl. Sticky per session.
   --no-pin-tab               Disable a sticky pin previously enabled with --pin-tab
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
+                             On an attached Firefox it applies to that browser and
+                             close clears it.
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
                              Invalid values warn and leave the existing output limit unchanged.

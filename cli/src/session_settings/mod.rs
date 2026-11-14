@@ -7,6 +7,7 @@
 //! its environment.
 
 // Accessors the tests use have no non-test caller yet.
+mod attach;
 #[allow(dead_code)]
 mod patch;
 mod plan;
@@ -18,6 +19,7 @@ mod spec;
 mod store;
 
 pub use patch::{Patch, Requested};
+pub use plan::Change;
 pub use proxy::parse_proxy;
 #[cfg(test)]
 pub use running::resolve_idle_timeout;

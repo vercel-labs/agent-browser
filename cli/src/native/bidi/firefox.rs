@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 
 use crate::native::cdp::chrome::LaunchOptions;
 #[cfg(windows)]
-use crate::native::cdp::windows_process::Child;
+pub(crate) use crate::native::cdp::windows_process::Child;
+use crate::session_settings::Connection;
 #[cfg(not(windows))]
-use std::process::Child;
+pub(crate) use std::process::Child;
 
 const DOWNLOAD_LINK: &str = "https://www.mozilla.org/firefox/new/";
 const MIN_MAJOR: u32 = 150;
@@ -22,13 +23,11 @@ const FIXED_PATHS: &[&str] = &[
     "/opt/firefox/firefox",
 ];
 
-/// Where Firefox's DevTools (RDP) server listens: a unix socket inside the
-/// private profile dir, or a loopback port on Windows.
+/// Where Firefox's DevTools (RDP) server listens.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DevtoolsEndpoint {
     Unix(PathBuf),
-    #[cfg_attr(not(windows), allow(dead_code))]
-    Port(u16),
+    Tcp { host: String, port: u16 },
 }
 
 /// An owned Firefox child, its temp profile and its stderr tail. Dropping it
@@ -43,45 +42,23 @@ pub struct FirefoxProcess {
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
-/// The launch request Firefox is asked to honour, as flags, env and config resolved it.
-#[derive(Default)]
-pub struct LaunchFlags<'a> {
-    pub cdp: Option<&'a str>,
-    pub auto_connect: bool,
-    pub provider: Option<&'a str>,
-    pub capture_flow: bool,
-    pub enable_features: &'a [String],
-    pub init_scripts: &'a [String],
-    pub plugins: &'a [crate::plugins::PluginConfig],
-}
-
-/// Rejects every launch option Firefox cannot honour, naming the flag that asked for it.
-pub fn validate_launch(options: &LaunchOptions, flags: LaunchFlags<'_>) -> Result<(), String> {
-    let unsupported = |flag: &str| Err(format!("{flag} is not supported with --engine firefox"));
-    if !flags.enable_features.is_empty() {
-        return unsupported("--enable");
-    }
-    if !flags.init_scripts.is_empty() {
-        return unsupported("--init-script");
-    }
-    if !crate::plugins::resolved_plugins_with_capability(
-        flags.plugins,
-        crate::plugins::CAPABILITY_LAUNCH_MUTATE,
-    )
-    .is_empty()
-    {
-        return unsupported("launch-mutator plugins");
-    }
-    if flags.capture_flow {
-        return Err("--capture flow is not supported with --engine firefox".to_string());
-    }
-    if flags.cdp.is_some() {
-        return Err("connect and --cdp are not supported with --engine firefox".to_string());
-    }
-    if flags.auto_connect {
+/// Rejects options a Firefox session cannot honour, for the connection it would use.
+pub fn validate_firefox_options(
+    options: &LaunchOptions,
+    connection: &Connection,
+) -> Result<(), String> {
+    let attached = matches!(connection, Connection::Cdp(_));
+    let unsupported = |flag: &str| {
+        Err(if attached {
+            format!("{flag} is not supported when attaching to Firefox")
+        } else {
+            format!("{flag} is not supported with --engine firefox")
+        })
+    };
+    if matches!(connection, Connection::AutoConnect) {
         return unsupported("--auto-connect");
     }
-    if flags.provider.is_some() {
+    if matches!(connection, Connection::Provider(_)) {
         return unsupported("--provider");
     }
     if options.extensions.as_ref().is_some_and(|e| !e.is_empty()) {
@@ -104,6 +81,30 @@ pub fn validate_launch(options: &LaunchOptions, flags: LaunchFlags<'_>) -> Resul
     }
     if let Some(proxy) = options.proxy.as_deref() {
         super::session::proxy_capability(proxy, None)?;
+    }
+    Ok(())
+}
+
+/// Rejects launch features, init scripts and launch-mutator plugins, which Firefox does not apply.
+pub fn validate_firefox_settings(
+    enable_features: &[String],
+    init_scripts: &[String],
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<(), String> {
+    let unsupported = |flag: &str| Err(format!("{flag} is not supported with --engine firefox"));
+    if !enable_features.is_empty() {
+        return unsupported("--enable");
+    }
+    if !init_scripts.is_empty() {
+        return unsupported("--init-script");
+    }
+    if !crate::plugins::resolved_plugins_with_capability(
+        plugins,
+        crate::plugins::CAPABILITY_LAUNCH_MUTATE,
+    )
+    .is_empty()
+    {
+        return unsupported("launch-mutator plugins");
     }
     Ok(())
 }
@@ -212,7 +213,14 @@ fn devtools_endpoint(
         .and_then(|l| l.local_addr())
         .map_err(|e| format!("Failed to reserve a DevTools port: {e}"))?
         .port();
-    Ok((DevtoolsEndpoint::Port(port), port.to_string(), None))
+    Ok((
+        DevtoolsEndpoint::Tcp {
+            host: "127.0.0.1".into(),
+            port,
+        },
+        port.to_string(),
+        None,
+    ))
 }
 
 #[cfg(not(windows))]
@@ -231,6 +239,21 @@ fn devtools_endpoint(
     Ok((DevtoolsEndpoint::Unix(sock), arg, None))
 }
 
+/// The headless choice and platform flags that keep the process tied to its child handle.
+pub(crate) fn base_args(headless: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if headless {
+        args.push("--headless".into());
+    }
+    if cfg!(target_os = "macos") {
+        args.push("--foreground".into());
+    }
+    if cfg!(windows) {
+        args.push("--wait-for-browser".into());
+    }
+    args
+}
+
 fn prepare(
     path: &Path,
     headless: bool,
@@ -244,16 +267,7 @@ fn prepare(
     )
     .map_err(|e| format!("Failed to write Firefox profile: {e}"))?;
     let (devtools, rdp, socket_dir) = devtools_endpoint(profile_dir)?;
-    let mut args: Vec<String> = Vec::new();
-    if headless {
-        args.push("--headless".into());
-    }
-    if cfg!(target_os = "macos") {
-        args.push("--foreground".into());
-    }
-    if cfg!(windows) {
-        args.push("--wait-for-browser".into());
-    }
+    let mut args = base_args(headless);
     args.extend(["--remote-debugging-port", "0", "--start-debugger-server"].map(String::from));
     args.push(rdp);
     args.extend([
@@ -349,12 +363,7 @@ impl FirefoxProcess {
 
     /// Kills the process tree.
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-        }
-        let _ = self.child.wait();
+        kill_tree(&mut self.child);
     }
 
     /// Last lines Firefox wrote to stderr.
@@ -383,14 +392,24 @@ pub(crate) fn remove_private_dir(dir: &Path) {
     }
 }
 
+/// Kills a Firefox process tree and reaps it.
+pub(crate) fn kill_tree(child: &mut Child) {
+    let _ = child.kill();
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
 #[cfg(windows)]
-fn spawn(path: &Path, args: &[String], headless: bool) -> Result<Child, String> {
+pub(crate) fn spawn(path: &Path, args: &[String], headless: bool) -> Result<Child, String> {
     Child::spawn(path, args, headless)
         .map_err(|e| format!("Failed to launch Firefox at {path:?}: {e}"))
 }
 
 #[cfg(not(windows))]
-fn spawn(path: &Path, args: &[String], _headless: bool) -> Result<Child, String> {
+pub(crate) fn spawn(path: &Path, args: &[String], _headless: bool) -> Result<Child, String> {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(path);
     cmd.args(args)
@@ -416,20 +435,12 @@ mod tests {
     }
 
     fn err_of(o: &LaunchOptions) -> String {
-        validate_launch(o, LaunchFlags::default()).unwrap_err()
+        validate_firefox_options(o, &Connection::Local).unwrap_err()
     }
 
     #[test]
     fn validate_accepts_plain_options() {
-        assert!(validate_launch(&ok(), LaunchFlags::default()).is_ok());
-    }
-
-    #[test]
-    fn validate_accepts_the_options_emulation_replays() {
-        let mut o = ok();
-        o.user_agent = Some("custom".into());
-        o.color_scheme = Some("dark".into());
-        assert!(validate_launch(&o, LaunchFlags::default()).is_ok());
+        assert!(validate_firefox_options(&ok(), &Connection::Local).is_ok());
     }
 
     #[test]
@@ -452,59 +463,49 @@ mod tests {
         let mut o = ok();
         o.ca_cert = Some("c".into());
         assert!(err_of(&o).contains("--ca-cert"));
-        let mut o = ok();
-        o.proxy_username = Some("user".into());
-        assert!(validate_launch(&o, LaunchFlags::default()).is_ok());
+        let e = validate_firefox_options(&ok(), &Connection::AutoConnect).unwrap_err();
+        assert!(e.contains("--auto-connect"), "{e}");
+        assert!(e.contains("--engine firefox"), "{e}");
+        let e = validate_firefox_options(&ok(), &Connection::Provider("browserbase".into()))
+            .unwrap_err();
+        assert!(e.contains("--provider"), "{e}");
         let mut o = ok();
         o.proxy = Some("https://proxy:443".into());
-        assert!(err_of(&o).contains("https:// proxy is not supported"));
-        let flags = |cdp, auto_connect, provider| LaunchFlags {
-            cdp,
-            auto_connect,
-            provider,
-            ..LaunchFlags::default()
-        };
-        let e = validate_launch(&ok(), flags(Some("9222"), false, None)).unwrap_err();
-        assert!(e.contains("--cdp"));
-        let e = validate_launch(&ok(), flags(None, true, None)).unwrap_err();
-        assert!(e.contains("--auto-connect"));
-        let e = validate_launch(&ok(), flags(None, false, Some("browserbase"))).unwrap_err();
-        assert!(e.contains("--provider"));
+        let e = validate_firefox_options(&o, &Connection::Local).unwrap_err();
+        assert!(e.contains("https:// proxy is not supported"), "{e}");
     }
 
     #[test]
-    fn validate_rejects_launch_extras_and_flow_capture() {
-        let init_scripts = vec!["x.js".to_string()];
-        let features = vec!["foo".to_string()];
-        assert!(validate_launch(
-            &ok(),
-            LaunchFlags {
-                init_scripts: &init_scripts,
-                ..LaunchFlags::default()
-            }
-        )
-        .unwrap_err()
-        .contains("--init-script"));
-        assert!(validate_launch(
-            &ok(),
-            LaunchFlags {
-                enable_features: &features,
-                ..LaunchFlags::default()
-            }
-        )
-        .unwrap_err()
-        .contains("--enable"));
+    fn validate_blames_attach_for_options_only_an_attach_refuses() {
+        let mut o = ok();
+        o.profile = Some("p".into());
         assert_eq!(
-            validate_launch(
-                &ok(),
-                LaunchFlags {
-                    capture_flow: true,
-                    ..LaunchFlags::default()
-                }
-            )
-            .unwrap_err(),
-            "--capture flow is not supported with --engine firefox"
+            validate_firefox_options(&o, &Connection::Cdp("9333".into())).unwrap_err(),
+            "--profile is not supported when attaching to Firefox"
         );
+        assert_eq!(
+            validate_firefox_options(&o, &Connection::Local).unwrap_err(),
+            "--profile is not supported with --engine firefox"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_launch_extras() {
+        assert!(validate_firefox_settings(&["foo".into()], &[], &[])
+            .unwrap_err()
+            .contains("--enable"));
+        assert!(validate_firefox_settings(&[], &["x.js".into()], &[])
+            .unwrap_err()
+            .contains("--init-script"));
+        assert!(validate_firefox_settings(&[], &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_the_options_emulation_replays() {
+        let mut o = ok();
+        o.user_agent = Some("custom".into());
+        o.color_scheme = Some("dark".into());
+        assert!(validate_firefox_options(&o, &Connection::Local).is_ok());
     }
 
     #[test]

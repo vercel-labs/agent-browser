@@ -51,6 +51,32 @@ agent-browser --engine firefox --executable-path /path/to/firefox open example.c
 
 Each launch uses a fresh temporary profile, so cookies and storage start clean unless you restore them with state or a session name. `--profile` is not supported with Firefox.
 
+## Attach to a running Firefox
+
+`agent-browser connect <port|url>` and `--cdp <port|url>` attach to a Firefox started outside agent-browser over WebDriver BiDi. Start Firefox 150 or newer with remote debugging and its DevTools server, and add these prefs to the profile's `user.js`:
+
+```js
+user_pref("devtools.debugger.remote-enabled", true);
+user_pref("devtools.chrome.enabled", true);
+user_pref("devtools.debugger.prompt-connection", false);
+```
+
+```bash
+firefox --remote-debugging-port 9222 --start-debugger-server 6000 -profile <dir>
+
+agent-browser connect 9222
+agent-browser snapshot
+agent-browser close
+```
+
+Detection is automatic. A `ws://` or `wss://` URL whose path is `/session` is treated as Firefox BiDi. Other targets try CDP first and probe for Firefox only when CDP discovery fails. Pass `--engine firefox` to skip the CDP attempt. Firefox uses the DevTools server on port 6000 unless the URL sets `?devtools=<port>`, for example `agent-browser connect "ws://127.0.0.1:9222/session?devtools=6080"` when Firefox was started with `--start-debugger-server 6080`.
+
+The session starts on the tab selected in Firefox, or on the first tab when none reports itself visible. The attached browser is externally owned: `close` ends the BiDi session and leaves Firefox running. Only one client can hold a Firefox BiDi session at a time, and a client that exits without ending its session keeps it until Firefox restarts. `--auto-connect` does not support Firefox.
+
+Options that describe a browser agent-browser launches are ignored when attaching, as they are for any attached browser: `--profile`, `--args`, `--extension`, `--allow-file-access`, `--webgpu`, `--headed`, `--executable-path`, and `--no-xvfb`. `--ca-cert` and `--allowed-domains` are rejected when attaching. `--pin-tab` and its `tab_gone` guarantee apply only to Chrome over CDP; Firefox attach rejects `--pin-tab`. See [CDP Mode](/cdp-mode) for the full attach workflow.
+
+`--download-path` and `--user-agent` apply to the attached browser in place. Attaching leaves the size of your tabs alone. `close` resets the download folder and every override the session set (viewport, user agent, locale, timezone, geolocation, and offline mode), so Firefox keeps its own settings, and media emulation ends when the session closes. Overrides reach the tabs that show web pages, while Firefox's own pages such as `about:home` cannot be changed and are skipped. `download` is refused on an attached Firefox because the file is saved on the browser's machine; `wait --download` reports the path Firefox saved to.
+
 ## Supported features
 
 Navigation, tabs, `eval`, snapshots and refs (including iframes and open shadow roots), all element commands, `find`, frames, dialogs, screenshots (including `--annotate`), PDF, cookies, storage, state save and load with `--session-name` restore, `network route` and `network unroute`, requests, HAR and response bodies, extra headers, offline mode, HTTP auth, `--allowed-domains`, downloads, uploads, emulation (`set viewport`, `set geo`, `set media`, and `--user-agent`), `--proxy`, `--ignore-https-errors`, and the dashboard live view.
@@ -87,7 +113,7 @@ Not every launch option applies to Firefox. These are rejected when combined wit
     <tr><th>Option</th><th>Reason</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>connect</code>, <code>--cdp</code>, <code>--auto-connect</code></td><td>Firefox is launched over WebDriver BiDi</td></tr>
+    <tr><td><code>--auto-connect</code></td><td>Firefox has no auto-discovery path; pass a BiDi endpoint to <code>connect</code> or <code>--cdp</code> instead</td></tr>
     <tr><td><code>--provider</code></td><td>Cloud and direct-page providers are not supported</td></tr>
     <tr><td><code>--extension</code>, <code>--args</code></td><td>Chrome extension and startup argument handling is not supported</td></tr>
     <tr><td><code>--enable</code>, <code>--init-script</code>, launch-mutator plugins</td><td>Launch-time scripts and feature toggles are not supported</td></tr>
@@ -99,7 +125,7 @@ Not every launch option applies to Firefox. These are rejected when combined wit
 
 ## Security
 
-The daemon enables Firefox's DevTools server only for the Firefox profile it owns. On macOS and Linux the server listens on a private unix socket inside a directory with `0700` permissions. On Windows it listens on a random loopback port.
+When it launches Firefox, the daemon enables Firefox's DevTools server only for the profile it owns. On macOS and Linux the server listens on a private unix socket inside a directory with `0700` permissions. On Windows it listens on a random loopback port.
 
 ## When to Use Firefox
 

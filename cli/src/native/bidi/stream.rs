@@ -467,7 +467,7 @@ mod tests {
             activity,
         );
         state.engine = "firefox".into();
-        first.bidi.reader.abort();
+        first.bidi.stop_reader();
         state.firefox = Some(first);
         state.update_stream_client().await;
         tokio::time::sleep(POLL_INTERVAL * 3).await;
