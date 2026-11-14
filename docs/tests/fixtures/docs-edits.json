@@ -64,6 +64,26 @@
       {
         "from": "Each tool has typed fields such as url, selector, text, key, session, and allowedDomains, so MCP clients show meaningful approval prompts instead of raw command arrays. The common allowedDomains array maps to --allowed-domains and activates the same WebRTC containment and launch-mode restrictions. The common idleTimeout string maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. Each tool also accepts extraArgs for per-command options and display or emulation flags such as --engine; extraArgs cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured allowedDomains is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.",
         "to": "Each tool has typed fields such as url, selector, text, and key, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments session, restore, allowedDomains, extraArgs, timeoutMs, namespace, restoreSave, restoreCheckUrl, restoreCheckText, restoreCheckFn, caCert, useSystemCa, clearCaCert, idleTimeout, and relaunch. A tool's schema lists only the ones that usually matter for it: session on every tool, restore and relaunch on open and tab_new, allowedDomains and extraArgs on open, tab_new, and read, and timeoutMs on tools that navigate, wait, or run scripts. The server's initialize instructions describe all of them. allowedDomains maps to --allowed-domains, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. idleTimeout maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. relaunch: true maps to --relaunch. extraArgs carries per-command options and display or emulation flags such as --engine; it cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
+      },
+      {
+        "from": "`read` fetches a URL without launching Chrome.",
+        "to": "Explicit URL reads run HTTP directly without launching, reconnecting, or reconfiguring a browser, including in batches."
+      },
+      {
+        "from": "read fetches a URL without launching Chrome.",
+        "to": "Explicit URL reads run HTTP directly without launching, reconnecting, or reconfiguring a browser, including in batches."
+      },
+      {
+        "from": "# Start video recording (.webm/.mp4, 30 fps; needs ffmpeg)",
+        "to": "# Record at 30 output fps (.webm/.mp4; needs ffmpeg)"
+      },
+      {
+        "from": "# Record at 60 fps (--fps accepts 1-60)",
+        "to": "# Request 60 output fps (capture rate varies; 1-60 allowed)"
+      },
+      {
+        "from": "Pending confirmations auto-deny after 60 seconds.",
+        "to": "The ID is required and must match the current pending action. Treat returned IDs as opaque; do not construct or truncate them. Missing or stale IDs fail without browser work, execution, or consuming a newer pending action. A newer confirmation request replaces the previous pending action."
       }
     ],
     "/configuration": [
@@ -198,6 +218,18 @@
       {
         "from": "All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.",
         "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust."
+      },
+      {
+        "from": "**Confirmation timeout.** Pending confirmations auto-deny after 60 seconds. Orchestrators must respond within that window.",
+        "to": "**One pending confirmation per session.** A newer confirmation request replaces the previous one. Missing or stale IDs are rejected without consuming the current action; use the exact ID returned by the intended request."
+      },
+      {
+        "from": "Confirmation timeout. Pending confirmations auto-deny after 60 seconds. Orchestrators must respond within that window.",
+        "to": "One pending confirmation per session. A newer confirmation request replaces the previous one. Missing or stale IDs are rejected without consuming the current action; use the exact ID returned by the intended request."
+      },
+      {
+        "from": "Pending confirmations auto-deny after 60 seconds.",
+        "to": "The confirmation ID is required and must match the current pending command before it can be executed or discarded. Request IDs use UUIDs rather than reusable clock fragments; treat them as opaque and do not construct or truncate them. Missing or stale IDs fail without browser work or consuming a newer pending action."
       }
     ],
     "/init-scripts": [
@@ -369,12 +401,48 @@
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
       }
+    ],
+    "/recording": [
+      {
+        "from": "Recording captures 30 frames per second by default, which is enough for scrolling, hover states, and CSS transitions to read as motion rather than as a slideshow. Use `--fps` to change it:",
+        "to": "`--fps` controls the output playback rate (30 by default, 1 to 60 allowed), not the rate at which Chrome supplies new images. Capture is repaint-driven and may be sparse. Requesting 60 fps cannot prove smoothness or the presence of intermediate states."
+      },
+      {
+        "from": "Recording captures 30 frames per second by default, which is enough for scrolling, hover states, and CSS transitions to read as motion rather than as a slideshow. Use --fps to change it:",
+        "to": "--fps controls the output playback rate (30 by default, 1 to 60 allowed), not the rate at which Chrome supplies new images. Capture is repaint-driven and may be sparse. Requesting 60 fps cannot prove smoothness or the presence of intermediate states."
+      },
+      {
+        "from": "# 60 fps for a short, motion-heavy take",
+        "to": "# Request a higher output rate; inspect capture evidence separately"
+      },
+      {
+        "from": "Valid rates are 1 to 60. The latest Chrome frame is held between repaints so the file duration matches wall clock.",
+        "to": "The recorder seeds an initial screenshot and repeats the latest image between repaints. It catches up after short encoder stalls and fails if capture or encoding falls too far behind, rather than silently shortening the timeline. Playback duration and output FPS do not establish how much motion was captured."
+      },
+      {
+        "from": "`record stop` reports `frames` written to the file and distinct `capturedFrames` received from Chrome.",
+        "to": "A successful `record start` returns `recordingId` but does not prove motion or successful encoding. `record stop --json` returns a receipt in `data`, including when the outer `success` is `false`:"
+      },
+      {
+        "from": "record stop reports frames written to the file and distinct capturedFrames received from Chrome.",
+        "to": "A successful record start returns recordingId but does not prove motion or successful encoding. record stop --json returns a receipt in data, including when the outer success is false:"
+      },
+      {
+        "from": "<tr><td>Frame rate</td><td>30 fps by default, 1 to 60 with <code>--fps</code></td></tr>",
+        "to": "<tr><td>Output frame rate</td><td>30 fps by default, 1 to 60 with <code>--fps</code>; observed capture rate is reported separately</td></tr>"
+      },
+      {
+        "from": "30 fps by default, 1 to 60 with --fps",
+        "to": "30 fps by default, 1 to 60 with --fps; observed capture rate is reported separately"
+      },
+      {
+        "from": "Long recordings can use significant disk space; 60 fps roughly doubles the bitrate of 30 fps.",
+        "to": "Long recordings can use significant disk space; higher output rates increase encoder work."
+      },
+      {
+        "from": "Distinct frames per second are bounded by how often the page repaints, so a page that renders below 60 fps records below it too.",
+        "to": "Capture depends on repaint frequency and recorder throughput. Frame event counts do not prove pixel-unique images or smoothness."
+      }
     ]
-  },
-  "resources": {
-    "/schema.json": {
-      "size": 9813,
-      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
-    }
   }
 }

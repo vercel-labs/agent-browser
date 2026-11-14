@@ -223,7 +223,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run multiple commands sequentially. Unknown commands and subcommands return errors. Set global flags on the batch invocation or MCP server. Command arguments can contain flag-like text. A batch containing only get cdp-url commands never launches a browser.",
+      "description": "Run multiple commands sequentially. Unknown commands and subcommands return errors. Set global flags on the batch invocation or MCP server. Command arguments can contain flag-like text. Server-configured browser launch options such as --state apply once before the first browser-dependent row, not between rows. Explicit URL reads and bailed local errors do not trigger browser setup. A batch containing only get cdp-url commands never launches a browser.",
       "inputSchema": {
         "properties": {
           "bail": {
@@ -483,7 +483,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Approve a pending action.",
+      "description": "Approve the exact pending action identified by id. Missing or stale IDs fail without browser work or consuming a newer pending action. A matched action still runs its normal policy and browser checks.",
       "inputSchema": {
         "properties": {
           "id": {
@@ -776,7 +776,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Deny a pending action.",
+      "description": "Deny the exact pending action identified by id. Missing or stale IDs fail without browser work or consuming a newer pending action.",
       "inputSchema": {
         "properties": {
           "id": {
@@ -2902,7 +2902,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Fetch a URL as agent-readable text, preferring text/markdown. Omit url to read the active tab.",
+      "description": "Fetch a URL directly over HTTP as agent-readable text, preferring text/markdown, without launching or reconfiguring a browser. Ordinary URL reads do not start a daemon; a session's running daemon performs the read so its allowed domains and action policy also apply, and an unreachable or mismatched daemon fails the read. Confirmation policy may retain a pending command in a browserless daemon, and the policy file is read again on confirm. The daemon must explicitly support ID-checked read confirmations; unsupported runtimes receive no read request. Only explicit-URL HTTP confirmation prompts carry data.capabilities.readRequiresConfirmation:true. Current headers, domain/action rules and HTTP proxy environment apply, not browser cookies. Omit url to read the rendered active tab.",
       "inputSchema": {
         "properties": {
           "allowedDomains": {
@@ -2975,7 +2975,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Restart video recording. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes.",
+      "description": "Stop the current recording and start another, with output at 30 fps by default (up to 60). Capture rate is not guaranteed. previousRecording retains the previous terminal receipt, including failures, separately from the new recordingId.",
       "inputSchema": {
         "properties": {
           "contactSheet": {
@@ -2993,7 +2993,7 @@
             "type": "boolean"
           },
           "fps": {
-            "description": "Capture rate in frames per second (default 30, max 60).",
+            "description": "Output frames per second (default 30, max 60). Does not guarantee capture rate or smoothness.",
             "maximum": 60,
             "minimum": 1,
             "type": "integer"
@@ -3026,7 +3026,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Start video recording of the current active page. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes. Pass url to navigate the active tab there first. Use agent_browser_tab_new beforehand to record in a separate tab.",
+      "description": "Start video recording of the current active page. Output defaults to 30 fps (up to 60). An initial screenshot seeds the recording, then repaint-driven capture may be sparse. Start success does not establish motion or encoding success. Pass url to navigate first, or use agent_browser_tab_new beforehand for a separate tab. Keep recordingId to match the terminal receipt.",
       "inputSchema": {
         "properties": {
           "contactSheet": {
@@ -3044,7 +3044,7 @@
             "type": "boolean"
           },
           "fps": {
-            "description": "Capture rate in frames per second (default 30, max 60).",
+            "description": "Output frames per second (default 30, max 60). Does not guarantee capture rate or smoothness.",
             "maximum": 60,
             "minimum": 1,
             "type": "integer"
@@ -3078,7 +3078,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Stop video recording.",
+      "description": "Stop recording and return capture timestamps, wall duration, captured/encoded frame metrics and file evidence. Failed encodes retain success:false receipts. After a timeout, recover runtime.recording.last with agent_browser_session_info and match recordingId; file existence or output FPS alone does not prove success or smoothness.",
       "inputSchema": {
         "properties": {
           "session": {
@@ -3379,7 +3379,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Show session, daemon, launch, and restore diagnostics.",
+      "description": "Inspect without launching, reconfiguring or reconnecting a browser. Distinguishes the daemon PID from runtime.browser liveness, local Chrome PID, effective userDataDir, launched/attached ownership and current tabs. Unavailable attached/remote values and bare/empty Chrome profile overrides are null. Raw Chrome profile values require --user-data-dir=<path>; tokens after -- are not switches. runtime.recording.current and runtime.recording.last expose recording evidence and terminal receipts, including failures. runtime.capabilities.readRequiresConfirmation advertises ID-checked HTTP read confirmations; equal version labels are not proof of support.",
       "inputSchema": {
         "properties": {
           "session": {

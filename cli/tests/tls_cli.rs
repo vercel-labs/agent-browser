@@ -5,7 +5,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use serde_json::Value;
@@ -181,8 +181,8 @@ impl Session {
             )
         })
     }
-    fn pid(&self) -> String {
-        std::fs::read_to_string(self.tmp.path().join("sockets/tls.pid")).unwrap()
+    fn pid(&self) -> Option<String> {
+        std::fs::read_to_string(self.tmp.path().join("sockets/tls.pid")).ok()
     }
     fn ca(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.tmp.path().join(name);
@@ -202,16 +202,19 @@ impl Drop for Session {
 }
 
 fn read(session: &Session, url: &str, options: &[&str], succeeds: bool) -> Value {
+    let pid = session.pid();
     let mut args = options.to_vec();
     args.extend(["read", url, "--timeout", "2000"]);
     let response = session.run(&args);
     assert_eq!(response["success"], succeeds, "{args:?}: {response}");
     if succeeds {
-        assert_eq!(
-            response["data"]["lifecycle"]["effectiveLaunch"]["browserLaunched"], false,
-            "{response}"
-        );
+        assert_eq!(response["data"]["content"], "TLS works\n", "{response}");
     }
+    assert_eq!(
+        session.pid(),
+        pid,
+        "{args:?}: HTTP reads must not change the daemon"
+    );
     response
 }
 
@@ -221,7 +224,6 @@ fn read_trust_changes_rotate_and_clear_without_browser_or_daemon_restart() {
     let session = Session::new();
     let ca = session.ca("ca.pem", CA_A);
     read(&session, &a.url(), &[], false);
-    let pid = session.pid();
     read(
         &session,
         &a.url(),
@@ -245,7 +247,6 @@ fn read_trust_changes_rotate_and_clear_without_browser_or_daemon_restart() {
         true,
     );
     read(&session, &b.url(), &["--no-ca-cert"], false);
-    assert_eq!(session.pid(), pid);
     let other = Session::new();
     let other_ca = other.ca("ca.pem", CA_B);
     read(
@@ -261,6 +262,37 @@ fn read_trust_changes_rotate_and_clear_without_browser_or_daemon_restart() {
 fn read_trust_survives_a_daemon_restart_until_close() {
     let a = TlsServer::a();
     let session = Session::new();
+    let start_daemon = || {
+        let mut daemon = session
+            .command()
+            .env("AGENT_BROWSER_DAEMON", "1")
+            .env("AGENT_BROWSER_SESSION", "tls")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let info = session.run(&["session", "info"]);
+            if info["data"]["pid"] == daemon.id()
+                && info["data"]["runtime"]["capabilities"]["readRequiresConfirmation"] == true
+            {
+                assert_eq!(info["data"]["runtime"]["browserLaunched"], false);
+                break;
+            }
+            assert!(
+                daemon.try_wait().unwrap().is_none(),
+                "daemon exited: {info}"
+            );
+            if Instant::now() >= deadline {
+                let _ = daemon.kill();
+                let _ = daemon.wait();
+                panic!("daemon did not become ready: {info}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        daemon
+    };
+    let mut daemon = start_daemon();
     let ca = session.ca("ca.pem", CA_A);
     read(
         &session,
@@ -269,10 +301,14 @@ fn read_trust_survives_a_daemon_restart_until_close() {
         true,
     );
     let pid = session.pid();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    let mut replacement = start_daemon();
+    assert_ne!(session.pid(), pid, "the owned daemon must actually restart");
     read(&session, &a.url(), &["--debug"], true);
-    assert_ne!(session.pid(), pid, "--debug should restart the daemon");
     read(&session, &a.url(), &[], true);
     assert_eq!(session.run(&["close"])["success"], true);
+    assert!(replacement.wait().unwrap().success());
     read(&session, &a.url(), &[], false);
 }
 
@@ -392,12 +428,10 @@ fn read_follows_ca_symlink_rotation() {
         &["--ca-cert", selected.to_str().unwrap()],
         true,
     );
-    let pid = session.pid();
     std::fs::remove_file(&selected).unwrap();
     std::os::unix::fs::symlink(&path_b, &selected).unwrap();
     read(&session, &b.url(), &[], true);
     read(&session, &a.url(), &[], false);
-    assert_eq!(session.pid(), pid);
 }
 
 #[test]
@@ -420,7 +454,6 @@ fn trust_option_transition_matrix_preserves_effective_roots() {
                     ],
                     false,
                 );
-                let pid = session.pid();
                 if let Some(bundle) = prior_bundle {
                     let path = if bundle == 'a' { &ca_a } else { &ca_b };
                     read(
@@ -448,11 +481,6 @@ fn trust_option_transition_matrix_preserves_effective_roots() {
                 };
                 read(&session, &a.url(), &options, bundle == Some('a'));
                 read(&session, &b.url(), &[], native || bundle == Some('b'));
-                assert_eq!(
-                    session.pid(),
-                    pid,
-                    "{prior_bundle:?}/{prior_native}/{change}"
-                );
             }
         }
     }
@@ -499,9 +527,10 @@ fn batch_read_uses_session_trust_without_a_browser() {
         let response = session.run(&args);
         let result = &response[0];
         assert_eq!(result["success"], true, "{args:?}: {response}");
-        assert_eq!(
-            result["result"]["lifecycle"]["effectiveLaunch"]["browserLaunched"], false,
-            "{args:?}: {response}"
+        assert_eq!(result["result"]["content"], "TLS works\n", "{response}");
+        assert!(
+            session.pid().is_none(),
+            "{args:?}: HTTP batch started a daemon"
         );
     }
 }
@@ -532,8 +561,12 @@ fn stdin_batch_read_uses_session_trust_without_a_browser() {
             .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stdout)));
         assert_eq!(response[0]["success"], true, "{options:?}: {response}");
         assert_eq!(
-            response[0]["result"]["lifecycle"]["effectiveLaunch"]["browserLaunched"], false,
+            response[0]["result"]["content"], "TLS works\n",
             "{response}"
+        );
+        assert!(
+            session.pid().is_none(),
+            "{options:?}: HTTP batch started a daemon"
         );
     }
 }

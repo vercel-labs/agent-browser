@@ -25,9 +25,9 @@ pub use running::SecurityView;
 pub use running::{named, Connection, IdleTimeout, Running, DEFAULT_IDLE_TIMEOUT_MS};
 #[allow(unused_imports)]
 pub use spec::{spec, spec_by_name, Effect, Key, Persist, Shape, Spec, SPECS};
-pub use store::{clear_file, is_refusal, orphan_sessions, FsStore, Store};
 #[cfg(test)]
-pub use store::{MemStore, StoreError};
+pub use store::StoreError;
+pub use store::{clear_file, is_refusal, orphan_sessions, FsStore, MemStore, Store};
 
 use std::fmt;
 
