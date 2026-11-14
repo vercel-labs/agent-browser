@@ -653,6 +653,80 @@ pub async fn uncheck(
     Ok(position)
 }
 
+/// Runs on a checkbox or radio input. Returns null when the input is visible, disabled, or not a
+/// checkbox or radio, so the original click error stands. Otherwise it clicks the input's first
+/// visible label, or the input itself when it has none, and reports which.
+const HIDDEN_CHECKABLE_JS: &str = r#"function() {
+  const el = this;
+  if (!el || el.tagName !== 'INPUT' || el.disabled) return null;
+  const type = (el.type || '').toLowerCase();
+  if (type !== 'checkbox' && type !== 'radio') return null;
+  // The same test the click's actionability check uses: no box, or visibility hidden.
+  const shown = (n) => {
+    const r = n.getBoundingClientRect();
+    const v = getComputedStyle(n).visibility;
+    return (r.width > 0 || r.height > 0) && v !== 'hidden' && v !== 'collapse';
+  };
+  if (shown(el)) return null;
+  // `labels` covers both <label for> and a wrapping <label>, as `check` does with label.control.
+  const label = Array.from(el.labels || []).find(shown);
+  if (label) { label.click(); return { how: 'label', checked: el.checked }; }
+  el.click();
+  return { how: 'input', checked: el.checked };
+}"#;
+
+/// A styled checkbox or radio is usually an input with no box (`display: none`, zero size) next to
+/// a visible `<label>`, so a pointer click on it fails as not visible. Called after such a click
+/// failed: click the input's visible label the way a person would, or the input itself when it has
+/// none. Returns the note to show, or None when the target is not a hidden, enabled checkbox or
+/// radio input and the original error should be reported.
+pub async fn click_hidden_checkable(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Option<String>, String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    let result: Value = client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: HIDDEN_CHECKABLE_JS.to_string(),
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+    let Some(found) = result.pointer("/result/value").filter(|v| v.is_object()) else {
+        return Ok(None);
+    };
+    let state = match found.get("checked").and_then(Value::as_bool) {
+        Some(true) => " (now checked)",
+        Some(false) => " (now unchecked)",
+        None => "",
+    };
+    Ok(match found.get("how").and_then(Value::as_str) {
+        Some("label") => Some(format!(
+            "{selector_or_ref} is a hidden input; clicked its visible label instead{state}"
+        )),
+        Some("input") => Some(format!(
+            "{selector_or_ref} is a hidden input with no visible label; clicked the input itself{state}"
+        )),
+        _ => None,
+    })
+}
+
 /// Fallback for when the coordinate-based CDP click did not toggle the
 /// checkbox/radio state. This mirrors how Playwright dispatches clicks
 /// through the DOM rather than via raw Input.dispatchMouseEvent coordinates.

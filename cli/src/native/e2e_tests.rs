@@ -7092,6 +7092,147 @@ async fn e2e_material_checkbox_check_uncheck() {
     assert_success(&resp);
 }
 
+// A styled checkbox or radio is usually an input with no box next to a visible
+// label. A plain click on the input fails as not visible; click should activate
+// its visible label instead.
+#[tokio::test]
+#[ignore]
+async fn e2e_click_hidden_checkbox_and_radio_through_label() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<html><body>",
+        // hidden input, label linked with for=
+        "<input id='terms' type='checkbox' style='display:none'><label for='terms'>Accept terms</label>",
+        // hidden input inside a wrapping label
+        "<label id='wrap'><input id='news' type='checkbox' style='width:0;height:0;border:0;padding:0;margin:0;position:absolute'>Newsletter</label>",
+        // hidden radio buttons sharing a name
+        "<input id='r1' type='radio' name='size' style='display:none'><label for='r1'>Small</label>",
+        "<input id='r2' type='radio' name='size' style='display:none'><label for='r2'>Large</label>",
+        // hidden input without any label
+        "<input id='bare' type='checkbox' style='display:none'>",
+        // hidden and disabled
+        "<input id='off' type='checkbox' style='display:none' disabled><label for='off'>Disabled</label>",
+        // an ordinary visible checkbox
+        "<input id='plain' type='checkbox'>",
+        // a hidden text input is not redirected
+        "<input id='text' type='text' style='display:none'>",
+        "</body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Hidden checkbox with a label: the label is clicked and the note says so.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#terms" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let note = get_data(&resp)["note"].as_str().unwrap_or_default();
+    assert!(
+        note.contains("clicked its visible label") && note.contains("now checked"),
+        "unexpected note: {note}"
+    );
+    assert_evaluate(&mut state, "4", "terms.checked", json!(true)).await;
+
+    // A second click unchecks it again.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "click", "selector": "#terms" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(get_data(&resp)["note"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("now unchecked"));
+    assert_evaluate(&mut state, "6", "terms.checked", json!(false)).await;
+
+    // Hidden input inside a wrapping label.
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "click", "selector": "#news" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "8", "news.checked", json!(true)).await;
+
+    // Hidden radio buttons.
+    for (id, selector, expected) in [
+        ("9", "#r1", json!([true, false])),
+        ("10", "#r2", json!([false, true])),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": id, "action": "click", "selector": selector }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_evaluate(
+            &mut state,
+            &format!("{id}-state"),
+            "[r1.checked, r2.checked]",
+            expected,
+        )
+        .await;
+    }
+
+    // No visible label: the input itself is clicked.
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "click", "selector": "#bare" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(get_data(&resp)["note"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("clicked the input itself"));
+    assert_evaluate(&mut state, "12", "bare.checked", json!(true)).await;
+
+    // A disabled hidden input keeps the original error and is left alone.
+    let resp = execute_command(
+        &json!({ "id": "13", "action": "click", "selector": "#off" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_evaluate(&mut state, "14", "off.checked", json!(false)).await;
+
+    // A hidden text input is not a checkbox or radio: the original error is kept.
+    let resp = execute_command(
+        &json!({ "id": "15", "action": "click", "selector": "#text" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+
+    // A visible checkbox is clicked as before, with no note.
+    let resp = execute_command(
+        &json!({ "id": "16", "action": "click", "selector": "#plain" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(get_data(&resp).get("note").is_none());
+    assert_evaluate(&mut state, "17", "plain.checked", json!(true)).await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Issue #841 – snapshot -C and screenshot --annotate must not hang over WSS
 // (PS: -C is deprecated, cursor-interactive elements are referred by default now)
