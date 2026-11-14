@@ -504,7 +504,7 @@ mod tests {
         if req["method"] == "script.callFunction"
             && req["params"]["functionDeclaration"]
                 .as_str()
-                .is_some_and(|js| js == crate::native::element::IS_CONNECTED_JS)
+                .is_some_and(|js| js == super::super::target::IN_DOCUMENT_JS)
         {
             script(json!({"type": "boolean", "value": true}))
         } else {
