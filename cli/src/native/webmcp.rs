@@ -54,11 +54,51 @@ pub const MAX_CONTEXT_BYTES: usize = 4 * 1024;
 pub const MAX_CONTEXT_TOOLS: usize = 16;
 const MAX_CONTEXT_DESCRIPTION_BYTES: usize = 160;
 
+/// Catalogs up to this size list full descriptions when they fit the byte budget.
+const MAX_FULL_DESCRIPTION_TOOLS: usize = 4;
+
+/// Small catalogs keep complete descriptions so the agent can often call a tool
+/// without a schema lookup. Returns `None` when the catalog is too large or
+/// does not fit `MAX_CONTEXT_BYTES`.
+fn full_context_from_tools(ordered: &[&ToolRecord]) -> Option<Value> {
+    if ordered.is_empty() || ordered.len() > MAX_FULL_DESCRIPTION_TOOLS {
+        return None;
+    }
+    let mut bytes = 256; // Envelope and array delimiters.
+    let mut catalog = Vec::new();
+    for tool in ordered {
+        let entry = json!({
+            "name": tool.name,
+            "description": tool.description,
+            "origin": tool.origin,
+            "frameId": tool.frame_id,
+        });
+        bytes += entry.to_string().len() + 1;
+        catalog.push(entry);
+    }
+    if bytes > MAX_CONTEXT_BYTES {
+        return None;
+    }
+    Some(json!({
+        "experimental": true,
+        "untrusted": true,
+        "status": "ready",
+        "available": true,
+        "toolCount": ordered.len(),
+        "tools": catalog,
+        "truncated": false,
+    }))
+}
+
 /// A bounded discovery summary, without schemas or page-provided safety claims.
-/// Full metadata is retrieved explicitly after the agent chooses a relevant tool.
+/// Small catalogs list full descriptions; larger ones are shortened. Full
+/// metadata is retrieved explicitly after the agent chooses a relevant tool.
 pub fn context_from_tools(tools: &[ToolRecord]) -> Value {
     let mut ordered: Vec<_> = tools.iter().collect();
     ordered.sort_by(|a, b| (&a.name, &a.frame_id).cmp(&(&b.name, &b.frame_id)));
+    if let Some(full) = full_context_from_tools(&ordered) {
+        return full;
+    }
     let mut catalog = Vec::new();
     let mut bytes = 256; // Envelope and array delimiters.
     let mut truncated = false;
@@ -745,6 +785,47 @@ mod tests {
         assert_eq!(context["tools"][0]["name"], "tool-000");
         assert_eq!(context["untrusted"], true);
         assert!(context["tools"][0].get("inputSchema").is_none());
+    }
+
+    fn sample_tool(name: &str, description: &str, frame: &str) -> super::ToolRecord {
+        super::ToolRecord {
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema: serde_json::json!({}),
+            annotations: serde_json::json!({}),
+            origin: "https://example.com".to_string(),
+            frame_id: frame.to_string(),
+            backend_node_id: None,
+        }
+    }
+
+    #[test]
+    fn small_catalog_lists_full_descriptions() {
+        let long = "x".repeat(super::MAX_CONTEXT_DESCRIPTION_BYTES * 3);
+        let tools = vec![sample_tool("a", &long, "f"), sample_tool("b", "short", "f")];
+        let context = super::context_from_tools(&tools);
+        assert_eq!(context["tools"][0]["description"], long.as_str());
+        assert_eq!(context["truncated"], false);
+        assert_eq!(context["toolCount"], 2);
+    }
+
+    #[test]
+    fn small_catalog_over_budget_falls_back_to_bounded() {
+        let long = "x".repeat(super::MAX_CONTEXT_BYTES);
+        let context = super::context_from_tools(&[sample_tool("a", &long, "f")]);
+        assert_eq!(context["truncated"], true);
+        assert!(context.to_string().len() <= super::MAX_CONTEXT_BYTES);
+    }
+
+    #[test]
+    fn catalog_above_full_description_limit_is_shortened() {
+        let long = "x".repeat(super::MAX_CONTEXT_DESCRIPTION_BYTES * 2);
+        let tools: Vec<_> = (0..super::MAX_FULL_DESCRIPTION_TOOLS + 1)
+            .map(|i| sample_tool(&format!("t{i}"), &long, "f"))
+            .collect();
+        let context = super::context_from_tools(&tools);
+        assert_eq!(context["truncated"], true);
+        assert!(context["tools"][0]["description"].as_str().unwrap().len() < long.len());
     }
 
     #[test]
