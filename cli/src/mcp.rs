@@ -2087,6 +2087,7 @@ fn click_modifiers_schema() -> Value {
             "type": "string",
             "enum": ["alt", "control", "meta", "shift"],
         },
+        "minItems": 1,
         "description": "Modifier keys held during the click.",
     })
 }
