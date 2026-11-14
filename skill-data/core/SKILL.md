@@ -249,6 +249,7 @@ Run `agent-browser doctor` before anything else when a command fails unexpectedl
 
 - **"Ref not found" or "Element not found: @eN"**: the page changed. Snapshot again and use the new refs.
 - **"Stale ref ... cannot be recovered"**: the element was replaced and duplicates make the match ambiguous, so nothing ran. Snapshot again.
+- **`Timed out waiting for the local daemon's response`**. If the code is `outcome_unknown`, check the session state before retrying. The command may already have run.
 - **`page_wedged`**: the page stopped responding. When agent-browser launched the browser and the tab times out twice in a row, it is replaced by a blank one, so navigate again and snapshot. With `--cdp` or `--auto-connect`, or when policy gates `tab_new` or `tab_close`, the tab is left alone; close it or switch tabs.
 - **"Target closed: CDP session ... detached"**: the tab closed while the command ran, for example a script called `window.close()`. Run `agent-browser tab`, switch to a remaining tab, and snapshot.
 - **Element in the DOM but not in the snapshot**: it is off-screen or not rendered yet. Scroll or `wait --text "..."`, then snapshot.
