@@ -529,23 +529,8 @@ pub async fn drain(state: &mut DaemonState) -> bool {
         apply_events(state, events).await;
     }
     let wanted = state.har_recording || state.request_tracking;
-    if let Some(ff) = state
-        .firefox
-        .as_mut()
-        .filter(|ff| ff.data_collector.is_some() != wanted)
-    {
-        let (method, params) = match ff.data_collector.take() {
-            Some(collector) => (
-                "network.removeDataCollector",
-                json!({ "collector": collector }),
-            ),
-            None => (
-                "network.addDataCollector",
-                json!({ "dataTypes": ["request", "response"], "maxEncodedDataSize": 10_000_000 }),
-            ),
-        };
-        let reply = ff.bidi.send(method, params).await.ok();
-        ff.data_collector = reply.and_then(|r| r["collector"].as_str().map(String::from));
+    if let Some(ff) = state.firefox.as_mut() {
+        collect_bodies(ff, wanted).await;
     }
     tabs_changed
 }
@@ -555,6 +540,25 @@ fn top_level_context_changed(event: &Value) -> bool {
         event["method"].as_str(),
         Some("browsingContext.contextCreated" | "browsingContext.contextDestroyed")
     ) && event["params"]["parent"].is_null()
+}
+
+/// Adds or removes the BiDi data collector, so Firefox keeps bodies only while something reads them.
+async fn collect_bodies(ff: &mut FirefoxSession, wanted: bool) {
+    if ff.data_collector.is_some() == wanted {
+        return;
+    }
+    let (method, params) = match ff.data_collector.take() {
+        Some(collector) => (
+            "network.removeDataCollector",
+            json!({ "collector": collector }),
+        ),
+        None => (
+            "network.addDataCollector",
+            json!({ "dataTypes": ["request", "response"], "maxEncodedDataSize": 10_000_000 }),
+        ),
+    };
+    let reply = ff.bidi.send(method, params).await.ok();
+    ff.data_collector = reply.and_then(|r| r["collector"].as_str().map(String::from));
 }
 
 /// The browsing context an event reports, when the event carries one.
@@ -963,6 +967,7 @@ pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .and_then(Value::as_u64)
         .unwrap_or(state.default_timeout_ms);
     let ff = session(state)?;
+    collect_bodies(ff, true).await;
     let mut rx = ff.bidi.subscribe_buffered();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
@@ -2085,10 +2090,16 @@ mod tests {
         state.har_recording = false;
         drain(&mut state).await;
 
+        let waited = responsebody(&json!({"url": "nothing", "timeout": 1}), &mut state).await;
+        assert!(waited.is_err());
+
         assert_eq!(
             *calls.lock().unwrap(),
-            vec!["network.addDataCollector", "network.removeDataCollector"]
+            vec![
+                "network.addDataCollector",
+                "network.removeDataCollector",
+                "network.addDataCollector"
+            ]
         );
-        assert_eq!(state.firefox.as_ref().unwrap().data_collector, None);
     }
 }
