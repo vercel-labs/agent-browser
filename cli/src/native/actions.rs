@@ -2713,7 +2713,17 @@ fn is_auth_login_no_navigate(cmd: &Value) -> bool {
 /// relaunch wait for the next command that can.
 pub(crate) fn command_launches_browser(cmd: &Value) -> bool {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
-    (!skip_launch_action(action) || action == "launch") && !is_auth_login_no_navigate(cmd)
+    ((!skip_launch_action(action) || action == "launch") && !is_auth_login_no_navigate(cmd))
+        || cdp_url_attaches(cmd)
+}
+
+/// Whether a `get cdp-url` names a running browser to attach to (`--cdp` or
+/// `--auto-connect`). It then takes the launch path, which for those targets
+/// only attaches and never starts a browser. Without a target it reads the
+/// browser the session already has and never relaunches it.
+fn cdp_url_attaches(cmd: &Value) -> bool {
+    cmd.get("action").and_then(Value::as_str) == Some("cdp_url")
+        && Patch::from_wire(cmd.get("settings")).is_ok_and(|patch| patch.names_attach_target())
 }
 
 fn skip_launch_action(action: &str) -> bool {
@@ -3200,7 +3210,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             Err(e) => return error_response(&id, &e),
         };
         if launches {
-            let mut patch = patch;
+            // `get cdp-url` attaches to the browser it names and applies no
+            // other launch setting, whatever the client sent.
+            let mut patch = if action == "cdp_url" {
+                patch.for_cdp_url()
+            } else {
+                patch
+            };
             if let Err(e) = adjust_ca_patch(state, &mut patch) {
                 return error_response(&id, &e);
             }
@@ -3214,7 +3230,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .map(|patch| state.settings.plan(patch))
         .filter(|plan| plan.relaunch);
 
-    let skip_launch = skip_launch_action(action);
+    let skip_launch = skip_launch_action(action) && !(action == "cdp_url" && launches);
     let restore_key_change_needs_launch = !skip_launch
         && command_changes_restore_key(cmd, state)
         && has_active_browser_session(state);
@@ -3469,7 +3485,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 .get("requireMd")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-        let safe_during_dialog = (skip_launch && !read_touches_active_tab)
+        let safe_during_dialog = (skip_launch_action(action) && !read_touches_active_tab)
             || matches!(
                 action,
                 "dialog"
@@ -15648,6 +15664,74 @@ mod tests {
         assert_eq!(response["success"], false);
         assert_eq!(response["error"], "Browser not launched");
         assert!(state.browser.is_none());
+    }
+
+    #[test]
+    fn cdp_url_takes_the_launch_path_only_to_attach() {
+        let cdp_url = |settings: serde_json::Value| serde_json::json!({ "id": "cdp", "action": "cdp_url", "settings": settings });
+        for settings in [
+            serde_json::json!({ "cdp": "ws://127.0.0.1:9333/devtools/browser/x" }),
+            serde_json::json!({ "auto-connect": true }),
+        ] {
+            assert!(
+                super::command_launches_browser(&cdp_url(settings.clone())),
+                "{settings}"
+            );
+        }
+        for settings in [
+            serde_json::json!({ "profile": "/tmp/p", "relaunch": true }),
+            serde_json::json!({ "provider": "browserbase" }),
+            serde_json::json!({ "cdp-headers": "{\"A\":\"b\"}" }),
+        ] {
+            assert!(
+                !super::command_launches_browser(&cdp_url(settings.clone())),
+                "{settings}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cdp_url_attaches_to_the_browser_it_names_and_launches_nothing() {
+        // An endpoint that accepts the connection and closes it: the attach
+        // reaches it and fails without a browser to talk to.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = accepted.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let mut state = super::DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+
+        let response = super::execute_command(
+            &serde_json::json!({
+                "id": "cdp",
+                "action": "cdp_url",
+                "settings": {
+                    "cdp": format!("ws://127.0.0.1:{port}/devtools/browser/x"),
+                    "profile": "/tmp/p",
+                    "relaunch": true,
+                },
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(response["success"], false, "{response}");
+        assert_ne!(response["error"], "Browser not launched", "{response}");
+        assert!(accepted.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(state.browser.is_none());
+        assert_eq!(state.settings.get(super::Key::Profile), None);
+        assert_eq!(
+            state.settings.get(super::Key::Cdp),
+            None,
+            "a failed attach rolls back"
+        );
     }
 
     #[tokio::test]

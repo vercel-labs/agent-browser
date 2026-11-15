@@ -1302,6 +1302,49 @@ fn a_patch_without_launch_settings_keeps_only_live_ones() {
 }
 
 #[test]
+fn a_cdp_url_patch_keeps_only_live_settings_and_the_browser_to_attach_to() {
+    let headers = json!(r#"{"Authorization":"Bearer x"}"#);
+    let cdp = patch_of(&[
+        is(Key::Cdp, json!("ws://127.0.0.1:9333/devtools/browser/x")),
+        is(Key::CdpHeaders, headers.clone()),
+        is(Key::Profile, json!("/p")),
+        is(Key::Headed, json!(true)),
+        is(Key::DefaultTimeout, json!(5000)),
+    ])
+    .for_cdp_url();
+    assert_eq!(
+        cdp.value(Key::Cdp),
+        Some(&json!("ws://127.0.0.1:9333/devtools/browser/x"))
+    );
+    assert_eq!(cdp.value(Key::CdpHeaders), Some(&headers));
+    assert!(cdp.value(Key::DefaultTimeout).is_some());
+    assert!(cdp.get(Key::Profile).is_none() && cdp.get(Key::Headed).is_none());
+
+    let auto = patch_of(&[
+        is(Key::AutoConnect, json!(true)),
+        is(Key::Args, json!(["--x"])),
+    ])
+    .for_cdp_url();
+    assert_eq!(auto.value(Key::AutoConnect), Some(&json!(true)));
+    assert!(auto.get(Key::Args).is_none());
+
+    // A provider starts a browser, and CDP headers alone name none.
+    for entries in [
+        vec![is(Key::Provider, json!("browserbase"))],
+        vec![is(Key::CdpHeaders, headers.clone())],
+        vec![(Key::AutoConnect, Requested::Default)],
+    ] {
+        let patch = patch_of(&entries);
+        assert!(!patch.names_attach_target(), "{patch:?}");
+        assert!(patch.for_cdp_url().is_noop(), "{patch:?}");
+    }
+
+    let forced = Patch::from_wire(Some(&json!({ "cdp": "9222", "relaunch": true }))).unwrap();
+    assert!(forced.forces_relaunch());
+    assert!(!forced.for_cdp_url().forces_relaunch());
+}
+
+#[test]
 fn local_only_settings_are_ignored_for_external_sessions() {
     for target in [
         (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
