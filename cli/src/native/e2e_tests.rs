@@ -16288,7 +16288,7 @@ async fn e2e_firefox_click_buttons_modifiers_and_double_click() {
         for (const type of ["mousedown", "mouseup", "click", "auxclick", "dblclick", "contextmenu"]) {
             document.addEventListener(type, (e) => {
                 if (type === "contextmenu") e.preventDefault();
-                window.__log.push(`${type}:${e.button}:${e.detail}:${+e.ctrlKey}${+e.shiftKey}`);
+                window.__log.push(`${type}:${e.button}:${e.detail}:${+e.metaKey}${+e.shiftKey}`);
             }, true);
         }
         true
@@ -16332,14 +16332,14 @@ async fn e2e_firefox_click_buttons_modifiers_and_double_click() {
             &mut state,
             "click",
             "#target",
-            json!({ "modifiers": 2 | 8 }),
+            json!({ "modifiers": 4 | 8 }),
         )
         .await,
     );
     let lines = firefox_log(&mut state).await;
     assert!(
         lines.iter().any(|line| line == "click:0:1:11"),
-        "control and shift must be held during the click: {lines:?}"
+        "meta and shift must be held during the click: {lines:?}"
     );
 
     assert_eq!(firefox_eval(&mut state, reset).await, json!(true));
