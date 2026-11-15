@@ -3976,8 +3976,8 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
     Ok(established)
 }
 
-/// Carry the session's pin-tab setting into a browser this session launched
-/// itself (local Chrome or a cloud provider). The CDP attach paths do this in
+/// Carry the session's pin-tab setting into a local Chrome this session
+/// launched itself. The CDP attach paths do this in
 /// `apply_tab_binding_on_attach`; without it the new manager keeps its default
 /// `pin_tab = false`, so closing the pinned tab from outside silently retargets
 /// the next command at another tab instead of entering `tab_gone` (#2620).
@@ -5027,7 +5027,6 @@ async fn auto_launch_inner(
                 Ok(mgr) => {
                     state.reset_input_state();
                     state.browser = Some(mgr);
-                    sync_pin_tab_to_launched_browser(state);
                     state.launch_identity = Some(state.settings.launch_identity());
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
