@@ -553,9 +553,17 @@ async fn verify_click_point_space(
     if iframe_sessions.get(frame_id).map(String::as_str) == Some(dispatch_session) {
         return Ok(());
     }
-    // No frame boundary was crossed, so the point is still in the frame's own
-    // viewport and the frame offset has to come from the browser.
-    if point.crossed == 0 {
+    // The walk crosses only same-origin ancestors, so a shortfall against the
+    // frame's depth in the page tree means the point is in a nested viewport.
+    // One remaining hop is mapped below; more than that cannot be placed.
+    let depth = frame_depth(client, dispatch_session, frame_id).await?;
+    if point.crossed < depth {
+        if point.crossed != 0 || depth != 1 {
+            return Err(format!(
+                "Element '{}' cannot be clicked safely: its frame sits {} frames below the page but the walk covered {}, so its click point is in another viewport. Open the frame's own URL to interact with it.",
+                target, depth, point.crossed
+            ));
+        }
         map_frame_local_point(client, dispatch_session, frame_id, point).await?;
     }
     // The hit test takes integer coordinates, so press the same integer point
@@ -636,19 +644,84 @@ async fn map_frame_local_point(
         .await
         .map_err(|error| format!("Cannot read the bounds of frame {}: {}", frame_id, error))?;
     let quad = &model.model.content;
-    if quad.len() < 8 {
-        return Err(format!("Frame {} has an incomplete content box", frame_id));
-    }
-    let left = quad[0];
-    let top = quad[1];
-    let width = (quad[2] - quad[0]).abs().max((quad[4] - quad[6]).abs());
-    let height = (quad[5] - quad[1]).abs().max((quad[7] - quad[3]).abs());
-    if width <= 0.0 || height <= 0.0 {
-        return Err(format!("Frame {} has no visible content box", frame_id));
-    }
-    point.x = left + point.x * (width / point.vw);
-    point.y = top + point.y * (height / point.vh);
+    let mapped = map_point_through_quad(quad, point.vw, point.vh, point.x, point.y)
+        .ok_or_else(|| {
+            format!(
+                "Cannot place the click point of frame {} in the page viewport: its content box is missing, empty, or transformed beyond a flat box",
+                frame_id
+            )
+        })?;
+    point.x = mapped.0;
+    point.y = mapped.1;
     Ok(())
+}
+
+/// Map a point inside a frame onto the frame element's content quad, using the
+/// quad's own basis so rotation, skew, reflection, and scaling are honored.
+/// Returns None for a quad that is not a parallelogram, which means a
+/// perspective transform this mapping cannot follow.
+fn map_point_through_quad(
+    quad: &[f64],
+    viewport_width: f64,
+    viewport_height: f64,
+    x: f64,
+    y: f64,
+) -> Option<(f64, f64)> {
+    if quad.len() < 8 || viewport_width <= 0.0 || viewport_height <= 0.0 {
+        return None;
+    }
+    let (x0, y0) = (quad[0], quad[1]);
+    let (x1, y1) = (quad[2], quad[3]);
+    let (x2, y2) = (quad[4], quad[5]);
+    let (x3, y3) = (quad[6], quad[7]);
+    let diag_x = x1 - x0 + (x3 - x0);
+    let diag_y = y1 - y0 + (y3 - y0);
+    if (diag_x - (x2 - x0)).abs() > 0.5 || (diag_y - (y2 - y0)).abs() > 0.5 {
+        return None;
+    }
+    if (x1 - x0).abs() + (y1 - y0).abs() == 0.0 && (x3 - x0).abs() + (y3 - y0).abs() == 0.0 {
+        return None;
+    }
+    let u = x / viewport_width;
+    let v = y / viewport_height;
+    Some((
+        x0 + u * (x1 - x0) + v * (x3 - x0),
+        y0 + u * (y1 - y0) + v * (y3 - y0),
+    ))
+}
+
+/// How many frames down from the root of `session_id`'s frame tree `frame_id`
+/// sits. The root of that tree is the main frame of the session.
+async fn frame_depth(
+    client: &CdpClient,
+    session_id: &str,
+    frame_id: &str,
+) -> Result<usize, String> {
+    let tree = client
+        .send_command_no_params("Page.getFrameTree", Some(session_id))
+        .await
+        .map_err(|error| format!("Cannot read the page frame tree: {}", error))?;
+    tree.get("frameTree")
+        .and_then(|root| find_frame_depth(root, frame_id, 0))
+        .ok_or_else(|| format!("Frame {} is not in the page frame tree", frame_id))
+}
+
+fn find_frame_depth(tree: &Value, frame_id: &str, depth: usize) -> Option<usize> {
+    if tree
+        .get("frame")
+        .and_then(|frame| frame.get("id"))
+        .and_then(Value::as_str)
+        == Some(frame_id)
+    {
+        return Some(depth);
+    }
+    tree.get("childFrames")
+        .and_then(Value::as_array)
+        .and_then(|children| {
+            children
+                .iter()
+                .find_map(|child| find_frame_depth(child, frame_id, depth + 1))
+        })
 }
 
 /// Origin of a CDP session's viewport in the recorded page's CSS coordinates.
@@ -2130,5 +2203,58 @@ mod tests {
         let session = resolve_frame_session(None, "parent-session", &iframe_sessions);
 
         assert_eq!(session, "parent-session");
+    }
+
+    #[test]
+    fn test_map_point_through_quad_places_a_plain_frame() {
+        let quad = [100.0, 50.0, 400.0, 50.0, 400.0, 250.0, 100.0, 250.0];
+        assert_eq!(
+            map_point_through_quad(&quad, 300.0, 200.0, 150.0, 100.0),
+            Some((250.0, 150.0))
+        );
+    }
+
+    #[test]
+    fn test_map_point_through_quad_follows_the_rendered_scale() {
+        let quad = [100.0, 50.0, 700.0, 50.0, 700.0, 450.0, 100.0, 450.0];
+        assert_eq!(
+            map_point_through_quad(&quad, 300.0, 200.0, 150.0, 100.0),
+            Some((400.0, 250.0))
+        );
+    }
+
+    #[test]
+    fn test_map_point_through_quad_follows_rotation() {
+        let quad = [200.0, 100.0, 270.71, 170.71, 200.0, 241.42, 129.29, 170.71];
+        let (x, y) = map_point_through_quad(&quad, 100.0, 100.0, 10.0, 80.0).unwrap();
+        assert!((x - 150.5).abs() < 0.01, "x was {x}");
+        assert!((y - 163.64).abs() < 0.01, "y was {y}");
+    }
+
+    #[test]
+    fn test_map_point_through_quad_rejects_a_perspective_quad() {
+        let quad = [0.0, 0.0, 100.0, 0.0, 80.0, 100.0, 20.0, 100.0];
+        assert_eq!(
+            map_point_through_quad(&quad, 100.0, 100.0, 50.0, 50.0),
+            None
+        );
+    }
+
+    #[test]
+    fn test_map_point_through_quad_rejects_missing_geometry() {
+        assert_eq!(
+            map_point_through_quad(&[0.0, 0.0], 100.0, 100.0, 1.0, 1.0),
+            None
+        );
+        assert_eq!(
+            map_point_through_quad(
+                &[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0],
+                0.0,
+                10.0,
+                1.0,
+                1.0
+            ),
+            None
+        );
     }
 }
