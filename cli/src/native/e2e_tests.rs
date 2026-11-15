@@ -14222,6 +14222,7 @@ async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
 <button id="parent-target" onclick="window.parentClicks = (window.parentClicks || 0) + 1">Parent control</button>
 <iframe id="frame" title="Payment" src="http://127.0.0.1:{child_port}/"></iframe>
 <iframe id="forged" title="Forged" src="http://127.0.0.1:{child_port}/forge"></iframe>
+<div style="height: 2000px"></div>
 </body></html>"#
     );
     let parent_server = tokio::spawn(async move {
@@ -14279,6 +14280,16 @@ async fn e2e_click_ref_in_cross_origin_frame_lands_in_frame() {
             .unwrap_or_else(|| panic!("ref '{}' must be in the snapshot", name))
     };
 
+    // A scrolled page must still place the point in the frame: input and box
+    // geometry are viewport-relative while the hit test reads document
+    // coordinates.
+    assert_success(
+        &execute_command(
+            &json!({ "action": "evaluate", "script": "window.scrollTo(0, 200); 'ok'" }),
+            &mut state,
+        )
+        .await,
+    );
     let click = execute_command(
         &json!({ "action": "click", "selector": format!("@{}", reference("Child action")) }),
         &mut state,
@@ -14308,6 +14319,13 @@ async fn e2e_click_ref_in_cross_origin_frame_lands_in_frame() {
     assert_eq!(
         child_clicks, 1,
         "the click must land on the ref inside the cross-origin frame: {click}"
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "action": "evaluate", "script": "window.scrollTo(0, 0); 'ok'" }),
+            &mut state,
+        )
+        .await,
     );
     let forged = execute_command(
         &json!({ "action": "click", "selector": format!("@{}", reference("Forged action")) }),

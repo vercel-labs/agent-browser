@@ -571,12 +571,17 @@ async fn verify_click_point_space(
     // the dispatched one.
     point.x = point.x.round();
     point.y = point.y.round();
+    // Input and box geometry use the session viewport, while the hit test
+    // reads document coordinates, so shift by the viewport's document origin.
+    let (origin_x, origin_y) = viewport_origin(client, dispatch_session).await?;
+    let hit_x = point.x as i64 + origin_x.round() as i64;
+    let hit_y = point.y as i64 + origin_y.round() as i64;
     let hit = client
         .send_command(
             "DOM.getNodeForLocation",
             Some(serde_json::json!({
-                "x": point.x as i64,
-                "y": point.y as i64,
+                "x": hit_x,
+                "y": hit_y,
                 "includeUserAgentShadowDOM": false,
                 "ignorePointerEventsNone": false,
             })),
@@ -596,6 +601,28 @@ async fn verify_click_point_space(
         "Element '{}' cannot be clicked safely: a click at ({}, {}) would land outside its frame, so the input could reach a different element. Open the frame's own URL to interact with it.",
         target, point.x, point.y
     ))
+}
+
+/// Document coordinates of the dispatch session's viewport origin. Box geometry
+/// and input events are viewport-relative, while `DOM.getNodeForLocation` takes
+/// document coordinates, so a scrolled page differs by this offset.
+async fn viewport_origin(client: &CdpClient, session_id: &str) -> Result<(f64, f64), String> {
+    let metrics = client
+        .send_command_no_params("Page.getLayoutMetrics", Some(session_id))
+        .await
+        .map_err(|error| format!("Cannot read the page viewport origin: {}", error))?;
+    let viewport = metrics
+        .get("visualViewport")
+        .or_else(|| metrics.get("cssVisualViewport"));
+    let x = viewport
+        .and_then(|v| v.get("pageX"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let y = viewport
+        .and_then(|v| v.get("pageY"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    Ok((x, y))
 }
 
 /// Add the frame's content-box offset to a point that is still in the frame's
