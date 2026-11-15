@@ -6696,16 +6696,21 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     };
 
     let previous_refs = state.ref_map.ref_ids();
-    state.ref_map.begin_snapshot();
+    // Build the replacement map separately and commit it only once the capture
+    // succeeds, so a failed snapshot (e.g. a selector that matches nothing)
+    // leaves the refs from the last good snapshot usable.
+    let mut next_ref_map = state.ref_map.clone();
+    next_ref_map.begin_snapshot();
     let tree = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
         &options,
-        &mut state.ref_map,
+        &mut next_ref_map,
         state.active_frame_id.as_deref(),
         &state.iframe_sessions,
     )
     .await?;
+    state.ref_map = next_ref_map;
 
     let url = mgr.get_url().await.unwrap_or_default();
 

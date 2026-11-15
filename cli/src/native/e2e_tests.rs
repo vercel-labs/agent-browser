@@ -6058,6 +6058,71 @@ worker.onerror = () => {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_failed_scoped_snapshot_preserves_refs() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("snapshot_diff_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(get_data(&resp)["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("[ref=e1]"));
+
+    // A scoped snapshot whose selector matches nothing must not wipe the refs
+    // from the last successful snapshot.
+    for (id, interactive) in [("4", false), ("5", true)] {
+        let resp = execute_command(
+            &json!({
+                "id": id,
+                "action": "snapshot",
+                "selector": "#nope",
+                "interactive": interactive
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("did not match any element"));
+
+        let resp = execute_command(
+            &json!({ "id": "6", "action": "click", "selector": "e1" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+    }
+
+    let resp = execute_command(&json!({ "id": "7", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_diff_snapshot() {
     let mut state = DaemonState::new();
 
