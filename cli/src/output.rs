@@ -2231,7 +2231,9 @@ Options:
                        click fires auxclick.
   --modifiers <keys>   Keys held during the click: alt, control (alias ctrl),
                        meta (aliases cmd, command), shift. Join several with a
-                       comma or a plus, such as control,shift.
+                       comma or a plus, such as control,shift. On macOS,
+                       control-click opens the context menu; use meta to open a
+                       link in a new tab, which is control on Windows and Linux.
   --new-tab            Open link in a new tab instead of navigating current tab.
                        The new tab inherits session setup before its first load.
                        Only works on elements with an href attribute.
@@ -2271,7 +2273,9 @@ Options:
   --button <button>    Mouse button: left (default), right, middle, back, forward
   --modifiers <keys>   Keys held during the click: alt, control (alias ctrl),
                        meta (aliases cmd, command), shift. Join several with a
-                       comma or a plus, such as control,shift.
+                       comma or a plus, such as control,shift. On macOS,
+                       control-click opens the context menu; use meta to open a
+                       link in a new tab, which is control on Windows and Linux.
   --human              Approach along a reproducible eased curve
                        Starts at the last pointer or element interaction
 
@@ -4757,7 +4761,7 @@ Options:
                              (default: 1h; 0 disables; dashboard input resets the timer)
                              Values too large to convert to milliseconds produce a warning and are ignored
   --engine <name>            Browser engine: chrome (default), lightpanda, obscura, firefox
-                             (or AGENT_BROWSER_ENGINE); firefox requires Firefox 150 or newer;
+                             (or AGENT_BROWSER_ENGINE)
                              Obscura rejects --proxy-bypass,
                              proxyBypass config, AGENT_BROWSER_PROXY_BYPASS, NO_PROXY/no_proxy,
                              --webgpu, --ca-cert, --args, profiles, state, extensions,

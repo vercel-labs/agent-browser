@@ -399,10 +399,6 @@ pub async fn set_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     }))
 }
 
-pub async fn set_device(_cmd: &Value, _state: &mut DaemonState) -> Result<Value, String> {
-    Err("Firefox does not support `set device`; use `set viewport` plus the `--user-agent` launch flag (or `AGENT_BROWSER_USER_AGENT`) instead of `set device`".to_string())
-}
-
 /// Overrides the user agent for the active tab and any tab opened later.
 pub async fn set_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let user_agent = cmd
@@ -677,9 +673,10 @@ mod tests {
             Some((800, 600, 1.5))
         );
 
-        let error = set_device(&json!({"device": "iPhone 15"}), &mut state)
-            .await
-            .unwrap_err();
+        let error =
+            super::super::actions::execute("device", &json!({"device": "iPhone 15"}), &mut state)
+                .await
+                .unwrap_err();
         assert!(error.contains("set device"));
         assert!(error.contains("set viewport"));
         assert!(error.contains("--user-agent") && error.contains("AGENT_BROWSER_USER_AGENT"));
@@ -708,28 +705,6 @@ mod tests {
             Some("Desktop Agent")
         );
         assert!(calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn media_dark_accepts_reduced_motion_no_preference() {
-        let (ff, _, _, _, rdp) = fake_session_with_rdp().await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-
-        set_media(
-            &json!({"colorScheme": "dark", "reducedMotion": "no-preference"}),
-            &mut state,
-        )
-        .await
-        .unwrap();
-
-        let messages = rdp.lock().unwrap().clone();
-        let pref = messages
-            .iter()
-            .find(|m| m["type"] == "setIntPref")
-            .expect("no setIntPref message");
-        assert_eq!(pref["name"], COLOR_SCHEME_PREF);
-        assert_eq!(pref["value"], 0);
     }
 
     #[tokio::test]
@@ -771,6 +746,17 @@ mod tests {
             find("emulation.setNetworkConditions")["params"]["networkConditions"]["type"],
             "offline"
         );
+
+        set_offline(&json!({"offline": false}), &mut state)
+            .await
+            .unwrap();
+        let updated = bidi.lock().unwrap().clone();
+        let last = updated
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "emulation.setNetworkConditions")
+            .unwrap();
+        assert!(last["params"]["networkConditions"].is_null());
     }
 
     #[tokio::test]
@@ -780,6 +766,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("prefers-reduced-motion"), "{error}");
+        assert!(error.contains("prefers-color-scheme"), "{error}");
         assert!(calls.lock().unwrap().is_empty());
     }
 
@@ -790,7 +777,11 @@ mod tests {
         state.firefox = Some(ff);
 
         let result = set_media(
-            &json!({"colorScheme": "dark", "media": "screen"}),
+            &json!({
+                "colorScheme": "dark",
+                "media": "screen",
+                "reducedMotion": "no-preference"
+            }),
             &mut state,
         )
         .await
@@ -835,7 +826,13 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .features,
-            vec![("prefers-color-scheme".to_string(), "dark".to_string())]
+            vec![
+                ("prefers-color-scheme".to_string(), "dark".to_string()),
+                (
+                    "prefers-reduced-motion".to_string(),
+                    "no-preference".to_string()
+                ),
+            ]
         );
     }
 

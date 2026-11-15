@@ -124,14 +124,6 @@ impl DomainFilter {
             ))
         }
     }
-
-    /// Rejects a URL the browser would navigate to. `about:blank` has no hostname and stays reachable.
-    pub fn check_navigation(&self, url: &str) -> Result<(), String> {
-        if url == "about:blank" {
-            return Ok(());
-        }
-        self.check_url(url)
-    }
 }
 
 /// Rejects a navigation to a URL outside the allowed domains; a missing filter allows everything.
@@ -140,7 +132,7 @@ pub(crate) fn check_navigation_allowed(
     url: &str,
 ) -> Result<(), String> {
     match filter {
-        Some(filter) => filter.check_navigation(url),
+        Some(filter) => filter.check_url(url),
         None => Ok(()),
     }
 }
@@ -814,15 +806,13 @@ mod tests {
     #[test]
     fn navigation_allows_about_blank_and_blocks_every_other_unlisted_url() {
         let filter = DomainFilter::new("example.com");
-        assert!(filter.check_navigation("about:blank").is_ok());
-        assert!(filter.check_navigation("https://example.com/page").is_ok());
+        assert!(filter.check_url("about:blank").is_ok());
+        assert!(filter.check_url("https://example.com/page").is_ok());
         assert_eq!(
-            filter
-                .check_navigation("https://evil.example/")
-                .unwrap_err(),
+            filter.check_url("https://evil.example/").unwrap_err(),
             "Domain 'evil.example' is not in the allowed domains list"
         );
-        assert!(filter.check_navigation("data:text/html,hi").is_err());
+        assert!(filter.check_url("data:text/html,hi").is_err());
         assert!(check_navigation_allowed(None, "https://evil.example/").is_ok());
     }
 

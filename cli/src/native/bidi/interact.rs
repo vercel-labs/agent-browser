@@ -47,18 +47,7 @@ fn prepare_js() -> String {
             const y = Math.floor((top + bottom) / 2);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            let blocker = blockerAt(document, el, x, y);
-            let doc = el.ownerDocument;
-            let parentX = x;
-            let parentY = y;
-            while (!blocker && doc.defaultView && doc.defaultView.frameElement) {{
-                const frame = doc.defaultView.frameElement;
-                const frameRect = frame.getBoundingClientRect();
-                parentX += frameRect.x + frame.clientLeft;
-                parentY += frameRect.y + frame.clientTop;
-                doc = frame.ownerDocument;
-                blocker = blockerAt(doc, frame, parentX, parentY);
-            }}
+            const blocker = blockerAt(document, el, x, y);
             const reachable = x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight;
             return {{ x: x, y: y, reason: notActionable(el, reachable), blocker: blocker }};
         }}"#
@@ -131,10 +120,53 @@ pub(super) async fn prepare(
     if let Some(blocker) = result["blocker"].as_str() {
         return Err(intercepted_error(label, blocker));
     }
-    Ok((
+    let position = (
         result["x"].as_f64().unwrap_or(0.0),
         result["y"].as_f64().unwrap_or(0.0),
-    ))
+    );
+    if target.context != ff.contexts.active_tab() {
+        let path = get_context_path(ff, &target.context)
+            .await?
+            .ok_or("Firefox could not find the click context")?;
+        let mut point = position;
+        for (parent, child) in path.iter().rev() {
+            let frames = super::query::locate_nodes(
+                &ff.bidi,
+                parent,
+                json!({ "type": "context", "value": { "context": child } }),
+                None,
+            )
+            .await?;
+            let [frame] = frames.as_slice() else {
+                return Err("Firefox could not verify the click frame".to_string());
+            };
+            let js = format!(
+                "function() {{ const r = this.getBoundingClientRect(); const x = {} + r.x + this.clientLeft; const y = {} + r.y + this.clientTop; return {{ x, y, blocker: ({BLOCKER_AT_JS})(document, this, x, y) }}; }}",
+                point.0, point.1
+            );
+            let mapped = ff
+                .bidi
+                .call_function_on_in_sandbox(
+                    parent,
+                    super::client::SANDBOX,
+                    &js,
+                    json!({ "sharedId": frame["sharedId"] }),
+                )
+                .await?;
+            if let Some(blocker) = mapped["blocker"].as_str() {
+                return Err(intercepted_error(label, blocker));
+            }
+            point = (
+                mapped["x"]
+                    .as_f64()
+                    .ok_or("Firefox could not map the click point")?,
+                mapped["y"]
+                    .as_f64()
+                    .ok_or("Firefox could not map the click point")?,
+            );
+        }
+    }
+    Ok(position)
 }
 
 pub(super) async fn perform_actions(
@@ -203,6 +235,26 @@ fn context_path(node: &Value, target: &str, path: &mut Vec<(String, String)>) ->
     false
 }
 
+async fn get_context_path(
+    ff: &FirefoxSession,
+    context: &str,
+) -> Result<Option<Vec<(String, String)>>, String> {
+    let tree = ff
+        .bidi
+        .send(
+            "browsingContext.getTree",
+            json!({ "root": ff.contexts.active_tab() }),
+        )
+        .await?;
+    let mut path = Vec::new();
+    let found = tree["contexts"].as_array().is_some_and(|roots| {
+        roots
+            .iter()
+            .any(|root| context_path(root, context, &mut path))
+    });
+    Ok(found.then_some(path))
+}
+
 async fn map_mouse_position(
     ff: &FirefoxSession,
     context: &str,
@@ -222,21 +274,9 @@ async fn map_mouse_position(
         )
         .await?;
     if point[2] == false {
-        let tree = ff
-            .bidi
-            .send(
-                "browsingContext.getTree",
-                json!({"root": ff.contexts.active_tab()}),
-            )
-            .await?;
-        let mut path = Vec::new();
-        if !tree["contexts"].as_array().is_some_and(|roots| {
-            roots
-                .iter()
-                .any(|root| context_path(root, context, &mut path))
-        }) {
-            return Err("Firefox could not find the mouse context".to_string());
-        }
+        let path = get_context_path(ff, context)
+            .await?
+            .ok_or("Firefox could not find the mouse context")?;
         let mut mapped = position;
         for (parent, child) in path {
             let frames = ff
@@ -531,45 +571,42 @@ async fn act_raw(
     .await
 }
 
-/// Clicks a ref or selector, returning Chrome's `{clicked}` shape.
+/// Clicks a ref or selector with Chrome's click rules.
 pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    click_with_count(cmd, state, 1).await
+    click_with(cmd, state, 1, PointerAction::Click).await
 }
 
-/// Runs a click or double click, holding any requested modifiers for the whole gesture.
-async fn click_with_count(
+/// Decodes the click the way Chrome does, then presses the requested button the requested number
+/// of times while holding any requested modifier keys.
+async fn click_with(
     cmd: &Value,
     state: &mut DaemonState,
     default_count: u8,
+    action: PointerAction,
 ) -> Result<Value, String> {
+    let plan = ClickPlan::from_command(cmd, default_count)?;
     let selector = cmd
         .get("selector")
         .and_then(Value::as_str)
         .ok_or("Missing 'selector' parameter")?;
-
-    let spec = match ClickPlan::from_command(cmd, default_count)? {
-        ClickPlan::NewTab => return click_new_tab(selector, state).await,
-        ClickPlan::Pointer(spec) => spec,
+    let ClickPlan::Pointer(spec) = plan else {
+        return click_new_tab(selector, state).await;
     };
-
     let target = resolve_target(state, selector).await?;
     let keys = spec.modifiers.key_names();
+    let actions = pointer_click(
+        &Origin::Element(target.shared_id.clone()),
+        spec.button,
+        u32::from(spec.count),
+    );
     hold_modifiers(state, &target.context, &keys, "keyDown").await?;
     let outcome = act_pointer(
         state,
         cmd,
         &target,
         selector,
-        if spec.count > 1 {
-            PointerAction::DoubleClick
-        } else {
-            PointerAction::Click
-        },
-        pointer_click(
-            &Origin::Element(target.shared_id.clone()),
-            spec.button,
-            u32::from(spec.count),
-        ),
+        action,
+        actions,
         json!({ "clicked": selector }),
     )
     .await;
@@ -617,7 +654,7 @@ async fn click_new_tab(selector: &str, state: &mut DaemonState) -> Result<Value,
 
 /// Double-clicks a ref or selector.
 pub async fn dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    click_with_count(cmd, state, 2).await
+    click_with(cmd, state, 2, PointerAction::DoubleClick).await
 }
 
 /// Moves the mouse over a ref or selector.
@@ -1512,8 +1549,9 @@ mod tests {
                 let (mut state, _) = state_with_refs(connected).await;
                 let ff = state.firefox.as_mut().unwrap();
                 ff.contexts.activate(selected_context);
-                ff.refs.retain(|(_, shared_id), _| shared_id != "sid-1");
-                ff.refs.insert((target_context.into(), "sid-1".into()), 7);
+                ff.refs.retain(|(_, shared_id, _), _| shared_id != "sid-1");
+                ff.refs
+                    .insert((target_context.into(), "sid-1".into(), "doc".into()), 7);
                 state.mouse_state.x = 17.0;
                 state.mouse_state.y = 23.0;
                 let command = json!({"selector": "@e1"});
@@ -1584,9 +1622,24 @@ mod tests {
 
     async fn state_with_refs(reply: fn(&Value) -> Value) -> (DaemonState, Calls) {
         let mut state = DaemonState::new();
-        let (mut ff, _tx, calls) = fake_session_with_script(reply).await;
-        ff.refs.insert(("ctx-active".into(), "sid-1".into()), 7);
-        ff.refs.insert(("ctx-active".into(), "sid-2".into()), 8);
+        let (mut ff, _tx, calls) = fake_session_with(move |request| {
+            let params = &request["params"];
+            match request["method"].as_str() {
+                Some("browsingContext.getTree") => json!({ "contexts": [{ "context": "ctx-active", "children": [{ "context": "ctx-frame" }] }] }),
+                Some("browsingContext.locateNodes") => json!({ "nodes": [{ "sharedId": "frame" }] }),
+                Some("script.callFunction") if params["this"]["sharedId"] == "frame" => located(None),
+                Some("script.callFunction") if params["functionDeclaration"] == "() => document" => {
+                    json!({ "type": "success", "result": { "type": "node", "sharedId": "doc" } })
+                }
+                Some("script.callFunction") => reply(params),
+                _ => json!({}),
+            }
+        })
+        .await;
+        ff.refs
+            .insert(("ctx-active".into(), "sid-1".into(), "doc".into()), 7);
+        ff.refs
+            .insert(("ctx-active".into(), "sid-2".into(), "doc".into()), 8);
         state.firefox = Some(ff);
         state
             .ref_map
@@ -1631,6 +1684,7 @@ mod tests {
             [
                 "script.callFunction",
                 "script.callFunction",
+                "script.callFunction",
                 "input.performActions",
                 "input.performActions",
                 "input.performActions"
@@ -1649,12 +1703,16 @@ mod tests {
         assert!(error.contains("covered by <div#overlay>"), "{error}");
         assert_eq!(
             *calls.lock().unwrap(),
-            ["script.callFunction", "script.callFunction"]
+            [
+                "script.callFunction",
+                "script.callFunction",
+                "script.callFunction"
+            ]
         );
     }
 
     #[tokio::test]
-    async fn element_commands_return_chrome_shapes() {
+    async fn element_and_raw_pointer_commands_return_chrome_shapes() {
         let (mut state, _calls) = state_with_refs(connected).await;
 
         assert_eq!(
@@ -1697,32 +1755,6 @@ mod tests {
             scroll(&json!({ "y": 80 }), &mut state).await.unwrap(),
             json!({ "scrolled": true })
         );
-    }
-
-    #[tokio::test]
-    async fn drag_updates_position_for_following_wheel() {
-        let (mut state, _) = state_with_refs(connected).await;
-        state.mouse_state.x = 17.0;
-        state.mouse_state.y = 23.0;
-        drag(&json!({"source": "@e1", "target": "@e2"}), &mut state)
-            .await
-            .unwrap();
-        assert_eq!(
-            (
-                state.mouse_state.x,
-                state.mouse_state.y,
-                state.mouse_state.buttons
-            ),
-            (40.0, 50.0, 0)
-        );
-        wheel(&json!({"deltaY": 12}), &mut state).await.unwrap();
-        assert_eq!((state.mouse_state.x, state.mouse_state.y), (40.0, 50.0));
-    }
-
-    #[tokio::test]
-    async fn raw_pointer_commands_return_chrome_shapes() {
-        let (mut state, _calls) = state_with_refs(connected).await;
-
         assert_eq!(
             wheel(&json!({ "x": 5, "y": 6, "deltaY": 100 }), &mut state)
                 .await
@@ -1745,6 +1777,26 @@ mod tests {
                 .unwrap(),
             json!({ "dragged": true, "source": "@e1", "target": "@e2" })
         );
+    }
+
+    #[tokio::test]
+    async fn drag_updates_position_for_following_wheel() {
+        let (mut state, _) = state_with_refs(connected).await;
+        state.mouse_state.x = 17.0;
+        state.mouse_state.y = 23.0;
+        drag(&json!({"source": "@e1", "target": "@e2"}), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                state.mouse_state.x,
+                state.mouse_state.y,
+                state.mouse_state.buttons
+            ),
+            (40.0, 50.0, 0)
+        );
+        wheel(&json!({"deltaY": 12}), &mut state).await.unwrap();
+        assert_eq!((state.mouse_state.x, state.mouse_state.y), (40.0, 50.0));
     }
 
     #[tokio::test]

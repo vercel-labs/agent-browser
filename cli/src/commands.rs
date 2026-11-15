@@ -381,15 +381,11 @@ fn reject_batch_global_flag(batch_item: bool, arg: &str) -> Result<(), ParseErro
     }
 }
 
-pub fn attach_allowed_domains_to_launch_command(cmd: &mut Value, flags: &Flags) {
+/// Adds the launch settings that also apply when attaching to a running browser.
+pub fn apply_attach_launch_options(cmd: &mut Value, flags: &Flags) {
     if let Some(ref domains) = flags.allowed_domains {
         cmd["allowedDomains"] = json!(domains);
     }
-}
-
-/// Adds the launch settings that also apply when attaching to a running browser.
-pub fn apply_attach_launch_options(cmd: &mut Value, flags: &Flags) {
-    attach_allowed_domains_to_launch_command(cmd, flags);
     if let Some(ref path) = flags.download_path {
         cmd["downloadPath"] = json!(path);
     }

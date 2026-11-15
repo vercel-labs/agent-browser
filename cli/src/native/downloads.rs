@@ -38,12 +38,8 @@ impl DownloadLedger {
         self.records.clear();
     }
 
-    /// Record a download event. `Page.*` and `Browser.*` events for one
-    /// download share a guid; only `Browser.downloadProgress` carries the file
-    /// path, and only when `eventsEnabled` is set. Provider connections that
-    /// never enable it still report completion through `Page.*`. Firefox BiDi
-    /// events use `download` (falling back to `navigation`) in place of `guid`.
-    /// Returns false for any other method.
+    /// Records a download event across Chrome, provider, and Firefox BiDi protocols.
+    /// Returns false for unsupported methods or missing download identifiers.
     pub fn observe(&mut self, method: &str, params: &Value) -> bool {
         let Some(guid) = params
             .get("guid")

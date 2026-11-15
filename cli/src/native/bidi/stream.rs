@@ -21,7 +21,7 @@ pub struct FirefoxLive {
     pub bidi: Arc<BidiClient>,
     pub context: String,
     pub contexts: Contexts,
-    /// The session's tabs as (context, `t<N>` id, label), in id order.
+    /// Modifier mask held for each browsing context.
     pub modifiers: Arc<Mutex<HashMap<String, u8>>>,
 }
 
@@ -33,9 +33,7 @@ pub struct Poller {
 }
 
 impl Poller {
-    /// Whether this poller is still running for the session behind `bidi`. A poller listens to
-    /// one session's events and stops when that session's socket closes, so a relaunched or
-    /// reattached Firefox needs its own.
+    /// Whether this poller is active for the given BiDi session.
     pub fn serves(&self, bidi: &Arc<BidiClient>) -> bool {
         Arc::ptr_eq(&self.bidi, bidi) && !self.task.is_finished()
     }
@@ -145,7 +143,14 @@ async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<Fire
                     break;
                 }
                 if frame.is_none() && !prompts.contains(&live.context) && server.has_clients().await {
-                    frame = Some(capture_frame(&live, server.screencast_quality(), server.screencast_max_size()));
+                    frame = Some(capture_frame(
+                        &live,
+                        server.screencast_config.quality,
+                        (
+                            server.screencast_config.max_width,
+                            server.screencast_config.max_height,
+                        ),
+                    ));
                 }
             }
             _ = tab_tick.tick() => {
@@ -413,8 +418,9 @@ mod tests {
         use crate::native::actions::{execute_command, DaemonState};
         use crate::native::stream::{IdleActivity, StreamServer};
 
-        let (ff, events, calls) = fake_session().await;
+        let (mut ff, events, calls) = fake_session().await;
         std::mem::forget(events);
+        ff.data_collector = Some("collector".into());
         let activity = Arc::new(IdleActivity::new());
         let (server, slot) =
             StreamServer::start_without_client(0, "firefox-idle".into(), true, activity.clone())

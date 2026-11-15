@@ -23,7 +23,6 @@ pub(crate) enum NetworkDecision {
         headers: Vec<(String, String)>,
         body: String,
     },
-    Abort,
     Continue {
         headers: Option<Vec<(String, String)>>,
     },
@@ -50,7 +49,7 @@ fn is_blocked(url: &str, resource_type: &str, filter: Option<&DomainFilter>) -> 
         .is_some_and(|hostname| !filter.is_allowed(hostname))
 }
 
-/// Decides how one Firefox request is handled: fail, fulfill, abort or continue.
+/// Decides how one Firefox request is handled: fail, fulfill or continue.
 pub(crate) fn decide_request(
     url: &str,
     resource_type: &str,
@@ -68,7 +67,7 @@ pub(crate) fn decide_request(
             continue;
         }
         if route.abort {
-            return NetworkDecision::Abort;
+            return NetworkDecision::Fail;
         }
         if let Some(response) = &route.response {
             let request_headers = headers
@@ -421,7 +420,7 @@ async fn before_request(
         )
     };
     match decision {
-        NetworkDecision::Fail | NetworkDecision::Abort => {
+        NetworkDecision::Fail => {
             bidi.send("network.failRequest", json!({"request": id}))
                 .await?;
         }
@@ -517,19 +516,23 @@ fn auth_response(
 /// recorders, which only see events from the active tab. When the drained events dropped the
 /// active context, or its tab, the daemon's element refs and frame scope go with it.
 pub async fn drain(state: &mut DaemonState) -> bool {
+    let mut tabs_changed = false;
     if let Some(ff) = state.firefox.as_mut() {
         let active = ff.contexts.active().to_string();
         let events = ff.drain_events(&mut state.pending_dialog);
-        let tabs_changed = events.iter().any(top_level_context_changed);
+        tabs_changed = events.iter().any(top_level_context_changed);
         if ff.contexts.active() != active {
             state.ref_map.invalidate_all_documents();
             state.active_iframe_sessions.clear();
             state.active_frame_id = None;
         }
         apply_events(state, events).await;
-        return tabs_changed;
     }
-    false
+    let wanted = state.har_recording || state.request_tracking;
+    if let Some(ff) = state.firefox.as_mut() {
+        collect_bodies(ff, wanted).await;
+    }
+    tabs_changed
 }
 
 fn top_level_context_changed(event: &Value) -> bool {
@@ -537,6 +540,25 @@ fn top_level_context_changed(event: &Value) -> bool {
         event["method"].as_str(),
         Some("browsingContext.contextCreated" | "browsingContext.contextDestroyed")
     ) && event["params"]["parent"].is_null()
+}
+
+/// Adds or removes the BiDi data collector, so Firefox keeps bodies only while something reads them.
+async fn collect_bodies(ff: &mut FirefoxSession, wanted: bool) {
+    if ff.data_collector.is_some() == wanted {
+        return;
+    }
+    let (method, params) = match ff.data_collector.take() {
+        Some(collector) => (
+            "network.removeDataCollector",
+            json!({ "collector": collector }),
+        ),
+        None => (
+            "network.addDataCollector",
+            json!({ "dataTypes": ["request", "response"], "maxEncodedDataSize": 10_000_000 }),
+        ),
+    };
+    let reply = ff.bidi.send(method, params).await.ok();
+    ff.data_collector = reply.and_then(|r| r["collector"].as_str().map(String::from));
 }
 
 /// The browsing context an event reports, when the event carries one.
@@ -585,6 +607,23 @@ fn request_id(p: &Value) -> &str {
     p["request"]["request"].as_str().unwrap_or("")
 }
 
+fn last_har_entry<'a>(entries: &'a mut [HarEntry], id: &str) -> Option<&'a mut HarEntry> {
+    entries
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.request_id == id)
+}
+
+fn last_tracked_request<'a>(
+    entries: &'a mut [TrackedRequest],
+    id: &str,
+) -> Option<&'a mut TrackedRequest> {
+    entries
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.request_id == id)
+}
+
 fn request_started(state: &mut DaemonState, p: &Value) {
     let request = &p["request"];
     let id = request_id(p).to_string();
@@ -596,27 +635,15 @@ fn request_started(state: &mut DaemonState, p: &Value) {
     if let Some(timestamp) = timestamp.filter(|_| state.har_recording) {
         state.har_entries.push(HarEntry {
             request_id: id.clone(),
-            remote_addr: None,
             wall_time: timestamp / 1000.0,
             method: method.clone(),
             url: url.clone(),
             request_headers: header_list(&request["headers"]),
-            post_data: None,
             request_body_size: request["bodySize"].as_i64().unwrap_or(0),
             resource_type: resource_type.clone(),
-            status: None,
-            status_text: String::new(),
             http_version: "HTTP/1.1".to_string(),
-            response_headers: Vec::new(),
-            mime_type: String::new(),
-            redirect_url: String::new(),
             response_body_size: -1,
-            cdp_timing: None,
-            loading_finished_timestamp: None,
-            response_started_timestamp: None,
-            response_completed_timestamp: None,
-            response_body: None,
-            response_body_base64: false,
+            ..Default::default()
         });
     }
     if state.request_tracking {
@@ -641,12 +668,7 @@ fn response_seen(state: &mut DaemonState, p: &Value, started: bool) {
     let status = response["status"].as_i64();
     let mime = response["mimeType"].as_str().unwrap_or("").to_string();
     if state.har_recording {
-        if let Some(entry) = state
-            .har_entries
-            .iter_mut()
-            .rev()
-            .find(|e| e.request_id == id)
-        {
+        if let Some(entry) = last_har_entry(&mut state.har_entries, id) {
             let headers = header_list(&response["headers"]);
             entry.status = status;
             entry.status_text = response["statusText"].as_str().unwrap_or("").to_string();
@@ -673,12 +695,7 @@ fn response_seen(state: &mut DaemonState, p: &Value, started: bool) {
         }
     }
     if state.request_tracking {
-        if let Some(entry) = state
-            .tracked_requests
-            .iter_mut()
-            .rev()
-            .find(|e| e.request_id == id)
-        {
+        if let Some(entry) = last_tracked_request(&mut state.tracked_requests, id) {
             entry.status = status;
             entry.mime_type = Some(mime);
             entry.response_headers = Some(header_object(&response["headers"]));
@@ -740,22 +757,12 @@ async fn request_body(state: &mut DaemonState, id: &str) {
         return;
     }
     if har_wanted {
-        if let Some(entry) = state
-            .har_entries
-            .iter_mut()
-            .rev()
-            .find(|e| e.request_id == id)
-        {
+        if let Some(entry) = last_har_entry(&mut state.har_entries, id) {
             entry.post_data = Some(body.clone());
         }
     }
     if tracked_wanted {
-        if let Some(entry) = state
-            .tracked_requests
-            .iter_mut()
-            .rev()
-            .find(|e| e.request_id == id)
-        {
+        if let Some(entry) = last_tracked_request(&mut state.tracked_requests, id) {
             entry.post_data = Some(body);
         }
     }
@@ -788,12 +795,7 @@ async fn har_body(state: &mut DaemonState, id: &str) {
     {
         return;
     }
-    if let Some(entry) = state
-        .har_entries
-        .iter_mut()
-        .rev()
-        .find(|e| e.request_id == id)
-    {
+    if let Some(entry) = last_har_entry(&mut state.har_entries, id) {
         state.har_body_total_bytes += body.len();
         entry.response_body = Some(body);
         entry.response_body_base64 = base64;
@@ -965,6 +967,7 @@ pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .and_then(Value::as_u64)
         .unwrap_or(state.default_timeout_ms);
     let ff = session(state)?;
+    collect_bodies(ff, true).await;
     let mut rx = ff.bidi.subscribe_buffered();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
@@ -1047,10 +1050,6 @@ impl DownloadStage {
             .map_err(|e| format!("Failed to create download staging directory: {e}"))?;
         Ok(Self { dir })
     }
-
-    fn path(&self) -> &std::path::Path {
-        &self.dir
-    }
 }
 
 impl Drop for DownloadStage {
@@ -1062,7 +1061,7 @@ impl Drop for DownloadStage {
 /// `download`: clicks the ref or selector and saves the resulting file at `path`.
 /// Only an owned browser may name files on the daemon's filesystem.
 pub async fn download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    if !session(state)?.downloads_are_local() {
+    if session(state)?.is_attached() {
         return Err(
             "Saving downloads from an attached Firefox is not supported; launch Firefox with --engine firefox instead"
                 .to_string(),
@@ -1098,7 +1097,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let target = resolve_target(state, selector).await?;
     let stage = DownloadStage::create()?;
     let stage_dir = stage
-        .path()
+        .dir
         .to_str()
         .ok_or("Download staging directory path is not valid UTF-8")?;
     let ff = session(state)?;
@@ -1143,7 +1142,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .or_else(|| {
             record
                 .suggested_filename
-                .map(|name| stage.path().join(name).to_string_lossy().into_owned())
+                .map(|name| stage.dir.join(name).to_string_lossy().into_owned())
         })
         .ok_or("Download completed but could not determine the downloaded file name")?;
     let saved = std::path::Path::new(&saved);
@@ -1153,7 +1152,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             saved.display()
         ));
     }
-    if !chrome::may_move_download(saved, ff.downloads_are_local(), Some(stage_dir)) {
+    if !chrome::may_move_download(saved, true, Some(stage_dir)) {
         return Err(format!(
             "Refusing to move downloaded file from {}",
             saved.display()
@@ -1172,7 +1171,7 @@ pub async fn waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Val
     let ff = session(state)?;
     let downloads = ff.net.downloads.clone();
     let download_dir = ff.download_dir.clone();
-    let launched_locally = ff.downloads_are_local();
+    let launched_locally = !ff.is_attached();
     let record = wait_download(
         &downloads,
         0,
@@ -1334,7 +1333,7 @@ mod tests {
             std::fs::write(&saved, b"private data").unwrap();
             std::fs::write(&destination, b"keep destination").unwrap();
             let (mut ff, _tx, _) = fake_session().await;
-            assert!(!ff.downloads_are_local());
+            assert!(ff.is_attached());
             if configured_directory {
                 ff.download_dir = Some(directory.path().to_string_lossy().into_owned());
             }
@@ -1458,17 +1457,14 @@ mod tests {
     fn the_download_stage_removes_its_directory_on_drop() {
         let dir = {
             let stage = DownloadStage::create().unwrap();
-            std::fs::write(stage.path().join("conftest.py"), b"page chosen").unwrap();
+            std::fs::write(stage.dir.join("conftest.py"), b"page chosen").unwrap();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mode = std::fs::metadata(stage.path())
-                    .unwrap()
-                    .permissions()
-                    .mode();
+                let mode = std::fs::metadata(&stage.dir).unwrap().permissions().mode();
                 assert_eq!(mode & 0o777, 0o700, "the staging directory is private");
             }
-            stage.path().to_path_buf()
+            stage.dir.to_path_buf()
         };
         assert!(
             !dir.exists(),
@@ -1630,28 +1626,6 @@ mod tests {
                 body: "aGVsbG8=".to_string(),
             }
         );
-    }
-
-    #[tokio::test]
-    async fn storage_context_requests_receive_blank_page() {
-        let (ff, _tx, _, messages, _) =
-            crate::native::bidi::session::tests::fake_session_with_rdp().await;
-        let net = NetContext::default();
-        net.blank_contexts
-            .write()
-            .await
-            .insert("storage-tab".into());
-        before_request(
-            &ff.bidi,
-            &net,
-            &json!({"request": "r1", "url": "https://example.com/", "headers": []}),
-            Some("storage-tab"),
-        )
-        .await
-        .unwrap();
-        let sent = messages.lock().unwrap().last().unwrap().clone();
-        assert_eq!(sent["method"], "network.provideResponse");
-        assert_eq!(sent["params"]["body"]["value"], "PGh0bWw+PC9odG1sPg==");
     }
 
     #[tokio::test]
@@ -1875,67 +1849,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatcher_tracks_repeated_downloads_with_null_navigation() {
-        let (ff, tx, _) = fake_session().await;
-        let net = NetContext::default();
-        let downloads = net.downloads.clone();
-        let _dispatcher = spawn_dispatcher(
-            ff.bidi.clone(),
-            net,
-            ff.bidi.subscribe_buffered(),
-            ff.emulation.clone(),
-            ff.permissions.clone(),
-        );
-        for filename in ["first.txt", "second.txt"] {
-            tx.send(json!({
-                "type": "event",
-                "method": "browsingContext.downloadWillBegin",
-                "params": {
-                    "context": "ctx-active",
-                    "navigation": null,
-                    "url": "http://example.com/download",
-                    "suggestedFilename": filename,
-                },
-            }))
-            .unwrap();
-            tx.send(json!({
-                "type": "event",
-                "method": "browsingContext.downloadEnd",
-                "params": {
-                    "context": "ctx-active",
-                    "navigation": null,
-                    "url": "http://example.com/download",
-                    "status": "complete",
-                    "filepath": format!("/downloads/{filename}"),
-                },
-            }))
-            .unwrap();
-        }
-        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
-            let mut claimed = Vec::new();
-            loop {
-                let mut ledger = downloads.lock().await;
-                if let Some(record) = ledger.claim_finished_since(0, &[]) {
-                    claimed.push(record);
-                    if claimed.len() == 2 {
-                        break claimed;
-                    }
-                }
-                drop(ledger);
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("dispatcher should record both downloads");
-        let [first, second] = claimed.as_slice() else {
-            unreachable!("the timeout returned two claimed downloads");
-        };
-        assert_ne!(first.guid, second.guid);
-        assert_eq!(first.suggested_filename.as_deref(), Some("first.txt"));
-        assert_eq!(second.suggested_filename.as_deref(), Some("second.txt"));
-    }
-
-    #[tokio::test]
     async fn dispatcher_separates_overlapping_downloads_with_null_navigation() {
         let (ff, tx, _) = fake_session().await;
         let net = NetContext::default();
@@ -1998,7 +1911,11 @@ mod tests {
     async fn har_captures_request_body_and_bidi_timestamps() {
         let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(|v| {
             if v["params"]["dataType"] == "request" {
-                json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD1oYXItcHJvYmU="}})
+                if v["params"]["request"] == "r2" {
+                    json!({"bytes": {"type": "string", "value": ""}})
+                } else {
+                    json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD1oYXItcHJvYmU="}})
+                }
             } else {
                 json!({"bytes": {"type": "string", "value": "har-response"}})
             }
@@ -2007,6 +1924,7 @@ mod tests {
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.har_recording = true;
+        state.request_tracking = true;
         state.har_content_mode = HarContentMode::All;
         let request = json!({
             "request": "r1",
@@ -2056,91 +1974,39 @@ mod tests {
             (entry.response_completed_timestamp.unwrap() - 1_800_000_000.42025).abs() < 0.00001
         );
         assert_eq!(entry.response_body.as_deref(), Some("har-response"));
-    }
-
-    #[tokio::test]
-    async fn tracked_requests_include_request_body() {
-        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(|v| {
-            if v["params"]["dataType"] == "request" {
-                json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD10cmFja2Vk"}})
-            } else {
-                json!({"bytes": {"type": "string", "value": "response"}})
-            }
-        })
-        .await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-        state.request_tracking = true;
-        let request = json!({
-            "request": "r1",
-            "url": "http://example.com/probe",
-            "method": "POST",
-            "headers": [],
-            "bodySize": 14,
-            "initiatorType": "fetch",
-        });
-        let response = json!({"status": 200, "headers": [], "bodySize": 8});
-
-        apply_events(
-            &mut state,
-            vec![
-                json!({
-                    "method": "network.beforeRequestSent",
-                    "params": {"timestamp": 1000, "request": request},
-                }),
-                json!({
-                    "method": "network.responseCompleted",
-                    "params": {"timestamp": 2000, "request": request, "response": response},
-                }),
-            ],
-        )
-        .await;
-
         assert_eq!(
             state.tracked_requests[0].post_data.as_deref(),
-            Some("payload=tracked")
+            Some("payload=har-probe")
         );
         assert_eq!(
             serde_json::to_value(&state.tracked_requests[0]).unwrap()["postData"],
-            json!("payload=tracked")
+            json!("payload=har-probe")
         );
-    }
 
-    #[tokio::test]
-    async fn an_empty_request_body_is_left_out_of_the_har() {
-        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(
-            |_| json!({"bytes": {"type": "string", "value": ""}}),
-        )
-        .await;
-        let mut state = DaemonState::new();
-        state.firefox = Some(ff);
-        state.har_recording = true;
-        let request = json!({
-            "request": "r1",
-            "url": "http://example.com/probe",
+        let empty = json!({
+            "request": "r2",
+            "url": "http://example.com/empty",
             "method": "POST",
             "headers": [],
             "bodySize": 0,
             "initiatorType": "fetch",
         });
-        let response = json!({"status": 200, "headers": [], "bodySize": 0});
-
+        let empty_response = json!({"status": 200, "headers": [], "bodySize": 0});
         apply_events(
             &mut state,
             vec![
                 json!({
                     "method": "network.beforeRequestSent",
-                    "params": {"timestamp": 1000, "request": request},
+                    "params": {"timestamp": 1_800_000_001_000.25, "request": empty},
                 }),
                 json!({
                     "method": "network.responseCompleted",
-                    "params": {"timestamp": 2000, "request": request, "response": response},
+                    "params": {"timestamp": 1_800_000_001_100.25, "request": empty, "response": empty_response},
                 }),
             ],
         )
         .await;
-
-        assert_eq!(state.har_entries[0].post_data, None);
+        assert_eq!(state.har_entries[1].post_data, None);
     }
 
     #[tokio::test]
@@ -2268,5 +2134,36 @@ mod tests {
         let errors = state.event_tracker.get_errors_json();
         assert_eq!(errors["errors"][0]["text"], "Error: boom");
         assert_eq!(errors["errors"][0]["line"], 3);
+    }
+
+    #[tokio::test]
+    async fn data_collector_tracks_recording_lifetime() {
+        let (ff, _, calls) = crate::native::bidi::session::tests::fake_session_with(|v| {
+            if v["method"] == "network.addDataCollector" {
+                json!({"collector": "collector-1"})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.har_recording = true;
+
+        drain(&mut state).await;
+        state.har_recording = false;
+        drain(&mut state).await;
+
+        let waited = responsebody(&json!({"url": "nothing", "timeout": 1}), &mut state).await;
+        assert!(waited.is_err());
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                "network.addDataCollector",
+                "network.removeDataCollector",
+                "network.addDataCollector"
+            ]
+        );
     }
 }

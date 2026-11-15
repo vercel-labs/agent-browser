@@ -2613,7 +2613,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_REMOVE_INIT_SCRIPT => call_one_string(arguments, "removeinitscript", "id"),
         TOOL_CONFIRM => call_one_string(arguments, "confirm", "id"),
         TOOL_DENY => call_one_string(arguments, "deny", "id"),
-        TOOL_CONNECT => call_connect(arguments),
+        TOOL_CONNECT => call_cli_tool(arguments, connect_args(arguments)?, None),
         TOOL_STREAM_ENABLE => call_stream_enable(arguments),
         TOOL_STREAM_DISABLE => call_literal(arguments, &["stream", "disable"]),
         TOOL_STREAM_STATUS => call_literal(arguments, &["stream", "status"]),
@@ -2885,10 +2885,6 @@ fn connect_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
         None => {}
     }
     Ok(args)
-}
-
-fn call_connect(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, connect_args(arguments)?, None)
 }
 
 fn call_optional_one(arguments: &Value, parts: &[&str], key: &str) -> Result<Value, ProtocolError> {
