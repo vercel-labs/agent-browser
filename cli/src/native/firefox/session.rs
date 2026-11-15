@@ -179,6 +179,8 @@ impl FirefoxSession {
             .collect();
         bidi.send("session.subscribe", json!({"events": events_to_watch}))
             .await?;
+        bidi.send("network.addIntercept", json!({"phases": ["authRequired"]}))
+            .await?;
         let rdp = connect_devtools(&process.devtools).await?;
         let root = rdp.request("root", "getRoot", json!({})).await?;
         let accessibility_actor = root["parentAccessibilityActor"]

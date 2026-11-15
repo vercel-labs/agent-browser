@@ -222,13 +222,14 @@ pub(super) fn is_websocket(url: &str) -> bool {
     url.starts_with("ws:") || url.starts_with("wss:")
 }
 
-/// Installs the single global intercept the first time it is needed.
+/// Installs the request intercept the first time it is needed. Auth challenges are intercepted
+/// from the start of the session.
 pub async fn ensure_intercept(ff: &mut FirefoxSession) -> Result<(), String> {
     if !ff.intercepting {
         ff.bidi
             .send(
                 "network.addIntercept",
-                json!({"phases": ["beforeRequestSent", "authRequired"]}),
+                json!({"phases": ["beforeRequestSent"]}),
             )
             .await?;
         ff.intercepting = true;
