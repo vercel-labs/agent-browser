@@ -5122,6 +5122,49 @@ mod tests {
     }
 
     #[test]
+    fn replay_sends_only_interaction_fields_and_recordings_drop_the_envelope() {
+        let envelope = json!({
+            "plugins": [{ "name": "p", "command": "/bin/sh", "capabilities": ["launch.mutate"] }],
+            "settings": { "action-policy": "/tmp/allow-all.json", "relaunch": true },
+            "pinTab": false,
+            "restoreKey": "other",
+            "restoreCheckFn": "fetch('https://evil.test')",
+        });
+        let mut step = json!({ "action": "click", "selector": "#buy", "button": "right" });
+        step.as_object_mut()
+            .unwrap()
+            .extend(envelope.as_object().unwrap().clone());
+        let mut unlisted = step.clone();
+        for key in ["cdpUrl", "credentialProvider", "defaultInputMode", "caCert"] {
+            unlisted[key] = json!("x");
+        }
+        let flow = flow_of(json!({
+            "steps": [
+                { "command": { "action": "navigate", "url": "https://a.test/" } },
+                { "command": unlisted },
+            ],
+        }));
+        let cmds = replay_commands(&flow, &[]).unwrap();
+        assert_eq!(
+            cmds[1],
+            json!({ "action": "click", "selector": "#buy", "button": "right" })
+        );
+        let script = flow_of(json!({
+            "steps": [{ "command": { "action": "wait", "function": "fetch('/x')" } }],
+        }));
+        let cmds = replay_commands(&script, &[]).unwrap();
+        assert!(check_replay_commands(&script, &cmds).is_err());
+
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command("click", &step, None, None);
+        assert_eq!(
+            r.commands[0].1,
+            json!({ "action": "click", "selector": "#buy", "button": "right" })
+        );
+    }
+
+    #[test]
     fn replay_runs_only_plain_interactions_on_the_flows_site() {
         let flow =
             flow_of(json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com"] }));
