@@ -548,6 +548,9 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
             std::env::temp_dir().join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
+        if cfg!(windows) {
+            seed_blank_password_probe_cache(&dir);
+        }
         args.push(format!("--user-data-dir={}", dir.display()));
         (dir.clone(), Some(dir))
     };
@@ -1600,6 +1603,35 @@ const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
     "component_crx_cache",
 ];
 
+/// Writes a `Local State` file into a fresh user data dir so Chrome on Windows
+/// skips its blank OS password probe.
+///
+/// On a non-domain Windows machine, Chrome calls `LogonUser` with an empty
+/// password on startup to learn whether the account has a blank password,
+/// unless `Local State` already caches the answer. A failed probe is logged as
+/// a failed logon (Security event 4625), so a new temp profile per session
+/// counts toward the account lockout threshold. Chrome reads
+/// `os_password_last_changed` as an int64 pref, which `Local State` stores as a
+/// JSON string; `i64::MAX` keeps the cache valid after password changes.
+/// Best effort: a write failure only means the probe runs as before.
+fn seed_blank_password_probe_cache(user_data_dir: &Path) {
+    let local_state = serde_json::json!({
+        "password_manager": {
+            "os_password_blank": false,
+            "os_password_last_changed": i64::MAX.to_string(),
+        }
+    });
+    let path = user_data_dir.join("Local State");
+    if let Err(e) = std::fs::write(&path, local_state.to_string()) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "Warning: could not write {}: {}",
+            path.display(),
+            e
+        );
+    }
+}
+
 /// Copies a Chrome profile subdirectory and `Local State` to a temp directory
 /// with a two-level structure suitable for `--user-data-dir`. Returns the temp
 /// directory path on success.
@@ -2319,6 +2351,34 @@ exec sleep 60
             .iter()
             .any(|a| a.starts_with("--user-data-dir=")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_build_args_temp_user_data_dir_seeds_blank_password_cache_on_windows() {
+        let opts = LaunchOptions::default();
+        let result = build_chrome_args(&opts).unwrap();
+        let dir = result.temp_user_data_dir.as_ref().unwrap();
+        let local_state = dir.join("Local State");
+        assert_eq!(local_state.is_file(), cfg!(windows));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_seed_blank_password_probe_cache_writes_string_typed_prefs() {
+        let dir =
+            std::env::temp_dir().join(format!("agent-browser-seed-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_blank_password_probe_cache(&dir);
+        let text = std::fs::read_to_string(dir.join("Local State")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let pm = &json["password_manager"];
+        assert_eq!(pm["os_password_blank"], serde_json::Value::Bool(false));
+        // Chrome rejects a numeric literal for this int64 pref; it must be a string.
+        assert_eq!(
+            pm["os_password_last_changed"],
+            serde_json::Value::String(i64::MAX.to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
