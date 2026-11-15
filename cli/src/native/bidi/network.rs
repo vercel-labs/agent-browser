@@ -222,13 +222,14 @@ pub(super) fn is_websocket(url: &str) -> bool {
     url.starts_with("ws:") || url.starts_with("wss:")
 }
 
-/// Installs the single global intercept the first time it is needed.
+/// Installs the request intercept the first time it is needed. Auth challenges are intercepted
+/// from the start of the session.
 pub async fn ensure_intercept(ff: &mut FirefoxSession) -> Result<(), String> {
     if !ff.intercepting {
         ff.bidi
             .send(
                 "network.addIntercept",
-                json!({"phases": ["beforeRequestSent", "authRequired"]}),
+                json!({"phases": ["beforeRequestSent"]}),
             )
             .await?;
         ff.intercepting = true;
@@ -451,8 +452,9 @@ async fn before_request(
     Ok(())
 }
 
-/// Answers an auth challenge: a proxy one with the configured credentials, an origin one by
-/// cancelling it when the request already carried credentials, as asking again cannot help.
+/// Answers an auth challenge: a proxy one with the configured credentials, up to the retry
+/// limit; an origin one always by cancelling it, as the only credentials the session can send
+/// are the ones it already put on the request.
 async fn auth_required(
     bidi: &BidiClient,
     net: &NetContext,
@@ -473,16 +475,7 @@ async fn auth_required(
     } else {
         false
     };
-    let sent_authorization = event["request"]["headers"]
-        .as_array()
-        .is_some_and(|headers| {
-            headers.iter().any(|header| {
-                header["name"]
-                    .as_str()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("authorization"))
-            })
-        });
-    let params = auth_response(id, status, sent_authorization, credentials, may_retry);
+    let params = auth_response(id, status, credentials, may_retry);
     bidi.send("network.continueWithAuth", params).await?;
     Ok(())
 }
@@ -490,17 +483,11 @@ async fn auth_required(
 fn auth_response(
     id: &str,
     status: i64,
-    sent_authorization: bool,
     credentials: Option<(String, String)>,
     may_retry: bool,
 ) -> Value {
     if status != 407 {
-        let action = if sent_authorization {
-            "cancel"
-        } else {
-            "default"
-        };
-        return json!({"request": id, "action": action});
+        return json!({"request": id, "action": "cancel"});
     }
     match credentials {
         Some((username, password)) if may_retry => json!({
@@ -1491,22 +1478,19 @@ mod tests {
     }
 
     #[test]
-    fn origin_auth_keeps_default_handling_and_ignores_proxy_credentials() {
+    fn origin_auth_is_always_cancelled() {
         let response = auth_response(
             "request",
             401,
-            false,
             Some(("proxy-user".into(), "proxy-pass".into())),
             true,
         );
-        assert_eq!(response["action"], "default");
-        assert!(response.get("credentials").is_none());
-    }
-
-    #[test]
-    fn origin_auth_is_cancelled_once_the_request_carried_credentials() {
-        let response = auth_response("request", 401, true, None, false);
         assert_eq!(response["action"], "cancel");
+        assert!(response.get("credentials").is_none());
+        assert_eq!(
+            auth_response("request", 401, None, false)["action"],
+            "cancel"
+        );
     }
 
     #[test]
@@ -1514,7 +1498,6 @@ mod tests {
         let response = auth_response(
             "request",
             407,
-            false,
             Some(("proxy-user".into(), "proxy-pass".into())),
             true,
         );
@@ -1525,7 +1508,6 @@ mod tests {
             auth_response(
                 "request",
                 407,
-                false,
                 Some(("proxy-user".into(), "proxy-pass".into())),
                 false,
             )["action"],
