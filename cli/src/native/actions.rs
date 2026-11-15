@@ -24855,8 +24855,8 @@ mod firefox_routing_tests {
         let mut state = DaemonState::new();
         state.engine = "firefox".into();
         state.settings.set(Key::Engine, json!("firefox"));
-        let resp = execute_command(&json!({"id":"1","action":"snapshot"}), &mut state).await;
-        assert_eq!(resp["error"], "`snapshot` is not supported on Firefox");
+        let resp = execute_command(&json!({"id":"1","action":"vitals"}), &mut state).await;
+        assert_eq!(resp["error"], "`vitals` is not supported on Firefox");
         assert!(state.firefox.is_none(), "no browser was launched");
     }
 
