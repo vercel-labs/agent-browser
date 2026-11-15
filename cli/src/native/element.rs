@@ -2206,19 +2206,15 @@ mod tests {
     }
 
     #[test]
-    fn test_map_point_through_quad_places_a_plain_frame() {
-        let quad = [100.0, 50.0, 400.0, 50.0, 400.0, 250.0, 100.0, 250.0];
+    fn test_map_point_through_quad_places_plain_and_scaled_frames() {
+        let plain = [100.0, 50.0, 400.0, 50.0, 400.0, 250.0, 100.0, 250.0];
         assert_eq!(
-            map_point_through_quad(&quad, 300.0, 200.0, 150.0, 100.0),
+            map_point_through_quad(&plain, 300.0, 200.0, 150.0, 100.0),
             Some((250.0, 150.0))
         );
-    }
-
-    #[test]
-    fn test_map_point_through_quad_follows_the_rendered_scale() {
-        let quad = [100.0, 50.0, 700.0, 50.0, 700.0, 450.0, 100.0, 450.0];
+        let scaled = [100.0, 50.0, 700.0, 50.0, 700.0, 450.0, 100.0, 450.0];
         assert_eq!(
-            map_point_through_quad(&quad, 300.0, 200.0, 150.0, 100.0),
+            map_point_through_quad(&scaled, 300.0, 200.0, 150.0, 100.0),
             Some((400.0, 250.0))
         );
     }
@@ -2232,29 +2228,17 @@ mod tests {
     }
 
     #[test]
-    fn test_map_point_through_quad_rejects_a_perspective_quad() {
-        let quad = [0.0, 0.0, 100.0, 0.0, 80.0, 100.0, 20.0, 100.0];
+    fn test_map_point_through_quad_refuses_unmappable_geometry() {
+        let perspective = [0.0, 0.0, 100.0, 0.0, 80.0, 100.0, 20.0, 100.0];
         assert_eq!(
-            map_point_through_quad(&quad, 100.0, 100.0, 50.0, 50.0),
+            map_point_through_quad(&perspective, 100.0, 100.0, 50.0, 50.0),
             None
         );
-    }
-
-    #[test]
-    fn test_map_point_through_quad_rejects_missing_geometry() {
         assert_eq!(
             map_point_through_quad(&[0.0, 0.0], 100.0, 100.0, 1.0, 1.0),
             None
         );
-        assert_eq!(
-            map_point_through_quad(
-                &[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0],
-                0.0,
-                10.0,
-                1.0,
-                1.0
-            ),
-            None
-        );
+        let plain = [0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0];
+        assert_eq!(map_point_through_quad(&plain, 0.0, 10.0, 1.0, 1.0), None);
     }
 }

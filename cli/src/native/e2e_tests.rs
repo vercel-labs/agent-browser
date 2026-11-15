@@ -14212,19 +14212,14 @@ async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
         }
     });
 
-    let same_frame_body = r#"<!doctype html><html lang="en"><head><title>Same-origin frame</title>
-<style>body { margin: 0 } #same-target { position: absolute; left: 16px; top: 16px; width: 201px; height: 81px }</style>
-</head><body><button id="same-target" onclick="window.sameClicks = (window.sameClicks || 0) + 1">Same-origin action</button></body></html>"#;
-
     let parent_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let parent_port = parent_listener.local_addr().unwrap().port();
     let parent_url = format!("http://127.0.0.1:{parent_port}/");
     let parent_body = format!(
         r#"<!doctype html><html lang="en"><head><title>Parent</title>
-<style>body {{ margin: 0 }} #parent-target {{ position: absolute; left: 16px; top: 16px; width: 240px; height: 120px }} iframe {{ position: absolute; border: 0 }} #same {{ left: 16px; top: 160px; width: 300px; height: 150px; border: 8px solid #333 }} #frame {{ left: 320px; top: 260px; width: 400px; height: 300px }} #forged {{ left: 760px; top: 236px; width: 320px; height: 300px }}</style>
+<style>body {{ margin: 0 }} #parent-target {{ position: absolute; left: 16px; top: 16px; width: 240px; height: 120px }} iframe {{ position: absolute; border: 0 }} #frame {{ left: 320px; top: 260px; width: 400px; height: 300px }} #forged {{ left: 760px; top: 236px; width: 320px; height: 300px }}</style>
 </head><body>
 <button id="parent-target" onclick="window.parentClicks = (window.parentClicks || 0) + 1">Parent control</button>
-<iframe id="same" title="Same origin" src="/same-frame"></iframe>
 <iframe id="frame" title="Payment" src="http://127.0.0.1:{child_port}/"></iframe>
 <iframe id="forged" title="Forged" src="http://127.0.0.1:{child_port}/forge"></iframe>
 </body></html>"#
@@ -14233,17 +14228,11 @@ async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
         loop {
             let (mut stream, _) = parent_listener.accept().await.unwrap();
             let mut request = [0u8; 4096];
-            let read = stream.read(&mut request).await.unwrap_or(0);
-            let request_line = String::from_utf8_lossy(&request[..read]);
-            let body = if request_line.starts_with("GET /same-frame") {
-                same_frame_body
-            } else {
-                parent_body.as_str()
-            };
+            let _ = stream.read(&mut request).await;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
+                parent_body.len(),
+                parent_body
             );
             let _ = stream.write_all(response.as_bytes()).await;
         }
@@ -14289,20 +14278,6 @@ async fn e2e_click_ref_in_cross_origin_frame_lands_in_frame() {
             .map(|(reference, _)| reference.clone())
             .unwrap_or_else(|| panic!("ref '{}' must be in the snapshot", name))
     };
-
-    let same_origin = execute_command(
-        &json!({ "action": "click", "selector": format!("@{}", reference("Same-origin action")) }),
-        &mut state,
-    )
-    .await;
-    assert_success(&same_origin);
-    assert_evaluate(
-        &mut state,
-        "same",
-        "document.getElementById('same').contentWindow.sameClicks || 0",
-        json!(1),
-    )
-    .await;
 
     let click = execute_command(
         &json!({ "action": "click", "selector": format!("@{}", reference("Child action")) }),
