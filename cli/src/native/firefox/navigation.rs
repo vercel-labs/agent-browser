@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use super::daemon;
 use crate::native::actions::DaemonState;
+use crate::native::browser::{load_state_timeout_error, WaitUntil};
 
 /// How long a load should wait for the document before reporting back.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,7 +53,8 @@ pub struct Landing {
 }
 
 /// Loads the active tab, dropping refs and frame scope first, and records the origin it reached.
-/// Fails with the load's name when Firefox rejects it.
+/// Fails with the load's name when Firefox rejects it, and with Chrome's load timeout when the
+/// load outlasts the session's default timeout.
 pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, String> {
     if state.domain_filter.read().await.is_some() {
         return Err(
@@ -82,14 +84,20 @@ pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, St
         Load::Url { url, .. } => (*url).to_string(),
         Load::Reload | Load::History { .. } => String::new(),
     };
+    let waited = match &load {
+        Load::Url { wait, .. } if *wait == Wait::Interactive => WaitUntil::DomContentLoaded,
+        Load::Url { wait, .. } if *wait == Wait::None => WaitUntil::None,
+        _ => WaitUntil::Load,
+    };
+    let budget = std::time::Duration::from_millis(state.default_timeout_ms);
     daemon::reset_page(state);
     let ff = daemon::session(state)?;
     let context = ff.contexts.active().to_string();
     let mut params = params;
     params["context"] = json!(context);
-    let landed = ff
-        .race_prompt(ff.bidi.send(method, params))
+    let landed = tokio::time::timeout(budget, ff.race_prompt(ff.bidi.send(method, params)))
         .await
+        .map_err(|_| load_state_timeout_error(waited, budget))?
         .map_err(|error| format!("{failure} failed: {error}"))?;
     let (url, prompt) = match landed {
         Some(result) => (landed_url(&result, ff.url().await, &requested), false),
