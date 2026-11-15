@@ -54,6 +54,9 @@ const RESOLVE_JS: &str = r#"(tree) => {
     for (const k of kids) walk(k);
   };
   walk(JSON.parse(tree));
+  const claims = new Map();
+  for (const entry of out) if (entry[0]) claims.set(entry[0], (claims.get(entry[0]) || 0) + 1);
+  for (const entry of out) if (entry[0] && claims.get(entry[0]) > 1) entry[3] = true;
   const resolved = new Set(out.map(entry => entry[0]).filter(Boolean));
   for (const entry of out) {
     if (!entry[4]) continue;
@@ -75,10 +78,10 @@ const RESOLVE_CHAIN_JS: &str = r#"(input) => {
   let el = null;
   for (let i = 0; i < chain.length; i++) {
     el = root.querySelector(chain[i]);
-    if (!el) throw new Error('Snapshot DOM node disappeared');
+    if (!el) return [null];
     if (i + 1 < chain.length) {
       root = el.shadowRoot;
-      if (!root) throw new Error('Snapshot shadow root disappeared');
+      if (!root) return [null];
     }
   }
   return [el, role === 'internal frame' ? el.contentWindow : null, el.getRootNode() instanceof ShadowRoot];
