@@ -17834,7 +17834,22 @@ async fn e2e_firefox_iframe_and_shadow_root_refs() {
         json!(["A", "B", "C"])
     );
 
+    firefox_eval(&mut state, r#"const frame = document.querySelector('iframe[title="Other origin"]'); frame.style.cssText = 'position:fixed;left:150px;top:100px;width:300px;height:250px;border:0'; document.title = 'not-clicked'; const cover = document.createElement('div'); cover.id = 'cover'; cover.style.cssText = 'position:fixed;left:150px;top:100px;width:300px;height:250px;background:red'; document.body.append(cover); true"#).await;
     let frame = firefox_ref(&mut state, "Frame button").await;
+    let resp = firefox_act(&mut state, "click", &frame, json!({})).await;
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("covered by <div#cover>"),
+        "{resp}"
+    );
+    assert_eq!(firefox_title(&mut state).await, "not-clicked");
+    firefox_eval(
+        &mut state,
+        "document.getElementById('cover').remove(); true",
+    )
+    .await;
     assert_success(&firefox_act(&mut state, "click", &frame, json!({})).await);
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
     assert_eq!(firefox_title(&mut state).await, "frame-clicked");
