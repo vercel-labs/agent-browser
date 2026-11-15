@@ -150,7 +150,7 @@ pub(super) async fn prepare(
                     if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) {{
                         this.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
                         [x, y] = at();
-                        scrollBy(Math.min(0, x) + Math.max(0, x - innerWidth + 1), Math.min(0, y) + Math.max(0, y - innerHeight + 1));
+                        scrollBy({{ left: Math.min(0, x) + Math.max(0, x - innerWidth + 1), top: Math.min(0, y) + Math.max(0, y - innerHeight + 1), behavior: 'instant' }});
                         [x, y] = at();
                     }}
                     return {{ x, y, blocker: ({BLOCKER_AT_JS})(document, this, x, y) }};
@@ -379,8 +379,8 @@ fn defer_release(
     }
 }
 
-/// Moves the mouse along the planned path, kept inside the viewport Firefox accepts points in,
-/// and records where it landed.
+/// Moves the mouse along the planned path and records where it landed. Points on the way are
+/// kept inside the viewport Firefox accepts points in; the destination is sent as asked.
 async fn move_mouse(
     ff: &FirefoxSession,
     mouse_state: &mut MouseState,
@@ -400,7 +400,8 @@ async fn move_mouse(
         )
         .await?;
     if let (Some(right), Some(bottom)) = (edge[0].as_f64(), edge[1].as_f64()) {
-        for step in path[0]["actions"].as_array_mut().into_iter().flatten() {
+        let steps = path[0]["actions"].as_array_mut().into_iter().flatten();
+        for step in steps.rev().skip(1) {
             step["x"] = json!(step["x"].as_f64().unwrap_or(0.0).clamp(0.0, right.max(0.0)));
             step["y"] = json!(step["y"]
                 .as_f64()
