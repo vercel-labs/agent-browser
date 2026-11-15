@@ -61,6 +61,10 @@ Navigation, tabs, `eval`, snapshots and refs (including iframes and open shadow 
 
 On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
 
+Firefox cancels an HTTP auth challenge that the session has no credentials for, so the page loads the server's 401 response instead of waiting on a browser prompt. Run `set credentials` before you open the page.
+
+Snapshots list controls inside closed shadow roots, but Firefox cannot act on them, so a command that uses such a ref fails. Pointer commands inside an iframe that has a CSS transform can miss their target.
+
 Media emulation on Firefox supports only `prefers-color-scheme` and print media. Other media features return an error that lists the supported ones.
 
 `find text` and `find label` search the main document only, like Chrome. The dashboard live view polls screenshots of the active tab and forwards mouse and keyboard input, so it works without screencast.

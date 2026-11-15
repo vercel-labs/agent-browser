@@ -214,14 +214,14 @@ pub(crate) mod tests {
     use serde_json::json;
     use tokio::io::{AsyncWriteExt, DuplexStream};
 
-    pub(crate) async fn put(s: &mut DuplexStream, v: Value) {
+    pub(crate) async fn put<W: AsyncWrite + Unpin>(s: &mut W, v: Value) {
         let b = v.to_string();
         s.write_all(format!("{}:{}", b.len(), b).as_bytes())
             .await
             .unwrap();
     }
 
-    pub(crate) async fn get(s: &mut DuplexStream) -> Value {
+    pub(crate) async fn get<R: AsyncRead + Unpin>(s: &mut R) -> Value {
         read_frame(&mut BufReader::with_capacity(1, s))
             .await
             .unwrap()

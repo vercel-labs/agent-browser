@@ -38,7 +38,11 @@ const RESOLVE_JS: &str = r#"(tree) => {
     }
   }
   const out = [];
-  const walk = ([sel, role, kids]) => {
+  const within = (el, owner) => {
+    for (let node = el; node; node = node.parentNode || node.host) if (node === owner) return true;
+    return false;
+  };
+  const walk = ([sel, role, kids], owner) => {
     let el = role === 'document' ? document : null;
     let ambiguous = false;
     if (role !== 'document' && sel && !sel.endsWith('#text')) {
@@ -52,11 +56,15 @@ const RESOLVE_JS: &str = r#"(tree) => {
         } catch (_) {}
       }
     }
+    if (el && owner && !within(el, owner)) { el = null; ambiguous = true; }
     const text = !!sel && sel.endsWith('#text');
     out.push([el, role === 'internal frame' && el ? el.contentWindow : null, !!el && el.getRootNode() instanceof ShadowRoot, ambiguous, text ? sel.slice(0, -5) : null]);
-    for (const k of kids) walk(k);
+    for (const k of kids) walk(k, el || owner);
   };
-  walk(JSON.parse(tree));
+  walk(JSON.parse(tree), null);
+  const claims = new Map();
+  for (const entry of out) if (entry[0]) claims.set(entry[0], (claims.get(entry[0]) || 0) + 1);
+  for (const entry of out) if (entry[0] && claims.get(entry[0]) > 1) entry[3] = true;
   const resolved = new Set(out.map(entry => entry[0]).filter(Boolean));
   for (const entry of out) {
     if (!entry[4]) continue;
@@ -78,10 +86,10 @@ const RESOLVE_CHAIN_JS: &str = r#"(input) => {
   let el = null;
   for (let i = 0; i < chain.length; i++) {
     el = root.querySelector(chain[i]);
-    if (!el) throw new Error('Snapshot DOM node disappeared');
+    if (!el) return [null];
     if (i + 1 < chain.length) {
       root = el.shadowRoot;
-      if (!root) throw new Error('Snapshot shadow root disappeared');
+      if (!root) return [null];
     }
   }
   return [el, role === 'internal frame' ? el.contentWindow : null, el.getRootNode() instanceof ShadowRoot];
@@ -645,9 +653,6 @@ pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Resu
         }
         pending.extend(info["children"].as_array().into_iter().flatten().cloned());
     }
-    ff.bidi
-        .send("browsingContext.activate", json!({"context": top}))
-        .await?;
     let _ = tokio::time::timeout(
         PAINT_WAIT,
         ff.bidi.call_function(&top, SETTLE_JS, None, vec![]),

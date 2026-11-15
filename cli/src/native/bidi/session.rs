@@ -11,7 +11,9 @@ use super::attach::AttachTarget;
 use super::client::{remote_to_json, unserializable, BidiClient, SANDBOX};
 use super::contexts::{Contexts, Removed};
 use super::emulation::{self, Settings as EmulationSettings};
-use super::firefox::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
+use super::firefox::{
+    check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess, NONCE_PREF,
+};
 use super::firefox_devtools::RdpClient;
 use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
 use super::permissions;
@@ -167,6 +169,24 @@ async fn connect_devtools(
     .map_err(|_| "Firefox DevTools connection timed out".to_string())?
 }
 
+/// Fails unless the DevTools peer returns the nonce from the launch profile, which only the
+/// Firefox this launch started can read.
+async fn check_devtools_peer(rdp: &RdpClient, root: &Value, nonce: &str) -> Result<(), String> {
+    let preferences = root["preferenceActor"]
+        .as_str()
+        .ok_or("Firefox DevTools did not expose the preference actor")?;
+    let read = rdp
+        .request(preferences, "getCharPref", json!({ "value": NONCE_PREF }))
+        .await;
+    if !matches!(read, Ok(reply) if reply["value"].as_str() == Some(nonce)) {
+        return Err(
+            "Another process answered on the Firefox DevTools endpoint, so the launch was stopped"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 impl FirefoxSession {
     /// Finds and launches Firefox, opens the BiDi session, starts the network dispatcher
     /// and enables the accessibility actor.
@@ -315,6 +335,8 @@ impl FirefoxSession {
         let window = if attached {
             ATTACH_DEVTOOLS_CONNECT_WINDOW
         } else {
+            bidi.send("network.addIntercept", json!({"phases": ["authRequired"]}))
+                .await?;
             DEVTOOLS_CONNECT_WINDOW
         };
         let rdp = match connect_devtools(&target.devtools, window).await {
@@ -323,6 +345,9 @@ impl FirefoxSession {
             Err(error) => return Err(error),
         };
         let root = rdp.request("root", "getRoot", json!({})).await?;
+        if let Some(process) = &process {
+            check_devtools_peer(&rdp, &root, &process.nonce).await?;
+        }
         let accessibility_actor = root["parentAccessibilityActor"]
             .as_str()
             .ok_or("Firefox DevTools did not expose the accessibility actor")?
@@ -426,8 +451,9 @@ impl FirefoxSession {
         }
     }
 
-    /// The BiDi storage partition of the active context's tab, when it is not the default one.
-    pub fn active_partition(&self) -> Option<Value> {
+    /// The BiDi storage partition of the active context's tab, so a storage command only touches
+    /// that tab's cookie jar.
+    pub fn active_partition(&self) -> Value {
         self.contexts.partition(self.contexts.active())
     }
 
@@ -1754,6 +1780,39 @@ pub(crate) mod tests {
         });
         let rdp = RdpClient::from_stream(a).await.unwrap();
         (test_session(bidi, rdp, events), rdp_messages)
+    }
+
+    /// Runs the peer check against a fake DevTools server that answers `getRoot` and then `reply`
+    /// to the nonce read, so the real check decides the outcome.
+    #[cfg(unix)]
+    async fn open_fake_devtools(reply: Value) -> Result<(), String> {
+        use super::super::firefox_devtools::tests::{get, put};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            put(&mut s, json!({"from": "root"})).await;
+            assert_eq!(get(&mut s).await["type"], "getRoot");
+            put(&mut s, json!({"from": "root", "preferenceActor": "pref1"})).await;
+            let read = get(&mut s).await;
+            assert_eq!(read["to"], "pref1", "{read}");
+            assert_eq!(read["value"], NONCE_PREF, "{read}");
+            put(&mut s, reply).await;
+        });
+        let rdp = RdpClient::connect_unix(&path).await?;
+        let root = rdp.request("root", "getRoot", json!({})).await?;
+        check_devtools_peer(&rdp, &root, "right-nonce").await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn devtools_peer_must_read_back_the_launch_nonce() {
+        let own = json!({"from": "pref1", "value": "right-nonce"});
+        assert!(open_fake_devtools(own).await.is_ok());
+        let other = json!({"from": "pref1", "value": "someone-elses-profile"});
+        let error = open_fake_devtools(other).await.unwrap_err();
+        assert!(error.contains("Another process"), "{error}");
     }
 
     #[test]

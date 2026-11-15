@@ -23,6 +23,7 @@ const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
     let el = useActive ? document.activeElement : this;
     while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
     if (!el || !el.isConnected || el.matches(':disabled') || el.readOnly) return 'unsupported';
+    if (useActive) try { el.focus(); } catch {}
     const doc = el.ownerDocument;
     const editable = el.isContentEditable || el.contentEditable === 'true' || el.contentEditable === 'plaintext-only';
     const nativeEdit = () => {
@@ -101,7 +102,8 @@ pub(super) async fn run(
     .await
 }
 
-async fn focused_context(ff: &FirefoxSession, context: &str) -> Result<String, String> {
+/// The context holding the focused element: the tab, or the frame focused inside it.
+async fn focused_context(ff: &FirefoxSession) -> Result<String, String> {
     let mut focused = ff.contexts.active_tab().to_string();
     let mut visited = HashSet::new();
     while visited.insert(focused.clone()) {
@@ -114,11 +116,7 @@ async fn focused_context(ff: &FirefoxSession, context: &str) -> Result<String, S
         };
         focused = child.to_string();
     }
-    Ok(if focused == ff.contexts.active_tab() {
-        context.to_string()
-    } else {
-        focused
-    })
+    Ok(focused)
 }
 
 async fn literal_edit_in_context(
@@ -151,15 +149,13 @@ async fn literal_edit_in_context(
 
 async fn literal_edit(
     ff: &FirefoxSession,
-    context: &str,
     target: Option<&Target>,
     text: &str,
     replace: bool,
 ) -> Result<(), String> {
-    let context = if target.is_none() {
-        focused_context(ff, context).await?
-    } else {
-        context.to_string()
+    let context = match target {
+        Some(target) => target.context.clone(),
+        None => focused_context(ff).await?,
     };
     literal_edit_in_context(ff, &context, target, text, replace)
         .await
@@ -170,16 +166,11 @@ async fn focus_target(ff: &FirefoxSession, target: &Target) -> Result<bool, Stri
     Ok(run(ff, target, FOCUS_JS, vec![]).await?.is_some())
 }
 
-async fn send_text(
-    ff: &FirefoxSession,
-    context: &str,
-    text: &str,
-    delay_ms: Option<u64>,
-) -> Result<(), String> {
+async fn send_text(ff: &FirefoxSession, text: &str, delay_ms: Option<u64>) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
-    let context = focused_context(ff, context).await?;
+    let context = focused_context(ff).await?;
     for ch in text.chars() {
         let text = ch.to_string();
         let dialog_opened = if matches!(ch, '\n' | '\r' | '\t') {
@@ -240,7 +231,7 @@ pub async fn fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
     if !focus_target(ff, &target).await? {
         return Ok(json!({ "filled": selector, "dialogOpened": true }));
     }
-    literal_edit(ff, &target.context, Some(&target), value, true).await?;
+    literal_edit(ff, Some(&target), value, true).await?;
     Ok(json!({ "filled": selector }))
 }
 
@@ -256,7 +247,7 @@ pub async fn type_text(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         return Ok(json!({ "typed": text, "dialogOpened": true }));
     }
     if !clear || run(ff, &target, CLEAR_INPUT_JS, vec![]).await?.is_some() {
-        send_text(ff, &target.context, text, delay).await?;
+        send_text(ff, text, delay).await?;
     }
     Ok(json!({ "typed": text }))
 }
@@ -291,7 +282,7 @@ pub async fn keyboard(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         Some("type") => {
             let text = require(cmd, "text")?;
             let ff = session(state)?;
-            send_text(ff, ff.contexts.active(), text, None).await?;
+            send_text(ff, text, None).await?;
             Ok(json!({ "typed": text }))
         }
         Some("insertText") => inserttext(cmd, state).await,
@@ -309,7 +300,7 @@ pub async fn input_keyboard(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     if event_type == "char" {
         let text = require(cmd, "text")?;
         let ff = session(state)?;
-        literal_edit(ff, ff.contexts.active(), None, text, false).await?;
+        literal_edit(ff, None, text, false).await?;
         return Ok(json!({ "dispatched": event_type }));
     }
     let key = key_from_raw(&raw_key(cmd))?;
@@ -328,7 +319,7 @@ pub async fn inserttext(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let text = require(cmd, "text")?;
     let ff = session(state)?;
     if !text.is_empty() {
-        literal_edit(ff, ff.contexts.active(), None, text, false).await?;
+        literal_edit(ff, None, text, false).await?;
     }
     Ok(json!({ "inserted": true }))
 }
