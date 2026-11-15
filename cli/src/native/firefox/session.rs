@@ -159,8 +159,9 @@ impl FirefoxSession {
         }
     }
 
-    /// The BiDi storage partition of the active context's tab, when it is not the default one.
-    pub fn active_partition(&self) -> Option<Value> {
+    /// The BiDi storage partition of the active context's tab, so a storage command only touches
+    /// that tab's cookie jar.
+    pub fn active_partition(&self) -> Value {
         self.contexts.partition(self.contexts.active())
     }
 
