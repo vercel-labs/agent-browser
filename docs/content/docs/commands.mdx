@@ -323,9 +323,9 @@ agent-browser click @e3         # uses docs's refs
 
 ### Which new tabs are followed
 
-A new tab becomes the active tab only when the command that is running opened it: a click, key press, `type`, `fill`, `select`, `check`, mouse action, or `eval` on the active tab. Clicking a `target=_blank` link, for example, switches to the tab it opens.
+A new tab becomes the active tab only when the active tab opens it while an input command runs: a click, key press, `type`, `fill`, `select`, `check`, mouse action, or `eval`. Clicking a `target=_blank` link, for example, switches to the tab it opens. A popup the page opens by itself during such a command is followed too, because the browser reports the same opener for both.
 
-A tab the page opens by itself, such as a timer popup, ad, sign-in helper, or chat widget, is registered in the background. The session stays on its tab and its refs stay valid, and the response names the tab in a warning. The warning carries the tab id only; run `tab list` to see its URL:
+A tab that appears at any other time is registered in the background: a timer popup, ad, sign-in helper, or chat widget that opens between commands or during `wait`, or a tab a click opens only after the command has returned. The session stays on its tab and its refs stay valid, and the response names the tab in a warning. The warning carries the tab id only; run `tab list` to see its URL:
 
 ```text
 New tab t2 opened in the background. Switch to it with `tab t2`.

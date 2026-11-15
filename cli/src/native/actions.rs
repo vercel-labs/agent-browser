@@ -3156,7 +3156,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     if let Err(e) = state.drain_cdp_events_background().await {
         return error_response(&id, &super::browser::to_ai_friendly_error(&e));
     }
-    state.follow_opened_tabs = should_follow_opened_tabs(action, cmd);
+    state.follow_opened_tabs = !state.pin_tab && should_follow_opened_tabs(action, cmd);
 
     // After the drain, so late requests from the previous command keep its tag.
     begin_flow_step(action, cmd, state).await;
@@ -11042,8 +11042,8 @@ fn validate_find_subaction(action: &str, cmd: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether the command sends input or script to the page, so a tab the
-/// active tab opens while it runs counts as opened by the command.
+/// Whether the command sends input or script to the page. A tab the active
+/// tab opens while such a command runs is followed, whoever opened it.
 fn should_follow_opened_tabs(action: &str, cmd: &Value) -> bool {
     if matches!(
         action,
