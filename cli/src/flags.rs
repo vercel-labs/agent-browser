@@ -508,6 +508,11 @@ pub struct Flags {
     pub state: Option<String>,
     pub proxy: Option<String>,
     pub proxy_bypass: Option<String>,
+    /// Proxy credentials supplied as separate environment variables
+    /// (`AGENT_BROWSER_PROXY_USERNAME` / `AGENT_BROWSER_PROXY_PASSWORD`).
+    /// They ride in the settings patch; the daemon never sees them in its env.
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
     pub args: Option<String>,
     pub user_agent: Option<String>,
     pub provider: Option<String>,
@@ -732,6 +737,8 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             .or(config.proxy_bypass)
             .or_else(|| env::var("NO_PROXY").ok())
             .or_else(|| env::var("no_proxy").ok()),
+        proxy_username: env::var("AGENT_BROWSER_PROXY_USERNAME").ok(),
+        proxy_password: env::var("AGENT_BROWSER_PROXY_PASSWORD").ok(),
         args: env::var("AGENT_BROWSER_ARGS").ok().or(config.args),
         user_agent: env::var("AGENT_BROWSER_USER_AGENT")
             .ok()

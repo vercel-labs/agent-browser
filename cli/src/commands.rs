@@ -3967,6 +3967,8 @@ mod tests {
             state: None,
             proxy: None,
             proxy_bypass: None,
+            proxy_username: None,
+            proxy_password: None,
             args: None,
             user_agent: None,
             provider: None,

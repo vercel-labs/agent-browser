@@ -222,15 +222,19 @@ fn read_proxy_bypass(f: &Flags) -> Option<Requested> {
     }
 }
 fn read_proxy_username(f: &Flags) -> Option<Requested> {
+    f.proxy.as_ref()?;
     f.proxy
         .as_deref()
         .and_then(|p| parse_proxy(p).username)
+        .or_else(|| f.proxy_username.clone())
         .map(|u| Requested::Set(Value::from(u)))
 }
 fn read_proxy_password(f: &Flags) -> Option<Requested> {
+    f.proxy.as_ref()?;
     f.proxy
         .as_deref()
         .and_then(|p| parse_proxy(p).password)
+        .or_else(|| f.proxy_password.clone())
         .map(|p| Requested::Set(Value::from(p)))
 }
 fn read_user_agent(f: &Flags) -> Option<Requested> {

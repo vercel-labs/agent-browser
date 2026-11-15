@@ -486,8 +486,6 @@ pub struct DaemonOptions<'a> {
     pub user_agent: Option<&'a str>,
     pub proxy: Option<&'a str>,
     pub proxy_bypass: Option<&'a str>,
-    pub proxy_username: Option<&'a str>,
-    pub proxy_password: Option<&'a str>,
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
@@ -530,8 +528,6 @@ impl DaemonOptions<'static> {
             user_agent: None,
             proxy: None,
             proxy_bypass: None,
-            proxy_username: None,
-            proxy_password: None,
             ignore_https_errors: false,
             allow_file_access: false,
             hide_scrollbars: true,
@@ -596,12 +592,11 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if let Some(pb) = opts.proxy_bypass {
         cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
     }
-    if let Some(pu) = opts.proxy_username {
-        cmd.env("AGENT_BROWSER_PROXY_USERNAME", pu);
-    }
-    if let Some(pp) = opts.proxy_password {
-        cmd.env("AGENT_BROWSER_PROXY_PASSWORD", pp);
-    }
+    // The proxy credential travels to the daemon in the per-command settings
+    // patch over the session socket, never in its environment. Strip any
+    // inherited values so a sibling process cannot read the credential.
+    cmd.env_remove("AGENT_BROWSER_PROXY_USERNAME")
+        .env_remove("AGENT_BROWSER_PROXY_PASSWORD");
     if opts.ignore_https_errors {
         cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
     }
@@ -1729,8 +1724,6 @@ mod tests {
             user_agent: None,
             proxy: None,
             proxy_bypass: None,
-            proxy_username: None,
-            proxy_password: None,
             ignore_https_errors: false,
             allow_file_access: false,
             hide_scrollbars: true,
@@ -1758,6 +1751,36 @@ mod tests {
             no_auto_dialog,
             plugins: None,
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn apply_daemon_env_strips_proxy_credentials() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_PROXY_USERNAME",
+            "AGENT_BROWSER_PROXY_PASSWORD",
+        ]);
+        guard.set("AGENT_BROWSER_PROXY_USERNAME", "proxy-user");
+        guard.set("AGENT_BROWSER_PROXY_PASSWORD", "proxy-pass");
+
+        let mut cmd = Command::new("true");
+        let opts = test_daemon_options(None, false, None);
+        apply_daemon_env(&mut cmd, "s", &opts);
+
+        let removed: Vec<String> = cmd
+            .get_envs()
+            .filter_map(|(name, value)| {
+                value.is_none().then(|| name.to_string_lossy().into_owned())
+            })
+            .collect();
+        assert!(
+            removed.iter().any(|n| n == "AGENT_BROWSER_PROXY_USERNAME"),
+            "daemon env is not told to drop the proxy username: {removed:?}"
+        );
+        assert!(
+            removed.iter().any(|n| n == "AGENT_BROWSER_PROXY_PASSWORD"),
+            "daemon env is not told to drop the proxy password: {removed:?}"
+        );
     }
 
     #[test]

@@ -48,8 +48,9 @@ impl Running {
             (Key::ExecutablePath, "AGENT_BROWSER_EXECUTABLE_PATH"),
             (Key::Proxy, "AGENT_BROWSER_PROXY"),
             (Key::ProxyBypass, "AGENT_BROWSER_PROXY_BYPASS"),
-            (Key::ProxyUsername, "AGENT_BROWSER_PROXY_USERNAME"),
-            (Key::ProxyPassword, "AGENT_BROWSER_PROXY_PASSWORD"),
+            // ProxyUsername and ProxyPassword are deliberately not seeded from
+            // the environment: the credential must reach the daemon only in the
+            // per-command settings patch, never through the daemon's environment.
             (Key::Profile, "AGENT_BROWSER_PROFILE"),
             (Key::StorageState, "AGENT_BROWSER_STATE"),
             (Key::UserAgent, "AGENT_BROWSER_USER_AGENT"),

@@ -301,6 +301,56 @@ fn proxy_without_credentials_sets_no_credentials() {
 }
 
 #[test]
+fn proxy_credential_env_vars_resolve_into_the_patch() {
+    let guard = EnvGuard::new(&[
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_USERNAME",
+        "AGENT_BROWSER_PROXY_PASSWORD",
+    ]);
+    guard.set("AGENT_BROWSER_PROXY", "http://proxy.example:8080");
+    guard.set("AGENT_BROWSER_PROXY_USERNAME", "env-user");
+    guard.set("AGENT_BROWSER_PROXY_PASSWORD", "env-pass");
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.json");
+    std::fs::write(&config, "{}").unwrap();
+    let args = vec![
+        "--config".to_string(),
+        config.to_string_lossy().into_owned(),
+    ];
+    let f = try_parse_flags(&args).unwrap();
+    let p = Patch::from_flags(&f);
+    assert_eq!(set(&p, Key::Proxy), json!("http://proxy.example:8080"));
+    assert_eq!(set(&p, Key::ProxyUsername), json!("env-user"));
+    assert_eq!(set(&p, Key::ProxyPassword), json!("env-pass"));
+}
+
+#[test]
+fn proxy_url_credentials_beat_env_credential_vars() {
+    let guard = EnvGuard::new(&[
+        "AGENT_BROWSER_PROXY_USERNAME",
+        "AGENT_BROWSER_PROXY_PASSWORD",
+    ]);
+    guard.set("AGENT_BROWSER_PROXY_USERNAME", "env-user");
+    guard.set("AGENT_BROWSER_PROXY_PASSWORD", "env-pass");
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.json");
+    std::fs::write(&config, "{}").unwrap();
+    let args = vec![
+        "--config".to_string(),
+        config.to_string_lossy().into_owned(),
+        "--proxy".to_string(),
+        "http://url-user:url-pass@proxy.example:8080".to_string(),
+    ];
+    let f = try_parse_flags(&args).unwrap();
+    let p = Patch::from_flags(&f);
+    assert_eq!(set(&p, Key::Proxy), json!("http://proxy.example:8080"));
+    assert_eq!(set(&p, Key::ProxyUsername), json!("url-user"));
+    assert_eq!(set(&p, Key::ProxyPassword), json!("url-pass"));
+}
+
+#[test]
 fn obscura_clears_an_unset_proxy_bypass() {
     let mut f = blank_flags();
     f.engine = Some("obscura".to_string());
@@ -475,8 +525,6 @@ fn launch_options_view_reads_every_launch_variable() {
         ("AGENT_BROWSER_EXECUTABLE_PATH", "/bin/chrome"),
         ("AGENT_BROWSER_PROXY", "http://proxy:1"),
         ("AGENT_BROWSER_PROXY_BYPASS", "localhost"),
-        ("AGENT_BROWSER_PROXY_USERNAME", "u"),
-        ("AGENT_BROWSER_PROXY_PASSWORD", "p"),
         ("AGENT_BROWSER_PROFILE", "/profile"),
         ("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1"),
         (
@@ -500,8 +548,8 @@ fn launch_options_view_reads_every_launch_variable() {
     assert_eq!(o.executable_path.as_deref(), Some("/bin/chrome"));
     assert_eq!(o.proxy.as_deref(), Some("http://proxy:1"));
     assert_eq!(o.proxy_bypass.as_deref(), Some("localhost"));
-    assert_eq!(o.proxy_username.as_deref(), Some("u"));
-    assert_eq!(o.proxy_password.as_deref(), Some("p"));
+    assert_eq!(o.proxy_username, None);
+    assert_eq!(o.proxy_password, None);
     assert_eq!(o.profile.as_deref(), Some("/profile"));
     assert!(o.allow_file_access);
     assert_eq!(
@@ -578,6 +626,20 @@ fn connection_keys_are_not_seeded_from_the_environment() {
     assert_eq!(r.connection(), Connection::Local);
     assert_eq!(r.cdp_headers(), None);
     assert_eq!(r.provider(), None);
+}
+
+#[test]
+fn proxy_credentials_are_not_seeded_from_the_environment() {
+    let r = seeded(&[
+        ("AGENT_BROWSER_PROXY", "http://proxy:1"),
+        ("AGENT_BROWSER_PROXY_USERNAME", "u"),
+        ("AGENT_BROWSER_PROXY_PASSWORD", "p"),
+    ]);
+    assert_eq!(r.get(Key::ProxyUsername), None);
+    assert_eq!(r.get(Key::ProxyPassword), None);
+    let o = r.launch_options();
+    assert_eq!(o.proxy_username, None);
+    assert_eq!(o.proxy_password, None);
 }
 
 #[test]
@@ -822,10 +884,12 @@ fn debug_output_never_contains_secrets() {
     for secret in ["hunter2", "s3cret"] {
         assert!(!patch.contains(secret), "{secret} leaked: {patch}");
     }
-    // The values themselves are untouched.
+    // The credential is no longer seeded from the environment, and the patch
+    // still carries it for the session socket.
+    assert_eq!(r.launch_options().proxy_password, None);
     assert_eq!(
-        r.launch_options().proxy_password.as_deref(),
-        Some("hunter2")
+        set(&Patch::from_flags(&f), Key::ProxyPassword),
+        json!("hunter2")
     );
 }
 
