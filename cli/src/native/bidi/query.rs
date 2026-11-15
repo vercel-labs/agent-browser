@@ -256,7 +256,7 @@ fn semantic_locator(strategy: &str, value: &str) -> Value {
 }
 
 /// Runs `browsingContext.locateNodes` and returns its nodes, optionally scoped to `startNodes`.
-async fn locate_nodes(
+pub(super) async fn locate_nodes(
     bidi: &BidiClient,
     context: &str,
     locator: Value,

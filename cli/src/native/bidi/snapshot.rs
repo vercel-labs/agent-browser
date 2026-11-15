@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use super::client::SANDBOX;
 use super::firefox_devtools::{actor_is_gone, RdpClient, Tab};
 use super::session::FirefoxSession;
-use super::target::find_element;
+use super::target::{current_document_id, find_element};
 use crate::native::actions::{self as chrome, DaemonState};
 use crate::native::cdp::types::{AXNode, AXProperty, AXValue};
 use crate::native::element::RefMap;
@@ -542,6 +542,7 @@ fn attach_cursor(node: &mut Value, detected: &HashMap<String, Value>) {
 async fn annotate(
     ff: &mut FirefoxSession,
     context: &str,
+    document_ids: &HashMap<String, String>,
     doc: &mut Value,
     source: &AccessibleSource,
     tab: &str,
@@ -562,6 +563,10 @@ async fn annotate(
         &mut Vec::new(),
         &mut frames,
     );
+    let annotated = doc["abSid"].as_str();
+    if annotated.is_none() || document_ids.get(context).map(String::as_str) != annotated {
+        return Err("The page changed during the snapshot. Run snapshot again.".into());
+    }
     attach_cursor(doc, &cursor_detections(ff, context).await);
     if !frames.is_empty() {
         ff.refresh_frame_tree().await?;
@@ -584,7 +589,16 @@ async fn annotate(
             child_source
         };
         if let Some(child) = node_at(doc, &path)["children"].get_mut(0) {
-            Box::pin(annotate(ff, &window, child, &child_source, tab, deadline)).await?;
+            Box::pin(annotate(
+                ff,
+                &window,
+                document_ids,
+                child,
+                &child_source,
+                tab,
+                deadline,
+            ))
+            .await?;
         }
     }
     Ok(())
@@ -620,6 +634,17 @@ fn recover_failed_capture(ff: &mut FirefoxSession, checkpoint: SnapshotCheckpoin
 pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Result<Value, String> {
     let deadline = tokio::time::Instant::now() + SNAPSHOT_DEADLINE;
     let top = ff.contexts.active_tab().to_string();
+    let tree = ff.refresh_frame_tree().await?;
+    let mut pending = tree["contexts"].as_array().cloned().unwrap_or_default();
+    let mut document_ids = HashMap::new();
+    while let Some(info) = pending.pop() {
+        if let Some(context) = info["context"].as_str() {
+            if let Some(document_id) = current_document_id(ff, context).await {
+                document_ids.insert(context.to_string(), document_id);
+            }
+        }
+        pending.extend(info["children"].as_array().into_iter().flatten().cloned());
+    }
     ff.bidi
         .send("browsingContext.activate", json!({"context": top}))
         .await?;
@@ -631,7 +656,16 @@ pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Resu
     let tabs = ff.rdp.tabs().await?;
     let (tab, target) = active_tab_target(ff, &top, &tabs, deadline).await?;
     let (mut doc, source) = document_snapshot(&ff.rdp, &target["frame"]).await?;
-    Box::pin(annotate(ff, &top, &mut doc, &source, &tab, deadline)).await?;
+    Box::pin(annotate(
+        ff,
+        &top,
+        &document_ids,
+        &mut doc,
+        &source,
+        &tab,
+        deadline,
+    ))
+    .await?;
     if context == top {
         return Ok(doc);
     }
@@ -1462,5 +1496,45 @@ mod tests {
             "loader-2".to_string()
         )));
         assert_eq!(ff.shadow_ids, HashSet::from([7]));
+    }
+
+    #[tokio::test]
+    async fn annotation_rejects_a_document_change_since_capture() {
+        let (mut ff, _tx, _) =
+            crate::native::bidi::session::tests::fake_session_with_script(|params| {
+                if params["functionDeclaration"] != RESOLVE_JS {
+                    return json!({});
+                }
+                json!({"result": {"type": "array", "value": [
+                    {"type": "array", "value": [{"type": "node", "sharedId": "replacement-doc"}]}
+                ]}})
+            })
+            .await;
+        let document_ids = HashMap::from([("ctx-active".to_string(), "captured-doc".to_string())]);
+        let source = AccessibleSource {
+            actor: "a".into(),
+            inspector: "i".into(),
+            path: Vec::new(),
+        };
+        let mut doc = page(vec![]);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+
+        let error = annotate(
+            &mut ff,
+            "ctx-active",
+            &document_ids,
+            &mut doc,
+            &source,
+            "tab",
+            deadline,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "The page changed during the snapshot. Run snapshot again."
+        );
+        assert!(ff.refs.is_empty());
     }
 }
