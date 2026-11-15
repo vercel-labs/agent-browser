@@ -6,7 +6,7 @@ use futures_util::FutureExt;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 use crate::native::cdp::client::CdpClient;
-use crate::native::cdp::types::CdpEvent;
+use crate::native::cdp::types::{session_matches, CdpEvent};
 use crate::native::network;
 
 use super::timestamp_ms;
@@ -22,14 +22,6 @@ fn frame_timestamp_ms(meta: Option<&Value>) -> u64 {
         .filter(|s| *s > 0.0)
         .map(|s| (s * 1000.0) as u64)
         .unwrap_or(0)
-}
-
-fn session_matches(active_session: Option<&str>, event_session: Option<&str>) -> bool {
-    match active_session {
-        Some("") => event_session.is_none_or(str::is_empty),
-        Some(active) => event_session == Some(active),
-        None => false,
-    }
 }
 
 fn main_frame_id(frame_tree: &Value) -> Option<String> {
