@@ -128,15 +128,24 @@ pub fn handles(action: &str) -> bool {
     SUPPORTED_ACTIONS.contains(&action) || CHROME_ONLY_ACTIONS.contains(&action)
 }
 
+/// The reason Firefox cannot run `action`, when it cannot. Consulted before a launch so an
+/// action Firefox cannot run never starts a browser.
+pub fn unsupported_error(action: &str) -> Option<String> {
+    if CHROME_ONLY_ACTIONS.contains(&action) {
+        Some(format!(
+            "`{action}` is Chrome-only and is not available with --engine firefox"
+        ))
+    } else if !SUPPORTED_ACTIONS.contains(&action) {
+        Some(format!("`{action}` is not supported on Firefox"))
+    } else {
+        None
+    }
+}
+
 /// Runs one command on the Firefox session.
 pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    if CHROME_ONLY_ACTIONS.contains(&action) {
-        return Err(format!(
-            "`{action}` is Chrome-only and is not available with --engine firefox"
-        ));
-    }
-    if !SUPPORTED_ACTIONS.contains(&action) {
-        return Err(format!("`{action}` is not supported on Firefox"));
+    if let Some(error) = unsupported_error(action) {
+        return Err(error);
     }
     if let Some(error) = chrome::dialog_block_error(action, cmd, state) {
         return Err(error);
