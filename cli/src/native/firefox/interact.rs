@@ -1156,12 +1156,7 @@ pub async fn input_touch(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .unwrap_or_default();
 
     let ff = session(state)?;
-    let effective = if matches!(event_type, "touchEnd" | "touchCancel") && points.is_empty() {
-        ff.touches.clone()
-    } else {
-        points.clone()
-    };
-    let actions = touch_event(event_type, &effective);
+    let actions = touch_event(event_type, ff.touches.len(), &points);
     if actions
         .as_array()
         .is_some_and(|sources| !sources.is_empty())
