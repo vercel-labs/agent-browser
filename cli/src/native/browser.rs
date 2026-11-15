@@ -1507,7 +1507,7 @@ impl BrowserManager {
                 match rx.recv().await {
                     Ok(event) => {
                         if event.method == event_name
-                            && event.session_id.as_deref() == Some(session_id)
+                            && session_matches(Some(session_id), event.session_id.as_deref())
                         {
                             return Ok(());
                         }
@@ -2652,7 +2652,7 @@ async fn poll_network_idle(
                 tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
 
             match recv_result {
-                Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
+                Ok(Ok(event)) if session_matches(Some(session_id), event.session_id.as_deref()) => {
                     let mut p = pending.lock().await;
                     match event.method.as_str() {
                         "Network.requestWillBeSent" => {
