@@ -16,6 +16,7 @@ export const navigation: NavSection[] = [
       { name: "Installation", href: "/installation" },
       { name: "Quick Start", href: "/quick-start" },
       { name: "Skills", href: "/skills" },
+      { name: "Modern Web Guidance", href: "/modern-web-guidance" },
     ],
   },
   {

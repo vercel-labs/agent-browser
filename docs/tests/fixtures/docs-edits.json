@@ -76,6 +76,10 @@
       {
         "from": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)\nagent-browser set device <name>       # Emulate device (\"iPhone 14\")\nagent-browser set geo <lat> <lng>     # Set geolocation\nagent-browser set offline [on|off]    # Toggle offline mode\nagent-browser set headers <json>      # Extra HTTP headers\nagent-browser set credentials <u> <p> # HTTP basic auth for current and future tabs\nagent-browser set media [dark|light]  # Emulate color scheme (persists for session)",
         "to": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)\nagent-browser set device <name>       # Emulate device (\"iPhone 14\")\nagent-browser set geo <lat> <lng>     # Set geolocation\nagent-browser set permissions <name...> [--origin <url>]  # Grant Chrome permission types\nagent-browser set offline [on|off]    # Toggle offline mode\nagent-browser set headers <json>      # Extra HTTP headers\nagent-browser set credentials <u> <p> # HTTP basic auth for current and future tabs\nagent-browser set media [dark|light]  # Emulate color scheme (persists for session)"
+      },
+      {
+        "from": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser dblclick <sel> # Double-click",
+        "to": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser click <sel> --button right # Right-click (fires contextmenu) agent-browser click <sel> --modifiers control,shift # Hold keys during the click agent-browser dblclick <sel> # Double-click agent-browser dblclick <sel> --modifiers shift # Double-click with Shift held"
       }
     ],
     "/configuration": [
@@ -340,6 +344,14 @@
       {
         "from": "agent-browser skills get core --full is the recommended starting point for most browser tasks.",
         "to": "Start with agent-browser skills get core. It routes to its references when a task needs more detail, and --full prints all of them at once."
+      },
+      {
+        "from": "**protected-vercel-deployments**: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens.",
+        "to": "**vercel**: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens, and view them at a different feature flag variant with a per-browser override cookie."
+      },
+      {
+        "from": "protected-vercel-deployments: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens.",
+        "to": "vercel: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens, and view them at a different feature flag variant with a per-browser override cookie."
       }
     ],
     "/webgpu": [
