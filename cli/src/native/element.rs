@@ -608,51 +608,28 @@ async fn map_frame_local_point(
     frame_id: &str,
     point: &mut ClickPoint,
 ) -> Result<(), String> {
-    if point.vw <= 0.0 || point.vh <= 0.0 {
-        return Err(format!(
-            "Cannot map the click point of frame {} because its viewport size is unknown",
-            frame_id
-        ));
-    }
-    let owner = client
-        .send_command(
-            "DOM.getFrameOwner",
-            Some(serde_json::json!({ "frameId": frame_id })),
+    let object_id = frame_owner_object_id(client, dispatch_session, frame_id).await?;
+    let model: DomGetBoxModelResult = client
+        .send_command_typed(
+            "DOM.getBoxModel",
+            &DomGetBoxModelParams {
+                backend_node_id: None,
+                node_id: None,
+                object_id: Some(object_id),
+            },
             Some(dispatch_session),
         )
         .await
         .map_err(|error| {
             format!(
-                "Cannot resolve the owner element of frame {}: {}",
+                "Cannot place the click point of frame {}: {}",
                 frame_id, error
             )
         })?;
-    let backend_node_id = owner
-        .get("backendNodeId")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| format!("No owner element for frame {}", frame_id))?;
-    let model: DomGetBoxModelResult = client
-        .send_command_typed(
-            "DOM.getBoxModel",
-            &DomGetBoxModelParams {
-                backend_node_id: Some(backend_node_id),
-                node_id: None,
-                object_id: None,
-            },
-            Some(dispatch_session),
-        )
-        .await
-        .map_err(|error| format!("Cannot read the bounds of frame {}: {}", frame_id, error))?;
-    let quad = &model.model.content;
-    let mapped = map_point_through_quad(quad, point.vw, point.vh, point.x, point.y)
-        .ok_or_else(|| {
-            format!(
-                "Cannot place the click point of frame {} in the page viewport: its content box is missing, empty, or transformed beyond a flat box",
-                frame_id
-            )
-        })?;
-    point.x = mapped.0;
-    point.y = mapped.1;
+    let (x, y) = map_point_through_quad(&model.model.content, point.vw, point.vh, point.x, point.y)
+        .ok_or_else(|| format!("Cannot place the click point of frame {}", frame_id))?;
+    point.x = x;
+    point.y = y;
     Ok(())
 }
 
