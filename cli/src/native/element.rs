@@ -16,10 +16,14 @@ pub struct RefEntry {
     allow_role_fallback: bool,
 }
 
-/// Click point in the viewport of the session that computed it.
+/// Click point in the viewport of the session that computed it, plus the frame
+/// walk's history and the viewport of the document the element lives in.
 struct ClickPoint {
     x: f64,
     y: f64,
+    crossed: usize,
+    vw: f64,
+    vh: f64,
 }
 
 #[derive(Clone)]
@@ -527,11 +531,11 @@ pub async fn resolve_element_center(
     Ok((x, y, session_id.to_string()))
 }
 
-/// Confirm with the browser that a click at the computed point reaches the
-/// ref's own frame. The point comes from page JS, which the page can tamper
-/// with: inside a cross-origin frame that shares the page session the frame
-/// walk stops at the origin boundary, so frame-local coordinates would
-/// otherwise be pressed in the parent viewport. The hit test runs in the
+/// Put a ref's click point in the viewport of the session that will receive the
+/// input, then confirm with the browser that the point reaches the ref's own
+/// frame. Page script measures the point, and inside a cross-origin frame that
+/// shares the page session its frame walk stops at the origin boundary, so the
+/// point needs the frame's geometry from the browser. The hit test runs in the
 /// browser, out of the page's reach.
 async fn verify_click_point_space(
     client: &CdpClient,
@@ -548,6 +552,11 @@ async fn verify_click_point_space(
     // its coordinates cannot reach the parent page.
     if iframe_sessions.get(frame_id).map(String::as_str) == Some(dispatch_session) {
         return Ok(());
+    }
+    // No frame boundary was crossed, so the point is still in the frame's own
+    // viewport and the frame offset has to come from the browser.
+    if point.crossed == 0 {
+        map_frame_local_point(client, dispatch_session, frame_id, point).await?;
     }
     // The hit test takes integer coordinates, so press the same integer point
     // that gets tested. Distances stay sub-pixel, and the confirmed point is
@@ -576,9 +585,70 @@ async fn verify_click_point_space(
         return Ok(());
     }
     Err(format!(
-        "Element '{}' cannot be clicked safely: a click at its computed point ({}, {}) would land outside its frame, so the input could reach a different element. This usually means the frame is cross-origin and shares the page CDP session; open the frame's own URL to interact with it.",
+        "Element '{}' cannot be clicked safely: a click at ({}, {}) would land outside its frame, so the input could reach a different element. Open the frame's own URL to interact with it.",
         target, point.x, point.y
     ))
+}
+
+/// Add the frame's content-box offset to a point that is still in the frame's
+/// own viewport. The browser reports the frame element's content quad in the
+/// dispatch viewport, which page script cannot read across an origin boundary,
+/// and the point is scaled by the quad's size against the frame's viewport.
+async fn map_frame_local_point(
+    client: &CdpClient,
+    dispatch_session: &str,
+    frame_id: &str,
+    point: &mut ClickPoint,
+) -> Result<(), String> {
+    if point.vw <= 0.0 || point.vh <= 0.0 {
+        return Err(format!(
+            "Cannot map the click point of frame {} because its viewport size is unknown",
+            frame_id
+        ));
+    }
+    let owner = client
+        .send_command(
+            "DOM.getFrameOwner",
+            Some(serde_json::json!({ "frameId": frame_id })),
+            Some(dispatch_session),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "Cannot resolve the owner element of frame {}: {}",
+                frame_id, error
+            )
+        })?;
+    let backend_node_id = owner
+        .get("backendNodeId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("No owner element for frame {}", frame_id))?;
+    let model: DomGetBoxModelResult = client
+        .send_command_typed(
+            "DOM.getBoxModel",
+            &DomGetBoxModelParams {
+                backend_node_id: Some(backend_node_id),
+                node_id: None,
+                object_id: None,
+            },
+            Some(dispatch_session),
+        )
+        .await
+        .map_err(|error| format!("Cannot read the bounds of frame {}: {}", frame_id, error))?;
+    let quad = &model.model.content;
+    if quad.len() < 8 {
+        return Err(format!("Frame {} has an incomplete content box", frame_id));
+    }
+    let left = quad[0];
+    let top = quad[1];
+    let width = (quad[2] - quad[0]).abs().max((quad[4] - quad[6]).abs());
+    let height = (quad[5] - quad[1]).abs().max((quad[7] - quad[3]).abs());
+    if width <= 0.0 || height <= 0.0 {
+        return Err(format!("Frame {} has no visible content box", frame_id));
+    }
+    point.x = left + point.x * (width / point.vw);
+    point.y = top + point.y * (height / point.vh);
+    Ok(())
 }
 
 /// Origin of a CDP session's viewport in the recorded page's CSS coordinates.
@@ -691,7 +761,7 @@ async fn node_click_point(
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             const topDoc = (point.view && point.view.document) || doc;
-            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
+            return {{ connected: true, x: point.x, y: point.y, crossed: point.crossed, vw: point.vw, vh: point.vh, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
         }}"#,
     );
     let result = client
@@ -729,7 +799,22 @@ async fn node_click_point(
         value.and_then(|v| v.get("x")).and_then(|v| v.as_f64()),
         value.and_then(|v| v.get("y")).and_then(|v| v.as_f64()),
     ) {
-        (Some(x), Some(y)) => Ok(Some(ClickPoint { x, y })),
+        (Some(x), Some(y)) => Ok(Some(ClickPoint {
+            x,
+            y,
+            crossed: value
+                .and_then(|v| v.get("crossed"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize,
+            vw: value
+                .and_then(|v| v.get("vw"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+            vh: value
+                .and_then(|v| v.get("vh"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+        })),
         _ => Err(format!("Element not found: {}", target)),
     }
 }
@@ -1145,7 +1230,7 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
         }
         const view = win || own;
         reachable = reachable && x >= 0 && y >= 0 && x < view.innerWidth && y < view.innerHeight;
-        return { x: x, y: y, lx: lx, ly: ly, frames: frames, view: view, inView: reachable, box: r.width > 0 || r.height > 0 };
+        return { x: x, y: y, lx: lx, ly: ly, frames: frames, crossed: frames.length, vw: own.innerWidth, vh: own.innerHeight, view: view, inView: reachable, box: r.width > 0 || r.height > 0 };
     };
     const settle = async (m) => {
         for (let i = 0; i < 5; i++) {
@@ -1171,7 +1256,7 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
         for (const frame of [...m.frames].reverse()) frame.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         m = await settle(measure());
     }
-    return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView };
+    return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView, crossed: m.crossed, vw: m.vw, vh: m.vh };
 })"#;
 
 /// Returns why a click at (x, y) cannot reach `el`, or null when it can.

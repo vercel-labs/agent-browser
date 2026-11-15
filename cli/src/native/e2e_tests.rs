@@ -14128,6 +14128,7 @@ async fn e2e_recording_cursor_uses_page_coordinates_for_oopif() {
 
 struct CrossOriginClickFixture {
     parent_url: String,
+    child_clicks: Arc<AtomicUsize>,
     parent_server: tokio::task::JoinHandle<()>,
     child_server: tokio::task::JoinHandle<()>,
 }
@@ -14146,10 +14147,12 @@ impl Drop for CrossOriginClickFixture {
 async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
     let child_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let child_port = child_listener.local_addr().unwrap().port();
+    let child_clicks = Arc::new(AtomicUsize::new(0));
+    let child_hits = child_clicks.clone();
     let child_server = tokio::spawn(async move {
         let plain = r#"<!doctype html><html lang="en"><head><title>Child</title>
 <style>body { margin: 0 } #child-target { position: absolute; left: 16px; top: 16px; width: 200px; height: 80px }</style>
-</head><body><button id="child-target" onclick="window.childClicks = (window.childClicks || 0) + 1">Child action</button></body></html>"#;
+</head><body><button id="child-target" onclick="window.childClicks = (window.childClicks || 0) + 1; navigator.sendBeacon('/clicked')">Child action</button></body></html>"#;
         let forged = r#"<!doctype html><html lang="en"><head><title>Forged child</title>
 <style>body { margin: 0 } #child-target { position: absolute; left: 16px; top: 16px; width: 200px; height: 80px }</style>
 </head><body><button id="child-target" onclick="window.childClicks = (window.childClicks || 0) + 1">Forged action</button>
@@ -14182,16 +14185,22 @@ async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
             let mut request = [0u8; 4096];
             let read = stream.read(&mut request).await.unwrap_or(0);
             let request_line = String::from_utf8_lossy(&request[..read]);
-            let body = if request_line.starts_with("GET /forge") {
-                forged
+            let response = if request_line.starts_with("POST /clicked") {
+                child_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
             } else {
-                plain
+                let body = if request_line.starts_with("GET /forge") {
+                    forged
+                } else {
+                    plain
+                };
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
             };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
             let _ = stream.write_all(response.as_bytes()).await;
         }
     });
@@ -14235,6 +14244,7 @@ async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
 
     CrossOriginClickFixture {
         parent_url,
+        child_clicks,
         parent_server,
         child_server,
     }
@@ -14242,7 +14252,7 @@ async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
 
 #[tokio::test]
 #[ignore]
-async fn e2e_click_ref_in_cross_origin_frame_does_not_reach_parent() {
+async fn e2e_click_ref_in_cross_origin_frame_lands_in_frame() {
     let fixture = cross_origin_click_fixture().await;
     let mut state = DaemonState::new();
     assert_success(
@@ -14291,6 +14301,7 @@ async fn e2e_click_ref_in_cross_origin_frame_does_not_reach_parent() {
         &mut state,
     )
     .await;
+    assert_success(&click);
     let parent_clicks = execute_command(
         &json!({ "action": "evaluate", "script": "window.parentClicks || 0" }),
         &mut state,
@@ -14300,19 +14311,13 @@ async fn e2e_click_ref_in_cross_origin_frame_does_not_reach_parent() {
     assert_eq!(
         get_data(&parent_clicks)["result"],
         json!(0),
-        "the frame-local click point landed on the parent control: {}",
+        "the click landed on the parent control: {}",
         serde_json::to_string(&click).unwrap_or_default()
     );
     assert_eq!(
-        click["success"], false,
-        "a ref inside a cross-origin frame must not be clicked in the parent viewport: {click}"
-    );
-    assert!(
-        click["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("shares the page CDP session"),
-        "{click}"
+        fixture.child_clicks.load(Ordering::SeqCst),
+        1,
+        "the click must land on the ref inside the cross-origin frame: {click}"
     );
 
     let forged = execute_command(
