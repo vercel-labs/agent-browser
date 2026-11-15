@@ -96,6 +96,8 @@ fn full_context_from_tools(ordered: &[&ToolRecord]) -> Option<Value> {
 /// A bounded discovery summary, without schemas or page-provided safety claims.
 /// Small catalogs list full descriptions; larger ones are shortened. Full
 /// metadata is retrieved explicitly after the agent chooses a relevant tool.
+/// Both the JSON and the rendered text are bounded, because escaping page text
+/// expands the announcement well past the JSON size.
 pub fn context_from_tools(tools: &[ToolRecord]) -> Value {
     let mut ordered: Vec<_> = tools.iter().collect();
     ordered.sort_by(|a, b| (&a.name, &a.frame_id).cmp(&(&b.name, &b.frame_id)));
@@ -104,24 +106,29 @@ pub fn context_from_tools(tools: &[ToolRecord]) -> Value {
     }
     let mut catalog = Vec::new();
     let mut bytes = 256; // Envelope and array delimiters.
+    let mut rendered = 0;
     let mut truncated = false;
     for tool in ordered {
         if catalog.len() == MAX_CONTEXT_TOOLS {
             break;
         }
+        let description = bounded_string(&tool.description, MAX_CONTEXT_DESCRIPTION_BYTES);
         let entry = json!({
             "name": tool.name,
-            "description": bounded_string(&tool.description, MAX_CONTEXT_DESCRIPTION_BYTES),
+            "description": description,
             "origin": tool.origin,
             "frameId": tool.frame_id,
         });
         truncated |= tool.description.len() > MAX_CONTEXT_DESCRIPTION_BYTES;
         let entry_bytes = entry.to_string().len() + 1;
-        if bytes + entry_bytes > MAX_CONTEXT_BYTES {
+        let record_bytes =
+            crate::output::webmcp_record_len(&tool.name, &tool.frame_id, &description) + 1;
+        if bytes + entry_bytes > MAX_CONTEXT_BYTES || rendered + record_bytes > MAX_CONTEXT_BYTES {
             truncated = true;
             continue;
         }
         bytes += entry_bytes;
+        rendered += record_bytes;
         catalog.push(entry);
     }
     truncated |= catalog.len() < tools.len();
@@ -831,6 +838,42 @@ mod tests {
             tool["description"].as_str().unwrap(),
         );
         assert!(rendered <= super::MAX_CONTEXT_BYTES);
+    }
+
+    #[test]
+    fn large_catalog_rendered_size_fits_the_context_budget() {
+        // Each soft hyphen renders as eight characters, so JSON bytes alone
+        // understate the announcement size.
+        let desc = "\u{00AD}".repeat(79);
+        assert_eq!(desc.len(), 158);
+        let tools: Vec<_> = (0..16)
+            .map(|i| sample_tool(&format!("tool-{i:02}"), &desc, "f"))
+            .collect();
+        let context = super::context_from_tools(&tools);
+        assert_eq!(context["truncated"], true);
+        assert!(context["tools"].as_array().unwrap().len() < 16);
+        let rendered: usize = context["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| {
+                crate::output::webmcp_record_len(
+                    tool["name"].as_str().unwrap(),
+                    tool["frameId"].as_str().unwrap(),
+                    tool["description"].as_str().unwrap(),
+                )
+            })
+            .sum();
+        assert!(rendered <= super::MAX_CONTEXT_BYTES, "{rendered}");
+        let announcement = crate::output::format_webmcp_context(
+            &serde_json::json!({ "webmcp": context.clone() }),
+            &crate::output::OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            announcement.matches("[frame ").count(),
+            context["tools"].as_array().unwrap().len()
+        );
     }
 
     #[test]
