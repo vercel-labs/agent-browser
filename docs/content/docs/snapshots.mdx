@@ -46,6 +46,38 @@ agent-browser snapshot -i
 # @e4 [link] "Learn more"
 ```
 
+## Control hints
+
+Controls whose accessible name is empty, or shared with another ref in the same snapshot, carry a hint read from the DOM after the ref. Refs themselves are unchanged:
+
+```bash
+agent-browser snapshot -i
+# - link [ref=e1] hint="img:cart"
+# - button [ref=e2] hint="icon:icon-trash; in:Blue mug"
+# - button [ref=e3] hint="icon:fa-heart; in:Blue mug"
+# - button [ref=e4] hint="img:pencil; id:edit-btn; in:Blue mug"
+# - textbox "Email" [ref=e5] hint="name:login-email"
+# - textbox "Email" [ref=e6] hint="name:newsletter-email"
+```
+
+Parts are joined with `; ` in this order, and each appears only when it is found:
+
+<table>
+  <thead>
+    <tr><th>Part</th><th>Source</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>icon:</code></td><td>SVG sprite id from <code>&lt;use href="#..."&gt;</code>, the <code>&lt;svg&gt;</code> <code>id</code> or <code>data-icon</code>, or an icon library class such as <code>lucide-trash</code> or <code>fa-heart</code></td></tr>
+    <tr><td><code>img:</code></td><td>File name of an image inside the control, without the extension</td></tr>
+    <tr><td><code>data-testid:</code>, <code>name:</code>, <code>id:</code></td><td>The first of those attributes set on the control, skipping values that look auto-generated</td></tr>
+    <tr><td><code>in:</code></td><td>Text of the nearest table row, list item, or article around the control</td></tr>
+  </tbody>
+</table>
+
+Hints are on by default in every snapshot mode. In `--json` output the hint sits in the `snapshot` text and the `refs` map keeps its empty `name`. Iframe refs never get a hint.
+
+A hint is not the accessible name. `find role <role> --name` and stale-ref recovery match on the name only, so act on these elements by ref. A control with no name and nothing to read still prints with no hint.
+
 ## Using refs
 
 Refs from the snapshot map directly to commands:

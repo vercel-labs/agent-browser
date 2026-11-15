@@ -9,6 +9,7 @@ bin/agent-browser-*
 bin/.install-method
 !bin/agent-browser
 !bin/agent-browser.cmd
+packages/@agent-browser/cli-*/bin/
 
 # Rust build artifacts
 cli/target/
