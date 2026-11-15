@@ -2969,6 +2969,19 @@ fn append_launch_policy_actions(
 
 /// The command future is large; boxing it keeps it off the caller's stack,
 /// which a debug-build test thread would otherwise overflow.
+/// Fields the CLI adds to every command to carry session configuration. They
+/// are not part of the action, so stream broadcasts and flow recordings drop them.
+pub(crate) const ENVELOPE_KEYS: &[&str] = &[
+    "plugins",
+    "settings",
+    "pinTab",
+    "restoreKey",
+    "restoreSave",
+    "restoreCheckUrl",
+    "restoreCheckText",
+    "restoreCheckFn",
+];
+
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     Box::pin(execute_command_flow(cmd, state)).await
 }
@@ -3092,25 +3105,11 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if let Some(ref server) = state.stream_server {
         let mut broadcast_cmd;
-        let has_internal_fields = cmd.get("plugins").is_some()
-            || cmd.get("settings").is_some()
-            || cmd.get("pinTab").is_some()
-            || cmd.get("restoreKey").is_some()
-            || cmd.get("restoreSave").is_some()
-            || cmd.get("restoreCheckUrl").is_some()
-            || cmd.get("restoreCheckText").is_some()
-            || cmd.get("restoreCheckFn").is_some();
+        let has_internal_fields = ENVELOPE_KEYS.iter().any(|k| cmd.get(k).is_some());
         let cmd_for_broadcast = if has_internal_fields {
             broadcast_cmd = cmd.clone();
             if let Some(obj) = broadcast_cmd.as_object_mut() {
-                obj.remove("plugins");
-                obj.remove("settings");
-                obj.remove("pinTab");
-                obj.remove("restoreKey");
-                obj.remove("restoreSave");
-                obj.remove("restoreCheckUrl");
-                obj.remove("restoreCheckText");
-                obj.remove("restoreCheckFn");
+                obj.retain(|k, _| !ENVELOPE_KEYS.contains(&k.as_str()));
             }
             &broadcast_cmd
         } else {
