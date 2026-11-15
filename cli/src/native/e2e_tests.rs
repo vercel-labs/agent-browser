@@ -14147,13 +14147,46 @@ async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
     let child_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let child_port = child_listener.local_addr().unwrap().port();
     let child_server = tokio::spawn(async move {
+        let plain = r#"<!doctype html><html lang="en"><head><title>Child</title>
+<style>body { margin: 0 } #child-target { position: absolute; left: 16px; top: 16px; width: 200px; height: 80px }</style>
+</head><body><button id="child-target" onclick="window.childClicks = (window.childClicks || 0) + 1">Child action</button></body></html>"#;
+        let forged = r#"<!doctype html><html lang="en"><head><title>Forged child</title>
+<style>body { margin: 0 } #child-target { position: absolute; left: 16px; top: 16px; width: 200px; height: 80px }</style>
+</head><body><button id="child-target" onclick="window.childClicks = (window.childClicks || 0) + 1">Forged action</button>
+<script>
+  const nativeStyle = window.getComputedStyle.bind(window);
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const fakeTop = {
+    innerWidth: w,
+    innerHeight: h,
+    frameElement: null,
+    document: document,
+    getComputedStyle: () => ({ borderLeftWidth: '0', borderTopWidth: '0', paddingLeft: '0', paddingTop: '0', paddingRight: '0', paddingBottom: '0' }),
+  };
+  const fakeFrame = {
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: w, height: h }),
+    offsetWidth: w,
+    offsetHeight: h,
+    clientWidth: w,
+    clientHeight: h,
+    ownerDocument: { defaultView: fakeTop },
+  };
+  Object.defineProperty(document, 'defaultView', {
+    value: { innerWidth: w, innerHeight: h, frameElement: fakeFrame, parent: fakeTop, getComputedStyle: nativeStyle },
+  });
+</script>
+</body></html>"#;
         loop {
             let (mut stream, _) = child_listener.accept().await.unwrap();
             let mut request = [0u8; 4096];
-            let _ = stream.read(&mut request).await;
-            let body = r#"<!doctype html><html lang="en"><head><title>Child</title>
-<style>body { margin: 0 } #child-target { position: absolute; left: 16px; top: 16px; width: 200px; height: 80px }</style>
-</head><body><button id="child-target" onclick="window.childClicks = (window.childClicks || 0) + 1">Child action</button></body></html>"#;
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&request[..read]);
+            let body = if request_line.starts_with("GET /forge") {
+                forged
+            } else {
+                plain
+            };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -14164,7 +14197,7 @@ async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
     });
 
     let same_frame_body = r#"<!doctype html><html lang="en"><head><title>Same-origin frame</title>
-<style>body { margin: 0 } #same-target { position: absolute; left: 16px; top: 16px; width: 200px; height: 80px }</style>
+<style>body { margin: 0 } #same-target { position: absolute; left: 16px; top: 16px; width: 201px; height: 81px }</style>
 </head><body><button id="same-target" onclick="window.sameClicks = (window.sameClicks || 0) + 1">Same-origin action</button></body></html>"#;
 
     let parent_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -14172,11 +14205,12 @@ async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
     let parent_url = format!("http://127.0.0.1:{parent_port}/");
     let parent_body = format!(
         r#"<!doctype html><html lang="en"><head><title>Parent</title>
-<style>body {{ margin: 0 }} #parent-target {{ position: absolute; left: 16px; top: 16px; width: 240px; height: 120px }} iframe {{ position: absolute; border: 0 }} #same {{ left: 16px; top: 160px; width: 300px; height: 150px }} #frame {{ left: 320px; top: 260px; width: 400px; height: 300px }}</style>
+<style>body {{ margin: 0 }} #parent-target {{ position: absolute; left: 16px; top: 16px; width: 240px; height: 120px }} iframe {{ position: absolute; border: 0 }} #same {{ left: 16px; top: 160px; width: 300px; height: 150px; border: 8px solid #333 }} #frame {{ left: 320px; top: 260px; width: 400px; height: 300px }} #forged {{ left: 320px; top: 620px; width: 400px; height: 300px }}</style>
 </head><body>
 <button id="parent-target" onclick="window.parentClicks = (window.parentClicks || 0) + 1">Parent control</button>
 <iframe id="same" title="Same origin" src="/same-frame"></iframe>
 <iframe id="frame" title="Payment" src="http://127.0.0.1:{child_port}/"></iframe>
+<iframe id="forged" title="Forged" src="http://127.0.0.1:{child_port}/forge"></iframe>
 </body></html>"#
     );
     let parent_server = tokio::spawn(async move {
@@ -14277,8 +14311,30 @@ async fn e2e_click_ref_in_cross_origin_frame_does_not_reach_parent() {
         click["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("cross-origin iframe that shares the page CDP session"),
+            .contains("shares the page CDP session"),
         "{click}"
+    );
+
+    let forged = execute_command(
+        &json!({ "action": "click", "selector": format!("@{}", reference("Forged action")) }),
+        &mut state,
+    )
+    .await;
+    let parent_clicks = execute_command(
+        &json!({ "action": "evaluate", "script": "window.parentClicks || 0" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&parent_clicks);
+    assert_eq!(
+        get_data(&parent_clicks)["result"],
+        json!(0),
+        "a forged frame walk landed on the parent control: {}",
+        serde_json::to_string(&forged).unwrap_or_default()
+    );
+    assert_eq!(
+        forged["success"], false,
+        "a forged frame walk must not reach the parent viewport: {forged}"
     );
 }
 

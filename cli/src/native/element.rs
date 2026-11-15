@@ -16,12 +16,10 @@ pub struct RefEntry {
     allow_role_fallback: bool,
 }
 
-/// Click point in the viewport of the session that computed it, plus how many
-/// iframe boundaries the frame walk crossed to build it.
+/// Click point in the viewport of the session that computed it.
 struct ClickPoint {
     x: f64,
     y: f64,
-    crossed: usize,
 }
 
 #[derive(Clone)]
@@ -442,7 +440,7 @@ pub async fn resolve_element_center(
             if let Some(object_id) =
                 resolve_node_object_id(client, effective_session_id, backend_node_id).await
             {
-                if let Some(point) = node_click_point(
+                if let Some(mut point) = node_click_point(
                     client,
                     effective_session_id,
                     &object_id,
@@ -456,7 +454,7 @@ pub async fn resolve_element_center(
                         effective_session_id,
                         entry.frame_id.as_deref(),
                         iframe_sessions,
-                        &point,
+                        &mut point,
                         selector_or_ref,
                     )
                     .await?;
@@ -483,7 +481,7 @@ pub async fn resolve_element_center(
         let object_id = resolve_node_object_id(client, effective_session_id, fresh_id)
             .await
             .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
-        let point = node_click_point(
+        let mut point = node_click_point(
             client,
             effective_session_id,
             &object_id,
@@ -497,7 +495,7 @@ pub async fn resolve_element_center(
             effective_session_id,
             entry.frame_id.as_deref(),
             iframe_sessions,
-            &point,
+            &mut point,
             selector_or_ref,
         )
         .await?;
@@ -529,65 +527,58 @@ pub async fn resolve_element_center(
     Ok((x, y, session_id.to_string()))
 }
 
-/// Reject a click point that was computed in a frame deeper than the session
-/// that will receive the input. The JS frame walk cannot cross an origin
-/// boundary, so a cross-origin frame sharing the page session yields
-/// frame-local coordinates, and dispatching them on the page session would
-/// press whatever sits at those coordinates in the parent viewport.
+/// Confirm with the browser that a click at the computed point reaches the
+/// ref's own frame. The point comes from page JS, which the page can tamper
+/// with: inside a cross-origin frame that shares the page session the frame
+/// walk stops at the origin boundary, so frame-local coordinates would
+/// otherwise be pressed in the parent viewport. The hit test runs in the
+/// browser, out of the page's reach.
 async fn verify_click_point_space(
     client: &CdpClient,
     dispatch_session: &str,
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
-    point: &ClickPoint,
+    point: &mut ClickPoint,
     target: &str,
 ) -> Result<(), String> {
-    let hops_to_session_root = match frame_id {
-        None => 0,
-        Some(id) if iframe_sessions.get(id).map(String::as_str) == Some(dispatch_session) => 0,
-        Some(id) => frame_depth(client, dispatch_session, id).await?,
+    let Some(frame_id) = frame_id else {
+        return Ok(());
     };
-    if point.crossed == hops_to_session_root {
+    // A frame with its own session receives the input in its own viewport, so
+    // its coordinates cannot reach the parent page.
+    if iframe_sessions.get(frame_id).map(String::as_str) == Some(dispatch_session) {
+        return Ok(());
+    }
+    // The hit test takes integer coordinates, so press the same integer point
+    // that gets tested. Distances stay sub-pixel, and the confirmed point is
+    // the dispatched one.
+    point.x = point.x.round();
+    point.y = point.y.round();
+    let hit = client
+        .send_command(
+            "DOM.getNodeForLocation",
+            Some(serde_json::json!({
+                "x": point.x as i64,
+                "y": point.y as i64,
+                "includeUserAgentShadowDOM": false,
+                "ignorePointerEventsNone": false,
+            })),
+            Some(dispatch_session),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "Cannot confirm which element would receive a click at ({}, {}), so the click on '{}' was refused: {}",
+                point.x, point.y, target, error
+            )
+        })?;
+    if hit.get("frameId").and_then(Value::as_str) == Some(frame_id) {
         return Ok(());
     }
     Err(format!(
-        "Element '{}' is inside a cross-origin iframe that shares the page CDP session, so its click point cannot be mapped into the page viewport. Refusing the click so the input cannot land on a different element. Open the frame's own URL to interact with it.",
-        target
+        "Element '{}' cannot be clicked safely: a click at its computed point ({}, {}) would land outside its frame, so the input could reach a different element. This usually means the frame is cross-origin and shares the page CDP session; open the frame's own URL to interact with it.",
+        target, point.x, point.y
     ))
-}
-
-/// How many frames down from the root of `session_id`'s frame tree `frame_id`
-/// sits. The root of that tree is the main frame of the session.
-async fn frame_depth(
-    client: &CdpClient,
-    session_id: &str,
-    frame_id: &str,
-) -> Result<usize, String> {
-    let tree = client
-        .send_command_no_params("Page.getFrameTree", Some(session_id))
-        .await
-        .map_err(|e| format!("Cannot read the frame tree of the page session: {}", e))?;
-    tree.get("frameTree")
-        .and_then(|root| find_frame_depth(root, frame_id, 0))
-        .ok_or_else(|| format!("Frame {} is not in the page frame tree", frame_id))
-}
-
-fn find_frame_depth(tree: &Value, frame_id: &str, depth: usize) -> Option<usize> {
-    if tree
-        .get("frame")
-        .and_then(|f| f.get("id"))
-        .and_then(Value::as_str)
-        == Some(frame_id)
-    {
-        return Some(depth);
-    }
-    tree.get("childFrames")
-        .and_then(Value::as_array)
-        .and_then(|children| {
-            children
-                .iter()
-                .find_map(|child| find_frame_depth(child, frame_id, depth + 1))
-        })
 }
 
 /// Origin of a CDP session's viewport in the recorded page's CSS coordinates.
@@ -700,7 +691,7 @@ async fn node_click_point(
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             const topDoc = (point.view && point.view.document) || doc;
-            return {{ connected: true, x: point.x, y: point.y, crossed: point.crossed, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
+            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
         }}"#,
     );
     let result = client
@@ -738,14 +729,7 @@ async fn node_click_point(
         value.and_then(|v| v.get("x")).and_then(|v| v.as_f64()),
         value.and_then(|v| v.get("y")).and_then(|v| v.as_f64()),
     ) {
-        (Some(x), Some(y)) => Ok(Some(ClickPoint {
-            x,
-            y,
-            crossed: value
-                .and_then(|v| v.get("crossed"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as usize,
-        })),
+        (Some(x), Some(y)) => Ok(Some(ClickPoint { x, y })),
         _ => Err(format!("Element not found: {}", target)),
     }
 }
@@ -1161,7 +1145,7 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
         }
         const view = win || own;
         reachable = reachable && x >= 0 && y >= 0 && x < view.innerWidth && y < view.innerHeight;
-        return { x: x, y: y, lx: lx, ly: ly, frames: frames, crossed: frames.length, view: view, inView: reachable, box: r.width > 0 || r.height > 0 };
+        return { x: x, y: y, lx: lx, ly: ly, frames: frames, view: view, inView: reachable, box: r.width > 0 || r.height > 0 };
     };
     const settle = async (m) => {
         for (let i = 0; i < 5; i++) {
@@ -1187,7 +1171,7 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
         for (const frame of [...m.frames].reverse()) frame.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         m = await settle(measure());
     }
-    return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView, crossed: m.frames.length };
+    return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView };
 })"#;
 
 /// Returns why a click at (x, y) cannot reach `el`, or null when it can.
