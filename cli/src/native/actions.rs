@@ -3455,6 +3455,17 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return resp;
     }
 
+    let engine = launch_plan
+        .as_ref()
+        .map_or(state.settings.engine(), |plan| plan.next.engine());
+    if needs_launch && engine.as_deref() == Some("firefox") {
+        if let Some(error) = firefox::actions::unsupported_error(action) {
+            let mut resp = error_response(&id, &error);
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            return resp;
+        }
+    }
+
     let restore_transition_closed_browser = match async {
         if auth_login_no_navigate && command_changes_restore_key(cmd, state) {
             return Err(
@@ -3476,16 +3487,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if !skip_launch {
         if needs_launch {
-            let engine = launch_plan
-                .as_ref()
-                .map_or(state.settings.engine(), |plan| plan.next.engine());
-            if engine.as_deref() == Some("firefox") {
-                if let Some(error) = firefox::actions::unsupported_error(action) {
-                    let mut resp = error_response(&id, &error);
-                    attach_settings_outcome(&mut resp, &settings_outcome);
-                    return resp;
-                }
-            }
             // Past the policy gates: the launch settings take effect now.
             if let (Some(patch), Some(_)) = (launch_patch.as_ref(), launch_plan.as_ref()) {
                 match apply_settings_patch(state, patch, true).await {
