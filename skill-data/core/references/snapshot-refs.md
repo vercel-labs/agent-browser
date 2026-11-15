@@ -206,6 +206,7 @@ agent-browser click @e5
 - Only one level of iframe nesting is expanded (iframes within iframes are not recursed)
 - Cross-origin iframes that block accessibility tree access are silently skipped
 - Empty iframes or iframes with no interactive content are omitted from the output
+- A cross-origin frame can share the page's renderer process, for example two ports on the same host. That frame has no CDP session of its own, so clicking a ref inside it fails with an explanatory error instead of pressing the wrong element. Open the frame's URL directly to interact with it
 - To scope a snapshot to a single iframe, use `frame @ref` then `snapshot -i`
 
 ## Troubleshooting
