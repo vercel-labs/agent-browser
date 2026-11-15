@@ -141,7 +141,20 @@ pub(super) async fn prepare(
                 return Err("Firefox could not verify the click frame".to_string());
             };
             let js = format!(
-                "function() {{ const r = this.getBoundingClientRect(); const x = {} + r.x + this.clientLeft; const y = {} + r.y + this.clientTop; return {{ x, y, blocker: ({BLOCKER_AT_JS})(document, this, x, y) }}; }}",
+                r#"function() {{
+                    const at = () => {{
+                        const r = this.getBoundingClientRect(), s = getComputedStyle(this);
+                        return [{} + r.x + this.clientLeft + parseFloat(s.paddingLeft), {} + r.y + this.clientTop + parseFloat(s.paddingTop)];
+                    }};
+                    let [x, y] = at();
+                    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) {{
+                        this.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
+                        [x, y] = at();
+                        scrollBy(Math.min(0, x) + Math.max(0, x - innerWidth + 1), Math.min(0, y) + Math.max(0, y - innerHeight + 1));
+                        [x, y] = at();
+                    }}
+                    return {{ x, y, blocker: ({BLOCKER_AT_JS})(document, this, x, y) }};
+                }}"#,
                 point.0, point.1
             );
             let mapped = ff
@@ -190,9 +203,9 @@ const MAP_POINT_JS: &str = r#"function(x, y, direction) {
     let win = window;
     while (win && win.frameElement) {
         const frame = win.frameElement;
-        const rect = frame.getBoundingClientRect();
-        x += direction * (rect.left + frame.clientLeft);
-        y += direction * (rect.top + frame.clientTop);
+        const rect = frame.getBoundingClientRect(), style = win.parent.getComputedStyle(frame);
+        x += direction * (rect.left + frame.clientLeft + parseFloat(style.paddingLeft));
+        y += direction * (rect.top + frame.clientTop + parseFloat(style.paddingTop));
         win = win.parent;
     }
     return [x, y, win === win.top];
@@ -203,8 +216,8 @@ const FRAME_OFFSETS_JS: &str = r#"function() {
     const visit = root => {
         for (const el of root.querySelectorAll('*')) {
             if ((el.tagName === 'IFRAME' || el.tagName === 'FRAME') && el.contentWindow) {
-                const rect = el.getBoundingClientRect();
-                frames.push([el.contentWindow, rect.left + el.clientLeft, rect.top + el.clientTop]);
+                const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
+                frames.push([el.contentWindow, rect.left + el.clientLeft + parseFloat(style.paddingLeft), rect.top + el.clientTop + parseFloat(style.paddingTop)]);
             }
             if (el.shadowRoot) visit(el.shadowRoot);
         }
@@ -366,7 +379,8 @@ fn defer_release(
     }
 }
 
-/// Moves the mouse along the planned path and records where it landed.
+/// Moves the mouse along the planned path, kept inside the viewport Firefox accepts points in,
+/// and records where it landed.
 async fn move_mouse(
     ff: &FirefoxSession,
     mouse_state: &mut MouseState,
@@ -375,7 +389,26 @@ async fn move_mouse(
     options: &PointerMoveOptions,
 ) -> Result<bool, String> {
     let from = map_mouse_position(ff, context, (mouse_state.x, mouse_state.y), -1).await?;
-    let dialog_opened = perform_actions(ff, context, pointer_mousemove(from, to, options)).await?;
+    let mut path = pointer_mousemove(from, to, options);
+    let edge = ff
+        .bidi
+        .call_function(
+            context,
+            "() => [innerWidth - 1, innerHeight - 1]",
+            None,
+            vec![],
+        )
+        .await?;
+    if let (Some(right), Some(bottom)) = (edge[0].as_f64(), edge[1].as_f64()) {
+        for step in path[0]["actions"].as_array_mut().into_iter().flatten() {
+            step["x"] = json!(step["x"].as_f64().unwrap_or(0.0).clamp(0.0, right.max(0.0)));
+            step["y"] = json!(step["y"]
+                .as_f64()
+                .unwrap_or(0.0)
+                .clamp(0.0, bottom.max(0.0)));
+        }
+    }
+    let dialog_opened = perform_actions(ff, context, path).await?;
     commit_mouse_position(ff, mouse_state, context, to).await;
     Ok(dialog_opened)
 }
@@ -1156,12 +1189,7 @@ pub async fn input_touch(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .unwrap_or_default();
 
     let ff = session(state)?;
-    let effective = if matches!(event_type, "touchEnd" | "touchCancel") && points.is_empty() {
-        ff.touches.clone()
-    } else {
-        points.clone()
-    };
-    let actions = touch_event(event_type, &effective);
+    let actions = touch_event(event_type, ff.touches.len(), &points);
     if actions
         .as_array()
         .is_some_and(|sources| !sources.is_empty())
@@ -1665,6 +1693,7 @@ mod tests {
         assert_eq!(
             *calls.lock().unwrap(),
             [
+                "script.callFunction",
                 "script.callFunction",
                 "script.callFunction",
                 "script.callFunction",

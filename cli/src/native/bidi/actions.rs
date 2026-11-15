@@ -67,17 +67,27 @@ macro_rules! firefox_actions {
             matches!(action, $($($name)|+)|+) || CHROME_ONLY_ACTIONS.contains(&action)
         }
 
+        /// The reason Firefox cannot run the action, when it cannot. Also asked before a launch.
+        pub fn unsupported_error(action: &str) -> Option<String> {
+            if CHROME_ONLY_ACTIONS.contains(&action) {
+                Some(format!(
+                    "`{action}` is Chrome-only and is not available with --engine firefox"
+                ))
+            } else if !handles(action) {
+                Some(format!("`{action}` is not supported on Firefox"))
+            } else {
+                None
+            }
+        }
+
         /// Runs a Firefox command after capability and dialog checks.
         pub async fn execute(
             $action: &str,
             $cmd: &Value,
             $state: &mut DaemonState,
         ) -> Result<Value, String> {
-            if CHROME_ONLY_ACTIONS.contains(&$action) {
-                return Err(format!(
-                    "`{}` is Chrome-only and is not available with --engine firefox",
-                    $action
-                ));
+            if let Some(error) = unsupported_error($action) {
+                return Err(error);
             }
             match $action {
                 $($($name)|+ => {

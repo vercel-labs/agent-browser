@@ -13,6 +13,7 @@ use std::process::Child;
 
 const DOWNLOAD_LINK: &str = "https://www.mozilla.org/firefox/new/";
 const MIN_MAJOR: u32 = 150;
+pub const NONCE_PREF: &str = "agent-browser.devtools-nonce";
 const STDERR_TAIL_LINES: usize = 40;
 const BIDI_PREFIX: &str = "WebDriver BiDi listening on ";
 const FIXED_PATHS: &[&str] = &[
@@ -38,6 +39,7 @@ pub struct FirefoxProcess {
     pub bidi_url: String,
     pub devtools: DevtoolsEndpoint,
     pub profile_dir: PathBuf,
+    pub nonce: String,
     socket_dir: Option<PathBuf>,
     tail: Arc<Mutex<VecDeque<String>>>,
     reader: Option<std::thread::JoinHandle<()>>,
@@ -171,9 +173,11 @@ pub fn check_firefox_version(version: &str) -> Result<(), String> {
     }
 }
 
-fn user_js(download_path: Option<&str>, restrict_webrtc: bool) -> String {
-    let mut js = String::from(
-        "user_pref(\"devtools.debugger.remote-enabled\", true);\n\
+fn user_js(nonce: &str, download_path: Option<&str>, restrict_webrtc: bool) -> String {
+    let nonce = serde_json::to_string(nonce).unwrap_or_default();
+    let mut js = format!(
+        "user_pref(\"{NONCE_PREF}\", {nonce});\n\
+         user_pref(\"devtools.debugger.remote-enabled\", true);\n\
          user_pref(\"devtools.chrome.enabled\", true);\n\
          user_pref(\"devtools.debugger.prompt-connection\", false);\n\
          user_pref(\"dom.w3c_touch_events.enabled\", 1);\n\
@@ -237,10 +241,11 @@ fn prepare(
     profile_dir: &Path,
     download_path: Option<&str>,
     restrict_webrtc: bool,
+    nonce: &str,
 ) -> Result<(DevtoolsEndpoint, Option<PathBuf>, Child), String> {
     std::fs::write(
         profile_dir.join("user.js"),
-        user_js(download_path, restrict_webrtc),
+        user_js(nonce, download_path, restrict_webrtc),
     )
     .map_err(|e| format!("Failed to write Firefox profile: {e}"))?;
     let (devtools, rdp, socket_dir) = devtools_endpoint(profile_dir)?;
@@ -282,12 +287,18 @@ impl FirefoxProcess {
         let profile_dir = std::env::temp_dir().join(format!("agent-browser-firefox-{id}"));
         create_private_dir(&profile_dir)
             .map_err(|e| format!("Failed to create Firefox profile dir: {e}"))?;
-        let (devtools, socket_dir, mut child) =
-            prepare(path, headless, &profile_dir, download_path, restrict_webrtc).inspect_err(
-                |_| {
-                    let _ = std::fs::remove_dir_all(&profile_dir);
-                },
-            )?;
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let (devtools, socket_dir, mut child) = prepare(
+            path,
+            headless,
+            &profile_dir,
+            download_path,
+            restrict_webrtc,
+            &nonce,
+        )
+        .inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&profile_dir);
+        })?;
         let stderr: Option<Box<dyn Read + Send>> = child.stderr.take().map(|s| Box::new(s) as _);
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let (tx, rx) = mpsc::channel();
@@ -312,6 +323,7 @@ impl FirefoxProcess {
             bidi_url: String::new(),
             devtools,
             profile_dir,
+            nonce,
             socket_dir,
             tail,
             reader,
@@ -522,8 +534,8 @@ mod tests {
 
     #[test]
     fn webrtc_is_disabled_only_when_domains_are_restricted() {
-        assert!(user_js(None, true).contains("media.peerconnection.enabled\", false"));
-        assert!(!user_js(None, false).contains("peerconnection"));
+        assert!(user_js("", None, true).contains("media.peerconnection.enabled\", false"));
+        assert!(!user_js("", None, false).contains("peerconnection"));
     }
 
     #[test]

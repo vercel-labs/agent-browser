@@ -227,10 +227,7 @@ async fn cookie_urls(ff: &FirefoxSession) -> Result<Vec<url::Url>, String> {
 }
 
 async fn get_all_cookies(ff: &FirefoxSession) -> Result<Vec<Cookie>, String> {
-    let mut params = json!({});
-    if let Some(partition) = ff.active_partition() {
-        params["partition"] = partition;
-    }
+    let params = json!({ "partition": ff.active_partition() });
     let result = ff.bidi.send("storage.getCookies", params).await?;
     Ok(result["cookies"]
         .as_array()
@@ -282,10 +279,7 @@ pub async fn cookies_set(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         vec![Value::Object(cookie)]
     };
 
-    let mut command = json!({});
-    if let Some(partition) = ff.active_partition() {
-        command["partition"] = partition;
-    }
+    let mut command = json!({ "partition": ff.active_partition() });
     for cookie in &cookie_values {
         command["cookie"] = command_cookie_to_bidi(cookie, current_url.as_deref())?;
         ff.bidi.send("storage.setCookie", command.clone()).await?;
@@ -296,10 +290,7 @@ pub async fn cookies_set(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 /// Clears cookies like Chrome's `handle_cookies_clear` (via `storage.deleteCookies`).
 pub async fn cookies_clear(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    let mut params = json!({ "filter": {} });
-    if let Some(partition) = ff.active_partition() {
-        params["partition"] = partition;
-    }
+    let params = json!({ "filter": {}, "partition": ff.active_partition() });
     ff.bidi.send("storage.deleteCookies", params).await?;
     Ok(json!({ "cleared": true }))
 }
@@ -655,10 +646,7 @@ pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<
     let saved: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {e}"))?;
 
-    let mut command = json!({});
-    if let Some(partition) = session(state)?.active_partition() {
-        command["partition"] = partition;
-    }
+    let mut command = json!({ "partition": session(state)?.active_partition() });
     for cookie in &saved.cookies {
         command["cookie"] = state_cookie_to_bidi(cookie);
         session(state)?

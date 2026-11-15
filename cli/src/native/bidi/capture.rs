@@ -113,8 +113,8 @@ async fn target_rect(state: &DaemonState, target: &Target) -> Option<Rect> {
 }
 
 const FRAME_RECTS_JS: &str = r#"() => Array.from(document.querySelectorAll('iframe,frame')).map(f => {
-  const r = f.getBoundingClientRect();
-  return [f.contentWindow, r.left + f.clientLeft, r.top + f.clientTop];
+  const r = f.getBoundingClientRect(), s = getComputedStyle(f);
+  return [f.contentWindow, r.left + f.clientLeft + parseFloat(s.paddingLeft), r.top + f.clientTop + parseFloat(s.paddingTop)];
 })"#;
 
 /// The context id that contains `child` in a `browsingContext.getTree` context list.
