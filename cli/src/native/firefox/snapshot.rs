@@ -35,7 +35,11 @@ const RESOLVE_JS: &str = r#"(tree) => {
     }
   }
   const out = [];
-  const walk = ([sel, role, kids]) => {
+  const within = (el, owner) => {
+    for (let node = el; node; node = node.parentNode || node.host) if (node === owner) return true;
+    return false;
+  };
+  const walk = ([sel, role, kids], owner) => {
     let el = role === 'document' ? document : null;
     let ambiguous = false;
     if (role !== 'document' && sel && !sel.endsWith('#text')) {
@@ -49,11 +53,12 @@ const RESOLVE_JS: &str = r#"(tree) => {
         } catch (_) {}
       }
     }
+    if (el && owner && !within(el, owner)) { el = null; ambiguous = true; }
     const text = !!sel && sel.endsWith('#text');
     out.push([el, role === 'internal frame' && el ? el.contentWindow : null, !!el && el.getRootNode() instanceof ShadowRoot, ambiguous, text ? sel.slice(0, -5) : null]);
-    for (const k of kids) walk(k);
+    for (const k of kids) walk(k, el || owner);
   };
-  walk(JSON.parse(tree));
+  walk(JSON.parse(tree), null);
   const claims = new Map();
   for (const entry of out) if (entry[0]) claims.set(entry[0], (claims.get(entry[0]) || 0) + 1);
   for (const entry of out) if (entry[0] && claims.get(entry[0]) > 1) entry[3] = true;
