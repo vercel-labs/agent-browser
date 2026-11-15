@@ -7621,6 +7621,73 @@ async fn e2e_material_checkbox_check_uncheck() {
 // (PS: -C is deprecated, cursor-interactive elements are referred by default now)
 // ---------------------------------------------------------------------------
 
+/// Issue #2615: a native <button>/<a> whose explicit role is not interactive
+/// (e.g. role="menu") is exposed by Chrome with that role, so the ARIA pass
+/// does not ref it. The cursor scan must not skip it just because of its tag.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_native_tag_with_non_interactive_role_gets_ref() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "<html><body>",
+        "<button type='button' role='menu' tabindex='0' style='cursor:pointer'>A button role=menu</button>",
+        "<span role='menu' tabindex='0' style='cursor:pointer'>B span role=menu</span>",
+        "<button type='button' style='cursor:pointer'>C plain button</button>",
+        "<a href='#x' role='menu' tabindex='0' style='cursor:pointer'>E link role=menu</a>",
+        "<button type='button' role='button' style='cursor:pointer'>F explicit button</button>",
+        "</body></html>",
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    for label in [
+        "A button role=menu",
+        "B span role=menu",
+        "C plain button",
+        "E link role=menu",
+        "F explicit button",
+    ] {
+        let line = snapshot.lines().find(|l| l.contains(label));
+        assert!(
+            line.is_some_and(|l| l.contains("[ref=")),
+            "Expected {label:?} to get a ref:\n{snapshot}",
+        );
+    }
+
+    // Native elements whose implicit/explicit role is already interactive are
+    // ref'd by the ARIA pass and must not pick up cursor-interactive hints.
+    for label in ["C plain button", "F explicit button"] {
+        let line = snapshot.lines().find(|l| l.contains(label)).unwrap();
+        assert!(
+            !line.contains("clickable") && !line.contains("focusable"),
+            "{label:?} should not carry cursor-interactive info:\n{line}",
+        );
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verifies that `snapshot` detects elements with cursor:pointer / onclick / tabindex,
 /// produces the correct v0.19.0-compatible output format, deduplicates against the ARIA
 /// tree, and completes in bounded time (no sequential CDP round-trip explosion).

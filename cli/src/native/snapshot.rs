@@ -832,6 +832,7 @@ async fn find_cursor_interactive_elements(
     // - Checks getComputedStyle(el).cursor === 'pointer'
     // - Checks onclick attribute/handler and tabindex
     // - Skips interactiveTags (a, button, input, select, textarea, details, summary)
+    //   unless an explicit non-interactive role overrides their implicit role
     // - Skips elements with interactive ARIA roles
     // - Deduplicates inherited cursor:pointer from parent
     // - Skips empty text and zero-size elements
@@ -857,10 +858,16 @@ async fn find_cursor_interactive_elements(
         if (el.closest && el.closest('[hidden], [aria-hidden="true"]')) continue;
 
         var tagName = el.tagName.toLowerCase();
-        if (interactiveTags[tagName]) continue;
-
         var role = el.getAttribute('role');
-        if (role && interactiveRoles[role.toLowerCase()]) continue;
+        var explicitRole = role ? role.trim().toLowerCase() : '';
+        if (explicitRole && interactiveRoles[explicitRole]) continue;
+
+        // Native controls normally get refs from the ARIA pass, so skip them here,
+        // unless an explicit non-interactive role (e.g. role="menu") overrides the
+        // implicit one: Chrome then exposes that role and the ARIA pass skips it.
+        // presentation/none are ignored on focusable elements, so keep skipping those.
+        if (interactiveTags[tagName] &&
+            (!explicitRole || explicitRole === 'presentation' || explicitRole === 'none')) continue;
 
         var computedStyle = getComputedStyle(el);
         var hasCursorPointer = computedStyle.cursor === 'pointer';
