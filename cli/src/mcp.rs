@@ -4953,6 +4953,8 @@ mod tests {
         assert!(names.contains(&TOOL_SNAPSHOT));
         assert!(names.contains(&TOOL_CLICK));
         assert!(names.contains(&TOOL_SCREENSHOT));
+        assert!(names.contains(&TOOL_DIALOG_ACCEPT));
+        assert!(names.contains(&TOOL_DIALOG_DISMISS));
         assert!(names.contains(&TOOL_DIALOG_STATUS));
         assert!(names.contains(&TOOL_DIALOG_ACCEPT));
         assert!(names.contains(&TOOL_DIALOG_DISMISS));
