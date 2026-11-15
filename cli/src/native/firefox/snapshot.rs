@@ -645,9 +645,6 @@ pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Resu
         }
         pending.extend(info["children"].as_array().into_iter().flatten().cloned());
     }
-    ff.bidi
-        .send("browsingContext.activate", json!({"context": top}))
-        .await?;
     let _ = tokio::time::timeout(
         PAINT_WAIT,
         ff.bidi.call_function(&top, SETTLE_JS, None, vec![]),
