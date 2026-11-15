@@ -3468,6 +3468,17 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return resp;
     }
 
+    let engine = launch_plan
+        .as_ref()
+        .map_or(state.settings.engine(), |plan| plan.next.engine());
+    if needs_launch && engine.as_deref() == Some("firefox") {
+        if let Some(error) = firefox::actions::unsupported_error(action) {
+            let mut resp = error_response(&id, &error);
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            return resp;
+        }
+    }
+
     let restore_transition_closed_browser = match async {
         if auth_login_no_navigate && command_changes_restore_key(cmd, state) {
             return Err(
@@ -24993,6 +25004,17 @@ mod firefox_routing_tests {
             .unwrap()
             .contains("not supported on Firefox"));
         assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_action_firefox_cannot_run_fails_before_launching_a_browser() {
+        let _guard = clean_env();
+        let mut state = DaemonState::new();
+        state.engine = "firefox".into();
+        state.settings.set(Key::Engine, json!("firefox"));
+        let resp = execute_command(&json!({"id":"1","action":"snapshot"}), &mut state).await;
+        assert_eq!(resp["error"], "`snapshot` is not supported on Firefox");
+        assert!(state.firefox.is_none(), "no browser was launched");
     }
 
     #[tokio::test]

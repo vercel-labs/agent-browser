@@ -216,20 +216,30 @@ pub(crate) fn touch_swipe_path(from: &Origin, to: &Origin, steps: u32) -> Value 
     pointer_source("touch", actions)
 }
 
-/// Build the BiDi actions for one raw touch event over `points`.
-pub(crate) fn touch_event(event_type: &str, points: &[(f64, f64)]) -> Value {
-    let sources: Vec<Value> = points
-        .iter()
-        .enumerate()
-        .map(|(index, (x, y))| {
-            let move_to = json!({ "type": "pointerMove", "x": x, "y": y, "origin": "viewport" });
-            let actions = match event_type {
-                "touchStart" => vec![move_to, json!({ "type": "pointerDown", "button": 0 })],
-                "touchMove" => vec![move_to],
-                "touchEnd" => vec![json!({ "type": "pointerUp", "button": 0 })],
-                "touchCancel" => vec![json!({ "type": "pointerUp", "button": 0 })],
-                _ => Vec::new(),
-            };
+/// Build the BiDi actions for one raw touch event, given how many fingers are already down. A
+/// finger the event no longer reports is released, so none stays pressed after it was let go.
+pub(crate) fn touch_event(event_type: &str, pressed: usize, points: &[(f64, f64)]) -> Value {
+    let ending = matches!(event_type, "touchEnd" | "touchCancel");
+    let count = if ending {
+        pressed
+    } else {
+        points.len().max(pressed)
+    };
+    let sources: Vec<Value> = (0..count)
+        .map(|index| {
+            let mut actions = Vec::new();
+            match (ending, points.get(index)) {
+                (true, _) => actions.push(json!({ "type": "pointerUp", "button": 0 })),
+                (false, Some((x, y))) => {
+                    actions.push(
+                        json!({ "type": "pointerMove", "x": x, "y": y, "origin": "viewport" }),
+                    );
+                    if index >= pressed {
+                        actions.push(json!({ "type": "pointerDown", "button": 0 }));
+                    }
+                }
+                (false, None) => actions.push(json!({ "type": "pointerUp", "button": 0 })),
+            }
             json!({
                 "type": "pointer",
                 "id": format!("finger{index}"),
@@ -630,5 +640,26 @@ mod tests {
 
         assert_eq!(actions[0]["parameters"]["pointerType"], "touch");
         assert_eq!(actions[0]["actions"][1]["type"], "pointerDown");
+    }
+
+    #[test]
+    fn a_finger_dropped_from_a_move_is_released_and_can_press_again() {
+        let started = touch_event("touchStart", 0, &[(1.0, 2.0), (3.0, 4.0)]);
+        let moved = touch_event("touchMove", 2, &[(5.0, 6.0)]);
+        let restarted = touch_event("touchStart", 1, &[(7.0, 8.0), (9.0, 10.0)]);
+
+        assert_eq!(started[1]["id"], "finger1");
+        assert_eq!(moved.as_array().unwrap().len(), 2);
+        assert_eq!(
+            moved[1]["actions"],
+            json!([{"type": "pointerUp", "button": 0}])
+        );
+        assert_eq!(
+            restarted[1]["actions"],
+            json!([
+                {"type": "pointerMove", "x": 9.0, "y": 10.0, "origin": "viewport"},
+                {"type": "pointerDown", "button": 0},
+            ])
+        );
     }
 }

@@ -14,7 +14,9 @@ use super::contexts::{Contexts, Removed};
 use super::emulation::{self, Settings as EmulationSettings};
 use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
 use super::permissions;
-use super::process::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
+use super::process::{
+    check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess, NONCE_PREF,
+};
 use super::rdp::RdpClient;
 use crate::native::actions::{EmulatedMedia, PendingDialog};
 use crate::native::cdp::chrome::LaunchOptions;
@@ -120,6 +122,29 @@ async fn connect_devtools_loop(endpoint: &DevtoolsEndpoint) -> Result<RdpClient,
     }
 }
 
+/// Connects to the DevTools server and returns its root once the peer proves it is the Firefox this
+/// launch started by reading back the nonce from the launch profile.
+async fn open_devtools(
+    endpoint: &DevtoolsEndpoint,
+    nonce: &str,
+) -> Result<(RdpClient, Value), String> {
+    let rdp = connect_devtools(endpoint).await?;
+    let root = rdp.request("root", "getRoot", json!({})).await?;
+    let preferences = root["preferenceActor"]
+        .as_str()
+        .ok_or("Firefox DevTools did not expose the preference actor")?;
+    let read = rdp
+        .request(preferences, "getCharPref", json!({ "value": NONCE_PREF }))
+        .await;
+    if !matches!(read, Ok(reply) if reply["value"].as_str() == Some(nonce)) {
+        return Err(
+            "Another process answered on the Firefox DevTools endpoint, so the launch was stopped"
+                .to_string(),
+        );
+    }
+    Ok((rdp, root))
+}
+
 impl FirefoxSession {
     /// Finds and launches Firefox, opens the BiDi session, starts the network dispatcher
     /// and enables the accessibility actor.
@@ -181,8 +206,7 @@ impl FirefoxSession {
             .await?;
         bidi.send("network.addIntercept", json!({"phases": ["authRequired"]}))
             .await?;
-        let rdp = connect_devtools(&process.devtools).await?;
-        let root = rdp.request("root", "getRoot", json!({})).await?;
+        let (rdp, root) = open_devtools(&process.devtools, &process.nonce).await?;
         let accessibility_actor = root["parentAccessibilityActor"]
             .as_str()
             .ok_or("Firefox DevTools did not expose the accessibility actor")?
@@ -262,8 +286,9 @@ impl FirefoxSession {
         }
     }
 
-    /// The BiDi storage partition of the active context's tab, when it is not the default one.
-    pub fn active_partition(&self) -> Option<Value> {
+    /// The BiDi storage partition of the active context's tab, so a storage command only touches
+    /// that tab's cookie jar.
+    pub fn active_partition(&self) -> Value {
         self.contexts.partition(self.contexts.active())
     }
 
@@ -959,6 +984,39 @@ pub(crate) mod tests {
             browser_version: String::new(),
         };
         (session, tx, calls, bidi_messages, rdp_messages)
+    }
+
+    /// Runs `open_devtools` against a fake DevTools server that answers `getRoot` and then `reply`
+    /// to the nonce read, so the real check decides the outcome.
+    #[cfg(unix)]
+    async fn open_fake_devtools(reply: Value) -> Result<Value, String> {
+        use super::super::rdp::tests::{get, put};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            put(&mut s, json!({"from": "root"})).await;
+            assert_eq!(get(&mut s).await["type"], "getRoot");
+            put(&mut s, json!({"from": "root", "preferenceActor": "pref1"})).await;
+            let read = get(&mut s).await;
+            assert_eq!(read["to"], "pref1", "{read}");
+            assert_eq!(read["value"], NONCE_PREF, "{read}");
+            put(&mut s, reply).await;
+        });
+        open_devtools(&DevtoolsEndpoint::Unix(path), "right-nonce")
+            .await
+            .map(|(_, root)| root)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn devtools_peer_must_read_back_the_launch_nonce() {
+        let own = json!({"from": "pref1", "value": "right-nonce"});
+        assert!(open_fake_devtools(own).await.is_ok());
+        let other = json!({"from": "pref1", "value": "someone-elses-profile"});
+        let error = open_fake_devtools(other).await.unwrap_err();
+        assert!(error.contains("Another process"), "{error}");
     }
 
     #[test]

@@ -298,10 +298,13 @@ impl Contexts {
         info["userContext"].as_str().unwrap_or(DEFAULT_USER_CONTEXT) == jar
     }
 
-    /// The BiDi storage partition of the tab `context` belongs to, when it is not the default one.
-    pub fn partition(&self, context: &str) -> Option<Value> {
-        self.user_context(context)
-            .map(|user_context| json!({"type": "storageKey", "userContext": user_context}))
+    /// The BiDi storage partition of the tab `context` belongs to. The default user context is
+    /// named too, so a storage command reads and writes only that tab's cookie jar.
+    pub fn partition(&self, context: &str) -> Value {
+        let user_context = self
+            .tab(context)
+            .map_or(DEFAULT_USER_CONTEXT, |tab| tab.user_context.as_str());
+        json!({"type": "storageKey", "userContext": user_context})
     }
 
     /// Notes a user context this session created, so it is removed once no tab uses it.
@@ -344,7 +347,10 @@ mod tests {
     fn frames_and_popups_use_the_tab_and_jar_firefox_reports() {
         let mut contexts = Contexts::from_tree(&tree()).unwrap();
         assert_eq!(contexts.tab_of("frame-a-inner"), Some("tab-a"));
-        assert_eq!(contexts.partition("frame-a-inner"), None);
+        assert_eq!(
+            contexts.partition("frame-a-inner"),
+            json!({"type": "storageKey", "userContext": "default"})
+        );
         contexts.record(&json!({
             "context": "popup", "parent": null, "userContext": "jar", "originalOpener": "tab-b",
         }));
@@ -352,7 +358,7 @@ mod tests {
         assert_eq!(contexts.tab("popup").unwrap().id, 3);
         assert_eq!(
             contexts.partition("popup-frame"),
-            Some(json!({"type": "storageKey", "userContext": "jar"}))
+            json!({"type": "storageKey", "userContext": "jar"})
         );
     }
 
