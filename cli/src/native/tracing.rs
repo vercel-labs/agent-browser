@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 use super::cdp::client::CdpClient;
+use super::cdp::types::session_matches;
 
 const MAX_PROFILE_EVENTS: usize = 5_000_000;
 
@@ -84,6 +85,7 @@ pub async fn trace_stop(
     client
         .send_command_no_params("Tracing.end", Some(session_id))
         .await?;
+    tracing_state.active = false;
 
     // Collect trace data with timeout
     let mut trace_events: Vec<Value> = Vec::new();
@@ -96,7 +98,7 @@ pub async fn trace_stop(
 
         match result {
             Ok(Ok(event)) => {
-                if event.session_id.as_deref() != Some(session_id) {
+                if !session_matches(Some(session_id), event.session_id.as_deref()) {
                     continue;
                 }
                 match event.method.as_str() {
@@ -153,8 +155,6 @@ pub async fn trace_stop(
             )
             .await;
     }
-
-    tracing_state.active = false;
 
     let save_path = match path {
         Some(p) => p.to_string(),
@@ -233,6 +233,7 @@ pub async fn profiler_stop(
     client
         .send_command_no_params("Tracing.end", Some(session_id))
         .await?;
+    tracing_state.active = false;
 
     let mut events: Vec<Value> = Vec::new();
     let mut dropped = false;
@@ -243,7 +244,7 @@ pub async fn profiler_stop(
 
         match result {
             Ok(Ok(event)) => {
-                if event.session_id.as_deref() != Some(session_id) {
+                if !session_matches(Some(session_id), event.session_id.as_deref()) {
                     continue;
                 }
                 match event.method.as_str() {
@@ -268,8 +269,6 @@ pub async fn profiler_stop(
             }
         }
     }
-
-    tracing_state.active = false;
 
     let save_path = match path {
         Some(p) => p.to_string(),
