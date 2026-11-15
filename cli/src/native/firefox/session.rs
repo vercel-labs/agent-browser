@@ -379,8 +379,9 @@ impl FirefoxSession {
         self.contexts.tab_of(context) == Some(self.contexts.active_tab())
     }
 
-    /// Records the frame tree under the active tab so frames created since the last drain can be placed.
-    pub(crate) async fn refresh_frame_tree(&mut self) -> Result<(), String> {
+    /// Records the frame tree under the active tab, so frames created since the last drain can be
+    /// placed, and returns it.
+    pub(crate) async fn refresh_frame_tree(&mut self) -> Result<Value, String> {
         let tree = self
             .bidi
             .send(
@@ -393,7 +394,7 @@ impl FirefoxSession {
             self.contexts.record(info);
         }
         self.record_context_origins(&contexts);
-        Ok(())
+        Ok(tree)
     }
 
     /// True when `context` is the active tab or one of its frames, reading the live frame tree

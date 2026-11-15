@@ -20,7 +20,7 @@ use crate::native::interaction::PendingRelease;
 use crate::native::interaction::{
     dispatch_event_js, CLICK_HREF_JS, FOCUS_JS, HIGHLIGHT_JS, SCROLL_BY_JS, SCROLL_INTO_VIEW_JS,
 };
-use crate::native::pointer::{Modifiers, MouseButton};
+use crate::native::pointer::{ClickPlan, Modifiers, MouseButton};
 
 /// Reports BiDi's in-view center plus the shared actionability and blocker verdicts.
 fn prepare_js() -> String {
@@ -47,18 +47,7 @@ fn prepare_js() -> String {
             const y = Math.floor((top + bottom) / 2);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            let blocker = blockerAt(document, el, x, y);
-            let doc = el.ownerDocument;
-            let parentX = x;
-            let parentY = y;
-            while (!blocker && doc.defaultView && doc.defaultView.frameElement) {{
-                const frame = doc.defaultView.frameElement;
-                const frameRect = frame.getBoundingClientRect();
-                parentX += frameRect.x + frame.clientLeft;
-                parentY += frameRect.y + frame.clientTop;
-                doc = frame.ownerDocument;
-                blocker = blockerAt(doc, frame, parentX, parentY);
-            }}
+            const blocker = blockerAt(document, el, x, y);
             const reachable = x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight;
             return {{ x: x, y: y, reason: notActionable(el, reachable), blocker: blocker }};
         }}"#
@@ -131,10 +120,53 @@ pub(super) async fn prepare(
     if let Some(blocker) = result["blocker"].as_str() {
         return Err(intercepted_error(label, blocker));
     }
-    Ok((
+    let position = (
         result["x"].as_f64().unwrap_or(0.0),
         result["y"].as_f64().unwrap_or(0.0),
-    ))
+    );
+    if target.context != ff.contexts.active_tab() {
+        let path = get_context_path(ff, &target.context)
+            .await?
+            .ok_or("Firefox could not find the click context")?;
+        let mut point = position;
+        for (parent, child) in path.iter().rev() {
+            let frames = super::query::locate_nodes(
+                &ff.bidi,
+                parent,
+                json!({ "type": "context", "value": { "context": child } }),
+                None,
+            )
+            .await?;
+            let [frame] = frames.as_slice() else {
+                return Err("Firefox could not verify the click frame".to_string());
+            };
+            let js = format!(
+                "function() {{ const r = this.getBoundingClientRect(); const x = {} + r.x + this.clientLeft; const y = {} + r.y + this.clientTop; return {{ x, y, blocker: ({BLOCKER_AT_JS})(document, this, x, y) }}; }}",
+                point.0, point.1
+            );
+            let mapped = ff
+                .bidi
+                .call_function_on_in_sandbox(
+                    parent,
+                    super::bidi::SANDBOX,
+                    &js,
+                    json!({ "sharedId": frame["sharedId"] }),
+                )
+                .await?;
+            if let Some(blocker) = mapped["blocker"].as_str() {
+                return Err(intercepted_error(label, blocker));
+            }
+            point = (
+                mapped["x"]
+                    .as_f64()
+                    .ok_or("Firefox could not map the click point")?,
+                mapped["y"]
+                    .as_f64()
+                    .ok_or("Firefox could not map the click point")?,
+            );
+        }
+    }
+    Ok(position)
 }
 
 pub(super) async fn perform_actions(
@@ -203,6 +235,26 @@ fn context_path(node: &Value, target: &str, path: &mut Vec<(String, String)>) ->
     false
 }
 
+async fn get_context_path(
+    ff: &FirefoxSession,
+    context: &str,
+) -> Result<Option<Vec<(String, String)>>, String> {
+    let tree = ff
+        .bidi
+        .send(
+            "browsingContext.getTree",
+            json!({ "root": ff.contexts.active_tab() }),
+        )
+        .await?;
+    let mut path = Vec::new();
+    let found = tree["contexts"].as_array().is_some_and(|roots| {
+        roots
+            .iter()
+            .any(|root| context_path(root, context, &mut path))
+    });
+    Ok(found.then_some(path))
+}
+
 async fn map_mouse_position(
     ff: &FirefoxSession,
     context: &str,
@@ -222,21 +274,9 @@ async fn map_mouse_position(
         )
         .await?;
     if point[2] == false {
-        let tree = ff
-            .bidi
-            .send(
-                "browsingContext.getTree",
-                json!({"root": ff.contexts.active_tab()}),
-            )
-            .await?;
-        let mut path = Vec::new();
-        if !tree["contexts"].as_array().is_some_and(|roots| {
-            roots
-                .iter()
-                .any(|root| context_path(root, context, &mut path))
-        }) {
-            return Err("Firefox could not find the mouse context".to_string());
-        }
+        let path = get_context_path(ff, context)
+            .await?
+            .ok_or("Firefox could not find the mouse context")?;
         let mut mapped = position;
         for (parent, child) in path {
             let frames = ff
@@ -531,35 +571,42 @@ async fn act_raw(
     .await
 }
 
-/// Clicks a ref or selector, returning Chrome's `{clicked}` shape.
+/// Clicks a ref or selector with Chrome's click rules.
 pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    click_with(cmd, state, 1, PointerAction::Click).await
+}
+
+/// Decodes the click the way Chrome does, then presses the requested button the requested number
+/// of times. Modifier keys are refused: nothing here holds them yet.
+async fn click_with(
+    cmd: &Value,
+    state: &mut DaemonState,
+    default_count: u8,
+    action: PointerAction,
+) -> Result<Value, String> {
+    let plan = ClickPlan::from_command(cmd, default_count)?;
     let selector = cmd
         .get("selector")
         .and_then(Value::as_str)
         .ok_or("Missing 'selector' parameter")?;
-
-    if cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false) {
+    let ClickPlan::Pointer(spec) = plan else {
         return click_new_tab(selector, state).await;
+    };
+    if spec.modifiers != Modifiers::default() {
+        return Err("--modifiers is not supported with --engine firefox".to_string());
     }
-
     let target = resolve_target(state, selector).await?;
-    let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
-    let click_count = cmd
-        .get("clickCount")
-        .and_then(Value::as_i64)
-        .unwrap_or(1)
-        .max(0) as u32;
     let actions = pointer_click(
         &Origin::Element(target.shared_id.clone()),
-        button,
-        click_count,
+        spec.button.name(),
+        u32::from(spec.count),
     );
     Ok(act_pointer(
         state,
         cmd,
         &target,
         selector,
-        PointerAction::Click,
+        action,
         actions,
         json!({ "clicked": selector }),
     )
@@ -590,23 +637,7 @@ async fn click_new_tab(selector: &str, state: &mut DaemonState) -> Result<Value,
 
 /// Double-clicks a ref or selector.
 pub async fn dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
-    let target = resolve_target(state, selector).await?;
-    let actions = pointer_click(&Origin::Element(target.shared_id.clone()), "left", 2);
-    Ok(act_pointer(
-        state,
-        cmd,
-        &target,
-        selector,
-        PointerAction::DoubleClick,
-        actions,
-        json!({ "clicked": selector }),
-    )
-    .await?
-    .value)
+    click_with(cmd, state, 2, PointerAction::DoubleClick).await
 }
 
 /// Moves the mouse over a ref or selector.
@@ -1576,11 +1607,17 @@ mod tests {
 
     async fn state_with_refs(reply: fn(&Value) -> Value) -> (DaemonState, Calls) {
         let mut state = DaemonState::new();
-        let (mut ff, _tx, calls) = fake_session_with_script(move |params| {
-            if params["functionDeclaration"] == "() => document" {
-                json!({ "type": "success", "result": { "type": "node", "sharedId": "doc" } })
-            } else {
-                reply(params)
+        let (mut ff, _tx, calls) = fake_session_with(move |request| {
+            let params = &request["params"];
+            match request["method"].as_str() {
+                Some("browsingContext.getTree") => json!({ "contexts": [{ "context": "ctx-active", "children": [{ "context": "ctx-frame" }] }] }),
+                Some("browsingContext.locateNodes") => json!({ "nodes": [{ "sharedId": "frame" }] }),
+                Some("script.callFunction") if params["this"]["sharedId"] == "frame" => located(None),
+                Some("script.callFunction") if params["functionDeclaration"] == "() => document" => {
+                    json!({ "type": "success", "result": { "type": "node", "sharedId": "doc" } })
+                }
+                Some("script.callFunction") => reply(params),
+                _ => json!({}),
             }
         })
         .await;
@@ -1841,5 +1878,14 @@ mod tests {
 
         assert!(state.pending_dialog.is_none());
         assert_eq!(*calls.lock().unwrap(), ["browsingContext.handleUserPrompt"]);
+    }
+
+    #[tokio::test]
+    async fn clicks_refuse_modifier_keys() {
+        let mut state = DaemonState::new();
+        let held = json!({"selector": "#a", "modifiers": 2});
+        let refused = "--modifiers is not supported with --engine firefox";
+        assert_eq!(click(&held, &mut state).await.unwrap_err(), refused);
+        assert_eq!(dblclick(&held, &mut state).await.unwrap_err(), refused);
     }
 }
