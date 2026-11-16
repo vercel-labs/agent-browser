@@ -1,0 +1,57 @@
+/* A page, a capture marquee, a shutter flash and the carried copies. Kept outside the upstream kit. */
+@keyframes ab-shot-flash {
+  0% { opacity: 0; }
+  15% { opacity: .85; }
+  100% { opacity: 0; }
+}
+
+.ab-feature-scene .ab-recording {
+  & .ab-shot-page { position: absolute; left: 40px; top: 25px; width: 320px; padding: 20px; display: flex; flex-direction: column; gap: 16px; border: var(--ss-hairline, 1px) solid var(--ss-line); border-radius: 12px; background: var(--ss-surface); box-shadow: var(--ss-shadow-card); }
+  & .ab-shot-row { display: flex; gap: 16px; }
+  & .ab-shot-lines { display: flex; flex-direction: column; gap: 10px; }
+  /* Measured as the paragraph's own lines: a margin, not padding, sets it down. */
+  & .ab-shot-side { align-self: flex-start; margin-top: 4px; }
+
+  /* Keep this radius in step with TILE_RADIUS in recording-scene.tsx. */
+  & .ab-shot-tile { flex: none; width: 168px; height: 80px; border: var(--ss-hairline, 1px) solid var(--ss-line); border-radius: 6px; background: var(--ss-surface); }
+  & .ab-shot-chart { width: 166px; height: 78px; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+  & .ab-shot-bars { flex: 1; display: flex; align-items: flex-end; gap: 8px; border-bottom: var(--ss-hairline, 1px) solid var(--ss-line); }
+  & .ab-shot-bars > span { flex: 1; background: var(--ds-gray-400); border-radius: 2px 2px 0 0; }
+  & .ab-shot-bars > span:last-child { background: var(--ds-gray-800); }
+  & .ab-shot-para { padding: 8px; display: flex; flex-direction: column; gap: 10px; background: var(--ss-surface); }
+
+  /* Drawn from the drag's own points; it fades on release, never vanishes. */
+  & .ab-shot-marquee { position: absolute; overflow: visible; color: var(--ds-gray-700); opacity: 0; pointer-events: none; transition: opacity .35s ease-out, color .12s ease-out; }
+  & .ab-shot-marquee path { fill: none; stroke: currentColor; stroke-width: 1; stroke-dasharray: 4 3; }
+  & .ab-shot-marquee[data-show] { opacity: 1; transition: color .12s ease-out; }
+  & .ab-shot-marquee[data-shot] { color: var(--ds-blue-700); }
+  /* A camera flash: light, not a surface color, so white in dark mode too. */
+  & .ab-shot-flash { position: absolute; background: var(--ds-background-100, #fff); opacity: 0; pointer-events: none; animation: ab-shot-flash .45s ease-out both; }
+
+  & .ss-stage[data-layout='compact'] .ab-shot-page { left: 24px; width: 310px; }
+}
+
+/* Copies live in the kit cursor's layer, so they ride with the hand exactly. */
+.ab-feature-scene .ab-recording .ss-cursor .ab-shot-copy {
+  position: absolute;
+  overflow: hidden;
+  /* The ring comes with --ss-shadow-lift (one real pixel, as the card's border) */
+  border-radius: 4px;
+  background: var(--ss-surface);
+  box-shadow: var(--ss-shadow-lift);
+  transform-origin: 0 0;
+  will-change: transform, opacity;
+  opacity: 1;
+  transition: transform .65s cubic-bezier(.22, 1, .36, 1), opacity .2s ease-out;
+
+  &[data-carry='none'] { opacity: 0; transition: opacity .25s ease-out; }
+  &[data-carry='lift'] { box-shadow: none; }
+  /* The stack leaves together: one fade, each copy held where it rests. */
+  &[data-carry='gone'] { opacity: 0; transition: opacity .35s ease-out; }
+
+  & .ab-shot-copy-inner { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ab-feature-scene .ab-recording .ab-shot-flash { animation: none; }
+}
