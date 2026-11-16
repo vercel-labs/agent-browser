@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
+use super::click_point::{place_in_dispatch_viewport, ClickPoint};
 
 #[derive(Debug, Clone)]
 pub struct RefEntry {
@@ -14,16 +15,6 @@ pub struct RefEntry {
     pub selector: Option<String>,
     pub frame_id: Option<String>,
     allow_role_fallback: bool,
-}
-
-/// Click point in the viewport of the session that computed it, plus the frame
-/// walk's history and the viewport of the document the element lives in.
-struct ClickPoint {
-    x: f64,
-    y: f64,
-    crossed: usize,
-    vw: f64,
-    vh: f64,
 }
 
 #[derive(Clone)]
@@ -453,11 +444,11 @@ pub async fn resolve_element_center(
                 )
                 .await?
                 {
-                    verify_click_point_space(
+                    place_in_dispatch_viewport(
                         client,
                         effective_session_id,
                         entry.frame_id.as_deref(),
-                        iframe_sessions,
+                        backend_node_id,
                         &mut point,
                         selector_or_ref,
                     )
@@ -494,11 +485,11 @@ pub async fn resolve_element_center(
         )
         .await?
         .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
-        verify_click_point_space(
+        place_in_dispatch_viewport(
             client,
             effective_session_id,
             entry.frame_id.as_deref(),
-            iframe_sessions,
+            fresh_id,
             &mut point,
             selector_or_ref,
         )
@@ -529,203 +520,6 @@ pub async fn resolve_element_center(
     let (x, y) =
         resolve_by_selector(client, session_id, selector_or_ref, require_actionable).await?;
     Ok((x, y, session_id.to_string()))
-}
-
-/// Put a ref's click point in the viewport of the session that will receive the
-/// input, then confirm with the browser that the point reaches the ref's own
-/// frame. Page script measures the point, and inside a cross-origin frame that
-/// shares the page session its frame walk stops at the origin boundary, so the
-/// point needs the frame's geometry from the browser. The hit test runs in the
-/// browser, out of the page's reach.
-async fn verify_click_point_space(
-    client: &CdpClient,
-    dispatch_session: &str,
-    frame_id: Option<&str>,
-    iframe_sessions: &HashMap<String, String>,
-    point: &mut ClickPoint,
-    target: &str,
-) -> Result<(), String> {
-    let Some(frame_id) = frame_id else {
-        return Ok(());
-    };
-    // A frame with its own session receives the input in its own viewport, so
-    // its coordinates cannot reach the parent page.
-    if iframe_sessions.get(frame_id).map(String::as_str) == Some(dispatch_session) {
-        return Ok(());
-    }
-    // The walk crosses only same-origin ancestors, so a shortfall against the
-    // frame's depth in the page tree means the point is in a nested viewport.
-    // One remaining hop is mapped below; more than that cannot be placed.
-    let depth = frame_depth(client, dispatch_session, frame_id).await?;
-    if point.crossed < depth {
-        if point.crossed != 0 || depth != 1 {
-            return Err(format!(
-                "Element '{}' cannot be clicked safely: its frame sits {} frames below the page but the walk covered {}, so its click point is in another viewport. Open the frame's own URL to interact with it.",
-                target, depth, point.crossed
-            ));
-        }
-        map_frame_local_point(client, dispatch_session, frame_id, point).await?;
-    }
-    // The hit test takes integer coordinates, so press the same integer point
-    // that gets tested. Distances stay sub-pixel, and the confirmed point is
-    // the dispatched one.
-    point.x = point.x.round();
-    point.y = point.y.round();
-    // Input and box geometry use the session viewport, while the hit test
-    // reads document coordinates, so shift by the viewport's document origin.
-    let (origin_x, origin_y) = viewport_origin(client, dispatch_session).await?;
-    let hit_x = point.x as i64 + origin_x.round() as i64;
-    let hit_y = point.y as i64 + origin_y.round() as i64;
-    let hit = client
-        .send_command(
-            "DOM.getNodeForLocation",
-            Some(serde_json::json!({
-                "x": hit_x,
-                "y": hit_y,
-                "includeUserAgentShadowDOM": false,
-                "ignorePointerEventsNone": false,
-            })),
-            Some(dispatch_session),
-        )
-        .await
-        .map_err(|error| {
-            format!(
-                "Cannot confirm which element would receive a click at ({}, {}), so the click on '{}' was refused: {}",
-                point.x, point.y, target, error
-            )
-        })?;
-    if hit.get("frameId").and_then(Value::as_str) == Some(frame_id) {
-        return Ok(());
-    }
-    Err(format!(
-        "Element '{}' cannot be clicked safely: a click at ({}, {}) would land outside its frame, so the input could reach a different element. Open the frame's own URL to interact with it.",
-        target, point.x, point.y
-    ))
-}
-
-/// Document coordinates of the dispatch session's viewport origin. Box geometry
-/// and input events are viewport-relative, while `DOM.getNodeForLocation` takes
-/// document coordinates, so a scrolled page differs by this offset.
-async fn viewport_origin(client: &CdpClient, session_id: &str) -> Result<(f64, f64), String> {
-    let metrics = client
-        .send_command_no_params("Page.getLayoutMetrics", Some(session_id))
-        .await
-        .map_err(|error| format!("Cannot read the page viewport origin: {}", error))?;
-    let viewport = metrics
-        .get("visualViewport")
-        .or_else(|| metrics.get("cssVisualViewport"));
-    let x = viewport
-        .and_then(|v| v.get("pageX"))
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let y = viewport
-        .and_then(|v| v.get("pageY"))
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    Ok((x, y))
-}
-
-/// Add the frame's content-box offset to a point that is still in the frame's
-/// own viewport. The browser reports the frame element's content quad in the
-/// dispatch viewport, which page script cannot read across an origin boundary,
-/// and the point is scaled by the quad's size against the frame's viewport.
-async fn map_frame_local_point(
-    client: &CdpClient,
-    dispatch_session: &str,
-    frame_id: &str,
-    point: &mut ClickPoint,
-) -> Result<(), String> {
-    let object_id = frame_owner_object_id(client, dispatch_session, frame_id).await?;
-    let model: DomGetBoxModelResult = client
-        .send_command_typed(
-            "DOM.getBoxModel",
-            &DomGetBoxModelParams {
-                backend_node_id: None,
-                node_id: None,
-                object_id: Some(object_id),
-            },
-            Some(dispatch_session),
-        )
-        .await
-        .map_err(|error| {
-            format!(
-                "Cannot place the click point of frame {}: {}",
-                frame_id, error
-            )
-        })?;
-    let (x, y) = map_point_through_quad(&model.model.content, point.vw, point.vh, point.x, point.y)
-        .ok_or_else(|| format!("Cannot place the click point of frame {}", frame_id))?;
-    point.x = x;
-    point.y = y;
-    Ok(())
-}
-
-/// Map a point inside a frame onto the frame element's content quad, using the
-/// quad's own basis so rotation, skew, reflection, and scaling are honored.
-/// Returns None for a quad that is not a parallelogram, which means a
-/// perspective transform this mapping cannot follow.
-fn map_point_through_quad(
-    quad: &[f64],
-    viewport_width: f64,
-    viewport_height: f64,
-    x: f64,
-    y: f64,
-) -> Option<(f64, f64)> {
-    if quad.len() < 8 || viewport_width <= 0.0 || viewport_height <= 0.0 {
-        return None;
-    }
-    let (x0, y0) = (quad[0], quad[1]);
-    let (x1, y1) = (quad[2], quad[3]);
-    let (x2, y2) = (quad[4], quad[5]);
-    let (x3, y3) = (quad[6], quad[7]);
-    let diag_x = x1 - x0 + (x3 - x0);
-    let diag_y = y1 - y0 + (y3 - y0);
-    if (diag_x - (x2 - x0)).abs() > 0.5 || (diag_y - (y2 - y0)).abs() > 0.5 {
-        return None;
-    }
-    if (x1 - x0).abs() + (y1 - y0).abs() == 0.0 && (x3 - x0).abs() + (y3 - y0).abs() == 0.0 {
-        return None;
-    }
-    let u = x / viewport_width;
-    let v = y / viewport_height;
-    Some((
-        x0 + u * (x1 - x0) + v * (x3 - x0),
-        y0 + u * (y1 - y0) + v * (y3 - y0),
-    ))
-}
-
-/// How many frames down from the root of `session_id`'s frame tree `frame_id`
-/// sits. The root of that tree is the main frame of the session.
-async fn frame_depth(
-    client: &CdpClient,
-    session_id: &str,
-    frame_id: &str,
-) -> Result<usize, String> {
-    let tree = client
-        .send_command_no_params("Page.getFrameTree", Some(session_id))
-        .await
-        .map_err(|error| format!("Cannot read the page frame tree: {}", error))?;
-    tree.get("frameTree")
-        .and_then(|root| find_frame_depth(root, frame_id, 0))
-        .ok_or_else(|| format!("Frame {} is not in the page frame tree", frame_id))
-}
-
-fn find_frame_depth(tree: &Value, frame_id: &str, depth: usize) -> Option<usize> {
-    if tree
-        .get("frame")
-        .and_then(|frame| frame.get("id"))
-        .and_then(Value::as_str)
-        == Some(frame_id)
-    {
-        return Some(depth);
-    }
-    tree.get("childFrames")
-        .and_then(Value::as_array)
-        .and_then(|children| {
-            children
-                .iter()
-                .find_map(|child| find_frame_depth(child, frame_id, depth + 1))
-        })
 }
 
 /// Origin of a CDP session's viewport in the recorded page's CSS coordinates.
@@ -838,7 +632,7 @@ async fn node_click_point(
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             const topDoc = (point.view && point.view.document) || doc;
-            return {{ connected: true, x: point.x, y: point.y, crossed: point.crossed, vw: point.vw, vh: point.vh, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
+            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
         }}"#,
     );
     let result = client
@@ -876,22 +670,7 @@ async fn node_click_point(
         value.and_then(|v| v.get("x")).and_then(|v| v.as_f64()),
         value.and_then(|v| v.get("y")).and_then(|v| v.as_f64()),
     ) {
-        (Some(x), Some(y)) => Ok(Some(ClickPoint {
-            x,
-            y,
-            crossed: value
-                .and_then(|v| v.get("crossed"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as usize,
-            vw: value
-                .and_then(|v| v.get("vw"))
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0),
-            vh: value
-                .and_then(|v| v.get("vh"))
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0),
-        })),
+        (Some(x), Some(y)) => Ok(Some(ClickPoint { x, y })),
         _ => Err(format!("Element not found: {}", target)),
     }
 }
@@ -1307,7 +1086,7 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
         }
         const view = win || own;
         reachable = reachable && x >= 0 && y >= 0 && x < view.innerWidth && y < view.innerHeight;
-        return { x: x, y: y, lx: lx, ly: ly, frames: frames, crossed: frames.length, vw: own.innerWidth, vh: own.innerHeight, view: view, inView: reachable, box: r.width > 0 || r.height > 0 };
+        return { x: x, y: y, lx: lx, ly: ly, frames: frames, view: view, inView: reachable, box: r.width > 0 || r.height > 0 };
     };
     const settle = async (m) => {
         for (let i = 0; i < 5; i++) {
@@ -1333,7 +1112,7 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
         for (const frame of [...m.frames].reverse()) frame.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         m = await settle(measure());
     }
-    return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView, crossed: m.crossed, vw: m.vw, vh: m.vh };
+    return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView };
 })"#;
 
 /// Returns why a click at (x, y) cannot reach `el`, or null when it can.
@@ -2207,42 +1986,5 @@ mod tests {
         let session = resolve_frame_session(None, "parent-session", &iframe_sessions);
 
         assert_eq!(session, "parent-session");
-    }
-
-    #[test]
-    fn test_map_point_through_quad_places_plain_and_scaled_frames() {
-        let plain = [100.0, 50.0, 400.0, 50.0, 400.0, 250.0, 100.0, 250.0];
-        assert_eq!(
-            map_point_through_quad(&plain, 300.0, 200.0, 150.0, 100.0),
-            Some((250.0, 150.0))
-        );
-        let scaled = [100.0, 50.0, 700.0, 50.0, 700.0, 450.0, 100.0, 450.0];
-        assert_eq!(
-            map_point_through_quad(&scaled, 300.0, 200.0, 150.0, 100.0),
-            Some((400.0, 250.0))
-        );
-    }
-
-    #[test]
-    fn test_map_point_through_quad_follows_rotation() {
-        let quad = [200.0, 100.0, 270.71, 170.71, 200.0, 241.42, 129.29, 170.71];
-        let (x, y) = map_point_through_quad(&quad, 100.0, 100.0, 10.0, 80.0).unwrap();
-        assert!((x - 150.5).abs() < 0.01, "x was {x}");
-        assert!((y - 163.64).abs() < 0.01, "y was {y}");
-    }
-
-    #[test]
-    fn test_map_point_through_quad_refuses_unmappable_geometry() {
-        let perspective = [0.0, 0.0, 100.0, 0.0, 80.0, 100.0, 20.0, 100.0];
-        assert_eq!(
-            map_point_through_quad(&perspective, 100.0, 100.0, 50.0, 50.0),
-            None
-        );
-        assert_eq!(
-            map_point_through_quad(&[0.0, 0.0], 100.0, 100.0, 1.0, 1.0),
-            None
-        );
-        let plain = [0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0];
-        assert_eq!(map_point_through_quad(&plain, 0.0, 10.0, 1.0, 1.0), None);
     }
 }

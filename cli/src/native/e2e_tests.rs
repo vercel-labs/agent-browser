@@ -14370,6 +14370,102 @@ async fn e2e_click_ref_in_cross_origin_frame_lands_in_frame() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_click_ref_on_iframe_nested_in_frame_stays_in_frame() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/");
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.starts_with("GET /inner ") {
+                    r#"<!doctype html><html lang="en"><head><title>Inner</title>
+<style>body { margin: 0; height: 180px } #deep { position: absolute; left: 40px; top: 40px; width: 160px; height: 60px }</style>
+</head><body onclick="top.frameClicks.inner++"><button id="deep" onclick="top.frameClicks.deep++">Deep action</button></body></html>"#
+                } else if request.starts_with("GET /frame ") {
+                    r#"<!doctype html><html lang="en"><head><title>Frame</title>
+<style>body { margin: 0 } iframe { position: absolute; border: 0 } #inner { left: 30px; top: 60px; width: 300px; height: 180px }</style>
+</head><body onclick="top.frameClicks.outer++"><iframe id="inner" title="Inner widget" src="/inner"></iframe></body></html>"#
+                } else {
+                    r#"<!doctype html><html lang="en"><head><title>Nested frames</title>
+<script>window.frameClicks = { outer: 0, inner: 0, deep: 0 };</script>
+<style>body { margin: 0 } iframe { position: absolute; border: 0 } #outer { left: 20px; top: 40px; width: 500px; height: 320px }</style>
+</head><body><iframe id="outer" title="Outer widget" src="/frame"></iframe></body></html>"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({"action": "launch", "headless": true}), &mut state).await,
+    );
+    assert_success(&execute_command(&json!({"action": "navigate", "url": url}), &mut state).await);
+    let snapshot = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let reference = |name: &str| {
+        get_data(&snapshot)["refs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, entry)| entry["name"] == name)
+            .map(|(reference, _)| reference.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "ref '{}' must be in the snapshot: {}",
+                    name,
+                    serde_json::to_string(&get_data(&snapshot)["refs"]).unwrap_or_default()
+                )
+            })
+    };
+    let inner = format!("@{}", reference("Inner widget"));
+    let outer = format!("@{}", reference("Outer widget"));
+
+    let hover = execute_command(&json!({"action": "hover", "selector": inner}), &mut state).await;
+    assert_success(&hover);
+
+    let click = execute_command(&json!({"action": "click", "selector": inner}), &mut state).await;
+    assert_success(&click);
+    let clicks = execute_command(
+        &json!({"action": "evaluate", "script": "JSON.stringify(window.frameClicks)"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&clicks);
+    assert_eq!(
+        get_data(&clicks)["result"],
+        json!("{\"outer\":0,\"inner\":1,\"deep\":1}"),
+        "a ref on the nested iframe must reach the frame it embeds: {click}"
+    );
+
+    let click = execute_command(&json!({"action": "click", "selector": outer}), &mut state).await;
+    assert_success(&click);
+    let clicks = execute_command(
+        &json!({"action": "evaluate", "script": "JSON.stringify(window.frameClicks)"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&clicks);
+    assert_eq!(
+        get_data(&clicks)["result"],
+        json!("{\"outer\":0,\"inner\":2,\"deep\":1}"),
+        "the press must land inside the frame nested in the ref's frame: {click}"
+    );
+
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
     let mut state = DaemonState::new();
 
