@@ -364,7 +364,7 @@ A `live` tab uses as much CPU as a front tab. Five busy background tabs used 0.0
 
 In a browser that agent-browser didn't launch (`--cdp` or `--auto-connect`), the timers of a `live` tab can still run slower than a front tab's. A 100 ms timer on a page that doesn't animate fired 6 to 8 times per second instead of 10, compared with once per second when throttled. Start that browser with `--disable-renderer-backgrounding` to get the full rate. Browsers that agent-browser launches already have the flag.
 
-Freezing the same five tabs took them to zero CPU and reduced memory from 1.70 GB to 1.55 GB. The active tab can't be frozen, and neither can a tab that is still visible, such as one in its own window. Switch to another tab first, then freeze it by ref. A tab pinned by another session with `--pin-tab` is refused with the same `tab_locked` error as `tab <ref>`.
+Freezing the same five tabs took them to zero CPU and reduced memory from 1.70 GB to 1.55 GB. The active tab can't be frozen, and neither can a tab that is still visible, such as one in its own window. Switch to another tab first, then freeze it by ref. A session that closes unfreezes the tabs it froze, so a browser you attached to with `--cdp` or `--auto-connect` isn't left with paused tabs. A tab pinned by another session with `--pin-tab` is refused with the same `tab_locked` error as `tab <ref>`.
 
 `tab list` shows each tab's mode. A text line ends with `(live)` or `(frozen)`, and `tab list --json` reports `"keep": "live" | "throttled" | "frozen"` for every tab. `tab keep` uses the Chrome DevTools Protocol, so it isn't available on the WebDriver backend (Safari, iOS).
 

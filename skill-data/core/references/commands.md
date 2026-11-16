@@ -342,7 +342,7 @@ Chrome slows every tab that is not in front: timers fire about once per second a
 
 - `throttled` is the default, and Chrome's normal behavior.
 - `live` keeps timers, `fetch`, CSS animations, and animation frames at their normal rate. The daemon holds focus emulation on the tab, so the page reports `document.visibilityState === "visible"` and `document.hasFocus() === true` while another tab is in front. It survives reloads and navigation. A live tab uses as much CPU as a front tab (five busy background tabs: 0.05 CPU cores throttled, 0.73 live), so set it only on tabs that have to keep running.
-- `frozen` stops timers, network callbacks, and scripts until you switch back to the tab, which returns it to `throttled`. The active tab can't be frozen, and neither can a tab that is still visible: switch to another tab first, then freeze it by ref.
+- `frozen` stops timers, network callbacks, and scripts until you switch back to the tab, which returns it to `throttled`. The active tab can't be frozen, and neither can a tab that is still visible: switch to another tab first, then freeze it by ref. Closing the session unfreezes the tabs it froze.
 
 A tab pinned by another session with `--pin-tab` is refused with `tab_locked`. `tab list` shows the mode: `(live)` or `(frozen)` in text, and `"keep"` in JSON. Chrome only. In a browser attached with `--cdp` or `--auto-connect`, a live tab's timers reach the full rate only if that browser was started with `--disable-renderer-backgrounding`; without it a 100 ms timer fired 6 to 8 times per second instead of 10.
 

@@ -3176,6 +3176,9 @@ async fn e2e_tabs() {
     assert_success(&resp);
 }
 
+/// A page that counts 100 ms ticks and records the longest gap between two.
+const TAB_KEEP_TICKER: &str = "data:text/html,<script>var ticks=0,gap=0,last=performance.now();setInterval(()=>{var n=performance.now();gap=Math.max(gap,n-last);last=n;ticks++},100)</script>";
+
 /// A live tab keeps its timers running behind another tab, and the active
 /// tab cannot be frozen. A frozen tab stops, and the daemon unfreezes it when
 /// closing a popup makes it the active tab while Chrome shows the opener.
@@ -3183,7 +3186,7 @@ async fn e2e_tabs() {
 #[ignore]
 async fn e2e_tab_keep_live_and_frozen() {
     let mut state = DaemonState::new();
-    let ticker = "data:text/html,<script>var ticks=0,gap=0,last=performance.now();setInterval(()=>{var n=performance.now();gap=Math.max(gap,n-last);last=n;ticks++},100)</script>";
+    let ticker = TAB_KEEP_TICKER;
     let run = async |state: &mut DaemonState, cmd: Value| execute_command(&cmd, state).await;
     let number = |resp: &Value| get_data(resp)["result"].as_f64().unwrap_or_default();
 
@@ -3312,6 +3315,68 @@ async fn e2e_tab_keep_live_and_frozen() {
     assert_eq!(tabs[1]["keep"], "throttled");
 
     let resp = run(&mut state, json!({ "id": "99", "action": "close" })).await;
+    assert_success(&resp);
+}
+
+/// A session attached to a running browser unfreezes the tabs it froze when
+/// it closes, because a frozen page stays frozen after the session disconnects.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_frozen_ends_with_an_attached_session() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let mut session =
+        attach_pinned_session(&guard, "e2e-keep-frozen", &ws_url, TAB_KEEP_TICKER).await;
+
+    let resp = execute_command(&json!({ "id": "1", "action": "tab_list" }), &mut session).await;
+    assert_success(&resp);
+    let ticker = get_data(&resp)["tabs"]
+        .as_array()
+        .and_then(|tabs| tabs.iter().find(|tab| tab["active"] == true))
+        .map(|tab| tab["targetId"].as_str().unwrap_or_default().to_string())
+        .expect("the attached session should have an active tab");
+    let resp = execute_command(&json!({ "id": "2", "action": "tab_new" }), &mut session).await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_keep", "keep": "frozen", "tabId": ticker }),
+        &mut session,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "4", "action": "close" }), &mut session).await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "5", "action": "tab_list" }), &mut host).await;
+    assert_success(&resp);
+    let browser = host
+        .browser
+        .as_ref()
+        .expect("host browser should be running");
+    let page = browser
+        .pages_list()
+        .into_iter()
+        .find(|page| page.target_id == ticker)
+        .expect("the host should see the tab the attached session left behind");
+    let mut ticks = Vec::new();
+    for _ in 0..2 {
+        let result = browser
+            .client
+            .send_command(
+                "Runtime.evaluate",
+                Some(json!({ "expression": "ticks", "returnByValue": true })),
+                Some(&page.session_id),
+            )
+            .await
+            .expect("the tab should answer");
+        ticks.push(result["result"]["value"].as_f64().unwrap_or_default());
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    }
+    assert!(
+        ticks[1] > ticks[0],
+        "the tab should tick again after the session that froze it closed, got {ticks:?}"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut host).await;
     assert_success(&resp);
 }
 

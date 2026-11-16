@@ -1701,6 +1701,8 @@ impl BrowserManager {
             } else {
                 let _ = close.await;
             }
+        } else {
+            self.thaw_frozen_tabs().await;
         }
 
         self.client.close().await;
@@ -2023,6 +2025,20 @@ impl BrowserManager {
         }
         let _ = self.set_lifecycle_state(&page.session_id, "active").await;
         self.tab_keep.remove(&page.target_id);
+    }
+
+    /// Unfreezes every frozen tab before the daemon leaves a browser that keeps
+    /// running, because a frozen page stays frozen after the session ends.
+    async fn thaw_frozen_tabs(&self) {
+        for page in &self.pages {
+            if self.tab_keep_of(&page.target_id) == TabKeep::Frozen {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(RENDERER_PROBE_TIMEOUT_MS),
+                    self.set_lifecycle_state(&page.session_id, "active"),
+                )
+                .await;
+            }
+        }
     }
 
     /// Whether the page reports itself hidden within a second. Freezing a page
