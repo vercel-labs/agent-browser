@@ -102,6 +102,7 @@ const DOCUMENTED_ACTIONS: &[&str] = &[
     "tab_new",
     "tab_switch",
     "tab_close",
+    "tab_keep",
     "viewport",
     "user_agent",
     "set_media",
@@ -263,6 +264,9 @@ fn minimal_command(action: &str, id: &str) -> Value {
         }
         "tab_switch" | "tab_close" => {
             obj.insert("index".to_string(), json!(0));
+        }
+        "tab_keep" => {
+            obj.insert("keep".to_string(), json!("throttled"));
         }
         "viewport" | "user_agent" | "set_media" | "timezone" | "locale" | "geolocation"
         | "permissions" | "device" => {

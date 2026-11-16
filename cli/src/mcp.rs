@@ -101,6 +101,7 @@ const TOOL_TAB_NEW: &str = "agent_browser_tab_new";
 const TOOL_TAB_LIST: &str = "agent_browser_tab_list";
 const TOOL_TAB_SWITCH: &str = "agent_browser_tab_switch";
 const TOOL_TAB_CLOSE: &str = "agent_browser_tab_close";
+const TOOL_TAB_KEEP: &str = "agent_browser_tab_keep";
 const TOOL_WINDOW_NEW: &str = "agent_browser_window_new";
 const TOOL_FRAME_SWITCH: &str = "agent_browser_frame_switch";
 const TOOL_FRAME_MAIN: &str = "agent_browser_frame_main";
@@ -479,6 +480,7 @@ const TABS_PROFILE_TOOLS: &[&str] = &[
     TOOL_TAB_LIST,
     TOOL_TAB_SWITCH,
     TOOL_TAB_CLOSE,
+    TOOL_TAB_KEEP,
     TOOL_WINDOW_NEW,
     TOOL_FRAME_SWITCH,
     TOOL_FRAME_MAIN,
@@ -1462,6 +1464,16 @@ fn parity_tools() -> Vec<Value> {
             "Close a tab by id (t1), label, or CDP target id. Omit to close the current tab.",
             json!({ "tab": { "type": "string", "description": "Tab id (t1), label, or CDP target id." } }),
             &[],
+        ),
+        tool(
+            TOOL_TAB_KEEP,
+            "Tab keep",
+            "Set how a tab runs while it is in the background. live keeps it at full speed and makes the page report visible and focused. throttled is the browser default. frozen pauses it until you switch to it. Omit tab for the current tab, which cannot be frozen.",
+            json!({
+                "keep": { "type": "string", "enum": ["live", "throttled", "frozen"] },
+                "tab": { "type": "string", "description": "Tab id (t1), label, or CDP target id." }
+            }),
+            &["keep"],
         ),
         tool(
             TOOL_WINDOW_NEW,
@@ -2562,6 +2574,10 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_TAB_LIST => call_literal(arguments, &["tab", "list"]),
         TOOL_TAB_SWITCH => call_one_string(arguments, "tab", "tab"),
         TOOL_TAB_CLOSE => call_optional_one(arguments, &["tab", "close"], "tab"),
+        TOOL_TAB_KEEP => {
+            let args = tab_keep_command_args(arguments)?;
+            call_cli_tool(arguments, args, None)
+        }
         TOOL_WINDOW_NEW => call_literal(arguments, &["window", "new"]),
         TOOL_FRAME_SWITCH => call_one_string(arguments, "frame", "frame"),
         TOOL_FRAME_MAIN => call_literal(arguments, &["frame", "main"]),
@@ -2895,6 +2911,18 @@ fn call_optional_one(arguments: &Value, parts: &[&str], key: &str) -> Result<Val
         }
     }
     call_cli_tool(arguments, args, None)
+}
+
+/// Build the CLI args for the tab keep tool.
+fn tab_keep_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = command_parts("tab keep");
+    args.push(required_string(arguments, "keep")?);
+    if let Some(tab) = optional_string(arguments, "tab")? {
+        if !tab.is_empty() {
+            args.push(tab);
+        }
+    }
+    Ok(args)
 }
 
 fn call_key_command(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
@@ -5461,6 +5489,24 @@ mod tests {
         assert!(listed.contains("tab"));
         assert!(err.message.contains("Did you mean tab for tabId?"));
         assert!(!listed.contains("session"));
+    }
+
+    #[test]
+    fn tab_keep_uses_canonical_cli_command() {
+        let args = tab_keep_command_args(&json!({"keep": "live", "tab": "t2"})).unwrap();
+        assert_eq!(args, vec!["tab", "keep", "live", "t2"]);
+        let flags = crate::flags::parse_flags(&args);
+        let command = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(command["action"], "tab_keep");
+        assert_eq!(command["keep"], "live");
+        assert_eq!(command["tabId"], "t2");
+
+        let args = tab_keep_command_args(&json!({"keep": "throttled"})).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let command = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(command["action"], "tab_keep");
+        assert_eq!(command["keep"], "throttled");
+        assert!(command.get("tabId").is_none());
     }
 
     #[test]

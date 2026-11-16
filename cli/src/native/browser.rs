@@ -305,6 +305,39 @@ pub struct PageInfo {
     pub target_type: String, // "page" or "webview"
 }
 
+/// How a tab runs while it is in the background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabKeep {
+    /// The browser's own background throttling.
+    #[default]
+    Throttled,
+    /// Focus emulation is held on the tab, so it runs at full speed.
+    Live,
+    /// The page is frozen until the tab becomes active again.
+    Frozen,
+}
+
+impl TabKeep {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "live" => Ok(Self::Live),
+            "throttled" => Ok(Self::Throttled),
+            "frozen" => Ok(Self::Frozen),
+            _ => Err(format!(
+                "Unknown tab keep mode `{s}`; expected live, throttled, or frozen"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Throttled => "throttled",
+            Self::Live => "live",
+            Self::Frozen => "frozen",
+        }
+    }
+}
+
 /// Canonical string form of a stable tab id: `t1`, `t2`, ... The `t` prefix
 /// disambiguates stable ids from positional indices (which the CLI no longer
 /// accepts) and matches the `@e<N>` convention used for element refs.
@@ -492,6 +525,8 @@ pub struct BrowserManager {
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
+    /// Background mode per CDP target id. A tab without an entry is throttled.
+    tab_keep: HashMap<String, TabKeep>,
     active_page_index: usize,
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
@@ -720,6 +755,7 @@ impl BrowserManager {
                 browser_process: Some(process),
                 ws_url,
                 pages: Vec::new(),
+                tab_keep: HashMap::new(),
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
@@ -830,6 +866,7 @@ impl BrowserManager {
             browser_process: None,
             ws_url,
             pages: Vec::new(),
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -1147,6 +1184,7 @@ impl BrowserManager {
             )
             .await;
         let was_bound = self.bound_target_id.as_deref() == Some(target_id.as_str());
+        self.tab_keep.remove(&target_id);
         let page = &mut self.pages[self.active_page_index];
         page.url = "about:blank".to_string();
         page.title.clear();
@@ -1727,6 +1765,7 @@ impl BrowserManager {
             browser_process: None,
             ws_url,
             pages: Vec::new(),
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -1879,10 +1918,156 @@ impl BrowserManager {
                     "title": p.title,
                     "url": p.url,
                     "type": p.target_type,
-                    "active": i == self.active_page_index && !self.bound_target_is_gone(),
+                    "active": self.is_active_index(i),
+                    "keep": self.tab_keep_of(&p.target_id).as_str(),
                 })
             })
             .collect()
+    }
+
+    /// Whether `index` is the tab commands act on. No tab is while the bound
+    /// tab is gone.
+    fn is_active_index(&self, index: usize) -> bool {
+        index == self.active_page_index && !self.bound_target_is_gone()
+    }
+
+    /// The background mode of the tab with this CDP target id.
+    fn tab_keep_of(&self, target_id: &str) -> TabKeep {
+        self.tab_keep.get(target_id).copied().unwrap_or_default()
+    }
+
+    /// Sets how a tab runs while it is in the background and applies it to the
+    /// page. `None` targets the active tab, which cannot be frozen.
+    pub async fn set_tab_keep(
+        &mut self,
+        tab_id: Option<u32>,
+        keep: TabKeep,
+    ) -> Result<Value, String> {
+        let index = match tab_id {
+            Some(id) => self
+                .pages
+                .iter()
+                .position(|p| p.tab_id == id)
+                .ok_or_else(|| format!("Tab ID {} not found", id))?,
+            None => {
+                self.check_bound()?;
+                self.active_page_index
+            }
+        };
+        let page = self.pages.get(index).ok_or("No active page")?;
+        let tab = format_tab_id(page.tab_id);
+        let result = json!({ "tabId": tab, "label": page.label, "keep": keep.as_str() });
+        let target_id = page.target_id.clone();
+        let session_id = page.session_id.clone();
+        let active = self.is_active_index(index);
+
+        let current = self.tab_keep_of(&target_id);
+        if keep == current {
+            return Ok(result);
+        }
+        if keep == TabKeep::Frozen && active {
+            return Err(
+                "Cannot freeze the active tab; switch to another tab first, then run `tab keep frozen <tab>`"
+                    .to_string(),
+            );
+        }
+        if !active
+            && !self
+                .renderer_responds(&session_id, RENDERER_PROBE_TIMEOUT_MS)
+                .await
+        {
+            return Err(format!(
+                "Tab {tab} is not responding; switch to it before changing how it runs in the background"
+            ));
+        }
+
+        match current {
+            TabKeep::Throttled => {}
+            TabKeep::Live => self.set_focus_emulation(&session_id, false).await?,
+            TabKeep::Frozen => self.set_lifecycle_state(&session_id, "active").await?,
+        }
+        self.tab_keep.remove(&target_id);
+
+        match keep {
+            TabKeep::Throttled => {}
+            TabKeep::Live => self.set_focus_emulation(&session_id, true).await?,
+            TabKeep::Frozen => {
+                if !self.wait_until_hidden(&session_id).await? {
+                    if current == TabKeep::Live {
+                        self.set_focus_emulation(&session_id, true).await?;
+                        self.tab_keep.insert(target_id, current);
+                    }
+                    return Err(format!(
+                        "Tab {tab} is visible; only a tab hidden behind another tab can be frozen"
+                    ));
+                }
+                self.set_lifecycle_state(&session_id, "frozen").await?
+            }
+        }
+        self.tab_keep.insert(target_id, keep);
+        Ok(result)
+    }
+
+    /// Unfreezes the active tab, because a command that awaits a timer or a
+    /// promise never finishes on a frozen page. A failed request means the
+    /// page is gone, so the tab stops counting as frozen either way.
+    pub async fn thaw_active_tab(&mut self) {
+        if !self.is_active_index(self.active_page_index) {
+            return;
+        }
+        let Some(page) = self.pages.get(self.active_page_index) else {
+            return;
+        };
+        if self.tab_keep_of(&page.target_id) != TabKeep::Frozen {
+            return;
+        }
+        let _ = self.set_lifecycle_state(&page.session_id, "active").await;
+        self.tab_keep.remove(&page.target_id);
+    }
+
+    /// Whether the page reports itself hidden within a second. Freezing a page
+    /// the browser is still showing leaves it reporting hidden for good, and a
+    /// page takes a moment to report hidden after focus emulation is turned off.
+    async fn wait_until_hidden(&self, session_id: &str) -> Result<bool, String> {
+        for _ in 0..20 {
+            let state = self
+                .client
+                .send_command(
+                    "Runtime.evaluate",
+                    Some(
+                        json!({ "expression": "document.visibilityState", "returnByValue": true }),
+                    ),
+                    Some(session_id),
+                )
+                .await?;
+            if state.pointer("/result/value").and_then(Value::as_str) == Some("hidden") {
+                return Ok(true);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(false)
+    }
+
+    async fn set_focus_emulation(&self, session_id: &str, enabled: bool) -> Result<(), String> {
+        self.client
+            .send_command(
+                "Emulation.setFocusEmulationEnabled",
+                Some(json!({ "enabled": enabled })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn set_lifecycle_state(&self, session_id: &str, state: &str) -> Result<(), String> {
+        self.client
+            .send_command(
+                "Page.setWebLifecycleState",
+                Some(json!({ "state": state })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Resolve a user-supplied `TabRef` (either `t<N>` or a label) to the
@@ -2124,6 +2309,7 @@ impl BrowserManager {
         }
 
         let page = self.pages.remove(target_index);
+        self.tab_keep.remove(&page.target_id);
         self.update_active_page_after_removal(target_index);
         let closed_tab_id = page.tab_id;
         let closed_label = page.label.clone();
@@ -2513,6 +2699,7 @@ impl BrowserManager {
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
             let page = self.pages.remove(pos);
+            self.tab_keep.remove(target_id);
             self.update_active_page_after_removal(pos);
             // If the destroyed target was the bound tab (closed externally,
             // e.g. by another session sharing this browser), fail loudly
@@ -2754,6 +2941,7 @@ async fn initialize_lightpanda_manager(
             browser_process: None,
             ws_url: ws_url.clone(),
             pages: Vec::new(),
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -2865,6 +3053,7 @@ async fn initialize_obscura_manager(
             browser_process: None,
             ws_url: ws_url.clone(),
             pages: Vec::new(),
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -3770,6 +3959,7 @@ mod tests {
             browser_process: None,
             ws_url,
             pages,
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -3832,6 +4022,7 @@ mod tests {
             browser_process: None,
             ws_url: format!("ws://{}", addr),
             pages: Vec::new(),
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,

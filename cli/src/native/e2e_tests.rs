@@ -3176,6 +3176,145 @@ async fn e2e_tabs() {
     assert_success(&resp);
 }
 
+/// A live tab keeps its timers running behind another tab, and the active
+/// tab cannot be frozen. A frozen tab stops, and the daemon unfreezes it when
+/// closing a popup makes it the active tab while Chrome shows the opener.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_live_and_frozen() {
+    let mut state = DaemonState::new();
+    let ticker = "data:text/html,<script>var ticks=0,gap=0,last=performance.now();setInterval(()=>{var n=performance.now();gap=Math.max(gap,n-last);last=n;ticks++},100)</script>";
+    let run = async |state: &mut DaemonState, cmd: Value| execute_command(&cmd, state).await;
+    let number = |resp: &Value| get_data(resp)["result"].as_f64().unwrap_or_default();
+
+    let resp = run(
+        &mut state,
+        json!({ "id": "1", "action": "launch", "headless": true }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = run(
+        &mut state,
+        json!({ "id": "2", "action": "navigate", "url": "data:text/html,<p>opener</p>" }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = run(
+        &mut state,
+        json!({ "id": "3", "action": "tab_new", "url": ticker }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = run(
+        &mut state,
+        json!({ "id": "4", "action": "tab_keep", "keep": "live" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], "t2");
+    assert_eq!(get_data(&resp)["keep"], "live");
+    let resp = run(
+        &mut state,
+        json!({ "id": "5", "action": "tab_keep", "keep": "frozen" }),
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cannot freeze the active tab"),
+        "unexpected response: {resp}"
+    );
+
+    assert_evaluate(&mut state, "6", "ticks = 0", json!(0)).await;
+    let resp = run(
+        &mut state,
+        json!({ "id": "7", "action": "tab_switch", "tabId": "t1" }),
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let resp = run(
+        &mut state,
+        json!({ "id": "8", "action": "tab_switch", "tabId": "t2" }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = run(
+        &mut state,
+        json!({ "id": "9", "action": "evaluate", "script": "ticks" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        number(&resp) >= 20.0,
+        "a live tab should tick about 30 times in 3s behind another tab, got {}",
+        number(&resp)
+    );
+
+    assert_evaluate(
+        &mut state,
+        "10",
+        "gap = 0, last = performance.now(), 0",
+        json!(0),
+    )
+    .await;
+    let resp = run(
+        &mut state,
+        json!({ "id": "11", "action": "tab_switch", "tabId": "t1" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "12", "window.open('about:blank'), 0", json!(0)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = run(
+        &mut state,
+        json!({ "id": "13", "action": "tab_keep", "keep": "frozen", "tabId": "t2" }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = run(&mut state, json!({ "id": "14", "action": "tab_list" })).await;
+    assert_success(&resp);
+    let tabs = &get_data(&resp)["tabs"];
+    assert_eq!(tabs[1]["keep"], "frozen");
+    assert_eq!(
+        tabs[2]["active"], true,
+        "the popup should be the active tab: {tabs}"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let resp = run(&mut state, json!({ "id": "15", "action": "tab_close" })).await;
+    assert_success(&resp);
+    let resp = run(
+        &mut state,
+        json!({ "id": "16", "action": "evaluate", "script": "new Promise(r => setTimeout(() => r(gap), 50))" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        number(&resp) >= 2000.0,
+        "a frozen tab should not tick for the 2.5s it was frozen, longest gap was {}ms",
+        number(&resp)
+    );
+    assert_evaluate(
+        &mut state,
+        "17",
+        "document.visibilityState",
+        json!("hidden"),
+    )
+    .await;
+    let resp = run(&mut state, json!({ "id": "18", "action": "tab_list" })).await;
+    assert_success(&resp);
+    let tabs = &get_data(&resp)["tabs"];
+    assert_eq!(tabs[1]["active"], true);
+    assert_eq!(tabs[1]["keep"], "throttled");
+
+    let resp = run(&mut state, json!({ "id": "99", "action": "close" })).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_tab_ids_not_reused() {

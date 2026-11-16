@@ -310,6 +310,9 @@ agent-browser tab docs                         # Switch to tab by label
 agent-browser tab close                        # Close current tab
 agent-browser tab close t2                     # Close tab by id
 agent-browser tab close docs                   # Close tab by label
+agent-browser tab keep live [t<N>|label]       # Keep a tab at full speed in the background
+agent-browser tab keep frozen <t<N>|label>     # Pause a background tab until you switch to it
+agent-browser tab keep throttled [t<N>|label]  # Return a tab to the default throttling
 agent-browser window new                       # New window
 ```
 
@@ -334,6 +337,14 @@ Tabs opened through `tab new` or `click --new-tab` inherit the session's setup b
 `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Target ids stay stable across daemon restarts, unlike `t<N>` ids, which are per-daemon counters. With `--pin-tab` the session is pinned to its bound tab: if that tab is closed, commands fail with a `tab_gone` error instead of falling back to another tab, and `tab new` or `tab list` recover. JSON errors include `code: "tab_gone"` and a recovery object with `data.targetId` plus optional sanitized `data.lastUrl`; batch uses `result` for the same object.
 
 Switching to a tab that the browser discarded to save memory reactivates it, since a discarded tab has no renderer to drive. Reactivation reloads the page and resets its unsaved state, and the switch result adds `"revived": true` so the reload is not silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `"dialogBlocked": true`. Resolve the dialog with `dialog accept`/`dialog dismiss` and its state is preserved. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
+
+Chrome slows every tab that is not in front: timers fire about once per second and animation frames stop, so a page you leave in the background falls behind and you read stale state when you switch back. `tab keep` sets how one tab runs while it is in the background. Without a tab ref it applies to the active tab.
+
+- `throttled` is the default, and Chrome's normal behavior.
+- `live` keeps timers, `fetch`, CSS animations, and animation frames at their normal rate. The daemon holds focus emulation on the tab, so the page reports `document.visibilityState === "visible"` and `document.hasFocus() === true` while another tab is in front. It survives reloads and navigation. A live tab uses as much CPU as a front tab (five busy background tabs: 0.05 CPU cores throttled, 0.73 live), so set it only on tabs that have to keep running.
+- `frozen` stops timers, network callbacks, and scripts until you switch back to the tab, which returns it to `throttled`. The active tab can't be frozen, and neither can a tab that is still visible: switch to another tab first, then freeze it by ref.
+
+A tab pinned by another session with `--pin-tab` is refused with `tab_locked`. `tab list` shows the mode: `(live)` or `(frozen)` in text, and `"keep"` in JSON. Chrome only. In a browser attached with `--cdp` or `--auto-connect`, a live tab's timers reach the full rate only if that browser was started with `--disable-renderer-backgrounding`; without it a 100 ms timer fired 6 to 8 times per second instead of 10.
 
 ## Frames
 
