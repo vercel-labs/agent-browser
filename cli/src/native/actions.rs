@@ -2941,6 +2941,9 @@ fn load_run_flow(
         .map(|flow| Some(Box::new(flow)))
 }
 
+/// Every action a command performs, so policy and confirmation gates check each one. A command
+/// that loads a URL first is also checked as `navigate`, and a `find` command as the standalone
+/// action it runs on the match.
 fn policy_actions_for_command(
     cmd: &Value,
     action: &str,
@@ -2953,8 +2956,25 @@ fn policy_actions_for_command(
     // `a11y <url>` performs a real browser navigation before the audit. Keep
     // navigation deny and confirmation policies effective for the compound
     // command instead of treating it as a read-only audit.
-    if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
+    if action == "diff_url"
+        || (matches!(action, "a11y" | "vitals")
+            && cmd.get("url").and_then(|v| v.as_str()).is_some())
+    {
         actions.push("navigate".to_string());
+    }
+    if FIND_SUBACTION_COMMANDS.contains(&action) {
+        let subaction = cmd
+            .get("subaction")
+            .and_then(|v| v.as_str())
+            .unwrap_or("click");
+        actions.push(
+            if subaction == "text" {
+                "gettext"
+            } else {
+                subaction
+            }
+            .to_string(),
+        );
     }
     if let Some(flow) = flow.filter(|_| action == "flow_run") {
         actions.extend(flow.run_writes().iter().map(|w| w.action()));
@@ -18297,6 +18317,35 @@ mod tests {
                 &Running::from_env()
             ),
             vec!["a11y".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_policy_actions_include_nested_actions() {
+        let actions = |cmd: Value| {
+            let action = cmd["action"].as_str().unwrap().to_string();
+            policy_actions_for_command(&cmd, &action, false, None, None, &Running::from_env())
+        };
+        assert_eq!(
+            actions(json!({ "action": "getbyrole" })),
+            ["getbyrole", "click"]
+        );
+        assert_eq!(
+            actions(json!({ "action": "nth", "subaction": "fill" })),
+            ["nth", "fill"]
+        );
+        assert_eq!(
+            actions(json!({ "action": "getbytext", "subaction": "text" })),
+            ["getbytext", "gettext"]
+        );
+        assert_eq!(
+            actions(json!({ "action": "vitals", "url": "https://example.com" })),
+            ["vitals", "navigate"]
+        );
+        assert_eq!(actions(json!({ "action": "vitals" })), ["vitals"]);
+        assert_eq!(
+            actions(json!({ "action": "diff_url" })),
+            ["diff_url", "navigate"]
         );
     }
 

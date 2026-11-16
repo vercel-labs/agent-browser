@@ -16412,7 +16412,7 @@ async fn firefox_close(state: &mut DaemonState) {
     assert_eq!(get_data(&resp)["closed"], true);
 }
 
-/// Fill replaces controlled values and reaches password inputs by ref, fill/type reach contenteditables and cross-origin frames, and inserttext and raw char succeed without editing when beforeinput is canceled, like Chrome.
+/// Fill replaces controlled values and reaches password inputs by ref, fill/type reach contenteditables and cross-origin frames, and inserttext and raw char succeed without editing when beforeinput is canceled, like Chrome Typing at a frame field stays in that frame while the embedding page holds focus in its own field. Typing ends as a success when Enter navigates away.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_form_entry() {
@@ -16539,6 +16539,26 @@ async fn e2e_firefox_form_entry() {
     .await;
     assert_success(&inserted);
     assert_eq!(firefox_eval(&mut state, "literal.value").await, "a\tb");
+
+    let frame_type = firefox_ref(&mut state, "Frame type").await;
+    let typed = json!({ "text": " kept" });
+    assert_success(&firefox_act(&mut state, "type", &frame_type, typed).await);
+    assert_eq!(firefox_eval(&mut state, "literal.value").await, "a\tb");
+    let target = resolve_target(&mut state, &frame_type).await.unwrap();
+    assert_eq!(
+        firefox_value_of(&mut state, &target).await,
+        "cross frame type kept"
+    );
+
+    firefox_eval(
+        &mut state,
+        "document.body.insertAdjacentHTML('beforeend', '<form action=landed><input id=nav></form>'); 0",
+    )
+    .await;
+    let typed = json!({ "text": "go\nmore", "delay": 50 });
+    assert_success(&firefox_act(&mut state, "type", "#nav", typed).await);
+    let url = firefox_command(&mut state, json!({ "id": "url", "action": "url" })).await;
+    assert!(get_data(&url)["url"].as_str().unwrap().contains("/landed"));
     firefox_close(&mut state).await;
 }
 
