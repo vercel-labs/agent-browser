@@ -4957,6 +4957,73 @@ async fn e2e_drag_presses_source_and_rejects_unreachable_ends() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_drag_finds_target_created_when_source_scrolls_into_view() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<!doctype html>
+        <style>
+            body { margin: 0; min-height: 3800px; user-select: none; }
+            #row { display: flex; gap: 40px; margin-top: 3000px; }
+            #row > div { width: 120px; height: 80px; }
+        </style>
+        <div id="row"><div id="src">Source</div></div>
+        <script>
+            window.dragEvents = [];
+            for (const type of ['mousedown', 'mouseup']) {
+                document.addEventListener(type, event => {
+                    window.dragEvents.push(`${type} on ${event.target.id}`);
+                });
+            }
+            window.addEventListener('scroll', () => {
+                const target = document.createElement('div');
+                target.id = 'far';
+                target.textContent = 'Drop here';
+                document.getElementById('row').append(target);
+            }, { once: true });
+        </script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    assert_evaluate(
+        &mut state,
+        "3",
+        "document.getElementById('far') === null",
+        json!(true),
+    )
+    .await;
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "drag", "source": "#src", "target": "#far" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    assert_evaluate(
+        &mut state,
+        "5",
+        "window.dragEvents",
+        json!(["mousedown on src", "mouseup on far"]),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_drag_drops_on_a_zone_the_press_reveals() {
     let mut state = DaemonState::new();
 
