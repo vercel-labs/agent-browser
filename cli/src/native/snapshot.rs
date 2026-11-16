@@ -918,10 +918,10 @@ async fn resolve_iframe_frame_id(
 }
 
 /// Runs inside a scope root and reports the elements that behave as controls without an interactive role.
-/// `tag` names an attribute that receives each match's index for a caller that only gets values back; each
-/// result also carries the matched `element`, so a caller that receives node handles can use those instead.
+/// `tag` names an attribute that receives each match's index for a caller that only gets values back;
+/// `withElement` adds the matched `element`, for a caller that receives node handles instead.
 pub(crate) const CURSOR_DETECTION_JS: &str = r#"
-(root, tag) => {
+(root, tag, withElement) => {
     var results = [];
     if (!root) return results;
 
@@ -985,8 +985,7 @@ pub(crate) const CURSOR_DETECTION_JS: &str = r#"
         }
 
         if (tag) el.setAttribute(tag, String(results.length));
-        results.push({
-            element: el,
+        var item = {
             text: text,
             tagName: tagName,
             hasOnClick: hasOnClick,
@@ -995,7 +994,9 @@ pub(crate) const CURSOR_DETECTION_JS: &str = r#"
             isEditable: isEditable,
             hiddenInputType: hiddenInputType,
             hiddenInputChecked: hiddenInputChecked
-        });
+        };
+        if (withElement) item.element = el;
+        results.push(item);
     }
     return results;
 }
@@ -1005,7 +1006,7 @@ async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
 ) -> Result<HashMap<i64, CursorElementInfo>, String> {
-    let js = format!("({CURSOR_DETECTION_JS})(document.body, 'data-__ab-ci')");
+    let js = format!("({CURSOR_DETECTION_JS})(document.body, 'data-__ab-ci', false)");
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.evaluate",
