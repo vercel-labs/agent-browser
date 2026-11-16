@@ -520,7 +520,7 @@ async fn cursor_detections(ff: &FirefoxSession, context: &str) -> HashMap<String
       const scopes = document.body ? [document.body] : [];
       for (let i = 0; i < scopes.length; i++)
         for (const el of scopes[i].querySelectorAll('*')) if (el.shadowRoot) scopes.push(el.shadowRoot);
-      return scopes.flatMap(scope => ({CURSOR_DETECTION_JS})(scope));
+      return scopes.flatMap(scope => ({CURSOR_DETECTION_JS})(scope, null, true));
     }}"#
     );
     ff.bidi
