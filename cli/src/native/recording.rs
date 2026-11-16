@@ -2045,9 +2045,6 @@ async fn encode_stream(
             }
             tick = interval.tick() => {
                 let Some(frame) = latest.as_ref() else { continue };
-                if tick.elapsed() > MAX_ENCODER_LAG {
-                    late += 1;
-                }
                 let output_timestamp = cursor_timestamp();
                 let history = shared_cursor
                     .lock()
@@ -2061,6 +2058,10 @@ async fn encode_stream(
                     write_encoder_bytes(&mut stdin, &frame.image_data).await?;
                 }
                 written += 1;
+                // After the write, so a frame the pipe held up counts as late too.
+                if tick.elapsed() > MAX_ENCODER_LAG {
+                    late += 1;
+                }
             }
         }
     }
