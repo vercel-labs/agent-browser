@@ -7646,11 +7646,25 @@ async fn e2e_snapshot_cursor_interactive() {
         "<div tabindex='0'>FocusDiv</div>",
         "<span style='cursor:pointer'>PointerSpan</span>",
         "<div style='cursor:pointer'><span>InheritChild</span></div>",
+        "<div style='cursor:pointer' onclick='x()' id='circular'>CircularDiv</div>",
         "</body></html>",
     );
 
     let resp = execute_command(
         &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // A live element carrying circular application state is the shape React leaves on the DOM.
+    // Evaluating the cursor scan by value used to fail the whole scan at this element.
+    let resp = execute_command(
+        &json!({
+            "id": "2b",
+            "action": "evaluate",
+            "script": "(() => { const el = document.getElementById('circular'); el.__self = el; el.__fiber = { stateNode: el, return: el }; return true; })()"
+        }),
         &mut state,
     )
     .await;
@@ -7679,6 +7693,15 @@ async fn e2e_snapshot_cursor_interactive() {
     assert!(
         snapshot.contains("focusable") && snapshot.contains("[tabindex]"),
         "Expected focusable role for tabindex-only element:\n{}",
+        snapshot,
+    );
+
+    // The circular element must keep its cursor ref instead of dropping the whole scan.
+    assert!(
+        snapshot
+            .lines()
+            .any(|line| line.contains("CircularDiv") && line.contains("clickable")),
+        "Expected the circular element to keep its cursor ref:\n{}",
         snapshot,
     );
 

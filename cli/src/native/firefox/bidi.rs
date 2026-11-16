@@ -126,7 +126,8 @@ impl BidiClient {
 
     /// Sends a command with the default 30s timeout and returns its `result`.
     pub async fn send(&self, method: &str, params: Value) -> Result<Value, String> {
-        self.send_timeout(method, params, DEFAULT_TIMEOUT).await
+        self.send_with_deadline(method, params, Some(DEFAULT_TIMEOUT))
+            .await
     }
 
     /// Sends a command and fails with a timeout error if no reply arrives in time.
@@ -135,6 +136,26 @@ impl BidiClient {
         method: &str,
         params: Value,
         timeout: Duration,
+    ) -> Result<Value, String> {
+        self.send_with_deadline(method, params, Some(timeout)).await
+    }
+
+    /// Sends a command and waits for its reply, leaving the deadline to the caller.
+    /// Use it when an enclosing timeout already bounds the command, so the client's
+    /// own default cannot cut the wait short.
+    pub async fn send_without_deadline(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        self.send_with_deadline(method, params, None).await
+    }
+
+    async fn send_with_deadline(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Option<Duration>,
     ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -148,7 +169,13 @@ impl BidiClient {
             self.pending.lock().unwrap().remove(&id);
             return Err(format!("BiDi send failed: {e}"));
         }
-        match tokio::time::timeout(timeout, rx).await {
+        let Some(deadline) = deadline else {
+            return match rx.await {
+                Ok(result) => result,
+                Err(_) => Err("BiDi connection closed".to_string()),
+            };
+        };
+        match tokio::time::timeout(deadline, rx).await {
             Ok(Ok(r)) => r,
             Ok(Err(_)) => Err("BiDi connection closed".to_string()),
             Err(_) => {
