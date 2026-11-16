@@ -214,6 +214,8 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     b.create(dir)
 }
 
+/// Reserves a loopback port for the DevTools server. Firefox on Windows cannot listen on a unix
+/// socket or authenticate DevTools clients, so other accounts on the machine can reach this port.
 #[cfg(windows)]
 fn devtools_endpoint(
     _profile_dir: &Path,
