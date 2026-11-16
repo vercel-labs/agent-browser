@@ -190,6 +190,8 @@ export AGENT_BROWSER_CONTENT_BOUNDARIES=1
 
 Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`.
 
+A command's error and warning, and the output of `dialog status`, are wrapped the same way in text output, because they can quote page text such as the id of an element covering a click target or the message of an open dialog.
+
 In `--json` mode, boundary metadata is injected into the JSON response as a `_boundary` object containing `nonce` and `origin` fields, allowing orchestrators to verify provenance programmatically:
 
 ```json
