@@ -109,6 +109,8 @@ Not every launch option applies to Firefox. These are rejected when combined wit
 
 When it launches Firefox, the daemon enables Firefox's DevTools server only for the profile it owns. On macOS and Linux the server listens on a private unix socket inside a directory with `0700` permissions. On Windows it listens on a random loopback port.
 
+Firefox on Windows can't restrict that port to one account or authenticate DevTools clients. While a session runs, another account on the same machine can connect to the port and debug the whole browser, which includes reading and driving its open tabs. Use the Firefox engine on Windows only on machines where you trust every local account.
+
 ## When to Use Firefox
 
 Use the Firefox engine when you need to test against Firefox rendering, JavaScript, or accessibility behavior with the same CLI and refs you use for Chrome. Use Chrome when you need Chrome-only commands, Chrome extensions, persistent profiles, or the exact Chrome fingerprint.
