@@ -75,12 +75,14 @@ export function AgentHero({ description }: { description: string }) {
       <MarketingGrid align="center" rowGap={14} className="@lg:min-h-[500px] @lg:grid-cols-11">
         <div className="col-span-full min-w-0 @lg:col-start-1 @lg:col-end-6 @lg:max-w-[33.5rem]">
           <ProductSwitcher id={id} />
+          {/* No tabIndex: the panel holds the copy CTA, so Tab from the product
+              tabs already lands inside it and a separate stop on the heading
+              block would add a focus box around static text */}
           <div
             id={`${id}-panel`}
             role="tabpanel"
             aria-labelledby={`${id}-${selected}`}
-            tabIndex={0}
-            className="mt-6 outline-none focus-visible:outline-2 focus-visible:outline-offset-8 focus-visible:outline-(--ds-focus-color)"
+            className="mt-6"
           >
             <div className="grid max-w-[15ch] text-heading-40 @md:text-heading-64 text-balance">
               <h1 id={`${id}-heading`} className="m-0 col-start-1 row-start-1">

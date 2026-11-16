@@ -377,13 +377,15 @@ export function AgentUseCaseTabs({ heading, items }: AgentUseCasesProps) {
           </div>
 
           {/* One fixed slot: all six stacked in a single cell, so it always holds the
-              tallest; only the active one is visible, with a very fast crossfade */}
+              tallest; only the active one is visible, with a very fast crossfade.
+              No tabIndex: the panel is one static paragraph, already read in
+              browse mode and visible beside the pills, so a Tab stop would only
+              put a focus box around text with nothing to operate. */}
           <div
             role="tabpanel"
             id={`${id}-panel`}
             aria-labelledby={`${id}-tab-${selected}`}
-            tabIndex={0}
-            className="mt-10 grid max-w-[40ch] rounded-[2px] outline-none [grid-area:desc] focus-visible:ring-2 focus-visible:ring-gray-1000 focus-visible:ring-offset-4 focus-visible:ring-offset-background-200 @lg:mt-12 @lg:self-start"
+            className="mt-10 grid max-w-[40ch] [grid-area:desc] @lg:mt-12 @lg:self-start"
           >
             {items.map((entry, index) => {
               const on = index === selected;

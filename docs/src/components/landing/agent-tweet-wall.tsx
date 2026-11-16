@@ -28,7 +28,7 @@ export function AgentTweetWall({ heading, posts }: AgentTweetWallProps) {
               href={`https://x.com/${handle}/status/${id}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="group flex h-full flex-col gap-8 rounded-sm outline-hidden focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-4 focus-visible:outline-(--ds-focus-color)"
+              className="group flex h-full flex-col gap-8 rounded-sm outline-hidden focus-visible:shadow-(--ds-focus-ring)"
             >
               <p dir="auto" className="text-copy-18 text-gray-1000">
                 {excerpt.map((part, index) => (
