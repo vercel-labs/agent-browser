@@ -143,7 +143,7 @@ export function ProductActions({
   centered = false,
   showAgentIcons = true,
   showDocsLink = true,
-  installLabel = 'Teach your agent',
+  installLabel = 'Add to your agent',
 }: {
   centered?: boolean;
   showAgentIcons?: boolean;
