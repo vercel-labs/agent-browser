@@ -49,6 +49,8 @@
   }
   & .ab-peer[data-peer='claude'] { --peer-color: #d97757; }
   & .ab-peer[data-peer='gemini'] { --peer-color: #4285f4; }
+  /* Their marks are white in both themes, on the brand discs, as in the hero */
+  & .ab-peer:is([data-peer='claude'], [data-peer='gemini']) .ab-peer-tile { color: #fff; }
   & .ab-peer .ab-vercel-arrow-fill { fill: var(--peer-color); }
 
   & .ab-peer-body {
