@@ -23,6 +23,8 @@ use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
 use crate::session_settings::{FsStore, Running, SecurityView, Store, DEFAULT_IDLE_TIMEOUT_MS};
 use crate::validation::{is_valid_session_name, session_name_error};
 
+const COMMAND_TIMEOUT_GRACE_MS: u64 = 5_000;
+
 /// What the daemon starts a session with: its settings and where the security
 /// part of them is kept.
 pub(super) struct Startup {
@@ -623,7 +625,21 @@ async fn handle_connection<S>(
 
                 let response = {
                     let mut s = state.lock().await;
-                    let response = execute_command(&cmd, &mut s).await;
+                    // Individual actions apply their own timeout while
+                    // waiting for browser events. Keep a daemon-level
+                    // deadline as a final guard against a stuck CDP future
+                    // blocking every later command on the shared state lock.
+                    let timeout_ms = cmd
+                        .get("timeout")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(s.default_timeout_ms)
+                        .saturating_add(COMMAND_TIMEOUT_GRACE_MS);
+                    let response = command_response_with_timeout(
+                        cmd.get("id").and_then(Value::as_str).unwrap_or_default(),
+                        Duration::from_millis(timeout_ms),
+                        execute_command(&cmd, &mut s),
+                    )
+                    .await;
                     // Refresh while the state lock is still held. An idle
                     // timer waiting on this command will observe the updated
                     // clock as soon as it acquires the lock.
@@ -656,6 +672,20 @@ async fn handle_connection<S>(
             }
             Err(_) => break,
         }
+    }
+}
+
+async fn command_response_with_timeout<F>(id: &str, timeout: Duration, command: F) -> Value
+where
+    F: std::future::Future<Output = Value>,
+{
+    match tokio::time::timeout(timeout, command).await {
+        Ok(response) => response,
+        Err(_) => serde_json::json!({
+            "id": id,
+            "success": false,
+            "error": format!("Command timed out after {}ms", timeout.as_millis()),
+        }),
     }
 }
 
@@ -754,6 +784,32 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     use crate::session_settings::{resolve_idle_timeout, IdleTimeout, MemStore};
+
+    #[tokio::test]
+    async fn timed_out_command_releases_the_shared_state_lock() {
+        let state = Arc::new(tokio::sync::Mutex::new(()));
+        let command_state = state.clone();
+        let command = async move {
+            let _guard = command_state.lock().await;
+            std::future::pending::<Value>().await
+        };
+
+        let response =
+            command_response_with_timeout("stuck-command", Duration::from_millis(10), command)
+                .await;
+
+        assert_eq!(response["id"], "stuck-command");
+        assert_eq!(response["success"], false);
+        assert!(response["error"]
+            .as_str()
+            .unwrap()
+            .contains("Command timed out"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), state.lock())
+                .await
+                .is_ok()
+        );
+    }
 
     #[test]
     fn test_a_ready_daemon_restores_settings_a_sweep_removed() {
