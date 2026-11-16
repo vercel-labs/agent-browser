@@ -42,6 +42,7 @@ const agent = { "user-agent": "ClaudeBot/1.0", accept: "text/markdown" };
 const pageAt = (path) => publicPages.find((page) => page.path === path);
 const legacyPath = (path) =>
   `/api/docs-markdown?path=${encodeURIComponent(path)}`;
+const homeOgVideo = `${origin}/landing/home-og-c3c73ab9.mp4`;
 const htmlCache = new Map();
 async function htmlFor(page) {
   if (!htmlCache.has(page.path))
@@ -104,6 +105,24 @@ for (const page of publicPages) {
       "twitter:image": og.image,
     }))
       assert.deepEqual(meta(html, key), [expected], `${page.path}: ${key}`);
+    const video =
+      page.path === "/"
+        ? {
+            "og:video": [homeOgVideo],
+            "og:video:secure_url": [homeOgVideo],
+            "og:video:type": ["video/mp4"],
+            "og:video:width": ["1200"],
+            "og:video:height": ["848"],
+          }
+        : {
+            "og:video": [],
+            "og:video:secure_url": [],
+            "og:video:type": [],
+            "og:video:width": [],
+            "og:video:height": [],
+          };
+    for (const [key, expected] of Object.entries(video))
+      assert.deepEqual(meta(html, key), expected, `${page.path}: ${key}`);
     assert.deepEqual(
       tags(html, "link")
         .filter((tag) => tag.rel === "canonical")
@@ -915,6 +934,28 @@ for (const page of publicPages) {
     assert.equal(png.readUInt32BE(20), 630);
   });
 }
+
+test("homepage og:video is a faststart MP4 that answers byte ranges", async () => {
+  const path = new URL(homeOgVideo).pathname;
+  const response = await get(path, { headers: agent });
+  responseType(response, "video/mp4");
+  const mp4 = Buffer.from(await response.arrayBuffer());
+  assert.ok(mp4.length < 2_000_000, `${path}: ${mp4.length} bytes`);
+  assert.equal(mp4.toString("ascii", 4, 8), "ftyp");
+  const boxes = [];
+  for (let offset = 0; offset + 8 <= mp4.length && boxes.length < 4; ) {
+    boxes.push(mp4.toString("ascii", offset + 4, offset + 8));
+    offset += mp4.readUInt32BE(offset);
+  }
+  assert.ok(
+    boxes.indexOf("moov") !== -1 && boxes.indexOf("moov") < boxes.indexOf("mdat"),
+    `moov must precede mdat for progressive playback: ${boxes.join(",")}`,
+  );
+  const range = await get(path, { headers: { ...agent, range: "bytes=0-1023" } });
+  assert.equal(range.status, 206);
+  assert.equal(range.headers.get("content-range"), `bytes 0-1023/${mp4.length}`);
+  assert.equal((await range.arrayBuffer()).byteLength, 1024);
+});
 
 test("unknown OG routes retain the original JSON 404", async () => {
   const response = await get("/og/missing-page", { headers: agent });
