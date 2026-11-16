@@ -17,7 +17,7 @@ const home = {
     },
     "desktop": {
       "headline": "Desktop automation built for any agent",
-      "docsHref": "https://agent-browser.dev/desktop",
+      "docsHref": "/desktop",
       "prompt": "Set up agent-desktop for yourself by reading the docs at https://agent-browser.dev/desktop."
     }
   },

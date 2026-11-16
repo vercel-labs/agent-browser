@@ -1,14 +1,13 @@
 import type { ReactNode } from 'react';
 import { Footer } from '@vercel/geistdocs/footer';
 import { GeistdocsThemeScript } from '@vercel/geistdocs/layout';
-import { Navbar } from '@vercel/geistdocs/navbar';
+import { ProductNavbar } from '@/components/landing/product-navbar';
 import { GeistSans } from 'geist/font/sans';
 import { GeistMono } from 'geist/font/mono';
 import { GeistPixelSquare } from 'geist/font/pixel';
 import { SpeedInsights } from '@vercel/speed-insights/next';
 import { Analytics } from '@vercel/analytics/next';
 import { DocsProvider } from '@/components/geistdocs-provider';
-import { config } from '@/lib/geistdocs/config';
 import { ProductProvider } from '@/components/landing/product-context';
 import page from '../../../content/landing/home';
 import '@/components/landing/landing.css';
@@ -34,7 +33,7 @@ export default function MarketingLayout({ children }: { children: ReactNode }) {
             desktop={page.hero.desktop}
             defaultProduct={page.hero.defaultProduct}
           >
-            <Navbar config={config} />
+            <ProductNavbar />
             {children}
             <Footer />
           </ProductProvider>
