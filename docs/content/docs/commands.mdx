@@ -332,41 +332,23 @@ Browsers discard background tabs to save memory, leaving a tab with no renderer 
 
 ### Background tab modes
 
-Only the front tab of a window is visible. Chrome slows every other tab down: timers fire about once per second, less often after the tab has been hidden for several minutes, and animation frames stop. In a test, a 100 ms timer in a background tab fired 5 times in 5 seconds instead of 50. A page you leave to work in another tab therefore falls behind, and you read stale state when you switch back.
+Only the front tab of a window is visible. Chrome slows every other tab down: timers fire about once per second, less often after the tab has been hidden for several minutes, and animation frames stop. A page you leave to work in another tab therefore falls behind, and you read stale state when you switch back.
 
-`tab keep` sets how one tab runs while it is in the background. Without a tab ref it applies to the active tab.
-
-```bash
-agent-browser tab keep live [t<N>|label]       # Keep a tab at full speed in the background
-agent-browser tab keep frozen <t<N>|label>     # Pause a background tab until you switch to it
-agent-browser tab keep throttled [t<N>|label]  # Return a tab to the default throttling
-```
-
-<table>
-  <thead>
-    <tr><th>Mode</th><th>Behavior</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>throttled</code></td><td>The default, and Chrome's normal behavior. Timers slow to about once per second and animation frames stop.</td></tr>
-    <tr><td><code>live</code></td><td>Keeps the tab at full speed. Timers, <code>fetch</code>, CSS animations, and animation frames keep their normal rate: 50 of 50 timer ticks and 60 animation frames per second in a hidden tab. The daemon holds Chrome's focus emulation on the tab, so the page reports <code>document.visibilityState === "visible"</code> and <code>document.hasFocus() === true</code> while another tab is in front. The setting survives reloads and navigation, and lasts until you change it, close the tab, or end the session.</td></tr>
-    <tr><td><code>frozen</code></td><td>Pauses the tab completely. Timers, network callbacks, and scripts stop until you switch back to it. Switching to a frozen tab unfreezes it and returns it to <code>throttled</code>, so it doesn't freeze again on its own.</td></tr>
-  </tbody>
-</table>
+`tab keep live` keeps one tab running at full speed in the background. The daemon holds Chrome's focus emulation on the tab, so the page reports `document.visibilityState === "visible"` and `document.hasFocus() === true` while another tab is in front. In a test, a 100 ms timer in a hidden tab fired 10 times per second when live and once per second when throttled. The setting survives reloads and navigation, and lasts until you run `tab keep throttled`, close the tab, or end the session. Without a tab ref, both commands apply to the active tab.
 
 ```bash
 agent-browser open https://app.example.com/build   # start something slow in t1
 agent-browser tab keep live                        # t1 keeps running in the background
 agent-browser tab new https://docs.example.com     # work in t2
 agent-browser tab t1                               # switch back and read the current page
+agent-browser tab keep throttled                   # return t1 to the default throttling
 ```
 
-A `live` tab uses as much CPU as a front tab. Five busy background tabs used 0.05 CPU cores when throttled and 0.73 cores when live, so set `live` only on the tabs that have to keep running. A site can also detect it, because more than one tab reports focus at the same time.
+A live tab uses as much CPU as a front tab. Five busy background tabs used 0.05 CPU cores when throttled and 0.73 cores when live, so set it only on the tabs that have to keep running. A site can also detect it, because more than one tab reports focus at the same time. A tab pinned by another session with `--pin-tab` is refused with the same `tab_locked` error as `tab <ref>`.
 
-In a browser that agent-browser didn't launch (`--cdp` or `--auto-connect`), the timers of a `live` tab can still run slower than a front tab's. A 100 ms timer on a page that doesn't animate fired 6 to 8 times per second instead of 10, compared with once per second when throttled. Start that browser with `--disable-renderer-backgrounding` to get the full rate. Browsers that agent-browser launches already have the flag.
+In a browser that agent-browser didn't launch (`--cdp` or `--auto-connect`), a live tab's timers can still run slower than a front tab's: 6 to 8 ticks per second instead of 10 on a page that doesn't animate. Start that browser with `--disable-renderer-backgrounding` to get the full rate. Browsers that agent-browser launches already have the flag.
 
-Freezing the same five tabs took them to zero CPU and reduced memory from 1.70 GB to 1.55 GB. The active tab can't be frozen, and neither can a tab that is still visible, such as one in its own window. Switch to another tab first, then freeze it by ref. A session that closes unfreezes the tabs it froze, so a browser you attached to with `--cdp` or `--auto-connect` isn't left with paused tabs. A tab pinned by another session with `--pin-tab` is refused with the same `tab_locked` error as `tab <ref>`.
-
-`tab list` shows each tab's mode. A text line ends with `(live)` or `(frozen)`, and `tab list --json` reports `"keep": "live" | "throttled" | "frozen"` for every tab. `tab keep` uses the Chrome DevTools Protocol, so it isn't available on the WebDriver backend (Safari, iOS).
+`tab list` marks a live tab with `(live)`, and `tab list --json` reports `"keep": "live"` or `"keep": "throttled"` for every tab. `tab keep` uses the Chrome DevTools Protocol, so it isn't available on the WebDriver backend (Safari, iOS).
 
 ### Snapshot deltas
 

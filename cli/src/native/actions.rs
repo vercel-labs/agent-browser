@@ -19,7 +19,7 @@ use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
 use super::auth;
-use super::browser::{should_track_target, BrowserManager, TabKeep, WaitUntil, WedgeReport};
+use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
@@ -3427,10 +3427,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
             }
         }
-    }
-
-    if let Some(mgr) = state.browser.as_mut() {
-        mgr.thaw_active_tab().await;
     }
 
     // WebDriver backend: reject unsupported CDP-only actions
@@ -8650,24 +8646,21 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 }
 
 async fn handle_tab_keep(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let keep = cmd
-        .get("keep")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'keep' parameter (expected live, throttled, or frozen)")?;
-    let keep = TabKeep::parse(keep)?;
-    let tab_id = {
-        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-        match cmd.get("tabId").and_then(Value::as_str) {
-            Some(tab_ref) => {
-                let tab_ref = super::browser::TabRef::parse(tab_ref)?;
-                Some(mgr.resolve_tab_ref(&tab_ref)?)
-            }
-            None => None,
+    let live = match cmd.get("keep").and_then(Value::as_str) {
+        Some("live") => true,
+        Some("throttled") => false,
+        _ => return Err("Missing 'keep' parameter (expected live or throttled)".to_string()),
+    };
+    let tab_id = match cmd.get("tabId").and_then(Value::as_str) {
+        Some(tab_ref) => {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            Some(mgr.resolve_tab_ref(&super::browser::TabRef::parse(tab_ref)?)?)
         }
+        None => None,
     };
     check_tab_unlocked(state, tab_id)?;
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    mgr.set_tab_keep(tab_id, keep).await
+    mgr.set_tab_live(tab_id, live).await
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
