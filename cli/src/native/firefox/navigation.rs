@@ -332,9 +332,14 @@ mod tests {
     /// gives up, and the failure must name the load timeout rather than the client's own.
     #[tokio::test(start_paused = true)]
     async fn a_load_past_the_client_default_reports_the_load_timeout() {
+        use crate::native::firefox::session::tests::FakeReply;
         let (ff, _events, _calls) =
-            crate::native::firefox::session::tests::fake_session_with_replies(|v| {
-                (v["method"] != "browsingContext.navigate").then(|| json!({}))
+            crate::native::firefox::session::tests::fake_session_with_replies(|cmd: &Value| {
+                if cmd["method"] == "browsingContext.navigate" {
+                    FakeReply::Silent
+                } else {
+                    FakeReply::Result(json!({}))
+                }
             })
             .await;
         let mut state = DaemonState::new();
