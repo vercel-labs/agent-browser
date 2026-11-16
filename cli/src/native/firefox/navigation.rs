@@ -95,10 +95,13 @@ pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, St
     let context = ff.contexts.active().to_string();
     let mut params = params;
     params["context"] = json!(context);
-    let landed = tokio::time::timeout(budget, ff.race_prompt(ff.bidi.send(method, params)))
-        .await
-        .map_err(|_| load_state_timeout_error(waited, budget))?
-        .map_err(|error| format!("{failure} failed: {error}"))?;
+    let landed = tokio::time::timeout(
+        budget,
+        ff.race_prompt(ff.bidi.send_without_deadline(method, params)),
+    )
+    .await
+    .map_err(|_| load_state_timeout_error(waited, budget))?
+    .map_err(|error| format!("{failure} failed: {error}"))?;
     let (url, prompt) = match landed {
         Some(result) => (landed_url(&result, ff.url().await, &requested), false),
         None => (ff.url().await.unwrap_or(requested), true),
@@ -237,6 +240,34 @@ mod tests {
             .contains("https://landed.example"));
         let calls = calls.lock().unwrap().clone();
         assert_eq!(calls[0], "browsingContext.navigate");
+    }
+
+    /// A session timeout longer than the BiDi client's default must still decide when a load
+    /// gives up, and the failure must name the load timeout rather than the client's own.
+    #[tokio::test(start_paused = true)]
+    async fn a_load_past_the_client_default_reports_the_load_timeout() {
+        let (ff, _events, _calls) = crate::native::firefox::session::tests::fake_session_ignoring(
+            "browsingContext.navigate",
+        )
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.default_timeout_ms = 60_000;
+
+        let error = load(
+            &mut state,
+            Load::Url {
+                url: "https://slow.example/",
+                wait: Wait::Complete,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Timed out after 60000ms waiting for load state 'load'"
+        );
     }
 
     #[tokio::test]

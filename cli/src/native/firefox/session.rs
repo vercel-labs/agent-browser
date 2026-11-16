@@ -467,6 +467,34 @@ pub(crate) mod tests {
         tokio::sync::mpsc::UnboundedSender<Value>,
         Calls,
     ) {
+        fake_session_with_options(trees, prompt, None).await
+    }
+
+    /// A session whose socket records `method` but never answers it.
+    pub(crate) async fn fake_session_ignoring(
+        method: &'static str,
+    ) -> (
+        FirefoxSession,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+    ) {
+        fake_session_with_options(
+            vec![json!({"contexts": [{"context": "ctx-active"}]})],
+            false,
+            Some(method),
+        )
+        .await
+    }
+
+    async fn fake_session_with_options(
+        trees: Vec<Value>,
+        prompt: bool,
+        silent: Option<&'static str>,
+    ) -> (
+        FirefoxSession,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+    ) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", l.local_addr().unwrap());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -482,6 +510,9 @@ pub(crate) mod tests {
                         let Some(Ok(Message::Text(t))) = m else { break };
                         let v: Value = serde_json::from_str(&t).unwrap();
                         log.lock().unwrap().push(v["method"].as_str().unwrap().to_string());
+                        if Some(v["method"].as_str().unwrap_or_default()) == silent {
+                            continue;
+                        }
                         if prompt && v["method"] == "browsingContext.navigate" {
                             let event = json!({"type":"event", "method":"browsingContext.userPromptOpened", "params":{
                                 "context":"ctx-new", "type":"confirm", "message":"sure?", "handler":"ignore"
