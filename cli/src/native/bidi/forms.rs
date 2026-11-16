@@ -20,7 +20,7 @@ use crate::native::interaction::{
 };
 
 const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
-    let el = useActive ? document.activeElement : this;
+    let el = useActive ? ((this && this.ownerDocument) || document).activeElement : this;
     while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
     if (!el || !el.isConnected || el.matches(':disabled') || el.readOnly) return 'unsupported';
     if (useActive) try { el.focus(); } catch {}
@@ -76,6 +76,8 @@ const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
     return 'ok';
 }"#;
 
+const SAME_DOCUMENT_JS: &str = "function() { return this.ownerDocument === document; }";
+
 const FOCUSED_FRAME_CONTEXT_JS: &str = r#"() => {
     let el = document.activeElement;
     while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
@@ -102,8 +104,12 @@ pub(super) async fn run(
     .await
 }
 
-/// The context holding the focused element: the tab, or the frame focused inside it.
-async fn focused_context(ff: &FirefoxSession) -> Result<String, String> {
+/// The context an edit runs in: the target's own, or without a target the tab or the frame
+/// focused inside it.
+async fn edit_context(ff: &FirefoxSession, target: Option<&Target>) -> Result<String, String> {
+    if let Some(target) = target {
+        return Ok(target.context.clone());
+    }
     let mut focused = ff.contexts.active_tab().to_string();
     let mut visited = HashSet::new();
     while visited.insert(focused.clone()) {
@@ -119,6 +125,8 @@ async fn focused_context(ff: &FirefoxSession) -> Result<String, String> {
     Ok(focused)
 }
 
+/// Replaces the target's value, or types `text` at the focused element. Typing at a target stays
+/// in the target's document, so text meant for it never reaches another frame that took focus.
 async fn literal_edit_in_context(
     ff: &FirefoxSession,
     context: &str,
@@ -133,7 +141,7 @@ async fn literal_edit_in_context(
                 context,
                 LITERAL_EDIT_JS,
                 target.map(Target::node_ref),
-                vec![json!(text), json!(replace), json!(target.is_none())],
+                vec![json!(text), json!(replace), json!(!replace)],
             ),
         )
         .await?;
@@ -142,7 +150,7 @@ async fn literal_edit_in_context(
     };
     match result.as_str() {
         Some("ok" | "canceled") => Ok(false),
-        Some("unsupported") if target.is_none() => Ok(false),
+        Some("unsupported") if !replace => Ok(false),
         _ => Err("Text input is not supported for the focused element".to_string()),
     }
 }
@@ -153,32 +161,55 @@ async fn literal_edit(
     text: &str,
     replace: bool,
 ) -> Result<(), String> {
-    let context = match target {
-        Some(target) => target.context.clone(),
-        None => focused_context(ff).await?,
-    };
+    let context = edit_context(ff, target).await?;
     literal_edit_in_context(ff, &context, target, text, replace)
         .await
         .map(|_| ())
+}
+
+/// Whether the target's document is still the one its context shows, asked in the sandbox.
+async fn in_current_document(ff: &FirefoxSession, target: &Target) -> bool {
+    ff.bidi
+        .call_function_on_in_sandbox(
+            &target.context,
+            "agent-browser",
+            SAME_DOCUMENT_JS,
+            target.node_ref(),
+        )
+        .await
+        .is_ok_and(|same| same == true)
 }
 
 async fn focus_target(ff: &FirefoxSession, target: &Target) -> Result<bool, String> {
     Ok(run(ff, target, FOCUS_JS, vec![]).await?.is_some())
 }
 
-async fn send_text(ff: &FirefoxSession, text: &str, delay_ms: Option<u64>) -> Result<(), String> {
+/// Types `text` one character at a time. Typing ends early, still as a success, when a dialog opens
+/// or a navigation replaces the target's document.
+async fn send_text(
+    ff: &FirefoxSession,
+    target: Option<&Target>,
+    text: &str,
+    delay_ms: Option<u64>,
+) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
-    let context = focused_context(ff).await?;
+    let context = edit_context(ff, target).await?;
     for ch in text.chars() {
         let text = ch.to_string();
-        let dialog_opened = if matches!(ch, '\n' | '\r' | '\t') {
-            perform_actions(ff, &context, key_text_actions(&text)).await?
+        let ended = if matches!(ch, '\n' | '\r' | '\t') {
+            match target {
+                Some(target) if !in_current_document(ff, target).await => true,
+                _ => perform_actions(ff, &context, key_text_actions(&text)).await?,
+            }
         } else {
-            literal_edit_in_context(ff, &context, None, &text, false).await?
+            match literal_edit_in_context(ff, &context, target, &text, false).await {
+                Err(e) if target.is_some() && e.starts_with("no such node") => true,
+                result => result?,
+            }
         };
-        if dialog_opened {
+        if ended {
             break;
         }
         if let Some(delay) = delay_ms.filter(|delay| *delay > 0) {
@@ -247,7 +278,7 @@ pub async fn type_text(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         return Ok(json!({ "typed": text, "dialogOpened": true }));
     }
     if !clear || run(ff, &target, CLEAR_INPUT_JS, vec![]).await?.is_some() {
-        send_text(ff, text, delay).await?;
+        send_text(ff, Some(&target), text, delay).await?;
     }
     Ok(json!({ "typed": text }))
 }
@@ -282,7 +313,7 @@ pub async fn keyboard(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         Some("type") => {
             let text = require(cmd, "text")?;
             let ff = session(state)?;
-            send_text(ff, text, None).await?;
+            send_text(ff, None, text, None).await?;
             Ok(json!({ "typed": text }))
         }
         Some("insertText") => inserttext(cmd, state).await,
@@ -749,9 +780,30 @@ mod tests {
                 "script.callFunction",
                 "script.callFunction",
                 "script.callFunction",
-                "script.callFunction",
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn typed_keys_stop_once_the_target_document_is_replaced() {
+        let (ff, _tx, calls) = fake_session_with(|req| {
+            if req["params"]["functionDeclaration"] == SAME_DOCUMENT_JS {
+                script(json!({"type": "boolean", "value": false}))
+            } else {
+                node_responder(req)
+            }
+        })
+        .await;
+        let mut state = state_with(ff);
+
+        type_text(&json!({"selector": "#a", "text": "\n"}), &mut state)
+            .await
+            .unwrap();
+
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .contains(&"input.performActions".to_string()));
     }
 
     #[tokio::test]
