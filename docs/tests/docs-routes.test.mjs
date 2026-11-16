@@ -975,7 +975,7 @@ test('homepage introduces both tools while keeping the original introduction rea
     tags(html, 'a').some((a) => a.href === 'https://x.com/onusoz/status/2032700396955697218')
   );
   assert.ok(!html.includes('platform.twitter.com/widgets.js'));
-  assert.ok(text(html).includes('Teach your agent'));
+  assert.ok(text(html).includes('Add to your agent'));
   assert.ok(tags(html, 'a').some((a) => a.href === '/introduction'));
   assert.ok(
     text(html).includes('Desktop')
