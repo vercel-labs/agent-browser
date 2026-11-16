@@ -232,6 +232,8 @@ agent-browser find last ".item" click
 agent-browser find nth 2 "a" hover
 ```
 
+An action policy or `--confirm-actions` rule for `click`, `fill`, `check`, `hover`, or `gettext` also applies to the `find` action that runs it (`text` counts as `gettext`).
+
 ## Browser Settings
 
 ```bash
