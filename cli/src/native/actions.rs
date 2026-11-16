@@ -11786,8 +11786,17 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'target' parameter")?;
 
-    // Check the target first, so a target that is missing, covered, or cannot
-    // be scrolled into view fails before any input reaches the page.
+    // Scrolling to the source can cause the page to render the drop target.
+    super::element::resolve_element_center(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        source,
+        &state.iframe_sessions,
+        PressCheck::Drag,
+    )
+    .await?;
+
     super::element::resolve_element_center(
         &mgr.client,
         &session_id,
@@ -11797,6 +11806,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         PressCheck::Drag,
     )
     .await?;
+    // Checking the target may have changed the source's viewport coordinates.
     let (sx, sy, source_session_id) = super::element::resolve_element_center(
         &mgr.client,
         &session_id,
@@ -11852,9 +11862,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     state.mouse_state.y = sy + source_offset.1;
     state.mouse_state.buttons = 1;
 
-    // Measure the target only after pressing: resolving scrolls it into view,
-    // which would move the source out from under a point measured earlier.
-    // It was checked above; the press may since have put a drop zone over it.
+    // Pressing the source may have revealed a drop zone over the target.
     let resolved_target = async {
         let (tx, ty, target_session_id) = super::element::resolve_element_center(
             &mgr.client,
