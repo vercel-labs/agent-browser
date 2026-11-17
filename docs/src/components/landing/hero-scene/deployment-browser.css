@@ -28,8 +28,10 @@
      past the tab's foot, clipped there by the tab: inset shadows on the tab's
      own box leave a sliver along its foot on the camera's fractional scale.
      A hairline of chrome under the tab covers the strip's hairline where the
-     tab's foot only partly covers a device pixel. */
-  & .ab-browser .ss-window__tabs { box-shadow: inset 0 calc(-1 * var(--ss-hairline, 1px)) 0 var(--ss-line); }
+     tab's foot only partly covers a device pixel. The strip stacks above the
+     toolbar: painted after it, the toolbar's edge would cover part of the
+     hairline's last device pixel and thin it where the scale is fractional. */
+  & .ab-browser .ss-window__tabs { position: relative; z-index: 1; box-shadow: inset 0 calc(-1 * var(--ss-hairline, 1px)) 0 var(--ss-line); }
   & .ab-browser .ss-window__tab { background: transparent; }
   & .ab-browser .ss-window__tab[data-active] { background: var(--ss-chrome); box-shadow: 0 var(--ss-hairline, 1px) 0 var(--ss-chrome); }
   & .ab-browser .ss-window__tab[data-active]::before { content: ""; position: absolute; inset: 0 0 calc(-2 * var(--ss-hairline, 1px)); border-radius: inherit; box-shadow: inset var(--ss-hairline, 1px) 0 0 var(--ss-line), inset calc(-1 * var(--ss-hairline, 1px)) 0 0 var(--ss-line), inset 0 var(--ss-hairline, 1px) 0 var(--ss-line); pointer-events: none; }
