@@ -21,15 +21,18 @@
   /* Flat chrome: strip, tabs and toolbar are one color. The strip draws a
      hairline along its foot; the active tab is outlined on three sides and
      covers that hairline, so it joins the toolbar as a real tab does. The
-     outline is a border on an overlay, not inset shadows: on the camera's
-     fractional scale, inset shadows leave a sliver along the tab's foot, a
-     faint line across it and sides that run past the strip's hairline. A
-     hairline of chrome under the tab covers the strip's hairline where the
+     outline is inset shadows, as the strip's hairline is, never a border:
+     Chrome rounds a border's width (here up to 1px against a ~0.67px
+     hairline), so the sides would read heavier or lighter than the strip's
+     line and step where they meet it. The shadows sit on an overlay that runs
+     past the tab's foot, clipped there by the tab: inset shadows on the tab's
+     own box leave a sliver along its foot on the camera's fractional scale.
+     A hairline of chrome under the tab covers the strip's hairline where the
      tab's foot only partly covers a device pixel. */
   & .ab-browser .ss-window__tabs { box-shadow: inset 0 calc(-1 * var(--ss-hairline, 1px)) 0 var(--ss-line); }
   & .ab-browser .ss-window__tab { background: transparent; }
   & .ab-browser .ss-window__tab[data-active] { background: var(--ss-chrome); box-shadow: 0 var(--ss-hairline, 1px) 0 var(--ss-chrome); }
-  & .ab-browser .ss-window__tab[data-active]::before { content: ""; position: absolute; inset: 0; border: var(--ss-hairline, 1px) solid var(--ss-line); border-bottom: 0; border-radius: inherit; pointer-events: none; }
+  & .ab-browser .ss-window__tab[data-active]::before { content: ""; position: absolute; inset: 0 0 calc(-2 * var(--ss-hairline, 1px)); border-radius: inherit; box-shadow: inset var(--ss-hairline, 1px) 0 0 var(--ss-line), inset calc(-1 * var(--ss-hairline, 1px)) 0 0 var(--ss-line), inset 0 var(--ss-hairline, 1px) 0 var(--ss-line); pointer-events: none; }
   & .ab-browser > .ss-window__bar { border-bottom-width: var(--ss-hairline, 1px); }
   /* The address pill: a white control with a hairline, the host in it */
   & .ab-browser .ss-window__url { background: var(--ds-background-100, #fff); box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ss-line); }
