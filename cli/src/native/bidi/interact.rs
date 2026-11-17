@@ -442,48 +442,55 @@ async fn perform_pointer(
         _ => false,
     };
     if let Some(source) = mouse_source {
-        for pointer_action in source["actions"].as_array().cloned().unwrap_or_default() {
+        let steps = source["actions"].as_array().cloned().unwrap_or_default();
+        // Each step is its own request so a dialog stops the rest, but Firefox resets its click
+        // count per request, so the presses of a multi-press gesture share one request.
+        let multi = steps.iter().filter(|s| s["type"] == "pointerDown").count() > 1;
+        let pressing = |s: &Value| multi && s["type"] != "pointerMove";
+        for batch in steps.chunk_by(|a, b| pressing(a) && pressing(b)) {
             if dialog_opened {
                 break;
             }
-            if motion.is_some() && pointer_action["type"] == "pointerMove" {
+            if motion.is_some() && batch[0]["type"] == "pointerMove" {
                 continue;
             }
             let request = json!([{
                 "type": "pointer",
                 "id": source["id"],
                 "parameters": source["parameters"],
-                "actions": [pointer_action],
+                "actions": batch,
             }]);
             dialog_opened = perform_actions(ff, &context, request).await?;
-            if pointer_action["type"] == "pointerMove" {
-                let point = if pointer_action["origin"] == "viewport" {
-                    match (pointer_action["x"].as_f64(), pointer_action["y"].as_f64()) {
-                        (Some(x), Some(y)) => (x, y),
-                        _ => position,
-                    }
-                } else {
-                    position
-                };
-                commit_mouse_position(ff, state.mouse, &context, point).await;
-            }
-            apply_mouse_action(state.mouse, &pointer_action);
-            match pointer_action["type"].as_str() {
-                Some("pointerDown") if dialog_opened => {
-                    if let Some(button) = pointer_action["button"].as_u64() {
-                        *state.pending_release = Some(PendingRelease {
-                            session_id: context.clone(),
-                            x: position.0,
-                            y: position.1,
-                            button: MouseButton::parse(mouse_button_name(button as u8))
-                                .unwrap_or_default(),
-                            click_count: 1,
-                            modifiers: Modifiers::default(),
-                        });
-                    }
+            for pointer_action in batch {
+                if pointer_action["type"] == "pointerMove" {
+                    let point = if pointer_action["origin"] == "viewport" {
+                        match (pointer_action["x"].as_f64(), pointer_action["y"].as_f64()) {
+                            (Some(x), Some(y)) => (x, y),
+                            _ => position,
+                        }
+                    } else {
+                        position
+                    };
+                    commit_mouse_position(ff, state.mouse, &context, point).await;
                 }
-                Some("pointerUp") => *state.pending_release = None,
-                _ => {}
+                apply_mouse_action(state.mouse, pointer_action);
+                match pointer_action["type"].as_str() {
+                    Some("pointerDown") if dialog_opened => {
+                        if let Some(button) = pointer_action["button"].as_u64() {
+                            *state.pending_release = Some(PendingRelease {
+                                session_id: context.clone(),
+                                x: position.0,
+                                y: position.1,
+                                button: MouseButton::parse(mouse_button_name(button as u8))
+                                    .unwrap_or_default(),
+                                click_count: 1,
+                                modifiers: Modifiers::default(),
+                            });
+                        }
+                    }
+                    Some("pointerUp") => *state.pending_release = None,
+                    _ => {}
+                }
             }
         }
     } else {

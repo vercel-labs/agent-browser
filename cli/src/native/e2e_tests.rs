@@ -16367,12 +16367,13 @@ async fn e2e_firefox_click_buttons_modifiers_and_double_click() {
 
     assert_eq!(firefox_eval(&mut state, reset).await, json!(true));
     assert_success(&firefox_act(&mut state, "dblclick", "#target", json!({})).await);
-    let clicks = firefox_log(&mut state)
-        .await
-        .into_iter()
-        .filter(|line| line.starts_with("click:"))
-        .count();
+    let log = firefox_log(&mut state).await;
+    let clicks = log.iter().filter(|line| line.starts_with("click:")).count();
     assert_eq!(clicks, 2, "a double click must send two full clicks");
+    assert!(
+        log.contains(&"dblclick:0:2:00".into()),
+        "no dblclick: {log:?}"
+    );
 
     let rejected = firefox_act(&mut state, "click", "#target", json!({ "button": "bogus" })).await;
     assert!(
