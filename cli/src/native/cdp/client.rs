@@ -19,6 +19,24 @@ use tokio_tungstenite::Connector;
 
 use super::types::{CdpCommand, CdpError, CdpEvent, CdpMessage};
 
+/// Wait for one CDP command answer when `AGENT_BROWSER_CDP_TIMEOUT_MS` is
+/// unset. A page script that runs longer than this fails with
+/// `CDP command timed out: <method>` and keeps running in the page (#2581).
+const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wait for one CDP command answer. `AGENT_BROWSER_CDP_TIMEOUT_MS` raises it,
+/// so a slow page script can still answer instead of losing its result, and so
+/// can `close` on a browser whose shutdown takes longer than the default.
+pub(crate) fn response_timeout() -> Duration {
+    const ENV: &str = "AGENT_BROWSER_CDP_TIMEOUT_MS";
+    std::env::var(ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_RESPONSE_TIMEOUT)
+}
+
 /// A command awaiting its response, with the session it was sent to so the
 /// reader can fail it as soon as that session detaches (#1991).
 struct PendingCommand<T> {
@@ -337,6 +355,8 @@ async fn release_detached_session(
 
 pub struct CdpClient {
     ws_tx: WsTx,
+    /// How long a command may wait for its answer, from `response_timeout()`.
+    response_timeout: Duration,
     socket: socket2::Socket,
     closed: Arc<AtomicBool>,
     close_complete: AtomicBool,
@@ -663,6 +683,7 @@ impl CdpClient {
 
         Ok(Self {
             ws_tx,
+            response_timeout: response_timeout(),
             socket,
             closed,
             close_complete: AtomicBool::new(false),
@@ -798,7 +819,7 @@ impl CdpClient {
             }
         }
 
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        let response = match tokio::time::timeout(self.response_timeout, rx).await {
             Ok(Ok(resp)) => {
                 guard.done = true;
                 resp
@@ -958,7 +979,7 @@ impl CdpClient {
             }
         }
 
-        let text = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        let text = match tokio::time::timeout(self.response_timeout, rx).await {
             Ok(Ok(text)) => {
                 guard.done = true;
                 text
@@ -1122,6 +1143,29 @@ mod tests {
 
     const TEST_CERT_DER: &str = "MIIBPDCB46ADAgECAgkA9xwXmIhbzQIwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgzMDA1NTU0NFoXDTM2MDgyNzA1NTU0NFowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQdmPO0sXXFRmVn7+8MViXGom2rYy8aV3Oc0pNZhUmFGaPl4MRFzc1G0yaV/WRBPF/BUh2LGsXCvUsn7NqaYkFaMeMBwwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAoGCCqGSM49BAMCA0gAMEUCIQC32oureGNAupABEmonQPAQBD7OdJjXmUxoVQNr0UB+6AIgb23GMwxTjwHyLG4tZcJST7r3cCW8K/Y+1h618j2f+Uw=";
     const TEST_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgIVZST8Vhc5f3OW+4kF78f8o1nQCRwjW/Yo8CXQ35Y9uhRANCAARB2Y87SxdcVGZWfv7wxWJcaibatjLxpXc5zSk1mFSYUZo+XgxEXNzUbTJpX9ZEE8X8FSHYsaxcK9Syfs2ppiQV";
+
+    #[test]
+    fn response_timeout_follows_the_env_var() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_CDP_TIMEOUT_MS"]);
+
+        env.remove("AGENT_BROWSER_CDP_TIMEOUT_MS");
+        assert_eq!(response_timeout(), Duration::from_secs(30));
+
+        env.set("AGENT_BROWSER_CDP_TIMEOUT_MS", "120000");
+        assert_eq!(response_timeout(), Duration::from_secs(120));
+
+        env.set("AGENT_BROWSER_CDP_TIMEOUT_MS", " 5000 ");
+        assert_eq!(response_timeout(), Duration::from_secs(5));
+
+        for value in ["0", "soon", ""] {
+            env.set("AGENT_BROWSER_CDP_TIMEOUT_MS", value);
+            assert_eq!(
+                response_timeout(),
+                Duration::from_secs(30),
+                "{value:?} should keep the default"
+            );
+        }
+    }
 
     #[test]
     fn repairs_only_unpaired_surrogate_escapes() {
