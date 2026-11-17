@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::Notify;
 
-use super::client::{remote_to_json, unserializable, BidiClient};
+use super::client::{remote_to_json, unserializable, BidiClient, Events};
 use super::contexts::{Contexts, Removed};
 use super::emulation::{self, Settings as EmulationSettings};
 use super::firefox::{
@@ -57,7 +57,7 @@ pub struct FirefoxSession {
     /// Launch download directory, restored after `download` redirects it.
     pub download_dir: Option<String>,
     pub(super) data_collector: Option<String>,
-    events: mpsc::Receiver<Value>,
+    events: Events,
     pub net: NetContext,
     /// True once the single global network intercept is installed; it is never installed twice.
     pub intercepting: bool,
