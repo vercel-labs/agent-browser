@@ -1488,6 +1488,30 @@ fn an_explicit_target_replaces_the_session_target_and_beats_an_ambient_one() {
     );
 }
 
+#[test]
+fn an_explicit_reset_lets_an_ambient_target_apply() {
+    // `--no-auto-connect` clears the session target, so the env endpoint that
+    // is processed after it applies to the now target-less session.
+    let running = running_with(&[(Key::AutoConnect, json!(true))]);
+    let mut f = ambient_flags(Some("ws://env.example/cdp"), None, None);
+    f.no_auto_connect = true;
+    let plan = running.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://env.example/cdp".to_string())
+    );
+
+    // `-p ""` resets a provider the same way.
+    let running = running_with(&[(Key::Provider, json!("ios"))]);
+    let mut f = ambient_flags(Some("ws://env.example/cdp"), Some(""), None);
+    f.cli_provider = true;
+    let plan = running.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://env.example/cdp".to_string())
+    );
+}
+
 const ENV_HEADERS: &str = r#"{"Authorization":"env"}"#;
 const OWN_HEADERS: &str = r#"{"Authorization":"own"}"#;
 
