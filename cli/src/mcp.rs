@@ -10,6 +10,8 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+
+use crate::native::pointer::{Modifiers, MouseButton};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
@@ -850,7 +852,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
+            "Launch the browser and optionally navigate to a URL. On macOS, installed browsers are searched in /Applications, then ~/Applications. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. A plugin provider that returns directPage: true connects to a page socket, so console messages, network requests, HAR recording, tracing, and profiling apply to that page. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
@@ -862,14 +864,14 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FLOW_LIST,
             "List saved flows",
-            "List tasks saved with flow save, with their params and whether their last run verified.",
+            "Experimental. List tasks saved with flow save, with their params and whether their last run verified.",
             json!({ "origin": { "type": "string", "description": "Only flows for this host's site." } }),
             &[],
         ),
         tool(
             TOOL_FLOW_RUN,
             "Run saved flow",
-            "Run a saved task directly over HTTP, without driving the page. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed.",
+            "Experimental. Run a saved task by sending its requests directly, falling back to the page, then to a replay of the recorded commands. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
             json!({
                 "name": { "type": "string" },
                 "params": { "type": "object", "additionalProperties": { "type": "string" } },
@@ -877,28 +879,30 @@ fn tools() -> Vec<Value> {
                 "fields": { "type": "string", "description": "Comma-separated fields to return per item, dotted paths allowed." },
                 "limit": { "type": "integer", "minimum": 1 },
                 "origin": { "type": "string" },
-                "allowWrite": { "type": "string", "description": "Writes the run may send without asking: `all`, or comma-separated write ids from flow save. Any other write needs confirmation." }
+                "allowWrite": { "type": "string", "description": "Writes the run may send without asking: `all`, or comma-separated write ids from flow save. Any other write needs confirmation." },
+                "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds the whole run may take, across every tier." }
             }),
             &["name"],
         ),
         tool(
             TOOL_FLOW_STEPS,
             "List captured steps",
-            "List the steps a session opened with capture flow has recorded: number, command, URL, tagged request count, and whether it succeeded. Use the numbers with flow save from and to.",
+            "Experimental. List the steps a session opened with capture flow has recorded: number, command, URL, tagged request count, and whether it succeeded. Use the numbers with flow save from and to.",
             json!({}),
             &[],
         ),
         tool(
             TOOL_FLOW_SAVE,
             "Save flow",
-            "Save recorded steps as a flow so later runs can skip the browser. The session must be opened with capture flow. By default the flow starts at the last navigation after the previous save. params maps a param name to the value you typed, so later runs can change it.",
+            "Experimental. Save recorded steps as a flow so later runs can skip the browser. The session must be opened with capture flow. By default the flow starts at the last navigation after the previous save. params maps a param name to the value you typed, so later runs can change it.",
             json!({
                 "name": { "type": "string" },
                 "from": { "type": "integer", "minimum": 1, "description": "First step number; defaults to the last navigation after the previous save." },
                 "to": { "type": "integer", "minimum": 1, "description": "Last step; defaults to the latest." },
                 "description": { "type": "string", "description": "One line saying what the flow does." },
                 "params": { "type": "object", "additionalProperties": { "type": "string" } },
-                "output": { "type": "string", "description": "Request id whose response the flow returns." }
+                "output": { "type": "string", "description": "Request id whose response the flow returns." },
+                "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds to wait for requests the last step started that have no response yet." }
             }),
             &["name"],
         ),
@@ -959,7 +963,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
+            "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text." },
@@ -974,9 +978,11 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLICK,
             "Click element",
-            "Click an element by @ref or CSS selector.",
+            "Click an element by @ref or CSS selector, optionally with another mouse button or held modifier keys.",
             json!({
                 "selector": selector_schema(),
+                "button": mouse_button_schema(),
+                "modifiers": click_modifiers_schema(),
                 "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab after applying session setup." },
                 "human": { "type": "boolean", "default": false, "description": "Approach the target with seeded, curved mouse movement." }
             }),
@@ -1117,8 +1123,13 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DBLCLICK,
             "Double-click element",
-            "Double-click an element.",
-            json!({ "selector": selector_schema() }),
+            "Double-click an element, optionally with another mouse button or held modifier keys.",
+            json!({
+                "selector": selector_schema(),
+                "button": mouse_button_schema(),
+                "modifiers": click_modifiers_schema(),
+                "human": { "type": "boolean", "default": false, "description": "Approach the target with seeded, curved mouse movement." }
+            }),
             &["selector"],
         ),
         tool(
@@ -1773,7 +1784,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_BATCH,
             "Batch",
-            "Run multiple commands sequentially. Unknown commands and subcommands return errors. A batch containing only get cdp-url commands never launches a browser.",
+            "Run multiple commands sequentially. Unknown commands and subcommands return errors. Set global flags on the batch invocation or MCP server. Command arguments can contain flag-like text. A batch containing only get cdp-url commands never launches a browser.",
             json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" }, "omitCommand": { "type": "boolean", "description": "Replace only command arrays with a stable zero-based input index. Does not make output safe for secrets: errors and response data are unchanged; type echoes typed text, and get value/eval may return input values." } }),
             &["commands"],
         ),
@@ -2065,8 +2076,21 @@ fn key_schema() -> Value {
 fn mouse_button_schema() -> Value {
     json!({
         "type": "string",
-        "enum": ["left", "right", "middle"],
+        "enum": MouseButton::ALL.map(|button| button.name()),
         "default": "left",
+        "description": "Mouse button. Defaults to left.",
+    })
+}
+
+fn click_modifiers_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "string",
+            "enum": Modifiers::NAMES,
+        },
+        "minItems": 1,
+        "description": "Modifier keys held during the click.",
     })
 }
 
@@ -2443,11 +2467,11 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_OPEN => call_open(arguments),
         TOOL_READ => call_read(arguments),
         TOOL_SNAPSHOT => call_snapshot(arguments),
-        TOOL_CLICK => call_click(arguments),
+        TOOL_CLICK => call_click(arguments, "click"),
         TOOL_BACK => call_literal(arguments, &["back"]),
         TOOL_FORWARD => call_literal(arguments, &["forward"]),
         TOOL_RELOAD => call_literal(arguments, &["reload"]),
-        TOOL_DBLCLICK => call_simple_selector(arguments, "dblclick"),
+        TOOL_DBLCLICK => call_click(arguments, "dblclick"),
         TOOL_FILL => call_fill(arguments),
         TOOL_TYPE => call_type(arguments),
         TOOL_PRESS => call_press(arguments),
@@ -2956,7 +2980,7 @@ fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError>
         args.push("--limit".to_string());
         args.push(limit.to_string());
     }
-    for (key, flag) in [("from", "--from"), ("to", "--to")] {
+    for (key, flag) in [("from", "--from"), ("to", "--to"), ("timeout", "--timeout")] {
         if let Some(n) = arguments.get(key).and_then(Value::as_u64) {
             args.push(flag.to_string());
             args.push(n.to_string());
@@ -3090,20 +3114,28 @@ fn call_simple_selector(arguments: &Value, command: &str) -> Result<Value, Proto
     call_cli_tool(arguments, vec![command.to_string(), selector], None)
 }
 
-fn click_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+fn click_command_args(arguments: &Value, command: &str) -> Result<Vec<String>, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
-    let mut args = vec!["click".to_string(), selector];
-    if optional_bool(arguments, "newTab")?.unwrap_or(false) {
+    let mut args = vec![command.to_string(), selector];
+    if command == "click" && optional_bool(arguments, "newTab")?.unwrap_or(false) {
         args.push("--new-tab".to_string());
     }
     if optional_bool(arguments, "human")?.unwrap_or(false) {
         args.push("--human".to_string());
     }
+    if let Some(button) = optional_string(arguments, "button")? {
+        args.push("--button".to_string());
+        args.push(button);
+    }
+    if let Some(modifiers) = optional_string_array(arguments, "modifiers")? {
+        args.push("--modifiers".to_string());
+        args.push(modifiers.join(","));
+    }
     Ok(args)
 }
 
-fn call_click(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, click_command_args(arguments)?, None)
+fn call_click(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, click_command_args(arguments, command)?, None)
 }
 
 fn call_fill(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4751,6 +4783,51 @@ mod tests {
         );
     }
 
+    /// Every argument a flow tool declares reaches the daemon command: the
+    /// MCP schema, `flow_args` and the CLI parser cannot drift apart.
+    #[test]
+    fn every_flow_tool_argument_reaches_the_command() {
+        let cases = [
+            (TOOL_FLOW_RUN, "run", "flow_run"),
+            (TOOL_FLOW_SAVE, "save", "flow_save"),
+        ];
+        for (tool_name, sub, action) in cases {
+            let tool = tools()
+                .into_iter()
+                .find(|t| t["name"] == tool_name)
+                .unwrap();
+            let props = tool["inputSchema"]["properties"]
+                .as_object()
+                .unwrap()
+                .clone();
+            let shared = advertised_shared_arguments(tool_name);
+            let mut arguments = serde_json::Map::new();
+            for (key, prop) in &props {
+                if shared.contains(&key.as_str()) {
+                    continue;
+                }
+                let value = match (key.as_str(), prop["type"].as_str()) {
+                    ("allowWrite", _) => json!("all"),
+                    (_, Some("integer")) => json!(7),
+                    (_, Some("object")) => json!({ "k": "v" }),
+                    _ => json!("x"),
+                };
+                arguments.insert(key.clone(), value);
+            }
+            let arguments = Value::Object(arguments);
+            let args = flow_args(&arguments, sub).unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["action"], action);
+            for key in arguments.as_object().unwrap().keys() {
+                assert!(
+                    !command[key.as_str()].is_null(),
+                    "{tool_name}: `{key}` is declared but the command has no `{key}`: {command}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn recording_timeline_options_use_cli_parser() {
         for operation in ["start", "restart"] {
@@ -5485,13 +5562,49 @@ mod tests {
 
     #[test]
     fn click_command_args_include_new_tab() {
-        let args = click_command_args(&json!({
-            "selector": "@e1",
-            "newTab": true,
-        }))
+        let args = click_command_args(
+            &json!({
+                "selector": "@e1",
+                "newTab": true,
+            }),
+            "click",
+        )
         .unwrap();
 
         assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+    }
+
+    #[test]
+    fn click_tools_forward_button_and_modifiers_to_cli_parser() {
+        for command in ["click", "dblclick"] {
+            let args = click_command_args(
+                &json!({
+                    "selector": "@e1",
+                    "button": "right",
+                    "modifiers": ["control", "shift"],
+                }),
+                command,
+            )
+            .unwrap();
+
+            assert_eq!(
+                args,
+                vec![
+                    command,
+                    "@e1",
+                    "--button",
+                    "right",
+                    "--modifiers",
+                    "control,shift"
+                ]
+            );
+
+            let flags = crate::flags::parse_flags(&args);
+            let parsed = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(parsed["action"], json!(command));
+            assert_eq!(parsed["button"], json!("right"));
+            assert_eq!(parsed["modifiers"], json!(10));
+        }
     }
 
     #[test]
@@ -6068,7 +6181,8 @@ mod tests {
     async fn mcp_human_click_preserves_session_mode() {
         let mut state = crate::native::actions::DaemonState::new();
         for human in [true, false] {
-            let args = click_command_args(&json!({"selector": "#target", "human": human})).unwrap();
+            let args = click_command_args(&json!({"selector": "#target", "human": human}), "click")
+                .unwrap();
             let flags = crate::flags::parse_flags(&args);
             let mut command = crate::commands::parse_command(&args, &flags).unwrap();
             assert_eq!(command.get("inputMode"), human.then_some(&json!("human")));
