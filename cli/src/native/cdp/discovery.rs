@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::types::BrowserVersionInfo;
+use crate::tls::TrustOptions;
 
 /// Default timeout for CDP discovery HTTP requests.
 const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -30,13 +31,15 @@ pub async fn discover_cdp_url(
 ///
 /// When `secure` is true (the user passed an `https://` CDP URL), discovery
 /// uses `https://`/`wss://` so auth headers are never sent in plaintext, and
-/// there is no silent fallback to an unencrypted scheme.
+/// there is no silent fallback to an unencrypted scheme. `trust` selects the
+/// roots that verify the endpoint's certificate.
 pub async fn discover_cdp_url_with_headers(
     host: &str,
     port: u16,
     query: Option<&str>,
     headers: &[(String, String)],
     secure: bool,
+    trust: &TrustOptions,
 ) -> Result<String, String> {
     discover(
         host,
@@ -45,6 +48,7 @@ pub async fn discover_cdp_url_with_headers(
         DEFAULT_DISCOVERY_TIMEOUT,
         headers,
         secure,
+        trust,
     )
     .await
 }
@@ -56,7 +60,16 @@ pub async fn discover_cdp_url_with_timeout(
     query: Option<&str>,
     timeout: Duration,
 ) -> Result<String, String> {
-    discover(host, port, query, timeout, &[], false).await
+    discover(
+        host,
+        port,
+        query,
+        timeout,
+        &[],
+        false,
+        &TrustOptions::default(),
+    )
+    .await
 }
 
 /// HTTP and WebSocket schemes for discovery. `secure` preserves the
@@ -76,9 +89,15 @@ async fn discover(
     timeout: Duration,
     headers: &[(String, String)],
     secure: bool,
+    trust: &TrustOptions,
 ) -> Result<String, String> {
+    // Plain http:// and ws:// discovery never negotiates TLS, so an unusable
+    // trust store cannot fail it.
+    let default_trust = TrustOptions::default();
+    let trust = if secure { trust } else { &default_trust };
+
     // Primary: /json/version (standard path)
-    let version_err = match fetch_cdp_info(host, port, timeout, headers, secure).await {
+    let version_err = match fetch_cdp_info(host, port, timeout, headers, secure, trust).await {
         Ok(info) => {
             if let Some(ws_url) = info.web_socket_debugger_url {
                 return Ok(append_query(
@@ -95,7 +114,7 @@ async fn discover(
     };
 
     // Fallback: /json/list (returns target list; look for the browser target)
-    let list_err = match fetch_cdp_list(host, port, timeout, headers, secure).await {
+    let list_err = match fetch_cdp_list(host, port, timeout, headers, secure, trust).await {
         Ok(ws_url) => {
             return Ok(append_query(
                 &rewrite_ws_host(&ws_url, host, port, secure),
@@ -108,7 +127,7 @@ async fn discover(
     // Final fallback: direct WebSocket at /devtools/browser.
     // Chrome 136+ with UI-based remote debugging (chrome://inspect) exposes
     // CDP over WebSocket but does not serve HTTP discovery endpoints.
-    match discover_cdp_ws(host, port, timeout, headers, secure).await {
+    match discover_cdp_ws(host, port, timeout, headers, secure, trust).await {
         Ok(ws_url) => Ok(append_query(&ws_url, query)),
         Err(ws_err) => Err(format!(
             "All CDP discovery methods failed for {}:{}: /json/version: {}; /json/list: {}; WebSocket: {}",
@@ -133,6 +152,7 @@ async fn fetch_cdp_info(
     timeout: Duration,
     headers: &[(String, String)],
     secure: bool,
+    trust: &TrustOptions,
 ) -> Result<BrowserVersionInfo, String> {
     let (http_scheme, _) = discovery_schemes(secure);
     let url = format!(
@@ -142,7 +162,7 @@ async fn fetch_cdp_info(
         port
     );
 
-    let body = tokio::time::timeout(timeout, reqwest_get_string(&url, headers))
+    let body = tokio::time::timeout(timeout, reqwest_get_string(&url, headers, trust))
         .await
         .map_err(|_| format!("Timeout connecting to CDP at {}:{}", host, port))?
         .map_err(|e| format!("Failed to connect to CDP at {}:{}: {}", host, port, e))?;
@@ -200,6 +220,7 @@ async fn fetch_cdp_list(
     timeout: Duration,
     headers: &[(String, String)],
     secure: bool,
+    trust: &TrustOptions,
 ) -> Result<String, String> {
     let (http_scheme, _) = discovery_schemes(secure);
     let url = format!(
@@ -209,7 +230,7 @@ async fn fetch_cdp_list(
         port
     );
 
-    let body = tokio::time::timeout(timeout, reqwest_get_string(&url, headers))
+    let body = tokio::time::timeout(timeout, reqwest_get_string(&url, headers, trust))
         .await
         .map_err(|_| format!("Timeout connecting to /json/list at {}:{}", host, port))?
         .map_err(|e| {
@@ -245,6 +266,7 @@ async fn discover_cdp_ws(
     timeout: Duration,
     headers: &[(String, String)],
     secure: bool,
+    trust: &TrustOptions,
 ) -> Result<String, String> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
@@ -267,9 +289,15 @@ async fn discover_cdp_ws(
     }
 
     tokio::time::timeout(timeout, async {
-        let (mut ws_stream, _) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|e| format!("WebSocket connect failed at {}: {}", ws_url, e))?;
+        let connector = if secure {
+            crate::tls::websocket_connector(trust)?
+        } else {
+            None
+        };
+        let (mut ws_stream, _) =
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
+                .await
+                .map_err(|e| format!("WebSocket connect failed at {}: {}", ws_url, e))?;
 
         let cmd = r#"{"id":1,"method":"Browser.getVersion"}"#;
         ws_stream
@@ -304,8 +332,12 @@ async fn discover_cdp_ws(
     .map(|()| ws_url)
 }
 
-async fn reqwest_get_string(url: &str, headers: &[(String, String)]) -> Result<String, String> {
-    let mut builder = reqwest::Client::builder();
+async fn reqwest_get_string(
+    url: &str,
+    headers: &[(String, String)],
+    trust: &TrustOptions,
+) -> Result<String, String> {
+    let mut builder = crate::tls::apply_to_reqwest(reqwest::Client::builder(), trust)?;
     if !headers.is_empty() {
         // Custom auth headers would follow a redirect to any host; keep them on
         // the origin the user supplied.
@@ -369,9 +401,16 @@ mod tests {
         });
 
         let headers = vec![("Authorization".to_string(), "Bearer t".to_string())];
-        discover_cdp_url_with_headers("127.0.0.1", port, None, &headers, false)
-            .await
-            .unwrap();
+        discover_cdp_url_with_headers(
+            "127.0.0.1",
+            port,
+            None,
+            &headers,
+            false,
+            &TrustOptions::default(),
+        )
+        .await
+        .unwrap();
         let request = server.await.unwrap();
         assert!(request.starts_with("get /json/version"), "{request}");
         assert!(request.contains("authorization: bearer t"), "{request}");
@@ -410,7 +449,15 @@ mod tests {
         });
 
         let headers = vec![("X-API-Key".to_string(), "secret".to_string())];
-        let _ = discover_cdp_url_with_headers("127.0.0.1", port, None, &headers, false).await;
+        let _ = discover_cdp_url_with_headers(
+            "127.0.0.1",
+            port,
+            None,
+            &headers,
+            false,
+            &TrustOptions::default(),
+        )
+        .await;
         let request = other_server.await.unwrap();
         assert!(!request.contains("x-api-key"), "{request}");
     }
@@ -519,9 +566,16 @@ mod tests {
             "Authorization".to_string(),
             "Bearer secret-token".to_string(),
         )];
-        let err = discover_cdp_url_with_headers("127.0.0.1", port, None, &headers, true)
-            .await
-            .unwrap_err();
+        let err = discover_cdp_url_with_headers(
+            "127.0.0.1",
+            port,
+            None,
+            &headers,
+            true,
+            &TrustOptions::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("All CDP discovery methods failed"), "{err}");
         let captured = String::from_utf8_lossy(&server.await.unwrap()).to_string();
         assert!(!captured.contains("secret-token"), "{captured}");

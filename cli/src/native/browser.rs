@@ -16,6 +16,7 @@ use super::cdp::obscura::{
 use super::cdp::types::*;
 use super::element::{resolve_element_object_id, RefMap};
 use super::tab_binding;
+use crate::tls::TrustOptions;
 
 // ---------------------------------------------------------------------------
 // Launch validation
@@ -792,39 +793,45 @@ impl BrowserManager {
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, None).await
+        Self::connect_cdp_inner(url, false, None, &TrustOptions::default()).await
     }
 
-    /// Like [`Self::connect_cdp`], but first waits up to two seconds while the target
-    /// port refuses connections, so attaching right after a browser starts succeeds.
+    /// Like [`Self::connect_cdp_with_headers`], but first waits up to two seconds while
+    /// the target port refuses connections, so attaching right after a browser starts
+    /// succeeds.
     pub async fn connect_cdp_when_listening(
         url: &str,
         headers: Option<Vec<(String, String)>>,
+        trust: &TrustOptions,
     ) -> Result<Self, String> {
         wait_while_cdp_port_refuses(url, CDP_PORT_WAIT).await;
-        Self::connect_cdp_with_headers(url, headers).await
+        Self::connect_cdp_with_headers(url, headers, trust).await
     }
 
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
     /// Skips browser-level Target.* commands that most proxies don't support.
-    pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, true, None).await
+    pub async fn connect_cdp_direct(url: &str, trust: &TrustOptions) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, true, None, trust).await
     }
 
+    /// Connect to a CDP endpoint. `trust` selects the roots that verify an
+    /// `https://` or `wss://` endpoint; plain `http://` and `ws://` ignore it.
     pub async fn connect_cdp_with_headers(
         url: &str,
         headers: Option<Vec<(String, String)>>,
+        trust: &TrustOptions,
     ) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, headers).await
+        Self::connect_cdp_inner(url, false, headers, trust).await
     }
 
     async fn connect_cdp_inner(
         url: &str,
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
+        trust: &TrustOptions,
     ) -> Result<Self, String> {
-        let ws_url = resolve_cdp_url(url, headers.as_deref().unwrap_or_default()).await?;
-        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        let ws_url = resolve_cdp_url(url, headers.as_deref().unwrap_or_default(), trust).await?;
+        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers, trust).await?);
         let mut manager = Self {
             client,
             browser_process: None,
@@ -2961,7 +2968,11 @@ async fn wait_while_cdp_port_refuses(input: &str, window: Duration) {
     }
 }
 
-async fn resolve_cdp_url(input: &str, headers: &[(String, String)]) -> Result<String, String> {
+async fn resolve_cdp_url(
+    input: &str,
+    headers: &[(String, String)],
+    trust: &TrustOptions,
+) -> Result<String, String> {
     if input.starts_with("ws://") || input.starts_with("wss://") {
         return Ok(input.to_string());
     }
@@ -2989,12 +3000,13 @@ async fn resolve_cdp_url(input: &str, headers: &[(String, String)]) -> Result<St
         // Preserve the input's encryption: an https:// CDP URL must discover
         // over https/wss so CDP auth headers are never sent in plaintext.
         let secure = parsed.scheme() == "https";
-        return discover_cdp_url_with_headers(host, port, query.as_deref(), headers, secure).await;
+        return discover_cdp_url_with_headers(host, port, query.as_deref(), headers, secure, trust)
+            .await;
     }
 
     // Try as numeric port
     if let Ok(port) = input.parse::<u16>() {
-        return discover_cdp_url_with_headers("127.0.0.1", port, None, headers, false).await;
+        return discover_cdp_url_with_headers("127.0.0.1", port, None, headers, false, trust).await;
     }
 
     Err(format!(
@@ -3939,14 +3951,14 @@ mod tests {
         existing: bool,
     ) {
         let (url, server) = initialization_server(fail_method, existing, 2, false).await;
-        let error = BrowserManager::connect_cdp_inner(&url, direct, None)
+        let error = BrowserManager::connect_cdp_inner(&url, direct, None, &TrustOptions::default())
             .await
             .err()
             .expect("initialization should fail");
         assert!(error.contains("injected initialization failure"), "{error}");
         let mut manager = tokio::time::timeout(
             Duration::from_secs(4),
-            BrowserManager::connect_cdp_inner(&url, direct, None),
+            BrowserManager::connect_cdp_inner(&url, direct, None, &TrustOptions::default()),
         )
         .await
         .expect("retry should succeed after cleanup")

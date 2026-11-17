@@ -7,11 +7,11 @@
       },
       {
         "from": "# Trust a CA for locally launched Chromium on Linux",
-        "to": "# Trust a CA for CLI requests, and for local Chromium on Linux"
+        "to": "# Trust a CA for CLI requests and remote CDP, and for local Chromium on Linux"
       },
       {
         "from": "# Clear CA trust retained by the running session",
-        "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
+        "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests and remote CDP (read, install, connect)"
       },
       {
         "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"cookies\",\"set\",\"--curl\",\"cookies.curl\",\"--domain\",\"localhost\"]' \\\n  '[\"navigate\",\"http://localhost:3000/target\"]'",
@@ -243,7 +243,7 @@
       },
       {
         "from": "Trust a CA certificate or PEM bundle in a locally launched Chromium browser on Linux",
-        "to": "Trust a CA certificate or PEM bundle for the CLI's own HTTPS requests, and in a locally launched Chromium browser on Linux"
+        "to": "Trust a CA certificate or PEM bundle for the CLI's own HTTPS requests and remote CDP connections, and in a locally launched Chromium browser on Linux"
       },
       {
         "from": "Path to a CA certificate or PEM bundle for locally launched Chromium on Linux",
@@ -383,8 +383,8 @@
   },
   "resources": {
     "/schema.json": {
-      "size": 9813,
-      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
+      "size": 9893,
+      "sha256": "42e7862a5834f2a3037bb2c333777443426d1bd21e95cebe32dd911bd3699fc0"
     }
   }
 }

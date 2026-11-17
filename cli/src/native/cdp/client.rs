@@ -17,6 +17,8 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
 
+use crate::tls::TrustOptions;
+
 use super::types::{CdpCommand, CdpError, CdpEvent, CdpMessage};
 
 /// A command awaiting its response, with the session it was sent to so the
@@ -384,12 +386,16 @@ impl Drop for PendingGuard {
 
 impl CdpClient {
     pub async fn connect(url: &str) -> Result<Self, String> {
-        Self::connect_with_headers(url, None).await
+        Self::connect_with_headers(url, None, &TrustOptions::default()).await
     }
 
+    /// Connect with optional handshake headers. A `wss://` endpoint is
+    /// verified against the roots selected by `trust`, so a remote browser
+    /// reached through an HTTPS-intercepting proxy works with the proxy's CA.
     pub async fn connect_with_headers(
         url: &str,
         headers: Option<Vec<(String, String)>>,
+        trust: &TrustOptions,
     ) -> Result<Self, String> {
         let normalized_url = normalize_websocket_root_path(url);
         let mut request = normalized_url
@@ -415,7 +421,14 @@ impl CdpClient {
             ..Default::default()
         };
 
-        Self::connect_request(request, ws_config, None).await
+        // Only wss:// negotiates TLS. A local ws:// connection never builds a
+        // connector, so an unusable trust store cannot break it.
+        let connector = if request.uri().scheme_str() == Some("wss") {
+            crate::tls::websocket_connector(trust)?
+        } else {
+            None
+        };
+        Self::connect_request(request, ws_config, connector).await
     }
 
     async fn connect_request(

@@ -4693,10 +4693,11 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --ca-cert <path>           Trust a specific CA certificate for HTTPS interception proxies
-                             (or AGENT_BROWSER_CA_CERT; CLI requests everywhere, local Chromium on Linux;
-                             install --with-deps provides certutil)
+                             (or AGENT_BROWSER_CA_CERT; CLI requests and remote CDP everywhere,
+                             local Chromium on Linux; install --with-deps provides certutil)
   --no-ca-cert               Clear CA trust retained by the running browser session
-  --use-system-ca            Use the OS trust store for CLI requests (read, install, upgrade, doctor)
+  --use-system-ca            Use the OS trust store for CLI requests and remote CDP
+                             (read, install, upgrade, doctor, --cdp, connect, providers)
                              (or AGENT_BROWSER_USE_SYSTEM_CA)
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
   --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
