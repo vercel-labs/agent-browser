@@ -3,12 +3,16 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 const BUFFERED_EVENT_CAPACITY: usize = 65_536;
+/// The most event text one subscriber may hold unread, for other events and for page logs.
+/// Logs get the smaller share, so a page that floods the console cannot crowd out the events
+/// that keep session state current.
+const BUFFERED_EVENT_BYTES: [usize; 2] = [64 << 20, 8 << 20];
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -23,11 +27,43 @@ type WsSink = futures_util::stream::SplitSink<
     Message,
 >;
 
+struct Subscriber {
+    tx: mpsc::Sender<(Value, usize)>,
+    queued_bytes: Arc<[AtomicUsize; 2]>,
+}
+
+/** A subscriber's event queue. Reading an event frees its share of the queue's byte budget. */
+pub struct Events {
+    rx: mpsc::Receiver<(Value, usize)>,
+    queued_bytes: Arc<[AtomicUsize; 2]>,
+}
+
+impl Events {
+    /// Waits for the next event and returns `None` once the connection has closed.
+    pub async fn recv(&mut self) -> Option<Value> {
+        self.rx.recv().await.map(|queued| self.release(queued))
+    }
+
+    /// Takes the next event if one is queued.
+    pub fn try_recv(&mut self) -> Result<Value, mpsc::error::TryRecvError> {
+        self.rx.try_recv().map(|queued| self.release(queued))
+    }
+
+    fn release(&self, (event, size): (Value, usize)) -> Value {
+        self.queued_bytes[usize::from(is_log(&event))].fetch_sub(size, Ordering::Relaxed);
+        event
+    }
+}
+
+fn is_log(event: &Value) -> bool {
+    event["method"] == "log.entryAdded"
+}
+
 /** A connected BiDi session socket; the reader task stops when the client is dropped. */
 pub struct BidiClient {
     sink: tokio::sync::Mutex<WsSink>,
     pending: Pending,
-    buffered_events: Arc<Mutex<Vec<mpsc::Sender<Value>>>>,
+    buffered_events: Arc<Mutex<Vec<Subscriber>>>,
     pub(crate) lost_events: Arc<AtomicBool>,
     next_id: AtomicU64,
     pub(crate) reader: tokio::task::JoinHandle<()>,
@@ -52,7 +88,7 @@ impl BidiClient {
             .map_err(|e| format!("BiDi connect failed: {e}"))?;
         let (sink, mut stream) = ws.split();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let buffered_events = Arc::new(Mutex::new(Vec::<mpsc::Sender<Value>>::new()));
+        let buffered_events = Arc::new(Mutex::new(Vec::<Subscriber>::new()));
         let lost_events = Arc::new(AtomicBool::new(false));
         let (p, be, lost) = (
             pending.clone(),
@@ -67,16 +103,27 @@ impl BidiClient {
                 };
                 match v["type"].as_str() {
                     Some("event") => {
-                        be.lock()
-                            .unwrap()
-                            .retain(|tx| match tx.try_send(v.clone()) {
-                                Ok(()) => true,
-                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                    lost.store(true, Ordering::Relaxed);
-                                    true
-                                }
-                                Err(mpsc::error::TrySendError::Closed(_)) => false,
-                            });
+                        let size = text.len();
+                        let log = usize::from(is_log(&v));
+                        be.lock().unwrap().retain(|subscriber| {
+                            let queued = &subscriber.queued_bytes[log];
+                            let fits = queued.fetch_add(size, Ordering::Relaxed) + size
+                                <= BUFFERED_EVENT_BYTES[log];
+                            let sent = if fits {
+                                subscriber
+                                    .tx
+                                    .try_send((v.clone(), size))
+                                    .map_err(|e| matches!(e, mpsc::error::TrySendError::Closed(_)))
+                            } else {
+                                Err(subscriber.tx.is_closed())
+                            };
+                            let Err(closed) = sent else { return true };
+                            queued.fetch_sub(size, Ordering::Relaxed);
+                            if !closed && log == 0 {
+                                lost.store(true, Ordering::Relaxed);
+                            }
+                            !closed
+                        });
                     }
                     Some(kind @ ("success" | "error")) => {
                         let Some(tx) = v["id"]
@@ -110,18 +157,22 @@ impl BidiClient {
         })
     }
 
-    /// Whether a full queue dropped events since the last call. State that events keep current
-    /// has to be rebuilt after that.
+    /// Whether a full queue dropped events other than page logs since the last call. State that
+    /// events keep current has to be rebuilt after that.
     pub fn take_event_loss(&self) -> bool {
         self.lost_events.swap(false, Ordering::Relaxed)
     }
 
-    /// Queues events without blocking the reader. Events past the 65,536-item capacity are
-    /// dropped and reported by `take_event_loss`.
-    pub fn subscribe_buffered(&self) -> mpsc::Receiver<Value> {
+    /// Queues events without blocking the reader. Events past the 65,536-item capacity or the
+    /// byte budget are dropped.
+    pub fn subscribe_buffered(&self) -> Events {
         let (tx, rx) = mpsc::channel(BUFFERED_EVENT_CAPACITY);
-        self.buffered_events.lock().unwrap().push(tx);
-        rx
+        let queued_bytes = Arc::<[AtomicUsize; 2]>::default();
+        self.buffered_events.lock().unwrap().push(Subscriber {
+            tx,
+            queued_bytes: queued_bytes.clone(),
+        });
+        Events { rx, queued_bytes }
     }
 
     /// Sends a command with the default 30s timeout and returns its `result`.
@@ -383,6 +434,43 @@ mod tests {
         let r = c.send("a.b", json!({})).await.unwrap();
         assert_eq!(r, json!({}));
         assert_eq!(ev.recv().await.unwrap()["method"], "x.y");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_log_flood_is_dropped_without_losing_other_events() {
+        let (url, l) = mock().await;
+        let server = tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
+            let text = "x".repeat(3 << 20);
+            let log = json!({"type":"event","method":"log.entryAdded","params":{"text":text}});
+            for _ in 0..2 {
+                let m: Value =
+                    serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                        .unwrap();
+                for _ in 0..4 {
+                    ws.send(Message::Text(log.to_string())).await.unwrap();
+                }
+                for reply in [
+                    json!({"type":"event","method":"x.y","params":{}}),
+                    json!({"type":"success","id":m["id"],"result":{}}),
+                ] {
+                    ws.send(Message::Text(reply.to_string())).await.unwrap();
+                }
+            }
+        });
+        let c = BidiClient::connect(&url).await.unwrap();
+        let mut events = c.subscribe_buffered();
+        for _ in 0..2 {
+            c.send("a.b", json!({})).await.unwrap();
+            let mut methods = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                methods.push(event["method"].as_str().unwrap().to_string());
+            }
+            assert_eq!(methods, ["log.entryAdded", "log.entryAdded", "x.y"]);
+        }
+        assert!(!c.take_event_loss());
         server.await.unwrap();
     }
 

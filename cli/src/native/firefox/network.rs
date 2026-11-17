@@ -281,7 +281,7 @@ impl LegacyDownloadIds {
 pub fn spawn_dispatcher(
     bidi: Arc<BidiClient>,
     net: NetContext,
-    mut rx: tokio::sync::mpsc::Receiver<Value>,
+    mut rx: super::bidi::Events,
     emulation: Arc<std::sync::RwLock<super::emulation::Settings>>,
     permissions: Arc<Mutex<super::permissions::Grants>>,
 ) -> AbortOnDrop {
