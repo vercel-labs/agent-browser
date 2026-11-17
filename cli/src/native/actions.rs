@@ -5862,18 +5862,21 @@ fn adjust_ca_patch(state: &mut DaemonState, patch: &mut Patch) -> Result<(), Str
 }
 
 /// Writes `pin` into the session's tab binding, when one exists.
-fn persist_pin_tab(session_id: &str, pin: bool) -> Result<(), String> {
+/// Returns whether the binding on disk was changed.
+fn persist_pin_tab(session_id: &str, pin: bool) -> Result<bool, String> {
     match tab_binding::load(session_id) {
         Ok(Some(mut binding)) if binding.pinned != pin => {
             binding.pinned = pin;
-            tab_binding::save(session_id, &binding).map_err(|e| {
-                format!(
-                    "cannot persist the pin-tab setting: {} — the change was not applied",
-                    e
-                )
-            })
+            tab_binding::save(session_id, &binding)
+                .map(|()| true)
+                .map_err(|e| {
+                    format!(
+                        "cannot persist the pin-tab setting: {} — the change was not applied",
+                        e
+                    )
+                })
         }
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(false),
         Err(e) => Err(format!(
             "cannot read the session tab binding to update the pin state: {} — delete the \
              binding file to reset the session",
@@ -5935,17 +5938,15 @@ async fn apply_settings_patch(
     // The pin binding and the security settings are stored before anything is
     // applied, so a failed write leaves the session as it was and a stored
     // setting never lags the running one. The two writes are not atomic: when
-    // the second fails, the pin binding is put back.
-    let pin_persisted = changed(Key::PinTab);
-    if pin_persisted {
-        persist_pin_tab(&state.session_id, plan.next.pin_tab())?;
-    }
+    // the second fails, a pin binding this patch changed is put back.
+    let pin_written =
+        changed(Key::PinTab) && persist_pin_tab(&state.session_id, plan.next.pin_tab())?;
     let next_security = plan.next.security();
     if next_security != state.settings.security() {
         if let Err(e) = state.store.save(&next_security) {
             let mut message = e.to_string();
-            if pin_persisted {
-                if let Err(undo) = persist_pin_tab(&state.session_id, state.pin_tab) {
+            if pin_written {
+                if let Err(undo) = persist_pin_tab(&state.session_id, !plan.next.pin_tab()) {
                     message.push_str(&format!(
                         "; the pin-tab binding could not be restored: {}",
                         undo

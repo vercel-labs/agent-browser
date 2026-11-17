@@ -759,7 +759,7 @@ fn pin_tab_env(session: &str) -> (crate::test_utils::EnvGuard<'static>, tempfile
 }
 
 #[tokio::test]
-async fn test_pin_tab_command_field_enables_strict_binding() {
+async fn test_pin_tab_setting_enables_strict_binding() {
     let (_guard, _dir) = pin_tab_env("parity-pin-cmd");
     // pin-tab is a live setting, so a skip-launch action (no browser needed)
     // still applies it and this runs without Chrome.
