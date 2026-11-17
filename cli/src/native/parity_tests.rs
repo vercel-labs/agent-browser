@@ -728,6 +728,15 @@ async fn test_state_find_auto_returns_none_for_nonexistent() {
 // 5. Session-to-tab binding (--pin-tab) parity
 // ---------------------------------------------------------------------------
 
+/// A daemon start as `run_daemon` does it: boot settings from a store, then
+/// build the state, so the pin seeding under test is the production path.
+fn booted_state(session: &str) -> DaemonState {
+    use crate::session_settings::{MemStore, Running, Store};
+    let store: std::sync::Arc<dyn Store> = std::sync::Arc::new(MemStore::default());
+    let settings = Running::boot(store.as_ref(), session).unwrap();
+    DaemonState::with_store(settings, store)
+}
+
 /// Set up an isolated socket dir and session so `DaemonState::new` and the
 /// binding helpers cannot pick up a stray binding file from the real runtime
 /// directory. Returns the env guard and the tempdir; keep both alive for the
@@ -796,7 +805,7 @@ async fn test_daemon_state_new_reads_sticky_pinned_binding() {
         },
     )
     .unwrap();
-    let state = DaemonState::new();
+    let state = booted_state("parity-pin-sticky");
     assert!(
         state.pin_tab,
         "a persisted pinned binding should enable pin_tab"
@@ -840,7 +849,7 @@ async fn test_pin_tab_false_disables_persisted_pin_across_restart() {
     // Fresh daemon restores the sticky pin; an explicit pin-tab false must
     // disable it and rewrite the persisted record even with no browser
     // attached, so the disable survives another restart.
-    let mut state = DaemonState::new();
+    let mut state = booted_state("parity-pin-disable-sticky");
     assert!(state.pin_tab, "sticky pin should be restored");
     let cmd = json!({ "action": "state_list", "id": "pin-off", "settings": { "pin-tab": false } });
     let result = execute_command(&cmd, &mut state).await;
@@ -854,7 +863,7 @@ async fn test_pin_tab_false_disables_persisted_pin_across_restart() {
         !binding.pinned,
         "the persisted binding must record pinned=false"
     );
-    let state = DaemonState::new();
+    let state = booted_state("parity-pin-disable-sticky");
     assert!(!state.pin_tab, "the disable must survive a daemon restart");
 }
 
@@ -1014,7 +1023,7 @@ async fn test_pin_tab_row_follows_the_persisted_binding_in_new_daemon() {
     use super::tab_binding::save;
     let (_guard, _dir) = pin_tab_env("parity-pin-row");
     save("parity-pin-row", &pin_binding(true)).unwrap();
-    let state = DaemonState::new();
+    let state = booted_state("parity-pin-row");
     assert!(state.settings.pin_tab(), "the row must carry the disk pin");
 }
 
@@ -1023,11 +1032,49 @@ async fn test_close_leaves_the_live_pin_to_the_binding_release() {
     use super::tab_binding::{load, save};
     let (_guard, _dir) = pin_tab_env("parity-pin-close");
     save("parity-pin-close", &pin_binding(true)).unwrap();
-    let mut state = DaemonState::new();
+    let mut state = booted_state("parity-pin-close");
     let resp = execute_command(&json!({ "action": "close", "id": "c" }), &mut state).await;
     assert_eq!(resp["success"], true);
     assert!(
         !load("parity-pin-close").unwrap().unwrap().pinned,
         "close releases the pin on disk"
     );
+}
+
+/// `close --no-pin-tab` carries no pin change: the daemon exits and the close
+/// releases the binding unpinned, whatever the flag says.
+#[tokio::test]
+async fn test_close_with_no_pin_tab_still_releases_the_binding_unpinned() {
+    use super::tab_binding::{load, save};
+    let (_guard, _dir) = pin_tab_env("parity-pin-close-off");
+    save("parity-pin-close-off", &pin_binding(true)).unwrap();
+    let mut state = booted_state("parity-pin-close-off");
+    let cmd = json!({ "action": "close", "id": "c", "settings": { "pin-tab": false } });
+    let resp = execute_command(&cmd, &mut state).await;
+    assert_eq!(resp["success"], true);
+    assert!(!load("parity-pin-close-off").unwrap().unwrap().pinned);
+}
+
+/// The policy gate runs after the patch is applied, so a denied command still
+/// changes the pin, as every live setting does.
+#[tokio::test]
+async fn test_pin_tab_applies_on_a_denied_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy = dir.path().join("p.json");
+    std::fs::write(&policy, r#"{"default":"allow","deny":["read"]}"#).unwrap();
+    let (_guard, _dir) = pin_tab_env("parity-pin-denied");
+    let mut state = DaemonState::new();
+
+    let denied = execute_command(
+        &json!({
+            "id": "denied",
+            "action": "read",
+            "url": "http://127.0.0.1:9/",
+            "settings": { "pin-tab": true, "action-policy": policy.to_str().unwrap() }
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(denied["success"], false, "{denied}");
+    assert!(state.pin_tab);
 }
