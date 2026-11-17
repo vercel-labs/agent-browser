@@ -3344,6 +3344,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .as_ref()
         .map(|patch| state.settings.plan(patch))
         .filter(|plan| plan.relaunch);
+    if let Some(plan) = launch_plan.as_ref() {
+        if let Err(e) = validate_firefox_relaunch(&plan.next, &plugins_from_command_or_env(cmd)) {
+            let mut resp = error_response(&id, &e);
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            return resp;
+        }
+    }
 
     let skip_launch = skip_launch_action(action);
     let restore_key_change_needs_launch = !skip_launch
@@ -5787,14 +5794,35 @@ async fn handle_launch_for_target(
     result
 }
 
-/// Launches owned Firefox with the session's resolved settings.
-async fn launch_firefox(
-    state: &mut DaemonState,
-    options: LaunchOptions,
+/// Rejects a relaunch into Firefox whose settings it cannot launch with. It runs on the planned
+/// settings before the relaunch closes the running browser, so a rejected option leaves it alone.
+fn validate_firefox_relaunch(
+    next: &Running,
     plugins: &[crate::plugins::PluginConfig],
-    strict_state: bool,
-) -> Result<Value, String> {
-    let connection = state.settings.connection();
+) -> Result<(), String> {
+    if next.engine().as_deref() != Some("firefox") {
+        return Ok(());
+    }
+    let mut options = next.launch_options();
+    options.ca_cert = next
+        .get(Key::CaCert)
+        .and_then(Value::as_str)
+        .map(String::from);
+    let allowed_domains = next
+        .security()
+        .allowed_domains
+        .is_some_and(|domains| !domains.is_empty());
+    validate_firefox_launch(next, &options, plugins, allowed_domains)
+}
+
+/// Rejects the settings owned Firefox cannot launch with.
+fn validate_firefox_launch(
+    settings: &Running,
+    options: &LaunchOptions,
+    plugins: &[crate::plugins::PluginConfig],
+    allowed_domains: bool,
+) -> Result<(), String> {
+    let connection = settings.connection();
     let cdp = match &connection {
         Connection::Cdp(cdp) => Some(cdp.clone()),
         _ => None,
@@ -5803,22 +5831,32 @@ async fn launch_firefox(
         Connection::Provider(provider) => Some(provider.clone()),
         _ => None,
     };
-    let enable_features = state.settings.enable_features();
-    let init_scripts = state.settings.init_scripts();
-    let allowed_domains = !current_allowed_domains(state).await.is_empty();
+    let enable_features = settings.enable_features();
+    let init_scripts = settings.init_scripts();
     firefox::process::validate_launch(
-        &options,
+        options,
         firefox::process::LaunchFlags {
             cdp: cdp.as_deref(),
             auto_connect: matches!(connection, Connection::AutoConnect),
             provider: provider.as_deref(),
             allowed_domains,
-            capture_flow: state.settings.captures_flow(),
+            capture_flow: settings.captures_flow(),
             enable_features: &enable_features,
             init_scripts: &init_scripts,
             plugins,
         },
-    )?;
+    )
+}
+
+/// Launches owned Firefox with the session's resolved settings.
+async fn launch_firefox(
+    state: &mut DaemonState,
+    options: LaunchOptions,
+    plugins: &[crate::plugins::PluginConfig],
+    strict_state: bool,
+) -> Result<Value, String> {
+    let allowed_domains = !current_allowed_domains(state).await.is_empty();
+    validate_firefox_launch(&state.settings, &options, plugins, allowed_domains)?;
     let storage_state = options.storage_state.clone();
     state.ref_map.invalidate_all_documents();
     state.reset_input_state();
@@ -6347,6 +6385,10 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .or_else(|| state.settings.engine());
     let patch = launch_envelope_patch(cmd, engine.as_deref());
     check_capture_setting(&patch)?;
+    validate_firefox_relaunch(
+        &state.settings.plan(&patch).next,
+        &plugins_from_command_or_env(cmd),
+    )?;
     let had_browser_before_launch = has_active_browser_session(state);
 
     let mut outcome = apply_settings_patch(state, &patch, true).await?;
@@ -24887,7 +24929,7 @@ mod firefox_routing_tests {
     #[tokio::test]
     async fn implicit_launch_rejects_cdp_settings_before_launching() {
         let _guard = clean_env();
-        let mut state = DaemonState::new();
+        let (mut state, _calls) = firefox_state().await;
         let resp = execute_command(
             &json!({"id":"1","action":"navigate","url":"https://a.test","settings":{"engine":"firefox","cdp":"ws://127.0.0.1:9222"}}),
             &mut state,
@@ -24899,7 +24941,7 @@ mod firefox_routing_tests {
             error.contains("--cdp is not supported with --engine firefox"),
             "{error}"
         );
-        assert!(state.firefox.is_none());
+        assert!(state.firefox.is_some());
     }
 
     #[tokio::test]
