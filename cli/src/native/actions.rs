@@ -5817,11 +5817,7 @@ fn validate_firefox_relaunch(
         .get(Key::CaCert)
         .and_then(Value::as_str)
         .map(String::from);
-    let allowed_domains = next
-        .security()
-        .allowed_domains
-        .is_some_and(|domains| !domains.is_empty());
-    validate_firefox_launch(next, &options, plugins, allowed_domains)
+    validate_firefox_launch(next, &options, plugins)
 }
 
 /// Rejects the settings owned Firefox cannot launch with.
@@ -5829,7 +5825,6 @@ fn validate_firefox_launch(
     settings: &Running,
     options: &LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
-    allowed_domains: bool,
 ) -> Result<(), String> {
     let connection = settings.connection();
     let cdp = match &connection {
@@ -5848,7 +5843,6 @@ fn validate_firefox_launch(
             cdp: cdp.as_deref(),
             auto_connect: matches!(connection, Connection::AutoConnect),
             provider: provider.as_deref(),
-            allowed_domains,
             capture_flow: settings.captures_flow(),
             enable_features: &enable_features,
             init_scripts: &init_scripts,
@@ -5860,12 +5854,25 @@ fn validate_firefox_launch(
 /// Launches owned Firefox with the session's resolved settings.
 async fn launch_firefox(
     state: &mut DaemonState,
-    options: LaunchOptions,
+    mut options: LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
     strict_state: bool,
 ) -> Result<Value, String> {
-    let allowed_domains = !current_allowed_domains(state).await.is_empty();
-    validate_firefox_launch(&state.settings, &options, plugins, allowed_domains)?;
+    validate_firefox_launch(&state.settings, &options, plugins)?;
+    let allowed_domains = current_allowed_domains(state).await;
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        allowed_domains: &allowed_domains,
+        cdp_url: None,
+        cdp_port: None,
+        auto_connect: false,
+        profile: None,
+        provider_name: None,
+        args: &[],
+        restore_key: state.session_name.as_deref(),
+        storage_state: options.storage_state.as_deref(),
+    })?;
+    options.restrict_webrtc = !allowed_domains.is_empty();
+    store_proxy_credentials(state, &options, true).await;
     let storage_state = options.storage_state.clone();
     state.ref_map.invalidate_all_documents();
     state.reset_input_state();
