@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::Notify;
 
 use super::attach::AttachTarget;
-use super::client::{remote_to_json, unserializable, BidiClient, SANDBOX};
+use super::client::{remote_to_json, unserializable, BidiClient, Events, SANDBOX};
 use super::contexts::{Contexts, Removed};
 use super::emulation::{self, Settings as EmulationSettings};
 use super::firefox::{
@@ -66,7 +66,7 @@ pub struct FirefoxSession {
     /// emulation overrides after `session.end`, so close puts them back.
     attached_download_path: Option<String>,
     pub(super) data_collector: Option<String>,
-    events: mpsc::Receiver<Value>,
+    events: Events,
     pub net: NetContext,
     /// True once the single global network intercept is installed; it is never installed twice.
     pub intercepting: bool,
@@ -315,7 +315,7 @@ impl FirefoxSession {
         options: &LaunchOptions,
         net: NetContext,
         auto_dialog: bool,
-        events: mpsc::Receiver<Value>,
+        events: Events,
         created: Value,
     ) -> Result<Self, String> {
         let attached = process.is_none();
@@ -1180,11 +1180,7 @@ pub(crate) mod tests {
         (url, tx, calls, messages)
     }
 
-    fn test_session(
-        bidi: Arc<BidiClient>,
-        rdp: RdpClient,
-        events: mpsc::Receiver<Value>,
-    ) -> FirefoxSession {
+    fn test_session(bidi: Arc<BidiClient>, rdp: RdpClient, events: Events) -> FirefoxSession {
         FirefoxSession {
             process: None,
             headless: false,

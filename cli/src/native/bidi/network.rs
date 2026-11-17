@@ -281,7 +281,7 @@ impl LegacyDownloadIds {
 pub fn spawn_dispatcher(
     bidi: Arc<BidiClient>,
     net: NetContext,
-    mut rx: tokio::sync::mpsc::Receiver<Value>,
+    mut rx: super::client::Events,
     emulation: Arc<std::sync::RwLock<super::emulation::Settings>>,
     permissions: Arc<Mutex<super::permissions::Grants>>,
 ) -> AbortOnDrop {
@@ -1111,11 +1111,10 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     if clicked.is_none() {
         return Ok(json!({ "clicked": selector, "dialogOpened": true }));
     }
-    let contexts = [target.context.as_str(), ff.contexts.active_tab()];
     let record = wait_download(
         &downloads,
         cursor,
-        &contexts,
+        &[target.context.as_str()],
         DOWNLOAD_TIMEOUT_MS,
         "Timeout waiting for download to complete",
     )
