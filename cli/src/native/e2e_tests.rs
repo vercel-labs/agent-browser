@@ -16043,7 +16043,7 @@ fn firefox_serve(
                     .unwrap()
                     .push(format!("{port}{path}#authorization"));
             }
-            if path == "/har-post" {
+            if matches!(path.as_str(), "/har-post" | "/slow.txt") {
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             }
             if path == "/stall" {
@@ -19654,6 +19654,38 @@ async fn e2e_firefox_download() {
     .await;
     assert_success(&resp);
     assert_eq!(std::fs::read_to_string(&inline_dest).unwrap(), "real");
+    firefox_close(&mut state).await;
+}
+
+/// A download started from a frame saves that frame's file, not one the embedding page finishes first.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_frame_download_ignores_the_embedding_page() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let out = tempfile::tempdir().unwrap();
+    let dest = out.path().join("frame.txt");
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    let link = firefox_ref(&mut state, "Frame download").await;
+    firefox_eval(
+        &mut state,
+        "for (const ms of [100, 200, 300]) setTimeout(() => document.querySelector('#dl').click(), ms); 0",
+    )
+    .await;
+
+    let resp = firefox_act(
+        &mut state,
+        "download",
+        &link,
+        json!({ "path": dest.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "ok");
     firefox_close(&mut state).await;
 }
 
