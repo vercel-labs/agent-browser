@@ -21,12 +21,15 @@
   /* Flat chrome: strip, tabs and toolbar are one color. The strip draws a
      hairline along its foot; the active tab is outlined on three sides and
      covers that hairline, so it joins the toolbar as a real tab does. The
-     outline is inset shadows, as the strip's hairline is, never a border:
-     Chrome rounds a border's width (here up to 1px against a ~0.67px
-     hairline), so the sides would read heavier or lighter than the strip's
-     line and step where they meet it. The shadows sit on an overlay that runs
-     past the tab's foot, clipped there by the tab: inset shadows on the tab's
-     own box leave a sliver along its foot on the camera's fractional scale.
+     outline is one inset ring (a spread shadow), as the strip's hairline is a
+     shadow, never a border: Chrome rounds a border's width (here up to 1px
+     against a ~0.67px hairline), so the sides would read heavier or lighter
+     than the strip's line and step where they meet it. One ring, not a shadow
+     per side: the line is translucent, and per-side shadows overlap around
+     the rounded corners and darken them. The ring sits on an overlay that runs
+     past the tab's foot, so its bottom edge falls below the tab's clip: inset
+     shadows on the tab's own box leave a sliver along its foot on the camera's
+     fractional scale.
      A hairline of chrome under the tab covers the strip's hairline where the
      tab's foot only partly covers a device pixel. The strip stacks above the
      toolbar: painted after it, the toolbar's edge would cover part of the
@@ -34,7 +37,7 @@
   & .ab-browser .ss-window__tabs { position: relative; z-index: 1; box-shadow: inset 0 calc(-1 * var(--ss-hairline, 1px)) 0 var(--ss-line); }
   & .ab-browser .ss-window__tab { background: transparent; }
   & .ab-browser .ss-window__tab[data-active] { background: var(--ss-chrome); box-shadow: 0 var(--ss-hairline, 1px) 0 var(--ss-chrome); }
-  & .ab-browser .ss-window__tab[data-active]::before { content: ""; position: absolute; inset: 0 0 calc(-2 * var(--ss-hairline, 1px)); border-radius: inherit; box-shadow: inset var(--ss-hairline, 1px) 0 0 var(--ss-line), inset calc(-1 * var(--ss-hairline, 1px)) 0 0 var(--ss-line), inset 0 var(--ss-hairline, 1px) 0 var(--ss-line); pointer-events: none; }
+  & .ab-browser .ss-window__tab[data-active]::before { content: ""; position: absolute; inset: 0 0 calc(-2 * var(--ss-hairline, 1px)); border-radius: inherit; box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ss-line); pointer-events: none; }
   & .ab-browser > .ss-window__bar { border-bottom-width: var(--ss-hairline, 1px); }
   /* The address pill: a white control with a hairline, the host in it */
   & .ab-browser .ss-window__url { background: var(--ds-background-100, #fff); box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ss-line); }
