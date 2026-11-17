@@ -8738,6 +8738,26 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     result
 }
 
+/// Chrome's Browser.setDownloadBehavior rejects verbatim (`\\?\`) paths on
+/// Windows and silently cancels every download afterwards, so hand CDP a
+/// plain path (upstream #1659).
+#[cfg(windows)]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy().into_owned();
+    if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
+        return PathBuf::from(format!("\\\\{}", rest));
+    }
+    if let Some(rest) = s.strip_prefix("\\\\?\\") {
+        return PathBuf::from(rest);
+    }
+    p
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    p
+}
+
 async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = cmd
         .get("selector")
@@ -8771,6 +8791,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let download_dir = download_dir
         .canonicalize()
         .map_err(|e| format!("Failed to resolve download directory: {}", e))?;
+    let download_dir = strip_verbatim_prefix(download_dir);
     let dest = download_dir.join(
         raw_dest
             .file_name()
@@ -24310,5 +24331,35 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
         assert!(elsewhere.domain_filter.read().await.is_none());
         assert!(sibling.domain_filter.read().await.is_none());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod download_path_tests {
+    use super::strip_verbatim_prefix;
+    use std::path::PathBuf;
+
+    #[test]
+    fn strips_verbatim_drive_prefix() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\me\dl")),
+            PathBuf::from(r"C:\Users\me\dl")
+        );
+    }
+
+    #[test]
+    fn strips_verbatim_unc_prefix() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\dl")),
+            PathBuf::from(r"\\server\share\dl")
+        );
+    }
+
+    #[test]
+    fn leaves_plain_path_untouched() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"C:\Users\me\dl")),
+            PathBuf::from(r"C:\Users\me\dl")
+        );
     }
 }
