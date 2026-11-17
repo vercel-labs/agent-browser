@@ -1507,7 +1507,7 @@ impl BrowserManager {
                 match rx.recv().await {
                     Ok(event) => {
                         if event.method == event_name
-                            && event.session_id.as_deref() == Some(session_id)
+                            && session_matches(Some(session_id), event.session_id.as_deref())
                         {
                             return Ok(());
                         }
@@ -2629,6 +2629,9 @@ impl BrowserManager {
     }
 }
 
+/// How long the network must be quiet to count as idle.
+pub const NETWORK_IDLE_MS: u64 = 500;
+
 /// Core network-idle polling loop, extracted so it can be unit-tested without a
 /// full `BrowserManager` / CDP connection.
 ///
@@ -2649,7 +2652,7 @@ async fn poll_network_idle(
                 tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
 
             match recv_result {
-                Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
+                Ok(Ok(event)) if session_matches(Some(session_id), event.session_id.as_deref()) => {
                     let mut p = pending.lock().await;
                     match event.method.as_str() {
                         "Network.requestWillBeSent" => {
@@ -2691,7 +2694,7 @@ async fn poll_network_idle(
             }
 
             if let Some(start) = idle_start {
-                if start.elapsed() >= tokio::time::Duration::from_millis(500) {
+                if start.elapsed() >= tokio::time::Duration::from_millis(NETWORK_IDLE_MS) {
                     return;
                 }
             }

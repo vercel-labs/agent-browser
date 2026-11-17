@@ -199,6 +199,8 @@ export function DocsChat({
       launcher.style.setProperty("--chat-launcher-bottom", `${24 + overlap}px`);
     };
     const schedule = () => {
+      // `frame` is local to this effect, not render state; oxlint's react/immutability misreads it.
+      // oxlint-disable-next-line react/immutability
       if (!frame) frame = requestAnimationFrame(update);
     };
     const resize = new ResizeObserver(schedule);
@@ -490,11 +492,7 @@ export function DocsChat({
         <textarea
           ref={inputRef}
           value={input}
-          onChange={(e) => {
-            setInput(e.target.value);
-            e.target.style.height = "auto";
-            e.target.style.height = `${e.target.scrollHeight}px`;
-          }}
+          onChange={(e) => setInput(e.target.value)}
           rows={1}
           enterKeyHint="send"
           placeholder="Ask a question..."
@@ -502,10 +500,14 @@ export function DocsChat({
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
+              // Ignore Enter that confirms an IME composition (e.g. Japanese, Chinese, Korean).
+              if (e.nativeEvent.isComposing || e.keyCode === 229) {
+                return;
+              }
               handleSubmit(e);
             }
           }}
-          className="flex-1 min-w-0 bg-transparent text-base sm:text-sm text-foreground outline-none focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring disabled:opacity-50 resize-none max-h-32 leading-relaxed placeholder:text-muted-foreground"
+          className="flex-1 min-w-0 bg-transparent text-base sm:text-sm text-foreground outline-none focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring disabled:opacity-50 field-sizing-content resize-none max-h-32 leading-relaxed placeholder:text-muted-foreground"
         />
         <Button
           typeName="submit"

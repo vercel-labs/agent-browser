@@ -5,8 +5,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import { parse } from "@babel/parser";
 import { createProcessor } from "@mdx-js/mdx";
-import ts from "typescript";
+import { transformSync } from "esbuild";
 
 const commit = "efee3893d9080fcacb1aa6c9a21d13fbc6021f20";
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -25,13 +26,12 @@ function original(path) {
 const modules = new Map();
 function evaluate(raw, filename, imports = {}) {
   const evaluated = { exports: {} };
-  const js = ts.transpileModule(raw, {
-    fileName: filename,
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2022,
-    },
-  }).outputText;
+  const js = transformSync(raw, {
+    sourcefile: filename,
+    loader: filename.endsWith(".tsx") ? "tsx" : "ts",
+    format: "cjs",
+    target: "es2022",
+  }).code;
   runInNewContext(
     js,
     {
@@ -59,21 +59,28 @@ function load(path) {
   return modules.get(path);
 }
 function initializer(raw, name, filename) {
-  const file = ts.createSourceFile(
-    filename,
-    raw,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TSX,
-  );
+  const file = parse(raw, {
+    sourceType: "module",
+    sourceFilename: filename,
+    plugins: ["typescript", "jsx"],
+  });
   let result;
   function visit(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(file) === name) {
-      result = node.initializer.getText(file);
+    if (Array.isArray(node)) return node.forEach(visit);
+    if (!node || typeof node.type !== "string") return;
+    if (
+      node.type === "VariableDeclarator" &&
+      node.id.type === "Identifier" &&
+      node.id.name === name
+    ) {
+      result = raw.slice(node.init.start, node.init.end);
     }
-    ts.forEachChild(node, visit);
+    for (const [key, value] of Object.entries(node)) {
+      if (!["loc", "leadingComments", "trailingComments"].includes(key))
+        if (value && typeof value === "object") visit(value);
+    }
   }
-  visit(file);
+  visit(file.program);
   assert.ok(result, `${filename}: ${name}`);
   return result;
 }
