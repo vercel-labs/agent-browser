@@ -14447,7 +14447,17 @@ async fn e2e_click_ref_on_iframe_nested_in_frame_stays_in_frame() {
     );
 
     let click = execute_command(&json!({"action": "click", "selector": outer}), &mut state).await;
-    assert_success(&click);
+    assert_eq!(
+        click["success"], false,
+        "a ref whose press point falls into a frame it does not own must be refused: {click}"
+    );
+    assert!(
+        click["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not embed"),
+        "unexpected error for a foreign nested frame: {click}"
+    );
     let clicks = execute_command(
         &json!({"action": "evaluate", "script": "JSON.stringify(window.frameClicks)"}),
         &mut state,
@@ -14456,12 +14466,205 @@ async fn e2e_click_ref_on_iframe_nested_in_frame_stays_in_frame() {
     assert_success(&clicks);
     assert_eq!(
         get_data(&clicks)["result"],
-        json!("{\"outer\":0,\"inner\":2,\"deep\":1}"),
-        "the press must land inside the frame nested in the ref's frame: {click}"
+        json!("{\"outer\":0,\"inner\":1,\"deep\":1}"),
+        "a refused press must not reach any frame: {click}"
     );
 
     assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
     server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_ref_refuses_a_frame_covering_the_pressed_point() {
+    let victim_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let victim_port = victim_listener.local_addr().unwrap().port();
+    let victim_clicks = Arc::new(AtomicUsize::new(0));
+    let victim_hits = victim_clicks.clone();
+    let victim_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = victim_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&request[..read]);
+            let response = if request_line.starts_with("POST /victim-clicked") {
+                victim_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else {
+                let body = r#"<!doctype html><html lang="en"><head><title>Statements</title>
+</head><body><button id="pay" style="position:absolute;inset:0;width:100%;height:100%" onclick="navigator.sendBeacon('/victim-clicked')">Pay invoice</button></body></html>"#;
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let page_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let page_port = page_listener.local_addr().unwrap().port();
+    let page_url = format!("http://127.0.0.1:{page_port}/");
+    let link_clicks = Arc::new(AtomicUsize::new(0));
+    let plain_clicks = Arc::new(AtomicUsize::new(0));
+    let link_hits = link_clicks.clone();
+    let plain_hits = plain_clicks.clone();
+    let page_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = page_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&request[..read]);
+            let response = if request_line.starts_with("POST /link-clicked") {
+                link_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else if request_line.starts_with("POST /plain-clicked") {
+                plain_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else {
+                let body = if request_line.starts_with("GET /frame ") {
+                    format!(
+                        r##"<!doctype html><html lang="en"><head><title>Frame</title>
+<style>body {{ margin: 0; font: 20px/200px sans-serif }}
+#victim {{ position: absolute; border: 0; left: -9999px; top: -9999px; width: 120px; height: 60px }}
+</style></head><body>
+<div style="position: absolute; left: 20px; top: 0; width: 200px">
+<a id="link" aria-label="Approve payment" href="#" onclick="navigator.sendBeacon('/link-clicked'); return false">Approve the payment authorization for this</a>
+</div>
+<div style="position: absolute; left: 20px; top: 400px; width: 200px">
+<a id="plain" aria-label="Plain link" href="#" onclick="navigator.sendBeacon('/plain-clicked'); return false">Plain link</a>
+</div>
+<iframe id="victim" title="Statements" src="http://127.0.0.1:{victim_port}/"></iframe>
+<script>
+  const link = document.getElementById('link');
+  const widest = [...link.getClientRects()].reduce((a, b) => (a.width * a.height >= b.width * b.height ? a : b));
+  const victim = document.getElementById('victim');
+  victim.style.left = (widest.left + widest.width / 2 - 60) + 'px';
+  victim.style.top = (widest.top + widest.height / 2 - 30) + 'px';
+</script>
+</body></html>"##
+                    )
+                } else {
+                    r#"<!doctype html><html lang="en"><head><title>Attacker</title>
+<style>body { margin: 0 }
+#frame { position: absolute; left: 0; top: 0; width: 600px; height: 240px; border: 0 }
+#covered { position: absolute; left: 20px; top: 320px }
+#cover { position: absolute; left: 0; top: 300px; width: 240px; height: 70px; z-index: 5; background: rgba(0,0,0,0.05) }
+</style></head><body>
+<iframe id="frame" title="Attacker frame" src="/frame"></iframe>
+<button id="covered">Covered action</button>
+<div id="cover"></div>
+</body></html>"#
+                        .to_string()
+                };
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({"action": "launch", "headless": true}), &mut state).await,
+    );
+    assert_success(
+        &execute_command(&json!({"action": "navigate", "url": page_url}), &mut state).await,
+    );
+    let snapshot = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let reference = |name: &str| {
+        get_data(&snapshot)["refs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, entry)| entry["name"] == name)
+            .map(|(reference, _)| reference.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "ref '{}' must be in the snapshot: {}",
+                    name,
+                    serde_json::to_string(&get_data(&snapshot)["refs"]).unwrap_or_default()
+                )
+            })
+    };
+
+    let click = execute_command(
+        &json!({"action": "click", "selector": format!("@{}", reference("Approve payment"))}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        click["success"], false,
+        "a frame covering the pressed point must refuse the click: {click}"
+    );
+    assert!(
+        click["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not embed"),
+        "unexpected error for a frame covering the pressed point: {click}"
+    );
+
+    let click = execute_command(
+        &json!({"action": "click", "selector": format!("@{}", reference("Covered action"))}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        click["success"], false,
+        "a covered ref must be refused: {click}"
+    );
+    assert!(
+        click["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("covered by <div#cover>"),
+        "unexpected covered-ref error: {click}"
+    );
+
+    let click = execute_command(
+        &json!({"action": "click", "selector": format!("@{}", reference("Plain link"))}),
+        &mut state,
+    )
+    .await;
+    assert_success(&click);
+
+    for _ in 0..50 {
+        if link_clicks.load(Ordering::SeqCst) == 0
+            && plain_clicks.load(Ordering::SeqCst) == 1
+            && victim_clicks.load(Ordering::SeqCst) == 0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        victim_clicks.load(Ordering::SeqCst),
+        0,
+        "a refused ref click must never reach the framed victim control"
+    );
+    assert_eq!(
+        link_clicks.load(Ordering::SeqCst),
+        0,
+        "the covered multiline link must not be activated"
+    );
+    assert_eq!(
+        plain_clicks.load(Ordering::SeqCst),
+        1,
+        "a link ref with nothing over its press point must still be clicked"
+    );
+
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+    page_server.abort();
+    victim_server.abort();
 }
 
 #[tokio::test]

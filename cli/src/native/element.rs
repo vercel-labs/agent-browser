@@ -629,10 +629,8 @@ async fn node_click_point(
             const doc = this.ownerDocument || document;
             const clickPoint = {CLICK_POINT_JS};
             const point = await clickPoint(this, doc);
-            const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            const topDoc = (point.view && point.view.document) || doc;
-            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
+            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView) }};
         }}"#,
     );
     let result = client
@@ -659,12 +657,6 @@ async fn node_click_point(
         if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
             return Err(not_actionable_error(target, reason));
         }
-    }
-    if let Some(blocker) = value
-        .and_then(|v| v.get("blocker"))
-        .and_then(|v| v.as_str())
-    {
-        return Err(intercepted_error(target, blocker));
     }
     match (
         value.and_then(|v| v.get("x")).and_then(|v| v.as_f64()),
@@ -1181,7 +1173,7 @@ async fn resolve_by_selector(
     }
 }
 
-fn intercepted_error(target: &str, blocker: &str) -> String {
+pub(super) fn intercepted_error(target: &str, blocker: &str) -> String {
     format!(
         "Element '{}' is covered by <{}> at its click point, so the input would land on that element instead. Dismiss or interact with the covering element first (it is often a dialog, banner, or sticky header).",
         target, blocker
