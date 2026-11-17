@@ -3920,6 +3920,7 @@ mod tests {
             cli_no_webmcp: false,
             cli_auto_connect: false,
             cli_cdp: false,
+            cli_cdp_headers: false,
             cli_provider: false,
             no_auto_connect: false,
             cli_restore: false,

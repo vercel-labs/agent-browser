@@ -42,7 +42,8 @@ const RELAUNCH_FIELD: &str = "relaunch";
 const AMBIENT_FIELD: &str = "ambient";
 
 /// The settings an environment or config value can make ambient.
-pub(super) const AMBIENT_KEYS: [Key; 3] = [Key::Cdp, Key::AutoConnect, Key::Provider];
+pub(super) const AMBIENT_KEYS: [Key; 4] =
+    [Key::Cdp, Key::AutoConnect, Key::Provider, Key::CdpHeaders];
 
 /// The connection targets of one invocation after the environment and config
 /// defaults are resolved against the command line.
@@ -127,6 +128,16 @@ impl Patch {
             let (kept, explicit) = match key {
                 Key::Cdp => (targets.cdp.is_some(), flags.cli_cdp),
                 Key::Provider => (targets.provider.is_some(), flags.cli_provider),
+                // Headers belong to an endpoint: the plan decides whether
+                // this invocation sends one.
+                Key::CdpHeaders => (
+                    flags.cli_cdp_headers
+                        || flags
+                            .cdp_headers
+                            .as_deref()
+                            .is_some_and(|v| !v.trim().is_empty()),
+                    flags.cli_cdp_headers,
+                ),
                 _ => (
                     targets.auto_connect || flags.no_auto_connect || flags.cli_auto_connect,
                     flags.cli_auto_connect || flags.no_auto_connect,
@@ -151,12 +162,15 @@ impl Patch {
         self.ambient.contains(&key)
     }
 
-    /// The patch without the connection entries that came from the
-    /// environment or config: what a command that names its own target sends.
+    /// What a command that names its own endpoint sends: the targets from the
+    /// environment or config are dropped, and the headers from there go with
+    /// the endpoint it names.
     pub fn without_ambient_connection(&self) -> Patch {
         let mut patch = self.clone();
         for key in std::mem::take(&mut patch.ambient) {
-            patch.entries.remove(&key);
+            if key != Key::CdpHeaders {
+                patch.entries.remove(&key);
+            }
         }
         patch
     }

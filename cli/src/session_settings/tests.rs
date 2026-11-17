@@ -1440,6 +1440,7 @@ fn environment_connection_values_are_ambient_and_flags_are_explicit() {
 
     let mut f = ambient_flags(Some("9222"), Some("ios"), Some(r#"{"A":"b"}"#));
     f.cli_cdp = true;
+    f.cli_cdp_headers = true;
     f.cli_provider = true;
     let p = Patch::from_flags(&f);
     for key in [Key::Cdp, Key::Provider, Key::CdpHeaders] {
@@ -1487,36 +1488,90 @@ fn an_explicit_target_replaces_the_session_target_and_beats_an_ambient_one() {
     );
 }
 
-#[test]
-fn headers_are_credentials_and_ride_with_any_endpoint() {
-    let headers = Some(r#"{"A":"b"}"#);
-    // Headers alone, and headers with an explicit target, are never ambient.
-    let p = Patch::from_flags(&ambient_flags(None, None, headers));
-    assert!(p.get(Key::CdpHeaders).is_some() && !p.is_ambient(Key::CdpHeaders));
+const ENV_HEADERS: &str = r#"{"Authorization":"env"}"#;
+const OWN_HEADERS: &str = r#"{"Authorization":"own"}"#;
 
-    let mut f = ambient_flags(Some("ws://b.example/cdp"), None, headers);
+fn headers_after(running: &Running, f: &Flags) -> (Option<String>, Vec<Key>) {
+    let plan = running.plan(&Patch::from_flags(f));
+    (plan.next.cdp_headers(), changed_keys(&plan))
+}
+
+#[test]
+fn env_headers_are_ambient_and_explicit_ones_are_not() {
+    let p = Patch::from_flags(&ambient_flags(Some("9222"), None, Some(ENV_HEADERS)));
+    assert!(p.is_ambient(Key::CdpHeaders));
+    let mut f = ambient_flags(Some("9222"), None, Some(OWN_HEADERS));
+    f.cli_cdp_headers = true;
+    assert!(!Patch::from_flags(&f).is_ambient(Key::CdpHeaders));
+    // A blank value names nothing.
+    let p = Patch::from_flags(&ambient_flags(Some("9222"), None, Some("  ")));
+    assert!(p.get(Key::CdpHeaders).is_none());
+}
+
+#[test]
+fn env_headers_never_replace_the_headers_of_a_session_attached_by_connect() {
+    // `connect wss://a --cdp-headers A`, then a plain command in a shell with
+    // an env endpoint and env headers: nothing changes.
+    let running = running_with(&[
+        (Key::Cdp, json!("wss://a.example/cdp")),
+        (Key::CdpHeaders, json!(OWN_HEADERS)),
+    ]);
+    let f = ambient_flags(Some("wss://env.example/cdp"), None, Some(ENV_HEADERS));
+    let (headers, changes) = headers_after(&running, &f);
+    assert_eq!(headers.as_deref(), Some(OWN_HEADERS));
+    assert!(changes.is_empty(), "{changes:?}");
+
+    // Attached with no headers, env headers and no env endpoint.
+    let running = running_with(&[(Key::Cdp, json!("wss://a.example/cdp"))]);
+    let f = ambient_flags(None, None, Some(ENV_HEADERS));
+    let (headers, changes) = headers_after(&running, &f);
+    assert_eq!(headers, None);
+    assert!(changes.is_empty(), "{changes:?}");
+
+    // Same for a session on a provider.
+    let running = running_with(&[(Key::Provider, json!("ios"))]);
+    assert!(headers_after(&running, &f).1.is_empty());
+}
+
+#[test]
+fn env_headers_go_with_an_endpoint_the_command_names() {
+    // An explicit --cdp.
+    let mut f = ambient_flags(Some("wss://b.example/cdp"), None, Some(ENV_HEADERS));
     f.cli_cdp = true;
-    let plan = Running::defaults().plan(&Patch::from_flags(&f));
+    let running = running_with(&[(Key::Cdp, json!("wss://a.example/cdp"))]);
+    assert_eq!(headers_after(&running, &f).0.as_deref(), Some(ENV_HEADERS));
+
+    // An ambient endpoint that applies to a session with no target.
+    let f = ambient_flags(Some("wss://b.example/cdp"), None, Some(ENV_HEADERS));
     assert_eq!(
-        plan.next.cdp_headers().as_deref(),
-        Some(r#"{"A":"b"}"#),
-        "env headers must ride with an explicit --cdp"
+        headers_after(&Running::defaults(), &f).0.as_deref(),
+        Some(ENV_HEADERS)
     );
 
-    // An ambient target that loses to the session target still lets rotated
-    // headers through: the session reconnects with them.
+    // `connect` names its endpoint in the launch envelope: its patch keeps the
+    // env headers as explicit ones.
+    let patch = Patch::from_flags(&f).without_ambient_connection();
+    assert!(patch.get(Key::Cdp).is_none() && !patch.is_ambient(Key::CdpHeaders));
+    let plan = Running::defaults().plan(&patch);
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(ENV_HEADERS));
+}
+
+#[test]
+fn rotated_env_headers_reconnect_only_on_the_same_ambient_endpoint() {
     let running = running_with(&[
-        (Key::Cdp, json!("ws://a.example/cdp")),
+        (Key::Cdp, json!("wss://a.example/cdp")),
         (Key::CdpHeaders, json!(r#"{"A":"old"}"#)),
     ]);
-    let rotated = Patch::from_flags(&ambient_flags(
-        Some("ws://a.example/cdp"),
-        None,
-        Some(r#"{"A":"new"}"#),
-    ));
-    let plan = running.plan(&rotated);
-    assert!(changed_keys(&plan).contains(&Key::CdpHeaders));
-    assert_eq!(plan.next.cdp_headers().as_deref(), Some(r#"{"A":"new"}"#));
+    // Same endpoint: the rotation applies.
+    let same = ambient_flags(Some("wss://a.example/cdp"), None, Some(ENV_HEADERS));
+    let (headers, changes) = headers_after(&running, &same);
+    assert_eq!(headers.as_deref(), Some(ENV_HEADERS));
+    assert_eq!(changes, vec![Key::CdpHeaders]);
+    // A different env endpoint: dropped, the session keeps its headers.
+    let other = ambient_flags(Some("wss://b.example/cdp"), None, Some(ENV_HEADERS));
+    let (headers, changes) = headers_after(&running, &other);
+    assert_eq!(headers.as_deref(), Some(r#"{"A":"old"}"#));
+    assert!(changes.is_empty(), "{changes:?}");
 }
 
 #[test]
@@ -1560,6 +1615,11 @@ fn ambient_marks_survive_the_wire_and_reject_unknown_names() {
     let patch = Patch::from_flags(&ambient_flags(Some("9222"), None, None));
     let wire = patch.to_wire().unwrap();
     assert_eq!(wire["ambient"], json!(["cdp"]));
+    let with_headers =
+        json!({"cdp": "9222", "cdp-headers": "{}", "ambient": ["cdp", "cdp-headers"]});
+    assert!(Patch::from_wire(Some(&with_headers))
+        .unwrap()
+        .is_ambient(Key::CdpHeaders));
     let back = Patch::from_wire(Some(&wire)).unwrap();
     assert_eq!(back, patch);
     assert!(back.is_ambient(Key::Cdp));
@@ -1568,13 +1628,7 @@ fn ambient_marks_survive_the_wire_and_reject_unknown_names() {
     let plain = json!({"cdp": "9222"});
     assert!(!Patch::from_wire(Some(&plain)).unwrap().is_ambient(Key::Cdp));
 
-    for bad in [
-        json!("cdp"),
-        json!(["headed"]),
-        json!(["cdp-headers"]),
-        json!([1]),
-        json!(["nope"]),
-    ] {
+    for bad in [json!("cdp"), json!(["headed"]), json!([1]), json!(["nope"])] {
         let wire = json!({"cdp": "9222", "ambient": bad});
         assert!(Patch::from_wire(Some(&wire)).is_err(), "{bad}");
     }

@@ -176,20 +176,36 @@ fn response_applied_relaunch(resp: &connection::Response) -> bool {
     .any(|path| data.pointer(path).and_then(|v| v.as_bool()) == Some(true))
 }
 
-/// Checks a `--cdp` value and its headers. The value is either a port number
-/// or a ws, wss, http or https URL.
+/// Checks the CDP value and headers this invocation will send. The value is
+/// either a port number or a ws, wss, http or https URL.
 fn validate_cdp_flags(flags: &Flags, cmd: &serde_json::Value) -> Result<(), String> {
     // A default target is checked only when it will be sent: `connect` names
     // its own endpoint and drops it, and a target on the command line or a
     // higher-precedence default replaces it.
     let targets = session_settings::effective_targets(flags);
-    let Some(cdp_value) = targets
+    if let Some(cdp_value) = targets
         .cdp
         .as_deref()
         .filter(|_| flags.cli_cdp || !command_names_target(cmd))
-    else {
-        return Ok(());
-    };
+    {
+        validate_cdp_value(cdp_value)?;
+    }
+    // Headers are checked whenever they can be sent: explicit ones always, and
+    // ones from the environment or config only with a CDP endpoint.
+    let patch = command_settings(flags, cmd);
+    if let Some(session_settings::Requested::Set(serde_json::Value::String(raw))) =
+        patch.get(session_settings::Key::CdpHeaders)
+    {
+        let sent = !patch.is_ambient(session_settings::Key::CdpHeaders)
+            || patch.get(session_settings::Key::Cdp).is_some();
+        if sent {
+            parse_cdp_headers(raw)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_cdp_value(cdp_value: &str) -> Result<(), String> {
     let is_url = ["ws://", "wss://", "http://", "https://"]
         .iter()
         .any(|scheme| cdp_value.starts_with(scheme));
@@ -210,9 +226,6 @@ fn validate_cdp_flags(flags: &Flags, cmd: &serde_json::Value) -> Result<(), Stri
                 ))
             }
         }
-    }
-    if let Some(raw) = flags.cdp_headers.as_deref() {
-        parse_cdp_headers(raw)?;
     }
     Ok(())
 }
@@ -2262,7 +2275,7 @@ mod tests {
     fn other_commands_carry_the_environment_target_as_ambient() {
         let wire = settings_with_env_target(&["snapshot"]);
         assert_eq!(wire["cdp"], "ws://env.example/cdp");
-        assert_eq!(wire["ambient"], serde_json::json!(["cdp"]));
+        assert_eq!(wire["ambient"], serde_json::json!(["cdp", "cdp-headers"]));
     }
 
     #[test]
@@ -2379,6 +2392,29 @@ mod tests {
         assert!(validate_cdp_flags(&flags, &cmd).is_ok());
         // An explicit value is always checked, even for `connect`.
         let (flags, cmd) = with_defaults(&["--cdp", "bogus", "connect", "9222"], None, None, false);
+        assert!(validate_cdp_flags(&flags, &cmd).is_err());
+    }
+
+    #[test]
+    fn headers_are_validated_whenever_they_will_be_sent() {
+        let bad = Some("[]".to_string());
+        // Env headers with an env endpoint, for a single command and a batch.
+        for args in [vec!["get", "url"], vec!["batch", "get url"]] {
+            let (mut flags, cmd) = with_defaults(&args, Some("9222"), None, false);
+            flags.cdp_headers = bad.clone();
+            let error = validate_cdp_flags(&flags, &cmd).unwrap_err();
+            assert!(error.contains("JSON object"), "{args:?}: {error}");
+        }
+        // Env headers with no endpoint are dropped, so they are not checked.
+        let (mut flags, cmd) = with_defaults(&["get", "url"], None, None, false);
+        flags.cdp_headers = bad.clone();
+        assert!(validate_cdp_flags(&flags, &cmd).is_ok());
+        // Explicit headers are always checked.
+        let (flags, cmd) = flags_of(&["--cdp-headers", "[]", "get", "url"]);
+        assert!(validate_cdp_flags(&flags, &cmd).is_err());
+        // Env headers with an explicit --cdp are sent.
+        let (mut flags, cmd) = flags_of(&["--cdp", "9222", "get", "url"]);
+        flags.cdp_headers = bad;
         assert!(validate_cdp_flags(&flags, &cmd).is_err());
     }
 
