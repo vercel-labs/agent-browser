@@ -17,6 +17,10 @@ use super::cdp::types::*;
 use super::element::{resolve_element_object_id, RefMap};
 use super::tab_binding;
 
+/// Touch points reported by `navigator.maxTouchPoints` when a mobile viewport
+/// preset is applied, matching the five-finger maximum of the presets' devices.
+const TOUCH_POINTS: u32 = 5;
+
 // ---------------------------------------------------------------------------
 // Launch validation
 // ---------------------------------------------------------------------------
@@ -2195,6 +2199,22 @@ impl BrowserManager {
                     "deviceScaleFactor": device_scale_factor,
                     "mobile": mobile,
                 })),
+                Some(session_id),
+            )
+            .await?;
+
+        // The metrics override resizes the viewport without turning the page
+        // into a touch device, so navigator.maxTouchPoints still reported the
+        // desktop value. Touch emulation is set separately, and cleared again
+        // when the viewport is no longer mobile.
+        let mut touch = json!({ "enabled": mobile });
+        if mobile {
+            touch["maxTouchPoints"] = json!(TOUCH_POINTS);
+        }
+        self.client
+            .send_command(
+                "Emulation.setTouchEmulationEnabled",
+                Some(touch),
                 Some(session_id),
             )
             .await?;

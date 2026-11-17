@@ -4111,6 +4111,73 @@ async fn e2e_viewport_emulation() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_device_preset_enables_touch() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "device", "name": "iPhone 16" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<h1>Touch</h1>";
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "[navigator.maxTouchPoints, 'ontouchstart' in window]",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let touch = get_data(&resp)["result"].clone();
+    assert_eq!(
+        touch,
+        json!([5, true]),
+        "A mobile device preset should emulate a touch device, got {touch}"
+    );
+
+    // A desktop viewport drops the touch emulation again.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "viewport", "width": 1280, "height": 720 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "6", "action": "reload" }), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "navigator.maxTouchPoints" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], 0);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Hover, scroll, press
 // ---------------------------------------------------------------------------
