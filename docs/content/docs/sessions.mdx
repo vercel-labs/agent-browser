@@ -107,7 +107,7 @@ AGENT_BROWSER_PROFILE=Default agent-browser open https://gmail.com
   </thead>
   <tbody>
     <tr><td>Supported browsers</td><td>Chrome, Chrome Canary, Chromium, Brave</td></tr>
-    <tr><td>What's copied</td><td>Cookies, local storage, extensions state (cache dirs excluded for speed)</td></tr>
+    <tr><td>What's copied</td><td>Cookies, local storage, saved logins and preferences. Caches, extensions, IndexedDB, history and favicons are skipped, which keeps a large profile to a few megabytes and the launch fast</td></tr>
     <tr><td>Original profile</td><td>Never modified (read-only snapshot)</td></tr>
     <tr><td>Cleanup</td><td>Temp copy deleted when browser closes</td></tr>
     <tr><td>Windows note</td><td>Close Chrome before using <code>--profile &lt;name&gt;</code> if Chrome is running</td></tr>
