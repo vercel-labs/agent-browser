@@ -6,6 +6,7 @@
 use serde_json::Value;
 
 use crate::flags::Flags;
+use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::patch::Requested;
 use super::proxy::parse_proxy;
@@ -68,11 +69,24 @@ pub enum Shape {
     Millis,
     /// Structured value kept as-is (plugin configs).
     Json,
+    /// A string usable as a restore key: alphanumerics, hyphens, underscores.
+    SessionName,
+    /// One of `auto`, `always`, `never`.
+    RestoreSavePolicy,
 }
+
+/// How a validation failure is classed in `--json` output.
+pub const ERROR_INVALID_SESSION_NAME: &str = "invalid_session_name";
+pub const ERROR_INVALID_VALUE: &str = "invalid_value";
 
 impl Shape {
     pub fn accepts(self, value: &Value) -> bool {
-        match self {
+        self.check(value).is_ok()
+    }
+
+    /// Why `value` does not fit, with the `--json` error type to report it as.
+    pub fn check(self, value: &Value) -> Result<(), (&'static str, String)> {
+        let fits = match self {
             Shape::Bool => value.is_boolean(),
             Shape::Str => value.is_string(),
             Shape::StrList => value
@@ -80,6 +94,29 @@ impl Shape {
                 .is_some_and(|items| items.iter().all(Value::is_string)),
             Shape::Millis => value.is_u64(),
             Shape::Json => true,
+            Shape::SessionName => match value.as_str() {
+                Some(name) if is_valid_session_name(name) => true,
+                Some(name) => return Err((ERROR_INVALID_SESSION_NAME, session_name_error(name))),
+                None => false,
+            },
+            Shape::RestoreSavePolicy => match value.as_str() {
+                Some("auto" | "always" | "never") => true,
+                Some(policy) => {
+                    return Err((
+                        ERROR_INVALID_VALUE,
+                        format!(
+                            "Invalid restore save policy '{}'. Use auto, always, or never.",
+                            policy
+                        ),
+                    ))
+                }
+                None => false,
+            },
+        };
+        if fits {
+            Ok(())
+        } else {
+            Err((ERROR_INVALID_VALUE, format!("expected {:?}", self)))
         }
     }
 }
@@ -716,10 +753,10 @@ pub static SPECS: &[Spec] = &[
         RestoreKey,
         "restore-key",
         "--restore",
-        Live,
+        Launch,
         Memory,
         false,
-        Str,
+        SessionName,
         read_restore_key
     ),
     row!(
@@ -729,7 +766,7 @@ pub static SPECS: &[Spec] = &[
         Live,
         Memory,
         false,
-        Str,
+        RestoreSavePolicy,
         read_restore_save
     ),
     row!(

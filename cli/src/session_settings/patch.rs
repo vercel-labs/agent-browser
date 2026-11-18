@@ -10,6 +10,14 @@ use crate::flags::Flags;
 use super::spec::{redacted, spec, spec_by_name, Effect, Key, Persist, SPECS};
 use super::SettingsError;
 
+/// A requested value that does not fit its setting.
+#[derive(Debug, PartialEq)]
+pub struct PatchInvalid {
+    /// The `--json` error type to report it under.
+    pub error_type: &'static str,
+    pub message: String,
+}
+
 /// What an invocation asks for one setting.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Requested {
@@ -255,6 +263,23 @@ impl Patch {
         self.entries.iter().map(|(k, r)| (*k, r))
     }
 
+    /// Whether every value fits its setting. The CLI calls this before it
+    /// starts a daemon; the daemon applies the same rule to what it receives.
+    pub fn validate(&self) -> Result<(), PatchInvalid> {
+        for (key, requested) in &self.entries {
+            if let Requested::Set(value) = requested {
+                spec(*key)
+                    .shape
+                    .check(value)
+                    .map_err(|(error_type, message)| PatchInvalid {
+                        error_type,
+                        message,
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
     /// The `settings` field of a command; `None` when there is nothing to say.
     pub fn to_wire(&self) -> Option<Value> {
         if self.is_noop() {
@@ -326,13 +351,11 @@ impl Patch {
                     ));
                 }
                 Requested::Default
-            } else if s.shape.accepts(value) {
-                Requested::Set(value.clone())
             } else {
-                return Err(SettingsError::Invalid(
-                    s.key,
-                    format!("expected {:?}", s.shape),
-                ));
+                s.shape
+                    .check(value)
+                    .map_err(|(_, why)| SettingsError::Invalid(s.key, why))?;
+                Requested::Set(value.clone())
             };
             entries.insert(s.key, requested);
         }

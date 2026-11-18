@@ -15,7 +15,6 @@ use crate::session_files::SessionFile;
 use crate::session_settings::{
     named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running, Store,
 };
-use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
 use super::auth;
@@ -2397,29 +2396,6 @@ fn reset_restore_runtime_state(state: &mut DaemonState) {
     state.restore_saved_path = None;
 }
 
-fn command_restore_check_fields(
-    cmd: &Value,
-) -> Option<(Option<String>, Option<String>, Option<String>)> {
-    let has_check_field = cmd.get("restoreCheckUrl").is_some()
-        || cmd.get("restoreCheckText").is_some()
-        || cmd.get("restoreCheckFn").is_some();
-    if !has_check_field {
-        return None;
-    }
-
-    Some((
-        cmd.get("restoreCheckUrl")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
-        cmd.get("restoreCheckText")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
-        cmd.get("restoreCheckFn")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
-    ))
-}
-
 fn restore_checks_are_configured(
     checks: &(Option<String>, Option<String>, Option<String>),
 ) -> bool {
@@ -2450,68 +2426,51 @@ fn reconcile_restore_check_change(
     }
 }
 
-fn apply_restore_config_from_command(cmd: &Value, state: &mut DaemonState) -> Result<(), String> {
-    validate_restore_config_from_command(cmd)?;
-
-    let restore_key = cmd.get("restoreKey").and_then(|v| v.as_str());
-    let old_checks = (
-        state.restore_check_url.clone(),
-        state.restore_check_text.clone(),
-        state.restore_check_fn.clone(),
-    );
-
-    if let Some(restore_key) = restore_key {
-        if !restore_key.is_empty() {
-            if state.session_name.as_deref() != Some(restore_key) {
-                reset_restore_runtime_state(state);
-            }
-            state.session_name = Some(restore_key.to_string());
-            if state.restore_status == "not_configured" {
-                state.restore_status = "pending".to_string();
-            }
-        }
-    }
-    if let Some(policy) = cmd.get("restoreSave").map(|v| v.as_str().unwrap_or("auto")) {
-        state.restore_save = policy.to_string();
-    }
-    if let Some(new_checks) = command_restore_check_fields(cmd) {
-        state.restore_check_url = new_checks.0.clone();
-        state.restore_check_text = new_checks.1.clone();
-        state.restore_check_fn = new_checks.2.clone();
-        if old_checks != new_checks {
-            reconcile_restore_check_change(state, &new_checks);
-        }
-    }
-
-    Ok(())
+fn is_restore_key(key: Key) -> bool {
+    key == Key::RestoreKey || RESTORE_LIVE_KEYS.contains(&key)
 }
 
-fn validate_restore_config_from_command(cmd: &Value) -> Result<(), String> {
-    let restore_key = cmd.get("restoreKey").and_then(|v| v.as_str());
-    if let Some(restore_key) = restore_key {
-        if !restore_key.is_empty() && !is_valid_session_name(restore_key) {
-            return Err(session_name_error(restore_key));
+/// The restore rows that apply to the running session in place.
+const RESTORE_LIVE_KEYS: [Key; 4] = [
+    Key::RestoreSave,
+    Key::RestoreCheckUrl,
+    Key::RestoreCheckText,
+    Key::RestoreCheckFn,
+];
+
+/// Writes the restore rows `rows` of the current settings into the daemon's
+/// restore state. A new key starts a fresh restore cycle; a changed check
+/// re-arms validation of what was loaded.
+fn apply_restore_settings(state: &mut DaemonState, rows: &[Key]) {
+    let restore = state.settings.restore();
+    if rows.contains(&Key::RestoreKey) {
+        if state.session_name != restore.key {
+            reset_restore_runtime_state(state);
+        }
+        state.session_name = restore.key.clone();
+        if state.session_name.is_none() {
+            state.restore_status = "not_configured".to_string();
+        } else if state.restore_status == "not_configured" {
+            state.restore_status = "pending".to_string();
         }
     }
-
-    let restore_save = cmd.get("restoreSave").map(|v| v.as_str().unwrap_or("auto"));
-    if let Some(policy) = restore_save {
-        if !matches!(policy, "auto" | "always" | "never") {
-            return Err(format!(
-                "Invalid restore save policy '{}'. Use auto, always, or never.",
-                policy
-            ));
+    if rows.contains(&Key::RestoreSave) {
+        state.restore_save = restore.save;
+    }
+    if rows.iter().any(|key| RESTORE_LIVE_KEYS[1..].contains(key)) {
+        let old = (
+            state.restore_check_url.clone(),
+            state.restore_check_text.clone(),
+            state.restore_check_fn.clone(),
+        );
+        let new = (restore.check_url, restore.check_text, restore.check_fn);
+        state.restore_check_url = new.0.clone();
+        state.restore_check_text = new.1.clone();
+        state.restore_check_fn = new.2.clone();
+        if old != new {
+            reconcile_restore_check_change(state, &new);
         }
     }
-
-    Ok(())
-}
-
-fn command_changes_restore_key(cmd: &Value, state: &DaemonState) -> bool {
-    cmd.get("restoreKey")
-        .and_then(|v| v.as_str())
-        .filter(|key| !key.is_empty())
-        .is_some_and(|key| state.session_name.as_deref() != Some(key))
 }
 
 /// Whether the session holds a browser of any backend: CDP, a provider
@@ -2535,22 +2494,6 @@ async fn close_before_implicit_relaunch(state: &mut DaemonState) -> Result<(), S
     } else {
         Ok(())
     }
-}
-
-async fn apply_restore_config_after_confirmation(
-    cmd: &Value,
-    state: &mut DaemonState,
-) -> Result<bool, String> {
-    let restore_key_changed = command_changes_restore_key(cmd, state);
-    let had_browser = has_active_browser_session(state);
-
-    if restore_key_changed && had_browser {
-        let _ = auto_save_restore_state(state).await;
-        close_before_implicit_relaunch(state).await?;
-    }
-
-    apply_restore_config_from_command(cmd, state)?;
-    Ok(restore_key_changed && had_browser)
 }
 
 const BROWSER_USE_ATTACH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
@@ -3087,10 +3030,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return resp;
     }
 
-    if let Err(err) = validate_restore_config_from_command(cmd) {
-        return error_response(&id, &err);
-    }
-
     // Invalid inputs are rejected before expensive setup: an unsupported
     // `find` action must fail here, not after a browser launch and a locator
     // resolution that can mask it with "element not found".
@@ -3140,6 +3079,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // is denied or needs confirmation leaves the browser and its settings alone.
     let launches = command_launches_browser(cmd);
     let mut launch_patch: Option<Patch> = None;
+    let mut no_navigate_key_switch = false;
     let mut settings_outcome = if action == "close" {
         SettingsOutcome::default()
     } else {
@@ -3150,6 +3090,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         if let Err(e) = check_capture_setting(&patch) {
             return error_response(&id, &e);
         }
+        // Read from the patch: a no-navigate command never plans the launch.
+        no_navigate_key_switch = auth_login_no_navigate
+            && patch
+                .value(Key::RestoreKey)
+                .and_then(Value::as_str)
+                .is_some_and(|key| state.settings.restore().key.as_deref() != Some(key));
         let outcome = match apply_settings_patch(state, &patch, false).await {
             Ok(outcome) => outcome,
             Err(e) => return error_response(&id, &e),
@@ -3170,14 +3116,11 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .filter(|plan| plan.relaunch);
 
     let skip_launch = skip_launch_action(action);
-    let restore_key_change_needs_launch = !skip_launch
-        && command_changes_restore_key(cmd, state)
-        && has_active_browser_session(state);
     let needs_launch = if !skip_launch && !auth_login_no_navigate {
         // Check if existing connection is stale and needs re-launch.
         // This must happen before policy evaluation so plugin capability
         // actions are gated when recovery relaunches would invoke plugins.
-        if restore_key_change_needs_launch || launch_plan.is_some() {
+        if launch_plan.is_some() {
             true
         } else if let Some(ref mut mgr) = state.browser {
             mgr.has_process_exited() || !mgr.is_connection_alive().await
@@ -3301,24 +3244,14 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return resp;
     }
 
-    let restore_transition_closed_browser = match async {
-        if auth_login_no_navigate && command_changes_restore_key(cmd, state) {
-            return Err(
-                "auth login --no-navigate cannot switch restore sessions; select the session containing the active login page"
-                    .to_string(),
-            );
-        }
-        apply_restore_config_after_confirmation(cmd, state).await
+    if no_navigate_key_switch {
+        let mut resp = error_response(
+            &id,
+            "auth login --no-navigate cannot switch restore sessions; select the session containing the active login page",
+        );
+        attach_settings_outcome(&mut resp, &settings_outcome);
+        return resp;
     }
-    .await
-    {
-        Ok(closed_browser) => closed_browser,
-        Err(err) => {
-            let mut resp = error_response(&id, &err);
-            attach_settings_outcome(&mut resp, &settings_outcome);
-            return resp;
-        }
-    };
 
     if !skip_launch {
         if needs_launch {
@@ -3334,9 +3267,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
             }
             lifecycle_relaunched_browser |= settings_outcome.relaunched_browser;
-            lifecycle_relaunched_browser |= restore_transition_closed_browser
-                || state.browser.is_some()
-                || state.active_provider_session.is_some();
+            lifecycle_relaunched_browser |=
+                state.browser.is_some() || state.active_provider_session.is_some();
             if state.browser.is_some() || state.active_provider_session.is_some() {
                 let _ = auto_save_restore_state(state).await;
             }
@@ -5757,7 +5689,8 @@ impl SettingsOutcome {
     /// was applied. The launch changes were reported as pending; they are
     /// replaced by what the launch actually did.
     fn absorb(&mut self, launch: SettingsOutcome) {
-        self.changes.retain(|change| change["effect"] == "live");
+        self.changes
+            .retain(|change| change["effect"] == "live" && change["applied"] == true);
         self.changes.extend(launch.changes);
         self.forced = launch.forced;
         self.relaunched_browser = launch.relaunched_browser;
@@ -5815,6 +5748,11 @@ async fn rollback_launch_settings(
     }
     if rejected {
         *state.domain_filter.write().await = pending.filter;
+    }
+    if restored.contains(&Key::RestoreKey) {
+        // The failed launch already started a fresh restore cycle for the new
+        // key; only the key goes back.
+        state.session_name = state.settings.restore().key;
     }
     state.effective_ca_cert = pending.ca_cert;
     state.attached_target = pending.attached;
@@ -5915,19 +5853,28 @@ async fn apply_settings_patch(
         return Ok(SettingsOutcome::default());
     }
     let ignored: Vec<Value> = full.ignored.iter().map(|c| c.to_ignored_json()).collect();
+    // A new restore key closes the running browser at the launch. Its save and
+    // checks must be the old key's until that browser has been saved, so the
+    // restore rows of the same patch wait for the launch too.
+    let hold_restore =
+        full.changes.iter().any(|c| c.key == Key::RestoreKey) && has_active_browser_session(state);
     let (plan, deferred) = if launches {
         (full, Vec::new())
     } else {
+        let held = |key: Key| hold_restore && RESTORE_LIVE_KEYS.contains(&key);
         let deferred: Vec<Value> = full
             .changes
             .iter()
-            .filter(|change| change.effect() == Effect::Launch)
+            .filter(|change| change.effect() == Effect::Launch || held(change.key))
             .map(|change| change.to_json(false))
             .collect();
-        (
-            state.settings.plan(&patch.without_launch_settings()),
-            deferred,
-        )
+        let mut live = patch.without_launch_settings();
+        for key in RESTORE_LIVE_KEYS {
+            if held(key) {
+                live.remove(key);
+            }
+        }
+        (state.settings.plan(&live), deferred)
     };
     let changed = |key: Key| plan.changes.iter().any(|change| change.key == key);
 
@@ -6082,9 +6029,26 @@ async fn apply_settings_patch(
 
     if relaunch && had_browser {
         let _ = auto_save_restore_state(state).await;
-        close_all_browser_backends(state).await?;
+        if let Err(e) = close_all_browser_backends(state).await {
+            // The old browser may still run under its key: the restore rows
+            // keep their old values.
+            if let Some(pending) = pending.as_ref() {
+                for key in touched.iter().filter(|key| is_restore_key(**key)) {
+                    state
+                        .settings
+                        .put_back(*key, pending.before.get(*key).cloned());
+                }
+            }
+            return Err(e);
+        }
         state.ref_map.invalidate_all_documents();
     }
+    let restore_rows: Vec<Key> = touched
+        .iter()
+        .copied()
+        .filter(|key| is_restore_key(*key))
+        .collect();
+    apply_restore_settings(state, &restore_rows);
 
     Ok(SettingsOutcome {
         changes,
@@ -17734,10 +17698,34 @@ mod tests {
         assert_eq!(state.restore_save_status, "not_attempted");
     }
 
-    #[test]
-    fn test_restore_key_change_resets_runtime_restore_state() {
-        let mut state = DaemonState::new();
-        state.session_name = Some("old-key".to_string());
+    /// A daemon built without a restore key or policy from the environment,
+    /// and the guard that keeps it so.
+    fn unconfigured_restore_session() -> (EnvGuard<'static>, DaemonState) {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SESSION_NAME", "AGENT_BROWSER_RESTORE_SAVE"]);
+        guard.remove("AGENT_BROWSER_SESSION_NAME");
+        guard.remove("AGENT_BROWSER_RESTORE_SAVE");
+        (guard, DaemonState::new())
+    }
+
+    fn restore_session(key: &str) -> (EnvGuard<'static>, DaemonState) {
+        let (guard, mut state) = unconfigured_restore_session();
+        state.settings.set(Key::RestoreKey, json!(key));
+        state.session_name = Some(key.to_string());
+        (guard, state)
+    }
+
+    async fn apply_wire(
+        state: &mut DaemonState,
+        settings: Value,
+        launches: bool,
+    ) -> Result<SettingsOutcome, String> {
+        let patch = Patch::from_wire(Some(&settings)).map_err(|e| e.to_string())?;
+        apply_settings_patch(state, &patch, launches).await
+    }
+
+    #[tokio::test]
+    async fn test_restore_key_change_resets_runtime_restore_state() {
+        let (_env, mut state) = restore_session("old-key");
         state.restore_status = "loaded_but_invalid".to_string();
         state.restore_status_detail = Some("missing text".to_string());
         state.restore_loaded_path = Some("/tmp/old-key.json".to_string());
@@ -17746,7 +17734,9 @@ mod tests {
         state.restore_save_status = "skipped_restore_failed".to_string();
         state.restore_saved_path = Some("/tmp/old-key.json".to_string());
 
-        apply_restore_config_from_command(&json!({ "restoreKey": "new-key" }), &mut state).unwrap();
+        apply_wire(&mut state, json!({ "restore-key": "new-key" }), true)
+            .await
+            .unwrap();
 
         assert_eq!(state.session_name.as_deref(), Some("new-key"));
         assert_eq!(state.restore_status, "pending");
@@ -17758,43 +17748,49 @@ mod tests {
         assert!(state.restore_saved_path.is_none());
     }
 
-    #[test]
-    fn test_restore_key_same_value_preserves_failure_state() {
-        let mut state = DaemonState::new();
-        state.session_name = Some("same-key".to_string());
+    #[tokio::test]
+    async fn test_restore_key_same_value_preserves_failure_state() {
+        let (_env, mut state) = restore_session("same-key");
         state.restore_status = "loaded_but_invalid".to_string();
         state.restore_load_failed = true;
         state.restore_save_status = "skipped_restore_failed".to_string();
 
-        apply_restore_config_from_command(&json!({ "restoreKey": "same-key" }), &mut state)
+        let outcome = apply_wire(&mut state, json!({ "restore-key": "same-key" }), true)
+            .await
             .unwrap();
 
+        assert!(outcome.changes.is_empty());
         assert_eq!(state.session_name.as_deref(), Some("same-key"));
         assert_eq!(state.restore_status, "loaded_but_invalid");
         assert!(state.restore_load_failed);
         assert_eq!(state.restore_save_status, "skipped_restore_failed");
     }
 
-    #[test]
-    fn test_restore_config_command_clears_sticky_checks_and_policy() {
-        let mut state = DaemonState::new();
-        state.session_name = Some("same-key".to_string());
+    #[tokio::test]
+    async fn test_restore_settings_clear_sticky_checks_and_policy() {
+        let (_env, mut state) = restore_session("same-key");
+        state.settings.set(Key::RestoreSave, json!("never"));
+        state
+            .settings
+            .set(Key::RestoreCheckText, json!("Dashboard"));
         state.restore_save = "never".to_string();
         state.restore_check_text = Some("Dashboard".to_string());
         state.restore_status = "loaded_but_invalid".to_string();
         state.restore_status_detail = Some("missing text".to_string());
         state.restore_load_failed = true;
 
-        apply_restore_config_from_command(
-            &json!({
-                "restoreKey": "same-key",
-                "restoreSave": "auto",
-                "restoreCheckUrl": null,
-                "restoreCheckText": null,
-                "restoreCheckFn": null
-            }),
+        apply_wire(
             &mut state,
+            json!({
+                "restore-key": "same-key",
+                "restore-save": "auto",
+                "restore-check-url": null,
+                "restore-check-text": null,
+                "restore-check-fn": null
+            }),
+            false,
         )
+        .await
         .unwrap();
 
         assert_eq!(state.restore_save, "auto");
@@ -17807,21 +17803,17 @@ mod tests {
         assert!(!state.restore_validation_pending);
     }
 
-    #[test]
-    fn test_restore_config_check_change_marks_loaded_state_for_validation() {
-        let mut state = DaemonState::new();
-        state.session_name = Some("same-key".to_string());
+    #[tokio::test]
+    async fn test_restore_check_change_marks_loaded_state_for_validation() {
+        let (_env, mut state) = restore_session("same-key");
         state.restore_status = "loaded".to_string();
-        state.restore_load_failed = false;
-        state.restore_validation_pending = false;
 
-        apply_restore_config_from_command(
-            &json!({
-                "restoreKey": "same-key",
-                "restoreCheckText": "Dashboard"
-            }),
+        apply_wire(
             &mut state,
+            json!({ "restore-key": "same-key", "restore-check-text": "Dashboard" }),
+            false,
         )
+        .await
         .unwrap();
 
         assert_eq!(state.restore_check_text.as_deref(), Some("Dashboard"));
@@ -17830,34 +17822,91 @@ mod tests {
         assert!(state.restore_validation_pending);
     }
 
-    #[test]
-    fn test_restore_config_rejects_invalid_restore_key() {
-        let mut state = DaemonState::new();
-
-        let err = apply_restore_config_from_command(&json!({ "restoreKey": "../bad" }), &mut state)
-            .unwrap_err();
-
-        assert!(err.contains("Invalid session name"));
-        assert!(state.session_name.is_none());
-        assert_eq!(state.restore_status, "not_configured");
+    #[tokio::test]
+    async fn test_invalid_restore_settings_are_rejected_before_anything_changes() {
+        for (wire, reason) in [
+            (json!({ "restore-key": "../bad" }), "Invalid session name"),
+            (
+                json!({ "restore-key": "same-key", "restore-save": "sometimes" }),
+                "Invalid restore save policy",
+            ),
+            // A value that is not a string used to become `auto`.
+            (
+                json!({ "restore-key": "same-key", "restore-save": 7 }),
+                "restore-save",
+            ),
+        ] {
+            let (_env, mut state) = unconfigured_restore_session();
+            let err = apply_wire(&mut state, wire, true).await.err().unwrap();
+            assert!(err.contains(reason), "{err}");
+            assert!(state.session_name.is_none());
+            assert_eq!(state.restore_status, "not_configured");
+            assert_eq!(state.restore_save, "auto");
+        }
     }
 
-    #[test]
-    fn test_restore_config_rejects_invalid_save_policy() {
-        let mut state = DaemonState::new();
+    #[tokio::test]
+    async fn test_restore_key_change_waits_for_a_command_that_launches() {
+        let (_env, mut state) = restore_session("old-key");
+        state.restore_status = "loaded".to_string();
 
-        let err = apply_restore_config_from_command(
+        let outcome = apply_wire(&mut state, json!({ "restore-key": "new-key" }), false)
+            .await
+            .unwrap();
+
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
+        assert_eq!(state.restore_status, "loaded");
+        assert_eq!(outcome.changes.len(), 1);
+        assert_eq!(outcome.changes[0]["option"], "restore-key");
+        assert_eq!(outcome.changes[0]["effect"], "relaunch");
+        assert_eq!(outcome.changes[0]["applied"], false);
+        assert!(outcome.pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_failed_launch_puts_the_restore_key_back_without_a_new_cycle() {
+        let (_env, mut state) = restore_session("old-key");
+        state.restore_status = "loaded".to_string();
+        let mut outcome = apply_wire(&mut state, json!({ "restore-key": "new-key" }), true)
+            .await
+            .unwrap();
+        assert_eq!(state.session_name.as_deref(), Some("new-key"));
+        // Anything the rollback touched beyond the key would show here.
+        state.restore_status = "sentinel".to_string();
+
+        let rollback = rollback_launch_settings(&mut state, &mut outcome, "launch failed").await;
+
+        assert!(rollback.is_none());
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
+        assert_eq!(state.settings.restore().key.as_deref(), Some("old-key"));
+        assert_eq!(state.restore_status, "sentinel");
+        assert_eq!(outcome.changes[0]["applied"], false);
+    }
+
+    #[tokio::test]
+    async fn test_auth_login_no_navigate_rejects_a_restore_key_change() {
+        let (_env, mut state) = restore_session("old-key");
+        let resp = execute_command(
             &json!({
-                "restoreKey": "same-key",
-                "restoreSave": "sometimes"
+                "id": "login",
+                "action": "auth_login",
+                "name": "site",
+                "noNavigate": true,
+                "settings": { "restore-key": "new-key" }
             }),
             &mut state,
         )
-        .unwrap_err();
+        .await;
 
-        assert!(err.contains("Invalid restore save policy"));
-        assert!(state.session_name.is_none());
-        assert_eq!(state.restore_save, "auto");
+        assert_eq!(resp["success"], false);
+        assert!(
+            resp["error"]
+                .as_str()
+                .unwrap()
+                .contains("cannot switch restore sessions"),
+            "{resp}"
+        );
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
     }
 
     #[test]
@@ -17888,7 +17937,7 @@ mod tests {
 
     #[test]
     fn test_explicit_state_load_without_restore_keeps_restore_unconfigured() {
-        let mut state = DaemonState::new();
+        let (_env, mut state) = unconfigured_restore_session();
 
         mark_explicit_storage_state_loaded(&mut state, "/tmp/my-auth.json");
 
@@ -18195,7 +18244,7 @@ mod tests {
             "action": "navigate",
             "id": "restore-confirm",
             "url": "https://example.com",
-            "restoreKey": "new-key"
+            "settings": { "restore-key": "new-key" }
         });
 
         let resp = execute_command(&cmd, &mut state).await;
@@ -20295,12 +20344,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
 
         let mut state = DaemonState::new();
-        // `execute_command` applies the restore config before the launch handler.
+        // The settings patch has already set the key by the time the launch handler runs.
         state.session_name = Some("saved-session".to_string());
         let error = handle_launch(
             &json!({
                 "action": "launch",
-                "restoreKey": "saved-session",
                 "allowedDomains": ["example.com"]
             }),
             &mut state,

@@ -270,10 +270,6 @@ fn restore_key_from_flags(flags: &Flags) -> Option<&str> {
     flags.restore.as_deref().or(flags.session_name.as_deref())
 }
 
-fn is_valid_restore_save_policy(policy: &str) -> bool {
-    matches!(policy, "auto" | "always" | "never")
-}
-
 fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     // Only targets that will apply count: a target on the command line wins
     // over environment and config defaults, and two defaults resolve by
@@ -376,28 +372,6 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     }
 
     None
-}
-
-fn attach_restore_config_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
-    if let Some(restore_key) = restore_key_from_flags(flags) {
-        cmd["restoreKey"] = json!(restore_key);
-        cmd["restoreSave"] = json!(flags.restore_save.as_deref().unwrap_or("auto"));
-        cmd["restoreCheckUrl"] = flags
-            .restore_check_url
-            .as_ref()
-            .map(|check| json!(check))
-            .unwrap_or(serde_json::Value::Null);
-        cmd["restoreCheckText"] = flags
-            .restore_check_text
-            .as_ref()
-            .map(|check| json!(check))
-            .unwrap_or(serde_json::Value::Null);
-        cmd["restoreCheckFn"] = flags
-            .restore_check_fn
-            .as_ref()
-            .map(|check| json!(check))
-            .unwrap_or(serde_json::Value::Null);
-    }
 }
 
 fn mark_restarted_background(resp: &mut Response) {
@@ -1796,34 +1770,15 @@ fn main() {
     // broadcasts before observers see the command payload.
     attach_plugins_to_command(&mut cmd, &flags.plugins);
 
-    attach_restore_config_to_command(&mut cmd, &flags);
-
-    // Validate restore/session persistence name before starting daemon
-    if let Some(name) = restore_key_from_flags(&flags) {
-        if !validation::is_valid_session_name(name) {
-            let msg = validation::session_name_error(name);
-            if flags.json {
-                print_json_error_with_type(msg, "invalid_session_name");
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
+    // Validate the settings before a daemon starts: a bad restore key or save
+    // policy must not leave one behind.
+    if let Err(invalid) = session_settings::Patch::from_flags(&flags).validate() {
+        if flags.json {
+            print_json_error_with_type(invalid.message, invalid.error_type);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), invalid.message);
         }
-    }
-
-    if let Some(ref policy) = flags.restore_save {
-        if !is_valid_restore_save_policy(policy) {
-            let msg = format!(
-                "Invalid --restore-save value '{}'. Use auto, always, or never.",
-                policy
-            );
-            if flags.json {
-                print_json_error_with_type(msg, "invalid_value");
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
-        }
+        exit(1);
     }
 
     // Handle state management commands locally — these are pure file operations
@@ -2168,7 +2123,6 @@ fn run_batch(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         attach_plugins_to_command(&mut parsed, &flags.plugins);
-        attach_restore_config_to_command(&mut parsed, flags);
         let settings = batch_item_settings(flags, &parsed, relaunch_applied);
         if let Some(wire) = settings.to_wire() {
             parsed["settings"] = wire;
@@ -3046,60 +3000,85 @@ mod tests {
         assert_eq!(cmd["plugins"], json!([]));
     }
 
-    #[test]
-    fn test_attach_restore_config_to_command_uses_session_for_bare_restore() {
-        let args = vec![
-            "--session".to_string(),
-            "next-loop".to_string(),
-            "--restore".to_string(),
-            "--restore-save".to_string(),
-            "always".to_string(),
-            "--restore-check-url".to_string(),
-            "**/dashboard".to_string(),
-            "--restore-check-text".to_string(),
-            "Dashboard".to_string(),
-            "--restore-check-fn".to_string(),
-            "!!localStorage.getItem('session')".to_string(),
-            "open".to_string(),
-            "http://localhost:3000".to_string(),
-        ];
+    fn restore_flags(extra: &[&str]) -> Flags {
+        let mut args: Vec<String> = ["--session", "next-loop", "--restore"]
+            .iter()
+            .chain(extra)
+            .map(|s| s.to_string())
+            .collect();
+        args.extend(["open".to_string(), "http://localhost:3000".to_string()]);
         let mut flags = parse_flags(&args);
         if flags.restore_uses_session {
             flags.restore = Some(flags.session.clone());
         }
-        let mut cmd = json!({ "action": "launch" });
-
-        attach_restore_config_to_command(&mut cmd, &flags);
-
-        assert_eq!(cmd["restoreKey"], "next-loop");
-        assert_eq!(cmd["restoreSave"], "always");
-        assert_eq!(cmd["restoreCheckUrl"], "**/dashboard");
-        assert_eq!(cmd["restoreCheckText"], "Dashboard");
-        assert_eq!(cmd["restoreCheckFn"], "!!localStorage.getItem('session')");
+        flags
     }
 
     #[test]
-    fn test_attach_restore_config_to_command_sends_defaults_and_clears_checks() {
-        let args = vec![
-            "--session".to_string(),
-            "next-loop".to_string(),
-            "--restore".to_string(),
-            "open".to_string(),
-            "http://localhost:3000".to_string(),
-        ];
-        let mut flags = parse_flags(&args);
-        if flags.restore_uses_session {
-            flags.restore = Some(flags.session.clone());
+    fn test_restore_rides_the_settings_patch_and_uses_session_for_bare_restore() {
+        let flags = restore_flags(&[
+            "--restore-save",
+            "always",
+            "--restore-check-url",
+            "**/dashboard",
+            "--restore-check-text",
+            "Dashboard",
+            "--restore-check-fn",
+            "!!localStorage.getItem('session')",
+        ]);
+        let cmd = json!({ "action": "navigate" });
+        let wire = command_settings(&flags, &cmd).to_wire().unwrap();
+
+        assert_eq!(wire["restore-key"], "next-loop");
+        assert_eq!(wire["restore-save"], "always");
+        assert_eq!(wire["restore-check-url"], "**/dashboard");
+        assert_eq!(wire["restore-check-text"], "Dashboard");
+        assert_eq!(
+            wire["restore-check-fn"],
+            "!!localStorage.getItem('session')"
+        );
+        assert_eq!(
+            batch_item_settings(&flags, &cmd, false).to_wire().unwrap(),
+            wire
+        );
+    }
+
+    #[test]
+    fn test_restore_settings_send_defaults_and_clear_checks() {
+        let wire = command_settings(&restore_flags(&[]), &json!({ "action": "navigate" }))
+            .to_wire()
+            .unwrap();
+
+        assert_eq!(wire["restore-key"], "next-loop");
+        assert_eq!(wire["restore-save"], "auto");
+        for check in [
+            "restore-check-url",
+            "restore-check-text",
+            "restore-check-fn",
+        ] {
+            assert!(wire[check].is_null(), "{check} must clear a sticky check");
         }
-        let mut cmd = json!({ "action": "navigate" });
+    }
 
-        attach_restore_config_to_command(&mut cmd, &flags);
+    #[test]
+    fn test_invalid_restore_settings_fail_validation_with_the_json_error_types() {
+        let key = session_settings::Patch::from_flags(&restore_flags(&[]));
+        assert!(key.validate().is_ok());
 
-        assert_eq!(cmd["restoreKey"], "next-loop");
-        assert_eq!(cmd["restoreSave"], "auto");
-        assert!(cmd["restoreCheckUrl"].is_null());
-        assert!(cmd["restoreCheckText"].is_null());
-        assert!(cmd["restoreCheckFn"].is_null());
+        let mut flags = restore_flags(&[]);
+        flags.restore = Some("../bad".to_string());
+        let invalid = session_settings::Patch::from_flags(&flags)
+            .validate()
+            .unwrap_err();
+        assert_eq!(invalid.error_type, "invalid_session_name");
+        assert!(invalid.message.contains("Invalid session name"));
+
+        let invalid =
+            session_settings::Patch::from_flags(&restore_flags(&["--restore-save", "sometimes"]))
+                .validate()
+                .unwrap_err();
+        assert_eq!(invalid.error_type, "invalid_value");
+        assert!(invalid.message.contains("sometimes"));
     }
 
     fn launch_mode_flags(auto_connect: bool, cdp: bool, provider: bool, extensions: bool) -> Flags {
