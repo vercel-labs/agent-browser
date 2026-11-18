@@ -1570,6 +1570,37 @@ const ENV_HEADERS: &str = r#"{"Authorization":"env"}"#;
 const OWN_HEADERS: &str = r#"{"Authorization":"own"}"#;
 
 #[test]
+fn command_line_headers_join_an_ambient_endpoint_that_attaches() {
+    // The environment names the endpoint and the session has none yet, so the
+    // endpoint attaches. `--cdp-headers` belong to it and must be kept.
+    let mut f = ambient_flags(Some("ws://b.example/cdp"), None, Some(OWN_HEADERS));
+    f.cli_cdp_headers = true;
+    let plan = Running::defaults().plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://b.example/cdp".to_string())
+    );
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(OWN_HEADERS));
+    let keys = changed_keys(&plan);
+    assert!(
+        keys.contains(&Key::Cdp) && keys.contains(&Key::CdpHeaders),
+        "{keys:?}"
+    );
+
+    // The same when an explicit reset clears the running target first.
+    let running = running_with(&[(Key::Provider, json!("ios"))]);
+    let mut f = ambient_flags(Some("ws://b.example/cdp"), Some(""), Some(OWN_HEADERS));
+    f.cli_provider = true;
+    f.cli_cdp_headers = true;
+    let plan = running.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://b.example/cdp".to_string())
+    );
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(OWN_HEADERS));
+}
+
+#[test]
 fn command_line_headers_do_not_replace_a_skipped_endpoints_own_headers() {
     // The env names B but the session stays on A: `--cdp-headers` belongs to
     // B, so A keeps the headers it already had.

@@ -157,24 +157,20 @@ impl Running {
 
         // Connection entries from the environment or config are session
         // defaults: they apply after the explicit ones, and only to a session
-        // that has no target by then. Headers from there are credentials of an
-        // endpoint: they go last, and only with an endpoint this command sends
-        // or the one the session already runs.
+        // that has no target by then. Headers are credentials of an endpoint,
+        // so they resolve after every target, and only for an endpoint this
+        // command sends or one the session already runs.
         let mut ambient_open: Option<bool> = None;
         let ambient_headers = |key: &Key| *key == Key::CdpHeaders;
         let ordered = patch
             .iter()
-            .filter(|(key, _)| !patch.is_ambient(*key))
+            .filter(|(key, _)| !patch.is_ambient(*key) && !ambient_headers(key))
             .chain(
                 patch
                     .iter()
                     .filter(|(key, _)| patch.is_ambient(*key) && !ambient_headers(key)),
             )
-            .chain(
-                patch
-                    .iter()
-                    .filter(|(key, _)| patch.is_ambient(*key) && ambient_headers(key)),
-            );
+            .chain(patch.iter().filter(|(key, _)| ambient_headers(key)));
         for (key, requested) in ordered {
             if ambient_headers(&key) {
                 // Headers go to the endpoint the invocation names, and to no
