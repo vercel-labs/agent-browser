@@ -14,7 +14,7 @@ use crate::native::cdp::types::{AXNode, AXProperty, AXValue};
 use crate::native::element::RefMap;
 use crate::native::snapshot::{
     cursor_info_from_value, snapshot_from_ax_nodes, SnapshotOptions, SnapshotRefContext,
-    CURSOR_DETECTION_JS,
+    CURSOR_DETECTION_JS, HINT_FUNCTION,
 };
 
 const PAINT_WAIT: Duration = Duration::from_millis(500);
@@ -698,6 +698,8 @@ pub async fn take_snapshot(
     let mut urls = HashMap::new();
     let mut cursor_elements = HashMap::new();
     let mut node_contexts = HashMap::new();
+    let mut shared_ids = HashMap::new();
+    let bidi = ff.bidi.clone();
     let FirefoxSession {
         refs,
         next_node_id,
@@ -719,6 +721,7 @@ pub async fn take_snapshot(
             *next_node_id
         });
         node_contexts.insert(id, context);
+        shared_ids.insert(id, n["abSid"].clone());
         if n["abShadow"] == true {
             shadow_ids.insert(id);
         }
@@ -749,7 +752,28 @@ pub async fn take_snapshot(
             frame_id: None,
             document_is_known: known,
         },
-    ))
+        |targets| async {
+            let calls = targets.into_iter().map(|(idx, id)| {
+                let (bidi, node_contexts, shared_ids) = (&bidi, &node_contexts, &shared_ids);
+                async move {
+                    let this = json!({"sharedId": shared_ids.get(&id)?});
+                    let hint = bidi
+                        .call_function(node_contexts.get(&id)?, HINT_FUNCTION, Some(this), vec![])
+                        .await
+                        .ok()?;
+                    hint.as_str()
+                        .filter(|hint| !hint.is_empty())
+                        .map(|hint| (idx, hint.to_string()))
+                }
+            });
+            futures_util::future::join_all(calls)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        },
+    )
+    .await)
 }
 
 /// Handles the `snapshot` action.
@@ -890,6 +914,7 @@ mod tests {
     use super::*;
     use crate::native::element::RefMap;
     use crate::native::snapshot::{snapshot_from_ax_nodes, SnapshotOptions, SnapshotRefContext};
+    use futures_util::FutureExt;
     use std::collections::{HashMap, HashSet};
 
     fn leaf(role: &str, name: &str, sel: &str, states: &[&str]) -> Value {
@@ -1113,7 +1138,15 @@ mod tests {
                 frame_id: None,
                 document_is_known: known,
             },
+            |targets| async move {
+                targets
+                    .into_iter()
+                    .map(|(idx, id)| (idx, format!("id:{id}")))
+                    .collect::<Vec<_>>()
+            },
         )
+        .now_or_never()
+        .unwrap()
     }
 
     #[test]
@@ -1160,9 +1193,11 @@ mod tests {
             leaf("button", "OK", "body > button:nth-child(3)", &[]),
         ]);
         let mut map = RefMap::new();
-        render_with(&root, &mut map, &mut HashMap::new(), "loader");
+        let out = render_with(&root, &mut map, &mut HashMap::new(), "loader");
         assert_eq!(map.get("e1").unwrap().nth, Some(0));
         assert_eq!(map.get("e2").unwrap().nth, Some(1));
+        assert!(out.contains(r#"button "OK" [ref=e1] hint="id:2""#), "{out}");
+        assert!(out.contains(r#"button "OK" [ref=e2] hint="id:3""#), "{out}");
     }
 
     #[test]
@@ -1195,7 +1230,10 @@ mod tests {
                 frame_id: None,
                 document_is_known: false,
             },
-        );
+            |_| async { Vec::new() },
+        )
+        .now_or_never()
+        .unwrap();
 
         assert_eq!(refs.get("e1").unwrap().nth, None);
         assert_eq!(refs.get("e2").unwrap().nth, None);
@@ -1304,7 +1342,10 @@ mod tests {
                     frame_id: None,
                     document_is_known: false,
                 },
+                |_| async { Vec::new() },
             )
+            .now_or_never()
+            .unwrap()
         };
         assert_eq!(render(false), "- link \"Docs\" [ref=e1]");
         assert_eq!(

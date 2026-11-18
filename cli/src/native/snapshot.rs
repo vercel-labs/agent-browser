@@ -517,36 +517,7 @@ pub async fn take_snapshot(
         document_is_known,
     );
 
-    let mut label_counts: HashMap<(&str, &str), usize> = HashMap::new();
-    for node in tree_nodes.iter().filter(|node| node.has_ref) {
-        *label_counts
-            .entry((node.role.as_str(), node.label()))
-            .or_default() += 1;
-    }
-    let hint_nodes: Vec<(usize, i64)> = tree_nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| node.has_ref)
-        .filter_map(|(idx, node)| {
-            let is_control = node.cursor_info.is_some()
-                || (INTERACTIVE_ROLES.contains(&node.role.as_str()) && node.role != "Iframe");
-            let state = match (
-                node.label(),
-                label_counts[&(node.role.as_str(), node.label())],
-            ) {
-                ("", _) => LabelState::Empty,
-                (_, 1) => LabelState::Unique,
-                _ => LabelState::Shared,
-            };
-            let needs_hint = match state {
-                LabelState::Unique => false,
-                LabelState::Shared | LabelState::Empty => true,
-            };
-            node.backend_node_id
-                .filter(|_| is_control && needs_hint)
-                .map(|bid| (idx, bid))
-        })
-        .collect();
+    let hint_nodes = hint_targets(&tree_nodes);
     for (idx, hint) in call_on_nodes(client, effective_session_id, &hint_nodes, HINT_FUNCTION).await
     {
         tree_nodes[idx].hint = Some(hint);
@@ -640,6 +611,40 @@ pub async fn take_snapshot(
     }
 
     Ok(finish_output(output, options))
+}
+
+/// Picks ref'd controls whose printed label is empty or shared with another ref, as (tree index, backend id).
+fn hint_targets(tree_nodes: &[TreeNode]) -> Vec<(usize, i64)> {
+    let mut label_counts: HashMap<(&str, &str), usize> = HashMap::new();
+    for node in tree_nodes.iter().filter(|node| node.has_ref) {
+        *label_counts
+            .entry((node.role.as_str(), node.label()))
+            .or_default() += 1;
+    }
+    tree_nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.has_ref)
+        .filter_map(|(idx, node)| {
+            let is_control = node.cursor_info.is_some()
+                || (INTERACTIVE_ROLES.contains(&node.role.as_str()) && node.role != "Iframe");
+            let state = match (
+                node.label(),
+                label_counts[&(node.role.as_str(), node.label())],
+            ) {
+                ("", _) => LabelState::Empty,
+                (_, 1) => LabelState::Unique,
+                _ => LabelState::Shared,
+            };
+            let needs_hint = match state {
+                LabelState::Unique => false,
+                LabelState::Shared | LabelState::Empty => true,
+            };
+            node.backend_node_id
+                .filter(|_| is_control && needs_hint)
+                .map(|bid| (idx, bid))
+        })
+        .collect()
 }
 
 /// Allocates or reuses refs for interactive and named content nodes and records them in `ref_map`.
@@ -781,13 +786,15 @@ fn finish_output(mut output: String, options: &SnapshotOptions) -> String {
 /// Runs the shared tree, ref and render pipeline on prebuilt accessibility nodes.
 /// `urls` maps a node's `backend_d_o_m_node_id` to its link target and is used when `options.urls` is set.
 /// `cursor_elements` maps that same id to the element's cursor-interactive info.
-pub fn snapshot_from_ax_nodes(
+/// `hints` runs `HINT_FUNCTION` on the controls that need a hint and returns the non-empty results by tree index.
+pub async fn snapshot_from_ax_nodes<F: std::future::Future<Output = Vec<(usize, String)>>>(
     nodes: &[AXNode],
     urls: &HashMap<i64, String>,
     cursor_elements: &HashMap<i64, CursorElementInfo>,
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
     refs: SnapshotRefContext<'_>,
+    hints: impl FnOnce(Vec<(usize, i64)>) -> F,
 ) -> String {
     let (mut tree_nodes, roots) = build_tree(nodes);
     promote_hidden_inputs(&mut tree_nodes, cursor_elements);
@@ -800,6 +807,9 @@ pub fn snapshot_from_ax_nodes(
         refs.frame_id,
         refs.document_is_known,
     );
+    for (idx, hint) in hints(hint_targets(&tree_nodes)).await {
+        tree_nodes[idx].hint = Some(hint);
+    }
     if options.urls {
         for node in tree_nodes
             .iter_mut()
@@ -816,7 +826,7 @@ pub fn snapshot_from_ax_nodes(
 }
 
 /// Describes a control from its icon, image file, stable attribute, and nearest row.
-const HINT_FUNCTION: &str = r#"function() {
+pub(crate) const HINT_FUNCTION: &str = r#"function() {
     const tail = (s, sep) => (s || '').split(sep).pop();
     const use = this.querySelector('svg use');
     const svg = this.querySelector('svg[id], svg[data-icon]');

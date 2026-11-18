@@ -5884,11 +5884,11 @@ fn validate_firefox_relaunch(
         .get(Key::CaCert)
         .and_then(Value::as_str)
         .map(String::from);
-    validate_firefox_launch(next, &options, plugins)
+    check_firefox_launch_flags(next, &options, plugins)
 }
 
-/// Rejects the settings owned Firefox cannot launch with.
-fn validate_firefox_launch(
+/// Rejects the options and settings owned Firefox cannot launch with.
+fn check_firefox_launch_flags(
     settings: &Running,
     options: &LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
@@ -5904,9 +5904,9 @@ fn validate_firefox_launch(
     };
     let enable_features = settings.enable_features();
     let init_scripts = settings.init_scripts();
-    firefox::process::validate_launch(
+    bidi::firefox::validate_launch(
         options,
-        firefox::process::LaunchFlags {
+        bidi::firefox::LaunchFlags {
             cdp: cdp.as_deref(),
             auto_connect: matches!(connection, Connection::AutoConnect),
             provider: provider.as_deref(),
@@ -5918,14 +5918,14 @@ fn validate_firefox_launch(
     )
 }
 
-/// Launches owned Firefox with the session's resolved settings.
-async fn launch_firefox(
-    state: &mut DaemonState,
-    mut options: LaunchOptions,
+/// Rejects the settings Firefox cannot launch with. It runs before a relaunch closes the running
+/// browser, so a rejected option leaves that browser and its pages alone.
+async fn validate_firefox_launch(
+    state: &DaemonState,
+    options: &LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
-    strict_state: bool,
-) -> Result<Value, String> {
-    validate_firefox_launch(&state.settings, &options, plugins)?;
+) -> Result<(), String> {
+    check_firefox_launch_flags(&state.settings, options, plugins)?;
     let allowed_domains = current_allowed_domains(state).await;
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
         allowed_domains: &allowed_domains,
