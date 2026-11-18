@@ -67,6 +67,8 @@ Clicks fail before dispatch when another element covers the target's click point
 
 Headless Chromium screenshots hide native scrollbars for consistent image output. Pass `--hide-scrollbars false` when launching to keep native scrollbars visible.
 
+When `scroll --selector` cannot move the selected element in the requested direction, it scrolls the nearest ancestor that can move, then falls back to the page. JSON responses report the distance moved on each axis and the target in `in`.
+
 ## Get info
 
 ```bash

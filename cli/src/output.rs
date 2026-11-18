@@ -2619,14 +2619,14 @@ agent-browser scroll - Scroll the page
 
 Usage: agent-browser scroll [direction] [amount] [options]
 
-Scrolls the page or a specific element in the specified direction.
+Scrolls the selected element when it can move in that direction, then tries its scrollable ancestors, and falls back to the page. JSON responses include the distance moved on each axis and the target in `in`.
 
 Arguments:
   direction            up, down, left, right (default: down)
   amount               Pixels to scroll (default: 300)
 
 Options:
-  -s, --selector <sel> CSS selector for a scrollable container
+  -s, --selector <sel> CSS selector for the element to scroll
 
 Global Options:
   --json               Output as JSON

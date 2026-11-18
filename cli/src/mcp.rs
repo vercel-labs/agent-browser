@@ -1043,11 +1043,11 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SCROLL,
             "Scroll page",
-            "Scroll the page or an element.",
+            "Scroll the selected element when it can move in that direction, then try scrollable ancestors and fall back to the page. The response reports the distance moved on each axis and the target.",
             json!({
                 "direction": { "type": "string", "enum": ["up", "down", "left", "right"], "default": "down" },
                 "amount": { "type": "integer", "default": 300, "description": "Pixels to scroll." },
-                "selector": { "type": "string", "description": "Optional element selector to scroll." }
+                "selector": { "type": "string", "description": "Optional element selector; scrolling falls back to scrollable ancestors and then the page when needed." }
             }),
             &[],
         ),

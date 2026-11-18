@@ -4321,6 +4321,88 @@ async fn e2e_hover_scroll_press() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_scroll_selector_falls_back_to_scrollable_ancestor_and_page() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<html><body style='height:3000px'>",
+        "<div id='outer' style='height:100px;overflow:auto'>",
+        "<div id='inner' style='height:400px'>content</div>",
+        "</div></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "scroll", "selector": "#inner", "y": 50 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["scrolled"], true);
+    assert_eq!(get_data(&resp)["y"], 50.0);
+    assert_eq!(get_data(&resp)["in"], "#outer");
+    assert_evaluate(
+        &mut state,
+        "4",
+        "document.querySelector('#outer').scrollTop",
+        json!(50),
+    )
+    .await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "scroll", "selector": "body", "y": 500 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["scrolled"], true);
+    assert_eq!(get_data(&resp)["y"], 500.0);
+    assert_eq!(get_data(&resp)["in"], "page");
+    assert_evaluate(&mut state, "6", "window.scrollY", json!(500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "scroll", "selector": "body", "y": 10000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["scrolled"], true);
+    assert!(get_data(&resp)["y"].as_f64().unwrap() > 0.0);
+    assert!(get_data(&resp)["y"].as_f64().unwrap() < 10000.0);
+    assert_evaluate(
+        &mut state,
+        "8",
+        "window.scrollY === document.documentElement.scrollHeight - window.innerHeight",
+        json!(true),
+    )
+    .await;
+
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "scroll", "selector": "body", "y": 500 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["scrolled"], false);
+    assert_eq!(get_data(&resp)["y"], 0.0);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// One `press` must produce exactly one keydown/keyup pair whose `code`
 /// matches the key. Sending the Windows VK code as `nativeVirtualKeyCode`
 /// made macOS Chrome resolve a different physical key and repeat keydown

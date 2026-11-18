@@ -394,16 +394,65 @@ pub async fn scroll(
     delta_x: f64,
     delta_y: f64,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<Value, String> {
     if let Some(sel) = selector_or_ref {
         let (object_id, effective_session_id) =
             resolve_element_object_id(client, session_id, ref_map, sel, iframe_sessions).await?;
-        let js = "function(dx, dy) { this.scrollBy(dx, dy); }".to_string();
-        client
+        let js = r#"function(dx, dy) {
+            const page = document.scrollingElement;
+            const isPageElement = (el) => el === document.body || el === document.documentElement || el === page;
+            const canMove = (el, axis, delta) => {
+                if (!el || isPageElement(el) || delta === 0) return false;
+                const style = getComputedStyle(el);
+                const overflow = axis === 'x' ? style.overflowX : style.overflowY;
+                if (overflow === 'visible' || overflow === 'clip') return false;
+                const max = axis === 'x' ? el.scrollWidth - el.clientWidth : el.scrollHeight - el.clientHeight;
+                if (max <= 0) return false;
+                const position = axis === 'x' ? el.scrollLeft : el.scrollTop;
+                const minPosition = axis === 'x' && style.direction === 'rtl' ? -max : 0;
+                const maxPosition = axis === 'x' && style.direction === 'rtl' ? 0 : max;
+                const next = Math.max(minPosition, Math.min(maxPosition, position + delta));
+                return next !== position;
+            };
+            const describe = (el) => el.id ? `#${el.id}` : el.tagName.toLowerCase();
+            const targetFor = (axis, delta) => {
+                for (let el = this; el && el !== document.documentElement; el = el.parentElement) {
+                    if (canMove(el, axis, delta)) return el;
+                }
+                return page;
+            };
+            const scrollAxis = (axis, delta) => {
+                if (delta === 0) return { moved: 0, target: null };
+                const target = targetFor(axis, delta);
+                const before = target === page
+                    ? (axis === 'x' ? window.scrollX : window.scrollY)
+                    : (axis === 'x' ? target.scrollLeft : target.scrollTop);
+                if (target === page) {
+                    window.scrollBy({ left: axis === 'x' ? delta : 0, top: axis === 'y' ? delta : 0, behavior: 'instant' });
+                } else if (axis === 'x') {
+                    target.scrollLeft += delta;
+                } else {
+                    target.scrollTop += delta;
+                }
+                const after = target === page
+                    ? (axis === 'x' ? window.scrollX : window.scrollY)
+                    : (axis === 'x' ? target.scrollLeft : target.scrollTop);
+                return { moved: after - before, target: target === page ? 'page' : describe(target) };
+            };
+            const x = scrollAxis('x', dx);
+            const y = scrollAxis('y', dy);
+            const targets = [x, y].filter((axis) => axis.target !== null).map((axis) => axis.target);
+            return {
+                x: x.moved,
+                y: y.moved,
+                in: targets.length === 0 ? 'page' : [...new Set(targets)].join(', ')
+            };
+        }"#;
+        let result = client
             .send_command_typed::<_, Value>(
                 "Runtime.callFunctionOn",
                 &CallFunctionOnParams {
-                    function_declaration: js,
+                    function_declaration: js.to_string(),
                     object_id: Some(object_id),
                     arguments: Some(vec![
                         CallArgument {
@@ -421,9 +470,26 @@ pub async fn scroll(
                 Some(&effective_session_id),
             )
             .await?;
+        if let Some(exc) = result.get("exceptionDetails") {
+            let msg = exc
+                .get("exception")
+                .and_then(|e| e.get("description"))
+                .and_then(|d| d.as_str())
+                .or_else(|| exc.get("text").and_then(|t| t.as_str()))
+                .unwrap_or("scroll failed: script error");
+            return Err(msg.to_string());
+        }
+        return result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .cloned()
+            .ok_or_else(|| "scroll failed: missing result".to_string());
     } else {
-        let js = format!("window.scrollBy({}, {})", delta_x, delta_y);
-        client
+        let js = format!(
+            "(() => {{ const beforeX = window.scrollX; const beforeY = window.scrollY; window.scrollBy({{ left: {}, top: {}, behavior: 'instant' }}); return {{ x: window.scrollX - beforeX, y: window.scrollY - beforeY, in: 'page' }}; }})()",
+            delta_x, delta_y
+        );
+        let result = client
             .send_command_typed::<_, Value>(
                 "Runtime.evaluate",
                 &EvaluateParams {
@@ -434,8 +500,12 @@ pub async fn scroll(
                 Some(session_id),
             )
             .await?;
+        return result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .cloned()
+            .ok_or_else(|| "scroll failed: missing result".to_string());
     }
-    Ok(())
 }
 
 pub async fn select_option(

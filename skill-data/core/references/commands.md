@@ -96,7 +96,7 @@ agent-browser select @e1 "a" "b"  # Select multiple options
 # On a custom ARIA combobox/listbox (Radix, Headless UI), select opens it and clicks the
 # role=option whose name or value matches; no match errors with the available options,
 # and a matched aria-disabled option errors instead of being clicked.
-agent-browser scroll down 500     # Scroll page (default: down 300px)
+agent-browser scroll down 500     # Scrolls the element, its scrollable ancestors, or the page; JSON reports the distance and target
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
