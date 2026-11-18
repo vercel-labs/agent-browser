@@ -797,7 +797,7 @@ fn log_entry(state: &mut DaemonState, p: &Value) {
                 "warn" => "warning",
                 other => other,
             };
-            let args = p["args"].as_array().cloned().unwrap_or_default();
+            let args = p["args"].as_array().map_or(&[][..], Vec::as_slice);
             state.event_tracker.add_console(level, text, args);
         }
         Some("javascript") => {

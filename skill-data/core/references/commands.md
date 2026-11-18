@@ -627,6 +627,8 @@ agent-browser profiler start              # Start Chrome DevTools profiling
 agent-browser profiler stop trace.json    # Stop and save profile
 ```
 
+`console` and `errors` keep the latest 1,000 entries each, and drop the oldest sooner once either holds about 8 MiB. Text over 64 KiB ends with `...[truncated N bytes]`, and console arguments over 64 KiB are replaced by a note, so a page that logs without pause shows only its latest output.
+
 ## React / Web Vitals
 
 Requires `--enable react-devtools` at launch for the `react ...` commands. `vitals` and `pushstate` are framework-agnostic.
