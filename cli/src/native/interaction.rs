@@ -5,7 +5,7 @@ use serde_json::Value;
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::{
-    resolve_element_center, resolve_element_object_id, session_viewport_offset, RefMap,
+    resolve_element_center, resolve_element_object_id, session_viewport_offset, PressCheck, RefMap,
 };
 use super::pointer::{ClickSpec, Modifiers, MouseButton};
 
@@ -50,7 +50,7 @@ pub async fn click(
         selector_or_ref,
         spec,
         iframe_sessions,
-        true,
+        PressCheck::Click,
     )
     .await
 }
@@ -63,7 +63,7 @@ async fn click_element(
     selector_or_ref: &str,
     spec: ClickSpec,
     iframe_sessions: &HashMap<String, String>,
-    require_actionable: bool,
+    check: PressCheck,
 ) -> Result<ClickResult, String> {
     let (x, y, effective_session_id) = resolve_element_center(
         client,
@@ -71,7 +71,7 @@ async fn click_element(
         ref_map,
         selector_or_ref,
         iframe_sessions,
-        require_actionable,
+        check,
     )
     .await?;
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
@@ -107,7 +107,7 @@ pub async fn hover(
         ref_map,
         selector_or_ref,
         iframe_sessions,
-        false,
+        PressCheck::None,
     )
     .await?;
     let offset =
@@ -651,7 +651,7 @@ pub async fn check(
             selector_or_ref,
             ClickSpec::default(),
             iframe_sessions,
-            false,
+            PressCheck::None,
         )
         .await?;
         position = Some(result.position);
@@ -705,7 +705,7 @@ pub async fn uncheck(
             selector_or_ref,
             ClickSpec::default(),
             iframe_sessions,
-            false,
+            PressCheck::None,
         )
         .await?;
         position = Some(result.position);
@@ -1051,7 +1051,7 @@ pub async fn tap_touch(
         ref_map,
         selector_or_ref,
         iframe_sessions,
-        false,
+        PressCheck::None,
     )
     .await?;
 

@@ -31,7 +31,7 @@ use super::cdp::types::{
 use super::cookies;
 use super::diff;
 use super::downloads::{DownloadLedger, DownloadState};
-use super::element::RefMap;
+use super::element::{PressCheck, RefMap};
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
@@ -7250,7 +7250,7 @@ async fn handle_click(
             &state.ref_map,
             selector,
             &state.iframe_sessions,
-            true,
+            PressCheck::Click,
         )
         .await?;
         let offset = super::element::session_viewport_offset(
@@ -11822,22 +11822,34 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'target' parameter")?;
 
+    // Scrolling to the source can cause the page to render the drop target.
+    super::element::resolve_element_center(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        source,
+        &state.iframe_sessions,
+        PressCheck::Drag,
+    )
+    .await?;
+
+    super::element::resolve_element_center(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        target,
+        &state.iframe_sessions,
+        PressCheck::Drag,
+    )
+    .await?;
+    // Checking the target may have changed the source's viewport coordinates.
     let (sx, sy, source_session_id) = super::element::resolve_element_center(
         &mgr.client,
         &session_id,
         &state.ref_map,
         source,
         &state.iframe_sessions,
-        false,
-    )
-    .await?;
-    let (tx, ty, target_session_id) = super::element::resolve_element_center(
-        &mgr.client,
-        &session_id,
-        &state.ref_map,
-        target,
-        &state.iframe_sessions,
-        false,
+        PressCheck::Drag,
     )
     .await?;
 
@@ -11853,13 +11865,6 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &mgr.client,
         &session_id,
         &source_session_id,
-        &state.iframe_sessions,
-    )
-    .await?;
-    let target_offset = super::element::session_viewport_offset(
-        &mgr.client,
-        &session_id,
-        &target_session_id,
         &state.iframe_sessions,
     )
     .await?;
@@ -11889,11 +11894,53 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         cursor.record(sx + source_offset.0, sy + source_offset.1, 1);
     }
 
-    // Move in steps to target, keeping the left button held (buttons: 1) so
-    // that the browser sees a drag rather than a plain pointer move.
     state.mouse_state.x = sx + source_offset.0;
     state.mouse_state.y = sy + source_offset.1;
     state.mouse_state.buttons = 1;
+
+    // Pressing the source may have revealed a drop zone over the target.
+    let resolved_target = async {
+        let (tx, ty, target_session_id) = super::element::resolve_element_center(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            target,
+            &state.iframe_sessions,
+            PressCheck::Held,
+        )
+        .await?;
+        let target_offset = super::element::session_viewport_offset(
+            &mgr.client,
+            &session_id,
+            &target_session_id,
+            &state.iframe_sessions,
+        )
+        .await?;
+        Ok::<_, String>((tx, ty, target_session_id, target_offset))
+    }
+    .await;
+    let (tx, ty, target_session_id, target_offset) = match resolved_target {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            // The target is gone; do not leave the button held.
+            let _ = mgr
+                .client
+                .send_command(
+                    "Input.dispatchMouseEvent",
+                    Some(json!({ "type": "mouseReleased", "x": sx, "y": sy, "button": "left", "buttons": 0, "clickCount": 1 })),
+                    Some(&source_session_id),
+                )
+                .await;
+            state.mouse_state.buttons = 0;
+            if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
+                cursor.record(sx + source_offset.0, sy + source_offset.1, 0);
+            }
+            return Err(err);
+        }
+    };
+
+    // Move in steps to target, keeping the left button held (buttons: 1) so
+    // that the browser sees a drag rather than a plain pointer move.
     move_mouse_interpolated(
         &mgr.client,
         &target_session_id,

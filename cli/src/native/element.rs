@@ -329,10 +329,11 @@ async fn resolve_center_in_same_process_frame(
     session_id: &str,
     frame_id: &str,
     selector: &str,
-    require_actionable: bool,
+    check: PressCheck,
 ) -> Result<(f64, f64), String> {
     let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
     let find_expr = build_find_element_js_in("doc", selector);
+    let check_disabled = check.rejects_disabled();
     let function = format!(
         r#"async function() {{
             const doc = this.contentDocument;
@@ -344,7 +345,7 @@ async fn resolve_center_in_same_process_frame(
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             const topDoc = (point.view && point.view.document) || doc;
-            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(doc, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
+            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView, {check_disabled}), blocker: blockerAt(doc, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
         }}"#,
     );
     let result = client
@@ -360,16 +361,8 @@ async fn resolve_center_in_same_process_frame(
         )
         .await?;
     let value = result.get("result").and_then(|r| r.get("value"));
-    if require_actionable {
-        if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
-            return Err(not_actionable_error(selector, reason));
-        }
-    }
-    if let Some(blocker) = value
-        .and_then(|v| v.get("blocker"))
-        .and_then(|v| v.as_str())
-    {
-        return Err(intercepted_error(selector, blocker));
+    if let Some(err) = check.rejection(selector, value) {
+        return Err(err);
     }
     let x = value.and_then(|v| v.get("x")).and_then(|v| v.as_f64());
     let y = value.and_then(|v| v.get("y")).and_then(|v| v.as_f64());
@@ -419,7 +412,7 @@ pub async fn resolve_element_center(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-    require_actionable: bool,
+    check: PressCheck,
 ) -> Result<(f64, f64, String), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
@@ -439,7 +432,7 @@ pub async fn resolve_element_center(
                     effective_session_id,
                     &object_id,
                     selector_or_ref,
-                    require_actionable,
+                    check,
                 )
                 .await?
                 {
@@ -471,7 +464,7 @@ pub async fn resolve_element_center(
             effective_session_id,
             &object_id,
             selector_or_ref,
-            require_actionable,
+            check,
         )
         .await?
         .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
@@ -483,9 +476,7 @@ pub async fn resolve_element_center(
         // Cross-process iframe: its dedicated session's main frame IS the
         // iframe, so plain document-rooted resolution works there.
         if let Some(frame_session) = iframe_sessions.get(&frame_id) {
-            let (x, y) =
-                resolve_by_selector(client, frame_session, selector_or_ref, require_actionable)
-                    .await?;
+            let (x, y) = resolve_by_selector(client, frame_session, selector_or_ref, check).await?;
             return Ok((x, y, frame_session.clone()));
         }
         let (x, y) = resolve_center_in_same_process_frame(
@@ -493,13 +484,12 @@ pub async fn resolve_element_center(
             session_id,
             &frame_id,
             selector_or_ref,
-            require_actionable,
+            check,
         )
         .await?;
         return Ok((x, y, session_id.to_string()));
     }
-    let (x, y) =
-        resolve_by_selector(client, session_id, selector_or_ref, require_actionable).await?;
+    let (x, y) = resolve_by_selector(client, session_id, selector_or_ref, check).await?;
     Ok((x, y, session_id.to_string()))
 }
 
@@ -602,8 +592,9 @@ async fn node_click_point(
     session_id: &str,
     object_id: &str,
     target: &str,
-    require_actionable: bool,
+    check: PressCheck,
 ) -> Result<Option<(f64, f64)>, String> {
+    let check_disabled = check.rejects_disabled();
     let function = format!(
         r#"async function() {{
             if (!this.isConnected) return {{ connected: false }};
@@ -613,7 +604,7 @@ async fn node_click_point(
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             const topDoc = (point.view && point.view.document) || doc;
-            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
+            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView, {check_disabled}), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
         }}"#,
     );
     let result = client
@@ -636,16 +627,8 @@ async fn node_click_point(
     {
         return Ok(None);
     }
-    if require_actionable {
-        if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
-            return Err(not_actionable_error(target, reason));
-        }
-    }
-    if let Some(blocker) = value
-        .and_then(|v| v.get("blocker"))
-        .and_then(|v| v.as_str())
-    {
-        return Err(intercepted_error(target, blocker));
+    if let Some(err) = check.rejection(target, value) {
+        return Err(err);
     }
     match (
         value.and_then(|v| v.get("x")).and_then(|v| v.as_f64()),
@@ -1096,20 +1079,22 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
     return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView };
 })"#;
 
-/// Returns why a click at (x, y) cannot reach `el`, or null when it can.
+/// Returns why input at (x, y) cannot reach `el`, or null when it can. A
+/// disabled element counts only with `checkDisabled`.
 /// It fails open when the engine lacks an API it needs.
-const ACTIONABILITY_JS: &str = r#"(el, inView) => {
+const ACTIONABILITY_JS: &str = r#"(el, inView, checkDisabled) => {
     try {
         const rect = el.getBoundingClientRect();
         if ((rect.width <= 0 && rect.height <= 0) || ['hidden', 'collapse'].includes(el.ownerDocument.defaultView.getComputedStyle(el).visibility)) return 'not visible';
-        if (el.disabled || el.matches(':disabled')) return 'disabled';
+        if (checkDisabled && (el.disabled || el.matches(':disabled'))) return 'disabled';
         if (!inView) return 'outside the viewport';
     } catch (e) {}
     return null;
 }"#;
 
-fn build_selector_js(selector: &str) -> String {
+fn build_selector_js(selector: &str, check: PressCheck) -> String {
     let find_expr = build_find_element_js(selector);
+    let check_disabled = check.rejects_disabled();
     format!(
         r#"(async () => {{
             const el = {find_expr};
@@ -1119,7 +1104,7 @@ fn build_selector_js(selector: &str) -> String {
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             const topDoc = (point.view && point.view.document) || document;
-            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(document, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
+            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView, {check_disabled}), blocker: blockerAt(document, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
         }})()"#,
     )
 }
@@ -1128,9 +1113,9 @@ async fn resolve_by_selector(
     client: &CdpClient,
     session_id: &str,
     selector: &str,
-    require_actionable: bool,
+    check: PressCheck,
 ) -> Result<(f64, f64), String> {
-    let js = build_selector_js(selector);
+    let js = build_selector_js(selector, check);
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -1145,13 +1130,8 @@ async fn resolve_by_selector(
         .await?;
 
     let val = result.result.value.unwrap_or(Value::Null);
-    if require_actionable {
-        if let Some(reason) = val.get("reason").and_then(|v| v.as_str()) {
-            return Err(not_actionable_error(selector, reason));
-        }
-    }
-    if let Some(blocker) = val.get("blocker").and_then(|v| v.as_str()) {
-        return Err(intercepted_error(selector, blocker));
+    if let Some(err) = check.rejection(selector, Some(&val)) {
+        return Err(err);
     }
     let x = val.get("x").and_then(|v| v.as_f64());
     let y = val.get("y").and_then(|v| v.as_f64());
@@ -1169,11 +1149,44 @@ fn intercepted_error(target: &str, blocker: &str) -> String {
     )
 }
 
-fn not_actionable_error(target: &str, reason: &str) -> String {
-    format!(
-        "Element '{}' is {}, so the click would not reach it",
-        target, reason
-    )
+/// What a resolved press point must satisfy before input is dispatched to it.
+#[derive(Clone, Copy)]
+pub enum PressCheck {
+    /// Nothing else may cover the point.
+    None,
+    /// The element must also be visible, enabled, and inside the viewport.
+    Click,
+    /// The element must also be visible and inside the viewport.
+    Drag,
+    /// No check. The button is already down, so what the page puts over the
+    /// point in response, such as a drop zone, is part of the gesture.
+    Held,
+}
+
+impl PressCheck {
+    fn rejects_disabled(self) -> bool {
+        matches!(self, PressCheck::Click)
+    }
+
+    /// Why input at the resolved `point` would miss `target`, if it would.
+    fn rejection(self, target: &str, point: Option<&Value>) -> Option<String> {
+        let action = match self {
+            PressCheck::Held => return None,
+            PressCheck::None => None,
+            PressCheck::Click => Some("click"),
+            PressCheck::Drag => Some("drag"),
+        };
+        let point = point?;
+        let reason = point.get("reason").and_then(|v| v.as_str());
+        if let (Some(action), Some(reason)) = (action, reason) {
+            return Some(format!(
+                "Element '{}' is {}, so the {} would not reach it",
+                target, reason, action
+            ));
+        }
+        let blocker = point.get("blocker")?.as_str()?;
+        Some(intercepted_error(target, blocker))
+    }
 }
 
 pub async fn get_element_text(
@@ -1886,28 +1899,28 @@ mod tests {
 
     #[test]
     fn test_build_selector_js_css() {
-        let js = build_selector_js("#submit-btn");
+        let js = build_selector_js("#submit-btn", PressCheck::None);
         assert!(js.contains("document.querySelector(\"#submit-btn\")"));
         assert!(!js.contains("document.evaluate"));
     }
 
     #[test]
     fn test_build_selector_js_xpath() {
-        let js = build_selector_js("xpath=//button[@id='ok']");
+        let js = build_selector_js("xpath=//button[@id='ok']", PressCheck::None);
         assert!(js.contains("document.evaluate(\"//button[@id='ok']\", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)"));
         assert!(!js.contains("document.querySelector"));
     }
 
     #[test]
     fn test_build_selector_js_xpath_empty() {
-        let js = build_selector_js("xpath=");
+        let js = build_selector_js("xpath=", PressCheck::None);
         assert!(js.contains("document.evaluate"));
     }
 
     #[test]
     fn test_build_selector_js_not_xpath_prefix() {
         // "xpath" without "=" should be treated as CSS selector
-        let js = build_selector_js("xpath//div");
+        let js = build_selector_js("xpath//div", PressCheck::None);
         assert!(js.contains("document.querySelector"));
     }
 
