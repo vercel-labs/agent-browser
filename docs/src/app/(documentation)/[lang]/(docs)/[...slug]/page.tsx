@@ -1,0 +1,50 @@
+import { MobileDocsBar } from '@vercel/geistdocs/mobile-docs-bar';
+import { createDocsPage, resolvePageMarkdownUrl } from '@vercel/geistdocs/pages/docs';
+import { notFound } from 'next/navigation';
+import { isSafePathSegments } from '@/lib/docs-source';
+import { config } from '@/lib/geistdocs/config';
+import { geistdocsSource } from '@/lib/geistdocs/source';
+import { pageMetadata } from '@/lib/page-metadata';
+import { legacyHeadingId } from '@/lib/remark-legacy-headings';
+
+type PageProps = {
+  params: Promise<{ lang: string; slug?: string[] }>;
+};
+
+async function validate(params: PageProps['params']) {
+  const resolved = await params;
+  if (resolved.lang !== 'en' || !isSafePathSegments(resolved.slug ?? [])) notFound();
+  try {
+    if (!geistdocsSource.source.getPage(resolved.slug, resolved.lang)) notFound();
+  } catch (error) {
+    if (error instanceof URIError) notFound();
+    throw error;
+  }
+  return resolved;
+}
+
+const docsPage = createDocsPage({
+  config,
+  source: geistdocsSource,
+  // The introduction is served at `/introduction`, not the root, so its Markdown is `/introduction.md` rather than `/introduction/index.md`.
+  getMarkdownUrl: ({ pageUrl, publicPageUrl }) =>
+    resolvePageMarkdownUrl({ isRootMountedPage: false, pageUrl, publicPageUrl }),
+  renderTop: ({ data }) => (
+    <>
+      <span id={legacyHeadingId(data.title)} />
+      <MobileDocsBar toc={data.toc} />
+    </>
+  ),
+});
+
+export default async function Page({ params }: PageProps) {
+  return <docsPage.Page params={Promise.resolve(await validate(params))} />;
+}
+
+export async function generateMetadata({ params }: PageProps) {
+  const { slug = [] } = await validate(params);
+  return pageMetadata(slug.join('/'));
+}
+
+export const generateStaticParams = async () =>
+  (await docsPage.generateStaticParams()).filter((params) => params.slug?.length);

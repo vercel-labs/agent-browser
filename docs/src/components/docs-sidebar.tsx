@@ -24,6 +24,7 @@ export function DocsSidebar() {
                 <li key={item.href}>
                   <Link
                     href={item.href}
+                    aria-current={isActive ? "page" : undefined}
                     className={cn(
                       "text-sm transition-colors block py-1",
                       isActive

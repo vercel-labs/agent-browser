@@ -73,14 +73,6 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
     }));
 }
 
-fn attach_pin_tab_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
-    if flags.pin_tab {
-        cmd["pinTab"] = json!(true);
-    } else if flags.cli_pin_tab {
-        cmd["pinTab"] = json!(false);
-    }
-}
-
 fn attach_input_mode(cmd: &mut serde_json::Value, flags: &Flags) {
     if flags.cli_input_mode {
         cmd["defaultInputMode"] = json!(flags.input_mode);
@@ -1875,7 +1867,6 @@ fn main() {
     // broadcasts before observers see the command payload.
     attach_plugins_to_command(&mut cmd, &flags.plugins);
 
-    attach_pin_tab_to_command(&mut cmd, &flags);
     attach_restore_config_to_command(&mut cmd, &flags);
 
     // Validate restore/session persistence name before starting daemon
@@ -2271,8 +2262,6 @@ fn run_batch(
         if let Some(wire) = settings.to_wire() {
             parsed["settings"] = wire;
         }
-
-        attach_pin_tab_to_command(&mut parsed, flags);
 
         // `parsed` is still needed below for `evaluate_assert`, so hand the
         // sender a clone rather than moving it.
@@ -2771,23 +2760,23 @@ mod tests {
     }
 
     #[test]
-    fn test_attach_pin_tab_to_command_preserves_preference() {
+    fn test_pin_tab_rides_the_settings_patch_for_single_and_batch_commands() {
         let mut flags = neutral_launch_config_flags();
-
-        let mut absent_cmd = json!({ "action": "launch" });
-        attach_pin_tab_to_command(&mut absent_cmd, &flags);
-        assert!(absent_cmd.get("pinTab").is_none());
+        let cmd = json!({ "action": "tab_list" });
+        let pin = |flags: &Flags| {
+            let single = command_settings(flags, &cmd).to_wire();
+            let batch = batch_item_settings(flags, &cmd, false).to_wire();
+            assert_eq!(single, batch);
+            single.and_then(|wire| wire.get("pin-tab").cloned())
+        };
+        assert_eq!(pin(&flags), None);
 
         flags.pin_tab = true;
-        let mut enabled_cmd = json!({ "action": "launch" });
-        attach_pin_tab_to_command(&mut enabled_cmd, &flags);
-        assert_eq!(enabled_cmd["pinTab"], true);
+        flags.cli_pin_tab = true;
+        assert_eq!(pin(&flags), Some(json!(true)));
 
         flags.pin_tab = false;
-        flags.cli_pin_tab = true;
-        let mut disabled_cmd = json!({ "action": "launch" });
-        attach_pin_tab_to_command(&mut disabled_cmd, &flags);
-        assert_eq!(disabled_cmd["pinTab"], false);
+        assert_eq!(pin(&flags), Some(json!(false)));
     }
 
     #[test]
