@@ -344,11 +344,11 @@ agent-browser tab t1                               # switch back and read the cu
 agent-browser tab keep throttled                   # return t1 to the default throttling
 ```
 
-A live tab uses as much CPU as a front tab. Five busy background tabs used 0.05 CPU cores when throttled and 0.73 cores when live, so set it only on the tabs that have to keep running. A site can also detect it, because more than one tab reports focus at the same time. A tab pinned by another session with `--pin-tab` is refused with the same `tab_locked` error as `tab <ref>`.
+A live tab uses as much CPU as a front tab. Five busy background tabs used 0.05 CPU cores when throttled and 0.73 cores when live, so set it only on the tabs that have to keep running. A site can also detect it, because more than one tab reports focus at the same time. A tab pinned by another session with `--pin-tab` is refused with the same `tab_locked` error as `tab <ref>`. The setting belongs to the session that set it, so another session's `tab list` still shows the tab as throttled.
 
 In a browser that agent-browser didn't launch (`--cdp` or `--auto-connect`), a live tab's timers can still run slower than a front tab's: 6 to 8 ticks per second instead of 10 on a page that doesn't animate. Start that browser with `--disable-renderer-backgrounding` to get the full rate. Browsers that agent-browser launches already have the flag.
 
-`tab list` marks a live tab with `(live)`, and `tab list --json` reports `"keep": "live"` or `"keep": "throttled"` for every tab. The setting belongs to the session that set it, so a tab another session keeps live still shows as throttled here. `tab keep` uses the Chrome DevTools Protocol, so it isn't available on the WebDriver backend (Safari, iOS).
+`tab list` marks a live tab with `(live)`, and `tab list --json` reports `"keep": "live"` or `"keep": "throttled"` for every tab. `tab keep` uses the Chrome DevTools Protocol, so it isn't available on the WebDriver backend (Safari, iOS).
 
 ### Snapshot deltas
 
