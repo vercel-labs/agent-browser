@@ -516,7 +516,7 @@ async fn proxy_session_http_route(
         SessionProxyEndpoint::Stream => unreachable!("stream routes use the WebSocket proxy"),
     };
     let request = format!(
-        "GET {upstream_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        "GET {upstream_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
     );
 
     tokio::time::timeout(PROXY_TIMEOUT, async {

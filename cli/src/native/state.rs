@@ -313,7 +313,8 @@ pub async fn save_state(
         Some(p) => p.to_string(),
         None => {
             let dir = get_sessions_dir();
-            let _ = fs::create_dir_all(&dir);
+            super::private_fs::private_dir(&get_state_dir())?;
+            super::private_fs::private_dir(&dir)?;
             let name = session_name.unwrap_or("default");
             if !is_valid_session_name(name) {
                 return Err(session_name_error(name));
@@ -327,11 +328,9 @@ pub async fn save_state(
     if let Ok(key) = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
         let encrypted = encrypt_data(json_str.as_bytes(), &key)?;
         save_path.push_str(".enc");
-        fs::write(&save_path, &encrypted)
-            .map_err(|e| format!("Failed to write state to {}: {}", save_path, e))?;
+        super::private_fs::write_private(std::path::Path::new(&save_path), &encrypted)?;
     } else {
-        fs::write(&save_path, &json_str)
-            .map_err(|e| format!("Failed to write state to {}: {}", save_path, e))?;
+        super::private_fs::write_private(std::path::Path::new(&save_path), json_str.as_bytes())?;
     }
 
     Ok(save_path)
@@ -349,17 +348,11 @@ pub async fn save_auto_state_transactional(
     }
 
     let dir = get_sessions_dir();
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create state directory {}: {}", dir.display(), e))?;
+    super::private_fs::private_dir(&get_state_dir())?;
+    super::private_fs::private_dir(&dir)?;
 
     let tmp_dir = dir.join(".tmp");
-    fs::create_dir_all(&tmp_dir).map_err(|e| {
-        format!(
-            "Failed to create temporary state directory {}: {}",
-            tmp_dir.display(),
-            e
-        )
-    })?;
+    super::private_fs::private_dir(&tmp_dir)?;
 
     let base_name = format!("{}-{}", session_name, session_id_str);
     let final_json_path = dir.join(format!("{}.json", base_name));
@@ -392,6 +385,7 @@ pub async fn save_auto_state_transactional(
 
     let previous_path = PathBuf::from(format!("{}.previous", final_path.to_string_lossy()));
     if final_path.exists() {
+        super::private_fs::private_file(&final_path)?;
         let _ = fs::remove_file(&previous_path);
         fs::rename(&final_path, &previous_path).map_err(|e| {
             format!(

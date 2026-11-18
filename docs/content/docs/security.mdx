@@ -30,6 +30,10 @@ These features are designed to mitigate the following threats when an LLM-based 
 
 ### Known limitations
 
+Session HTTP APIs require an `Origin` or `Referer` matching the loopback `Host`, including chat, session creation, and read endpoints. Cross origin requests are rejected before dispatch. The standalone dashboard forwards approved requests through its own origin checks. These checks protect against browser requests, not untrusted programs running as your operating system user.
+
+Saved state, authentication profiles, and generated encryption keys are staged privately before atomic replacement. Unix files use mode `0600` and managed directories use `0700`. On Windows, access is restricted to the owner and SYSTEM. Explicit state exports do not change permissions on their parent directory. Filesystem permissions do not replace encryption or make an untrusted shared directory safe.
+
 - **WebSocket/EventSource blocking is best-effort.** It works by overriding browser constructors via an init script. If the `eval` action category is allowed, page scripts could theoretically restore the original constructors. Deny `eval` via `--action-policy` for maximum protection.
 - **Domain filter timing on cloud providers.** Cloud providers run outside the local Chrome process, so resources loaded by provider-side startup behavior before agent-browser connects are not retroactively blocked. agent-browser rejects pre-existing browser attach modes, Chrome profiles, direct-page provider plugins, restore/state replay, and raw startup Chrome args when the allowlist is active.
 - **The domain allowlist is not an operating-system firewall.** Locally launched Chrome disables non-proxied WebRTC UDP in addition to blocking `RTCPeerConnection` in page JavaScript. Combine the allowlist with host, container, or network egress controls when you require a boundary below the browser process.

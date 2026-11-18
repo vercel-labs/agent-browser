@@ -82,6 +82,8 @@ Security settings (`--allowed-domains`, `--action-policy`, `--confirm-actions`) 
 
 ## Session State Persistence
 
+Saved state and authentication credentials use private, atomic writes. Unix files use `0600` and managed directories use `0700`; Windows uses owner and SYSTEM access. An explicit export does not change its parent directory. Encryption remains optional. Session HTTP APIs require matching loopback `Host` and `Origin` or `Referer` headers; the standalone dashboard handles its own approved proxy requests.
+
 ### Automatic Restore
 
 ```bash
