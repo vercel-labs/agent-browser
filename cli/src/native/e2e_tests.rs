@@ -3173,6 +3173,148 @@ async fn e2e_tabs() {
     assert_success(&resp);
 }
 
+/// A live tab keeps its timers running behind another tab, and goes back to
+/// the browser's throttling when asked.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_live() {
+    let mut state = DaemonState::new();
+    let ticker = "data:text/html,<script>var ticks=0;setInterval(()=>ticks++,100)</script>";
+    let mut run = async |action: &str, mut cmd: Value| {
+        cmd["id"] = json!(action);
+        cmd["action"] = json!(action);
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_success(&resp);
+        resp
+    };
+    run("launch", json!({ "headless": true })).await;
+    run("navigate", json!({ "url": ticker })).await;
+
+    let resp = run("tab_keep", json!({ "keep": "live" })).await;
+    assert_eq!(get_data(&resp)["tabId"], "t1");
+    run("evaluate", json!({ "script": "ticks = 0" })).await;
+    run("tab_new", json!({})).await;
+    let resp = run("tab_list", json!({})).await;
+    assert_eq!(get_data(&resp)["tabs"][0]["keep"], "live");
+    assert_eq!(get_data(&resp)["tabs"][1]["keep"], "throttled");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    run("tab_switch", json!({ "tabId": "t1" })).await;
+    let resp = run("evaluate", json!({ "script": "ticks" })).await;
+    let ticks = get_data(&resp)["result"].as_f64().unwrap_or_default();
+    assert!(
+        ticks >= 20.0,
+        "a live tab ticks about 30 times in 3s, got {ticks}"
+    );
+
+    run("tab_keep", json!({ "keep": "throttled" })).await;
+    let resp = run("tab_list", json!({})).await;
+    assert_eq!(get_data(&resp)["tabs"][0]["keep"], "throttled");
+    run("close", json!({})).await;
+}
+
+/// A page that records the longest gap between two 100 ms ticks.
+const GAP_PAGE: &str = "data:text/html,<script>var ticks=0,gap=0,last=performance.now();setInterval(()=>{var n=performance.now();gap=Math.max(gap,n-last);last=n;ticks++},100)</script>";
+
+/// The active tab cannot be frozen. A frozen tab stops, and the daemon
+/// unfreezes it when closing a popup makes it the active tab while Chrome
+/// shows the opener.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_frozen() {
+    let mut state = DaemonState::new();
+    let mut run = async |action: &str, mut cmd: Value| {
+        cmd["id"] = json!(action);
+        cmd["action"] = json!(action);
+        execute_command(&cmd, &mut state).await
+    };
+    let ok = |resp: Value| {
+        assert_success(&resp);
+        resp
+    };
+    ok(run("launch", json!({ "headless": true })).await);
+    ok(run("navigate", json!({ "url": "data:text/html,<p>opener</p>" })).await);
+    ok(run("tab_new", json!({ "url": GAP_PAGE })).await);
+    let resp = run("tab_keep", json!({ "keep": "frozen" })).await;
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(error.contains("Cannot freeze the active tab"), "{resp}");
+
+    ok(run("tab_switch", json!({ "tabId": "t1" })).await);
+    ok(run(
+        "evaluate",
+        json!({ "script": "window.open('about:blank'), 0" }),
+    )
+    .await);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ok(run("tab_keep", json!({ "keep": "frozen", "tabId": "t2" })).await);
+    let resp = ok(run("tab_list", json!({})).await);
+    assert_eq!(get_data(&resp)["tabs"][1]["keep"], "frozen");
+    assert_eq!(get_data(&resp)["tabs"][2]["active"], true, "{resp}");
+
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    ok(run("tab_close", json!({})).await);
+    let script = "new Promise(r => setTimeout(() => r([gap, document.visibilityState]), 50))";
+    let resp = ok(run("evaluate", json!({ "script": script })).await);
+    let result = &get_data(&resp)["result"];
+    assert!(result[0].as_f64().unwrap_or_default() >= 2000.0, "{resp}");
+    assert_eq!(result[1], "hidden", "Chrome should still show the opener");
+    let resp = ok(run("tab_list", json!({})).await);
+    assert_eq!(get_data(&resp)["tabs"][1]["keep"], "throttled");
+    ok(run("close", json!({})).await);
+}
+
+/// A session attached to a running browser unfreezes the tabs it froze when
+/// it closes, because a frozen page stays frozen after the session disconnects.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_frozen_ends_with_an_attached_session() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let mut session = attach_pinned_session(&guard, "e2e-keep-frozen", &ws_url, GAP_PAGE).await;
+    let mut run = async |action: &str, mut cmd: Value| {
+        cmd["id"] = json!(action);
+        cmd["action"] = json!(action);
+        let resp = execute_command(&cmd, &mut session).await;
+        assert_success(&resp);
+        resp
+    };
+    let resp = run("tab_list", json!({})).await;
+    let tabs = get_data(&resp)["tabs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let ticker = tabs
+        .iter()
+        .find(|tab| tab["active"] == true)
+        .expect("an active tab");
+    let ticker = ticker["targetId"].as_str().unwrap_or_default().to_string();
+    run("tab_new", json!({})).await;
+    run("tab_keep", json!({ "keep": "frozen", "tabId": ticker })).await;
+    run("close", json!({})).await;
+
+    assert_success(&execute_command(&json!({ "id": "1", "action": "tab_list" }), &mut host).await);
+    let browser = host.browser.as_ref().expect("host browser");
+    let pages = browser.pages_list();
+    let page = pages
+        .iter()
+        .find(|page| page.target_id == ticker)
+        .expect("the tab left behind");
+    let mut ticks = Vec::new();
+    for _ in 0..2 {
+        let params = json!({ "expression": "ticks", "returnByValue": true });
+        let result =
+            browser
+                .client
+                .send_command("Runtime.evaluate", Some(params), Some(&page.session_id));
+        ticks.push(result.await.expect("the tab should answer")["result"]["value"].as_f64());
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    }
+    assert!(
+        ticks[1] > ticks[0],
+        "the tab should tick again after the session closed: {ticks:?}"
+    );
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut host).await);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_tab_ids_not_reused() {
@@ -14656,7 +14798,7 @@ async fn attach_pinned_session(
             "id": format!("{}-launch", session),
             "action": "launch",
             "cdpUrl": ws_url,
-            "pinTab": true
+            "settings": { "pin-tab": true }
         }),
         &mut state,
     )
@@ -14920,6 +15062,44 @@ async fn e2e_tab_new_still_activates_under_auto_attach() {
 
     let resp = execute_command(&json!({ "id": "host-99", "action": "close" }), &mut host).await;
     assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_pin_tab_setting_off_releases_the_manager_pin() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let url_a = "data:text/html,release-session-a";
+    let url_b = "data:text/html,release-session-b";
+    let mut state_a = attach_pinned_session(&guard, "e2e-release-a", &ws_url, url_a).await;
+    let binding_a = load_binding("e2e-release-a", "session A binding should persist");
+    let mut state_b = attach_pinned_session(&guard, "e2e-release-b", &ws_url, url_b).await;
+
+    let resp = execute_command(
+        &json!({ "id": "b-close-a", "action": "tab_close", "tabId": binding_a.target_id }),
+        &mut state_b,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Turning the pin off must reach the browser manager: a pinned manager
+    // with a gone tab answers tab_gone to every command.
+    let resp = execute_command(
+        &json!({ "id": "a-url", "action": "url", "settings": { "pin-tab": false } }),
+        &mut state_a,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(!state_a.pin_tab);
+    assert!(
+        !load_binding("e2e-release-a", "binding should remain").pinned,
+        "the binding must be unpinned"
+    );
+
+    let _ = execute_command(&json!({ "id": "a-close", "action": "close" }), &mut state_a).await;
+    let _ = execute_command(&json!({ "id": "b-close", "action": "close" }), &mut state_b).await;
+    let _ = execute_command(&json!({ "id": "h-close", "action": "close" }), &mut host).await;
 }
 
 #[tokio::test]

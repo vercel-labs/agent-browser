@@ -16,13 +16,14 @@ import './deployment-browser.css';
    screenshots are pasted into, Before and After side by side. */
 
 const VISIBLE: Record<Layout, number> = { wide: 460, compact: 280 };
-/** The captured region: most of the hero, from under the nav line to near the
+/** The captured region: most of the hero, from the nav line (so the marquee,
+ * SHOT_GAP outside it, clears that line instead of sitting on it) to near the
  * crop's foot, across the page's width; a fixed box, so the capture never
  * depends on measured text. The hero's content sits inside it (.ab-mock-hero
  * in the CSS places it). */
 export const SHOT_REGION: Record<Layout, { x: number; y: number; width: number; height: number }> = {
-  wide: { x: 12, y: 40, width: 436, height: 184 },
-  compact: { x: 10, y: 40, width: 260, height: 172 },
+  wide: { x: 12, y: 32, width: 436, height: 192 },
+  compact: { x: 10, y: 32, width: 260, height: 180 },
 };
 /** The copy is the region in a frame of the page's color, SHOT_PAD all round:
  * exactly the marquee's box (its gap is the same 8px). */
