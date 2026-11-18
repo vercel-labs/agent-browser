@@ -2458,6 +2458,22 @@ mod tests {
     }
 
     #[test]
+    fn a_default_provider_replaced_by_cdp_keeps_the_page_load_wait() {
+        let open = |args: &[&str], provider: Option<&str>| {
+            let (flags, _) = with_defaults(args, None, provider, false);
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap()
+        };
+        let cmd = open(&["--cdp", "9222", "open", "example.com"], Some("ios"));
+        assert!(cmd.get("waitUntil").is_none(), "{cmd}");
+        // A provider that applies still skips it, and `-p ""` names none.
+        let cmd = open(&["open", "example.com"], Some("ios"));
+        assert_eq!(cmd["waitUntil"], "none");
+        let cmd = open(&["-p", "", "open", "example.com"], None);
+        assert!(cmd.get("waitUntil").is_none(), "{cmd}");
+    }
+
+    #[test]
     fn cdp_flags_are_validated_before_the_command_runs() {
         let check = |args: &[&str]| {
             let (flags, cmd) = flags_of(args);

@@ -449,7 +449,12 @@ fn parse_command_inner(
             };
             let url = normalize_navigation_url(url);
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
-            if flags.provider.is_some() {
+            // The provider that will apply: `--cdp` replaces a default one, and
+            // `-p ""` names none.
+            let provider = crate::session_settings::effective_targets(flags)
+                .provider
+                .filter(|p| !p.trim().is_empty());
+            if provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");
             }
             if let Some(ref headers_json) = flags.headers {
@@ -463,7 +468,7 @@ fn parse_command_inner(
                 nav_cmd["headers"] = headers;
             }
             // Include iOS device info if specified (needed for auto-launch with existing daemon)
-            if flags.provider.as_deref() == Some("ios") {
+            if provider.as_deref() == Some("ios") {
                 if let Some(ref device) = flags.device {
                     nav_cmd["iosDevice"] = json!(device);
                 }
