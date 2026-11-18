@@ -1540,8 +1540,8 @@ fn headers_never_reach_a_session_that_stays_on_another_endpoint() {
     assert_eq!(headers, None);
     assert!(changes.is_empty(), "{changes:?}");
 
-    // Headers on the command line are not tied to a default endpoint, so a
-    // skipped one leaves them to update the attached endpoint.
+    // Command-line headers name B too, so they are dropped with it instead of
+    // reaching the retained endpoint A.
     let mut f = ambient_flags(Some("ws://b.example/cdp"), None, Some(OWN_HEADERS));
     f.cli_cdp_headers = true;
     let plan = attached.plan(&Patch::from_flags(&f));
@@ -1549,8 +1549,8 @@ fn headers_never_reach_a_session_that_stays_on_another_endpoint() {
         plan.next.connection(),
         Connection::Cdp("ws://a.example/cdp".to_string())
     );
-    assert_eq!(plan.next.cdp_headers().as_deref(), Some(OWN_HEADERS));
-    assert_eq!(changed_keys(&plan), vec![Key::CdpHeaders]);
+    assert_eq!(plan.next.cdp_headers(), None);
+    assert!(plan.changes.is_empty() && !plan.relaunch);
 
     // Headers alone, with no other endpoint named, update the attached one.
     let mut f = blank_flags();
@@ -1568,6 +1568,24 @@ fn headers_never_reach_a_session_that_stays_on_another_endpoint() {
 
 const ENV_HEADERS: &str = r#"{"Authorization":"env"}"#;
 const OWN_HEADERS: &str = r#"{"Authorization":"own"}"#;
+
+#[test]
+fn command_line_headers_do_not_replace_a_skipped_endpoints_own_headers() {
+    // The env names B but the session stays on A: `--cdp-headers` belongs to
+    // B, so A keeps the headers it already had.
+    let attached = running_with(&[
+        (Key::Cdp, json!("ws://a.example/cdp")),
+        (Key::CdpHeaders, json!(r#"{"Authorization":"a"}"#)),
+    ]);
+    let mut f = ambient_flags(Some("ws://b.example/cdp"), None, Some(OWN_HEADERS));
+    f.cli_cdp_headers = true;
+    let plan = attached.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.cdp_headers().as_deref(),
+        Some(r#"{"Authorization":"a"}"#)
+    );
+    assert!(plan.changes.is_empty() && !plan.relaunch);
+}
 
 fn headers_after(running: &Running, f: &Flags) -> (Option<String>, Vec<Key>) {
     let plan = running.plan(&Patch::from_flags(f));

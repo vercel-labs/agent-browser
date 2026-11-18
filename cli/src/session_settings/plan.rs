@@ -178,21 +178,17 @@ impl Running {
         for (key, requested) in ordered {
             if ambient_headers(&key) {
                 // Headers go to the endpoint the invocation names, and to no
-                // other. A default endpoint carries them only when it applied
-                // above or is the running one: if the session stays on another
-                // endpoint, the headers from the environment or config for it
-                // are dropped rather than sent to that one. Headers on the
-                // command line are free of any default endpoint, so they go
-                // with the endpoint the command names, or update the attached
-                // one when it names none.
-                let send = !patch.is_ambient(Key::CdpHeaders)
-                    || match patch.get(Key::Cdp) {
-                        Some(_) if !patch.is_ambient(Key::Cdp) => true,
-                        Some(r) => {
-                            matches!(r, Requested::Set(v) if next.get(Key::Cdp) == Some(v))
-                        }
-                        None => false,
-                    };
+                // other. When that endpoint was skipped because the session
+                // stays on another one, headers for it are dropped rather than
+                // sent to the endpoint that remains. Headers named by no
+                // endpoint update the attached one when they were given on the
+                // command line; headers from the environment or config have
+                // none to belong to.
+                let send = match patch.get(Key::Cdp) {
+                    Some(Requested::Set(endpoint)) => next.get(Key::Cdp) == Some(endpoint),
+                    Some(Requested::Default) => false,
+                    None => !patch.is_ambient(Key::CdpHeaders),
+                };
                 if !send {
                     continue;
                 }
