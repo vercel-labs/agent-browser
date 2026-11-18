@@ -952,7 +952,13 @@ fn parse_markdown_heading(line: &str) -> Option<Heading> {
     {
         return None;
     }
-    let title = rest.trim().trim_end_matches('#').trim();
+    let text = rest.trim_end_matches([' ', '\t']);
+    let before_hashes = text.trim_end_matches('#');
+    let title = if before_hashes.ends_with([' ', '\t']) {
+        before_hashes.trim()
+    } else {
+        text.trim()
+    };
     if title.is_empty() {
         None
     } else {
@@ -1322,6 +1328,19 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         assert!(outline.contains("    - Token auth"));
         assert!(!outline.contains("Install"));
         assert!(!outline.contains("Usage"));
+    }
+
+    #[test]
+    fn outline_preserves_literal_trailing_hashes() {
+        let content = "# Guide\n## C#\n## F# ###  \n## Issue##\t##\n## ###";
+        assert_eq!(
+            format_page_outline(content, "https://example.com", None),
+            "# Outline\n\nSource: https://example.com\n\n- Guide\n  - C#\n  - F#\n  - Issue##"
+        );
+        assert_eq!(
+            format_page_outline(content, "https://example.com", Some("C#")),
+            "# Outline\n\nSource: https://example.com\n\n  - C#"
+        );
     }
 
     #[test]
