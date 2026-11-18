@@ -1,6 +1,6 @@
 // Fixture Company for the browser join (Personal Agent Protocol section 6).
 // Usage: node company.mjs <normal|scope|reject|codeurl|offsite|deadport|canonical|upload|query>. Prints its port, then serves.
-// GET /_codes lists issued codes; GET /_hosts (per Host), /_discoveries, /_submits and /_redirects count poppy.json requests, form submissions and accepted joins.
+// GET /_codes lists issued codes; GET /_hosts (per Host), /_discoveries, /_uploads, /_submits and /_redirects count poppy.json requests, upload-path requests, form submissions and accepted joins.
 import http from "node:http";
 
 const mode = process.argv[2] ?? "normal";
@@ -11,6 +11,7 @@ let counter = 0;
 let submits = 0;
 let redirects = 0;
 let discoveries = 0;
+let uploads = 0;
 const hosts = {};
 
 const cookie = (req, name) =>
@@ -45,15 +46,20 @@ const server = http.createServer((req, res) => {
       // upload, query: the well-known URL redirects to a document outside the well-known path.
       if (mode === "upload") return send(302, { location: "/uploads/poppy.json" });
       if (mode === "query") return send(302, { location: "/.well-known/poppy.json?v=1" });
+      // linklocal: the well-known URL redirects to a link-local address.
+      if (mode === "linklocal")
+        return send(302, { location: "https://169.254.169.254/.well-known/poppy.json" });
       return json(200, document(origin));
     }
     if (route === "GET /uploads/poppy.json" || route === "GET /.well-known/poppy.json?v=1") {
+      uploads++;
       return json(200, document(origin));
     }
     if (route === "GET /_codes") return json(200, [...codes.keys()]);
     if (route === "GET /_submits") return json(200, submits);
     if (route === "GET /_hosts") return json(200, hosts);
     if (route === "GET /_discoveries") return json(200, discoveries);
+    if (route === "GET /_uploads") return json(200, uploads);
     if (route === "GET /_redirects") return json(200, redirects);
     if (route === "GET /join") {
       const n = counter++;

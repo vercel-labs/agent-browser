@@ -79,6 +79,10 @@ impl Company {
         self.counter("discoveries")
     }
 
+    fn uploads(&self) -> u64 {
+        self.counter("uploads")
+    }
+
     fn redirects(&self) -> u64 {
         self.counter("redirects")
     }
@@ -425,5 +429,25 @@ fn e2e_poppy_join_rejects_a_document_outside_the_well_known_path() {
             company.codes().is_empty(),
             "{mode}: the join page was loaded"
         );
+        assert_eq!(
+            company.uploads(),
+            0,
+            "{mode}: the document outside the well-known path was fetched"
+        );
     }
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_refuses_a_redirect_to_a_link_local_address() {
+    let company = Company::start("linklocal");
+    let session = Session::new();
+    let output = session.join(&company, &[]);
+    assert_failure(&output, "discovery_failed");
+    assert!(text(&output).contains("link-local"), "{}", text(&output));
+    assert_eq!(
+        company.discoveries(),
+        1,
+        "the redirect target was requested"
+    );
 }

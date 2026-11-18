@@ -4,10 +4,13 @@
 //! then the browser steps and the authorizer, so the one-time code never
 //! reaches the CLI process.
 
+use std::net::{IpAddr, SocketAddr};
+
 use reqwest::{redirect::Policy, Client};
 use serde_json::Value;
 use url::Url;
 
+use crate::native::flow::net::{is_link_local_or_metadata, is_non_public};
 use crate::tls::TrustOptions;
 
 const WELL_KNOWN: &str = "/.well-known/poppy.json";
@@ -59,6 +62,83 @@ fn check_scheme(url: &Url) -> Result<(), JoinError> {
         "http" if local => Ok(()),
         _ => Err(discovery_failed(format!("{} is not an HTTPS URL", url))),
     }
+}
+
+/// Whether discovery began at a target on this machine, whose hops are not
+/// third-party requests.
+fn started_locally(start: &Url) -> bool {
+    match start.host() {
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => is_non_public(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => is_non_public(IpAddr::V6(ip)),
+        None => false,
+    }
+}
+
+/// A hop reaches public addresses only, unless discovery started locally, and
+/// never a link-local or cloud metadata address.
+fn admitted(ip: IpAddr, local: bool) -> bool {
+    !is_link_local_or_metadata(ip) && (local || !is_non_public(ip))
+}
+
+fn check_address(host: &str, ip: IpAddr, local: bool) -> Result<(), JoinError> {
+    if admitted(ip, local) {
+        return Ok(());
+    }
+    let ip = ip.to_canonical();
+    Err(discovery_failed(if is_link_local_or_metadata(ip) {
+        format!(
+            "{} resolves to the link-local or cloud metadata address {}",
+            host, ip
+        )
+    } else {
+        format!("{} resolves to the non-public address {}", host, ip)
+    }))
+}
+
+/// A client for one hop, pinned to the addresses that were checked, so the
+/// address that passed `check_address` is the address that is used.
+async fn client_for(
+    url: &Url,
+    local: bool,
+    trust: &TrustOptions,
+    deadline: tokio::time::Instant,
+) -> Result<Client, JoinError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| discovery_failed(format!("{} has no host", url)))?;
+    let mut builder = crate::tls::apply_to_reqwest(Client::builder(), trust)
+        .map_err(discovery_failed)?
+        .redirect(Policy::none());
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => check_address(host, IpAddr::V4(ip), local)?,
+        Some(url::Host::Ipv6(ip)) => check_address(host, IpAddr::V6(ip), local)?,
+        _ => {
+            let port = url.port_or_known_default().unwrap_or(443);
+            let lookup = tokio::time::timeout_at(deadline, tokio::net::lookup_host((host, port)));
+            let addrs: Vec<SocketAddr> = lookup
+                .await
+                .map_err(|_| discovery_failed(format!("Resolving {} timed out", host)))?
+                .map_err(|e| discovery_failed(format!("Could not resolve {}: {}", host, e)))?
+                .collect();
+            if addrs.is_empty() {
+                return Err(discovery_failed(format!(
+                    "{} did not resolve to any address",
+                    host
+                )));
+            }
+            for addr in &addrs {
+                check_address(host, addr.ip(), local)?;
+            }
+            builder = builder.resolve_to_addrs(host, &addrs);
+        }
+    }
+    builder
+        .build()
+        .map_err(|e| discovery_failed(format!("Failed to create HTTP client: {}", e)))
 }
 
 /// Reads a `/.well-known/poppy.json` response for the Company at `host`.
@@ -142,29 +222,36 @@ fn is_redirect(status: u16) -> bool {
 /// Fetches the Company's `poppy.json`, following redirects one hop at a time.
 ///
 /// `check` runs on every URL before it is requested, so a hop can be refused
-/// before any DNS lookup or connection. The document's `organization.domain`
-/// must match the host that finally serves it. Everything stops at `deadline`.
+/// before any DNS lookup or connection, and the address check in `client_for`
+/// runs before the connection too. A hop fetches only the well-known path with
+/// no query, so a file uploaded elsewhere on a host cannot speak for it. The
+/// document's `organization.domain` must match the host that finally serves it.
+/// Everything stops at `deadline`.
 pub async fn fetch(
     target: Target,
     deadline: tokio::time::Instant,
     trust: &TrustOptions,
     check: impl Fn(&Url) -> Result<(), JoinError>,
 ) -> Result<Discovery, JoinError> {
-    let client = crate::tls::apply_to_reqwest(Client::builder(), trust)
-        .map_err(discovery_failed)?
-        .redirect(Policy::none())
-        .build()
-        .map_err(|e| discovery_failed(format!("Failed to create HTTP client: {}", e)))?;
     let mut url = Url::parse(&target.well_known)
         .map_err(|e| discovery_failed(format!("Invalid discovery URL: {}", e)))?;
+    let local = started_locally(&url);
     let mut seen: Vec<Url> = Vec::new();
     let (response, host, origin) = loop {
         check_scheme(&url)?;
+        // Only the well-known path speaks for a host; an upload elsewhere on it must not.
+        if url.path() != WELL_KNOWN || url.query().is_some() {
+            return Err(discovery_failed(format!(
+                "Discovery would request {}, not {}",
+                url, WELL_KNOWN
+            )));
+        }
         check(&url)?;
         if seen.contains(&url) {
             return Err(discovery_failed(format!("Redirect loop at {}", url)));
         }
         seen.push(url.clone());
+        let client = client_for(&url, local, trust, deadline).await?;
         let request = client
             .get(url.clone())
             .header(reqwest::header::ACCEPT, "application/json")
@@ -189,13 +276,6 @@ pub async fn fetch(
         let origin = format!("{}://{}", url.scheme(), host);
         break (response, host, origin);
     };
-    // Only the well-known path speaks for a host; an upload elsewhere on it must not.
-    if url.path() != WELL_KNOWN || url.query().is_some() {
-        return Err(discovery_failed(format!(
-            "Discovery ended at {}, not at {}",
-            url, WELL_KNOWN
-        )));
-    }
     let status = response.status().as_u16();
     if status == 404 || status == 410 {
         return Err(interpret(&host, status, "").unwrap_err());
@@ -298,5 +378,47 @@ mod tests {
         assert!(check_scheme(&Url::parse("http://localhost/").unwrap()).is_ok());
         assert!(check_scheme(&Url::parse("http://example.com/").unwrap()).is_err());
         assert!(check_scheme(&Url::parse("https://example.com/").unwrap()).is_ok());
+    }
+
+    #[test]
+    fn a_public_start_reaches_public_addresses_only() {
+        assert!(super::started_locally(
+            &Url::parse("http://127.0.0.1:3000/").unwrap()
+        ));
+        assert!(super::started_locally(
+            &Url::parse("http://localhost:3000/").unwrap()
+        ));
+        assert!(super::started_locally(
+            &Url::parse("https://[::1]/").unwrap()
+        ));
+        assert!(!super::started_locally(
+            &Url::parse("https://example.com/").unwrap()
+        ));
+
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let private: IpAddr = "10.0.0.7".parse().unwrap();
+        let public: IpAddr = "93.184.216.34".parse().unwrap();
+        let metadata: IpAddr = "169.254.169.254".parse().unwrap();
+        assert!(admitted(public, false));
+        assert!(!admitted(loopback, false));
+        assert!(!admitted(private, false));
+        assert!(!admitted(metadata, false));
+        assert!(admitted(loopback, true));
+        assert!(admitted(private, true));
+        // A link-local address is never reached, local target or not.
+        assert!(!admitted(metadata, true));
+    }
+
+    #[test]
+    fn a_refused_hop_says_which_address_it_reached() {
+        let err = check_address("evil.example", "10.0.0.7".parse().unwrap(), false).unwrap_err();
+        assert_eq!(err.code, "discovery_failed");
+        assert!(
+            err.message.contains("non-public address 10.0.0.7"),
+            "{err:?}"
+        );
+        let err =
+            check_address("evil.example", "169.254.169.254".parse().unwrap(), true).unwrap_err();
+        assert!(err.message.contains("link-local"), "{err:?}");
     }
 }
