@@ -2441,6 +2441,15 @@ const RESTORE_LIVE_KEYS: [Key; 4] = [
 /// Writes the restore rows `rows` of the current settings into the daemon's
 /// restore state. A new key starts a fresh restore cycle; a changed check
 /// re-arms validation of what was loaded.
+/// The restore status follows whether a key is set.
+fn sync_restore_status_with_key(state: &mut DaemonState) {
+    if state.session_name.is_none() {
+        state.restore_status = "not_configured".to_string();
+    } else if state.restore_status == "not_configured" {
+        state.restore_status = "pending".to_string();
+    }
+}
+
 fn apply_restore_settings(state: &mut DaemonState, rows: &[Key]) {
     let restore = state.settings.restore();
     if rows.contains(&Key::RestoreKey) {
@@ -2448,11 +2457,7 @@ fn apply_restore_settings(state: &mut DaemonState, rows: &[Key]) {
             reset_restore_runtime_state(state);
         }
         state.session_name = restore.key.clone();
-        if state.session_name.is_none() {
-            state.restore_status = "not_configured".to_string();
-        } else if state.restore_status == "not_configured" {
-            state.restore_status = "pending".to_string();
-        }
+        sync_restore_status_with_key(state);
     }
     if rows.contains(&Key::RestoreSave) {
         state.restore_save = restore.save;
@@ -5753,6 +5758,7 @@ async fn rollback_launch_settings(
         // The failed launch already started a fresh restore cycle for the new
         // key; only the key goes back.
         state.session_name = state.settings.restore().key;
+        sync_restore_status_with_key(state);
     }
     state.effective_ca_cert = pending.ca_cert;
     state.attached_target = pending.attached;
@@ -17881,6 +17887,23 @@ mod tests {
         assert_eq!(state.settings.restore().key.as_deref(), Some("old-key"));
         assert_eq!(state.restore_status, "sentinel");
         assert_eq!(outcome.changes[0]["applied"], false);
+    }
+
+    #[tokio::test]
+    async fn test_failed_launch_without_a_previous_key_returns_to_not_configured() {
+        let (_env, mut state) = unconfigured_restore_session();
+        assert!(state.session_name.is_none());
+        assert_eq!(state.restore_status, "not_configured");
+        let mut outcome = apply_wire(&mut state, json!({ "restore-key": "new-key" }), true)
+            .await
+            .unwrap();
+        assert_eq!(state.restore_status, "pending");
+
+        let rollback = rollback_launch_settings(&mut state, &mut outcome, "launch failed").await;
+
+        assert!(rollback.is_none());
+        assert!(state.session_name.is_none());
+        assert_eq!(state.restore_status, "not_configured");
     }
 
     #[tokio::test]

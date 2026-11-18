@@ -270,6 +270,25 @@ fn restore_key_from_flags(flags: &Flags) -> Option<&str> {
     flags.restore.as_deref().or(flags.session_name.as_deref())
 }
 
+/// The save policy is checked with or without a restore key, so a bad value
+/// from a flag, env or config never passes silently.
+fn validate_restore_settings(flags: &Flags) -> Result<(), (&'static str, String)> {
+    if let Some(policy) = flags.restore_save.as_deref() {
+        if !matches!(policy, "auto" | "always" | "never") {
+            return Err((
+                "invalid_value",
+                format!(
+                    "Invalid --restore-save value '{}'. Use auto, always, or never.",
+                    policy
+                ),
+            ));
+        }
+    }
+    session_settings::Patch::from_flags(flags)
+        .validate()
+        .map_err(|invalid| (invalid.error_type, invalid.message))
+}
+
 fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     // Only targets that will apply count: a target on the command line wins
     // over environment and config defaults, and two defaults resolve by
@@ -1772,11 +1791,11 @@ fn main() {
 
     // Validate the settings before a daemon starts: a bad restore key or save
     // policy must not leave one behind.
-    if let Err(invalid) = session_settings::Patch::from_flags(&flags).validate() {
+    if let Err((error_type, message)) = validate_restore_settings(&flags) {
         if flags.json {
-            print_json_error_with_type(invalid.message, invalid.error_type);
+            print_json_error_with_type(message, error_type);
         } else {
-            eprintln!("{} {}", color::error_indicator(), invalid.message);
+            eprintln!("{} {}", color::error_indicator(), message);
         }
         exit(1);
     }
@@ -3058,6 +3077,32 @@ mod tests {
         ] {
             assert!(wire[check].is_null(), "{check} must clear a sticky check");
         }
+    }
+
+    #[test]
+    fn test_invalid_restore_save_is_rejected_without_a_restore_key() {
+        let args: Vec<String> = ["--restore-save", "sometimes", "state", "list"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut flags = parse_flags(&args);
+        flags.restore = None;
+        flags.session_name = None;
+        let (error_type, message) = validate_restore_settings(&flags).unwrap_err();
+        assert_eq!(error_type, "invalid_value");
+        assert!(message.contains("Invalid --restore-save value 'sometimes'"));
+
+        // Env and config land in the same field as the flag.
+        let mut from_env = parse_flags(&["state".to_string(), "list".to_string()]);
+        from_env.restore = None;
+        from_env.session_name = None;
+        from_env.restore_save = Some("bogus".to_string());
+        assert_eq!(
+            validate_restore_settings(&from_env).unwrap_err().0,
+            "invalid_value"
+        );
+        from_env.restore_save = Some("never".to_string());
+        assert!(validate_restore_settings(&from_env).is_ok());
     }
 
     #[test]
