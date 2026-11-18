@@ -41,6 +41,9 @@ jobs:
       - name: Run launcher tests
         run: pnpm run test:launcher
 
+      - name: Run browser script tests
+        run: pnpm run test:browser-scripts
+
   docs:
     name: Docs (${{ matrix.environment }})
     runs-on: ubuntu-latest
