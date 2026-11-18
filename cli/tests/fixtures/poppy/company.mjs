@@ -1,6 +1,6 @@
 // Fixture Company for the browser join (Personal Agent Protocol section 6).
-// Usage: node company.mjs <normal|scope|reject|codeurl|offsite|deadport>. Prints its port, then serves.
-// GET /_codes lists issued codes; GET /_submits and /_redirects count form submissions and accepted joins.
+// Usage: node company.mjs <normal|scope|reject|codeurl|offsite|deadport|canonical>. Prints its port, then serves.
+// GET /_codes lists issued codes; GET /_hosts (per Host), /_discoveries, /_submits and /_redirects count poppy.json requests, form submissions and accepted joins.
 import http from "node:http";
 
 const mode = process.argv[2] ?? "normal";
@@ -10,6 +10,8 @@ const sessions = new Map();
 let counter = 0;
 let submits = 0;
 let redirects = 0;
+let discoveries = 0;
+const hosts = {};
 
 const cookie = (req, name) =>
   (req.headers.cookie ?? "").split(";").map((p) => p.trim().split("=")).find(([k]) => k === name)?.[1];
@@ -24,10 +26,16 @@ const server = http.createServer((req, res) => {
     };
     const json = (status, value) => send(status, { "content-type": "application/json" }, JSON.stringify(value));
     const html = (text, headers = {}) => send(200, { "content-type": "text/html", ...headers }, text);
-    const origin = `http://127.0.0.1:${server.address().port}`;
+    const origin = `http://${req.headers.host}`;
     const route = `${req.method} ${req.url}`;
 
     if (route === "GET /.well-known/poppy.json") {
+      discoveries++;
+      hosts[req.headers.host] = (hosts[req.headers.host] ?? 0) + 1;
+      // canonical: the document is served from localhost only; 127.0.0.1 redirects there.
+      if (mode === "canonical" && req.headers.host.startsWith("127.0.0.1")) {
+        return send(301, { location: `http://localhost:${server.address().port}/.well-known/poppy.json` });
+      }
       return json(200, {
         protocol_version: "1.0",
         organization: { domain: origin.slice("http://".length) },
@@ -36,6 +44,8 @@ const server = http.createServer((req, res) => {
     }
     if (route === "GET /_codes") return json(200, [...codes.keys()]);
     if (route === "GET /_submits") return json(200, submits);
+    if (route === "GET /_hosts") return json(200, hosts);
+    if (route === "GET /_discoveries") return json(200, discoveries);
     if (route === "GET /_redirects") return json(200, redirects);
     if (route === "GET /join") {
       const n = counter++;

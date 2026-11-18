@@ -67,6 +67,18 @@ impl Company {
         self.counter("submits")
     }
 
+    fn hosts(&self) -> Value {
+        let output = Command::new("curl")
+            .args(["-s", &format!("{}/_hosts", self.origin())])
+            .output()
+            .unwrap();
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    fn discoveries(&self) -> u64 {
+        self.counter("discoveries")
+    }
+
     fn redirects(&self) -> u64 {
         self.counter("redirects")
     }
@@ -107,7 +119,12 @@ impl Session {
     }
 
     fn join(&self, company: &Company, env: &[(&str, &str)]) -> Output {
+        self.join_with(company, &[], env)
+    }
+
+    fn join_with(&self, company: &Company, flags: &[&str], env: &[(&str, &str)]) -> Output {
         self.command()
+            .args(flags)
             .args(["poppy", "join", &company.origin(), "--authorizer"])
             .arg(format!("node \"{}\"", fixture("authorizer.mjs").display()))
             .envs(env.iter().copied())
@@ -300,4 +317,98 @@ fn e2e_poppy_join_fails_when_the_redirect_target_does_not_load() {
     assert!(text(&output).contains("did not load"), "{}", text(&output));
     assert_code_absent(&company, &output);
     assert_blank(&session);
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_checks_the_allowlist_before_discovery() {
+    let company = Company::start("normal");
+    let session = Session::new();
+    let output = session.join(
+        &company,
+        &[("AGENT_BROWSER_ALLOWED_DOMAINS", "other.example")],
+    );
+    assert_failure(&output, "domain_not_allowed");
+    assert!(text(&output).contains("127.0.0.1"), "{}", text(&output));
+    assert_eq!(company.discoveries(), 0, "the host was contacted");
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_enforces_the_stored_session_allowlist() {
+    let company = Company::start("normal");
+    let session = Session::new();
+    // The allowlist is stored by the first command and not repeated on the join.
+    session.run(&[
+        "--allowed-domains",
+        "other.example",
+        "read",
+        "http://127.0.0.1:1/",
+        "--timeout",
+        "1000",
+    ]);
+    let output = session.join(&company, &[]);
+    assert_failure(&output, "domain_not_allowed");
+    assert_eq!(company.discoveries(), 0, "the host was contacted");
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_is_parked_for_confirmation_before_discovery() {
+    let company = Company::start("normal");
+    let session = Session::new();
+    let output = session.join_with(&company, &["--confirm-actions", "navigate"], &[]);
+    let value = stdout_json(&output);
+    assert_eq!(value["data"]["confirmation_required"], true, "{value}");
+    assert_eq!(company.discoveries(), 0, "the host was contacted");
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_follows_a_redirect_to_the_canonical_host() {
+    let company = Company::start("canonical");
+    let session = Session::new();
+    let output = session.join(&company, &[]);
+    let value = stdout_json(&output);
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(value["data"]["joined"], true, "{value}");
+    assert_eq!(
+        value["data"]["url"],
+        format!("http://localhost:{}/", company.port),
+        "{value}"
+    );
+    assert_code_absent(&company, &output);
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_checks_the_allowlist_on_each_redirect_hop() {
+    let company = Company::start("canonical");
+    let session = Session::new();
+    let output = session.join(&company, &[("AGENT_BROWSER_ALLOWED_DOMAINS", "127.0.0.1")]);
+    assert_failure(&output, "domain_not_allowed");
+    assert!(text(&output).contains("localhost"), "{}", text(&output));
+    let hosts = company.hosts();
+    assert_eq!(hosts[format!("127.0.0.1:{}", company.port)], 1, "{hosts}");
+    assert!(
+        hosts.get(format!("localhost:{}", company.port)).is_none(),
+        "the redirect target was requested: {hosts}"
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_waits_for_a_slow_authorizer_within_the_timeout() {
+    let company = Company::start("normal");
+    let session = Session::new();
+    let output = session.join(
+        &company,
+        &[
+            ("AGENT_BROWSER_DEFAULT_TIMEOUT", "40000"),
+            ("POPPY_TEST_DELAY_MS", "32000"),
+        ],
+    );
+    let value = stdout_json(&output);
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(value["data"]["joined"], true, "{value}");
 }

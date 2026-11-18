@@ -37,6 +37,7 @@ Success prints `{"success": true, "data": {"experimental": true, "joined": true,
 ## Errors
 
 - `not_supported`: the site has no `poppy.json`. Browse it signed out.
+- `domain_not_allowed`: the discovery URL, a redirect or the session endpoint is outside the session's allowed domains. Nothing was requested. Do not widen the allowlist without the user's say.
 - `web_disabled`: the site asks agents not to use a browser. Use the agent or APIs it lists.
 - `no_browser_session_endpoint`: the site has no browser join. Browse it signed out.
 - `discovery_failed`: the discovery document is invalid, does not match the host, or is not served over HTTPS. Do not join.
@@ -45,7 +46,7 @@ Success prints `{"success": true, "data": {"experimental": true, "joined": true,
 - `join_failed`: the page had no code form, or the site rejected the submission. Run the join again.
 - Any other code came from the authorizer, such as `invalid_request`, `insufficient_scope`, `invalid_session`, `invalid_token`, or `version_unsupported`. Do not retry `version_unsupported`.
 
-When a join fails after the browser session page has loaded, the tab returns to `about:blank`. A discovery failure leaves the tab where it was. A signed-out browser still belongs to the Session. To sign in again, run the join again with the same authorizer.
+When a join fails after the browser session page has loaded, the tab returns to `about:blank`. A discovery failure leaves the tab where it was. The whole join runs within `AGENT_BROWSER_DEFAULT_TIMEOUT`. A signed-out browser still belongs to the Session. To sign in again, run the join again with the same authorizer.
 
 ## Safety
 

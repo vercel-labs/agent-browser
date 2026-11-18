@@ -382,8 +382,8 @@ fn reject_batch_global_flag(batch_item: bool, arg: &str) -> Result<(), ParseErro
     }
 }
 
-/// Stamps `timeout` on a wait-family command, `flow_save` or `flow_run` that
-/// has none, so the client read timeout follows it.
+/// Stamps `timeout` on a wait-family command, `flow_save`, `flow_run` or
+/// `poppy_join` that has none, so the client read timeout follows it.
 pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     let Some(timeout) = timeout else {
         return;
@@ -392,7 +392,7 @@ pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
         .get("action")
         .and_then(Value::as_str)
         .is_some_and(|action| {
-            action.starts_with("wait") || action == "flow_save" || action == "flow_run"
+            action.starts_with("wait") || matches!(action, "flow_save" | "flow_run" | "poppy_join")
         });
     if is_wait && cmd.get("timeout").is_none() {
         cmd["timeout"] = json!(timeout);
@@ -414,7 +414,7 @@ fn parse_command_inner(
     reject_batch_global_flag(batch_item, &args[0])?;
     let cmd = args[0].as_str();
     if batch_item && cmd == "poppy" {
-        // Discovery runs in the CLI before the daemon action, so a join is not a batch step.
+        // A join runs discovery, the authorizer and a sign-in, so it is not a batch step.
         return Err(ParseError::InvalidValue {
             message: "poppy join cannot run inside batch".to_string(),
             usage: "agent-browser poppy join <url> --authorizer <command>",
@@ -6603,6 +6603,21 @@ mod tests {
         assert_eq!(cmd["timeout"], 40000);
         let none = parse_command(&args("flow save stoves"), &default_flags()).unwrap();
         assert!(none.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_poppy_join_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(40000);
+        let cmd = parse_command(
+            &args("poppy join https://example.com --authorizer ./auth.sh"),
+            &flags,
+        )
+        .unwrap();
+        assert_eq!(cmd["timeout"], 40000);
+        assert_eq!(
+            crate::connection::read_timeout_for(&cmd),
+            std::time::Duration::from_millis(50_000)
+        );
     }
 
     #[test]

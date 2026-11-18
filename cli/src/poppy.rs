@@ -1,20 +1,16 @@
-//! `poppy join` (experimental): discovery, on the CLI side.
+//! `poppy join` (experimental): reading a Company's `poppy.json`.
 //!
-//! The browser steps and the authorizer run in the daemon (`native::poppy`),
-//! so the one-time code never reaches this process.
-
-use std::time::Duration;
+//! The daemon (`native::poppy`) runs discovery after policy and domain checks,
+//! then the browser steps and the authorizer, so the one-time code never
+//! reaches the CLI process.
 
 use reqwest::{redirect::Policy, Client};
-use serde_json::{json, Value};
+use serde_json::Value;
 use url::Url;
 
-use crate::color;
 use crate::tls::TrustOptions;
 
 const WELL_KNOWN: &str = "/.well-known/poppy.json";
-/// The documented `AGENT_BROWSER_DEFAULT_TIMEOUT` default, in ms.
-pub const DEFAULT_TIMEOUT_MS: u64 = 25_000;
 
 /// A failed join with a machine-readable code.
 #[derive(Debug, PartialEq, Eq)]
@@ -28,6 +24,15 @@ fn discovery_failed(message: impl Into<String>) -> JoinError {
         code: "discovery_failed",
         message: message.into(),
     }
+}
+
+/// Where a Company publishes `poppy.json`, before any request is made.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Target {
+    pub origin: String,
+    pub host: String,
+    /// The one URL discovery requests.
+    pub well_known: String,
 }
 
 /// What discovery learned about a Company.
@@ -114,79 +119,93 @@ fn interpret(host: &str, status: u16, body: &str) -> Result<String, JoinError> {
     Ok(endpoint.to_string())
 }
 
-async fn discover_async(
-    raw_url: &str,
-    timeout_ms: u64,
-    trust: &TrustOptions,
-) -> Result<Discovery, JoinError> {
-    let target = crate::read::normalize_url(raw_url).map_err(discovery_failed)?;
-    check_scheme(&target)?;
-    let host = host_with_port(&target)
-        .ok_or_else(|| discovery_failed(format!("{} has no host", raw_url)))?;
-    let origin = format!("{}://{}", target.scheme(), host);
+/// Resolves the discovery URL for `raw_url` without touching the network.
+pub fn target(raw_url: &str) -> Result<Target, JoinError> {
+    let url = crate::read::normalize_url(raw_url).map_err(discovery_failed)?;
+    check_scheme(&url)?;
+    let host =
+        host_with_port(&url).ok_or_else(|| discovery_failed(format!("{} has no host", raw_url)))?;
+    let origin = format!("{}://{}", url.scheme(), host);
+    let well_known = format!("{}{}", origin, WELL_KNOWN);
+    Ok(Target {
+        origin,
+        host,
+        well_known,
+    })
+}
 
+/// Redirect statuses that carry a `Location` to follow.
+fn is_redirect(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// Fetches the Company's `poppy.json`, following redirects one hop at a time.
+///
+/// `check` runs on every URL before it is requested, so a hop can be refused
+/// before any DNS lookup or connection. The document's `organization.domain`
+/// must match the host that finally serves it. Everything stops at `deadline`.
+pub async fn fetch(
+    target: Target,
+    deadline: tokio::time::Instant,
+    trust: &TrustOptions,
+    check: impl Fn(&Url) -> Result<(), JoinError>,
+) -> Result<Discovery, JoinError> {
     let client = crate::tls::apply_to_reqwest(Client::builder(), trust)
         .map_err(discovery_failed)?
         .redirect(Policy::none())
-        .timeout(Duration::from_millis(timeout_ms))
         .build()
         .map_err(|e| discovery_failed(format!("Failed to create HTTP client: {}", e)))?;
-    let url = format!("{}{}", origin, WELL_KNOWN);
-    let response = client
-        .get(&url)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .map_err(|e| discovery_failed(format!("Request to {} failed: {}", url, e)))?;
+    let mut url = Url::parse(&target.well_known)
+        .map_err(|e| discovery_failed(format!("Invalid discovery URL: {}", e)))?;
+    let mut seen: Vec<Url> = Vec::new();
+    let (response, host, origin) = loop {
+        check_scheme(&url)?;
+        check(&url)?;
+        if seen.contains(&url) {
+            return Err(discovery_failed(format!("Redirect loop at {}", url)));
+        }
+        seen.push(url.clone());
+        let request = client
+            .get(url.clone())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send();
+        let response = tokio::time::timeout_at(deadline, request)
+            .await
+            .map_err(|_| discovery_failed(format!("Request to {} timed out", url)))?
+            .map_err(|e| discovery_failed(format!("Request to {} failed: {}", url, e)))?;
+        let status = response.status().as_u16();
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok());
+        if let (true, Some(location)) = (is_redirect(status), location) {
+            url = url
+                .join(location)
+                .map_err(|e| discovery_failed(format!("Invalid redirect Location: {}", e)))?;
+            continue;
+        }
+        let host =
+            host_with_port(&url).ok_or_else(|| discovery_failed(format!("{} has no host", url)))?;
+        let origin = format!("{}://{}", url.scheme(), host);
+        break (response, host, origin);
+    };
     let status = response.status().as_u16();
     if status == 404 || status == 410 {
         return Err(interpret(&host, status, "").unwrap_err());
     }
-    let body = response
-        .text()
+    let body = tokio::time::timeout_at(deadline, response.text())
         .await
+        .map_err(|_| discovery_failed(format!("Reading {} timed out", url)))?
         .map_err(|e| discovery_failed(format!("Could not read {}: {}", url, e)))?;
     let endpoint = interpret(&host, status, &body)?;
     Ok(Discovery { origin, endpoint })
 }
 
-/// Fetches the Company's `poppy.json` and returns its origin and browser session endpoint.
-pub fn discover(
-    raw_url: &str,
-    timeout_ms: u64,
-    trust: &TrustOptions,
-) -> Result<Discovery, JoinError> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| discovery_failed(format!("Failed to start runtime: {}", e)))?
-        .block_on(discover_async(raw_url, timeout_ms, trust))
-}
-
-pub fn print_failure(json: bool, error: &JoinError) {
-    if json {
-        println!(
-            "{}",
-            json!({
-                "success": false,
-                "error": error.message,
-                "code": error.code,
-                "data": { "experimental": true, "joined": false },
-            })
-        );
-    } else {
-        eprintln!(
-            "{} {}: {}",
-            color::error_indicator(),
-            error.code,
-            error.message
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use serde_json::json;
 
     fn doc(extra: Value) -> String {
         let mut doc = json!({
@@ -252,6 +271,18 @@ mod tests {
             code(200, &doc(json!({ "web": {} }))),
             "no_browser_session_endpoint"
         );
+    }
+
+    #[test]
+    fn the_target_is_the_well_known_url_of_the_origin() {
+        let target = target("http://127.0.0.1:3000/some/page").unwrap();
+        assert_eq!(target.origin, "http://127.0.0.1:3000");
+        assert_eq!(
+            target.well_known,
+            "http://127.0.0.1:3000/.well-known/poppy.json"
+        );
+        assert_eq!(target.host, "127.0.0.1:3000");
+        assert!(super::target("http://example.com/").is_err());
     }
 
     #[test]

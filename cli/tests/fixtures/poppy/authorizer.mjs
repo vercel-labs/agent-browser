@@ -1,6 +1,7 @@
 // Test authorizer: performs step 2 of the browser join against the fixture Company.
 // Reads one JSON line on stdin and prints one JSON line.
 // POPPY_TEST_TOKEN: send this access token.
+// POPPY_TEST_DELAY_MS: wait this long before answering.
 import { createInterface } from "node:readline";
 
 const [line] = await new Promise((resolve) => {
@@ -10,6 +11,7 @@ const [line] = await new Promise((resolve) => {
   rl.on("close", () => resolve(lines));
 });
 const input = JSON.parse(line);
+await new Promise((resolve) => setTimeout(resolve, Number(process.env.POPPY_TEST_DELAY_MS ?? 0)));
 
 const headers = {
   "content-type": "application/json",

@@ -1,10 +1,13 @@
 //! Daemon side of `poppy join` (experimental).
 //!
-//! One action covers the whole join, so the one-time code is read from the
-//! page, handed to the authorizer, and submitted without leaving the daemon.
+//! One action covers the whole join: discovery, then the one-time code is read
+//! from the page, handed to the authorizer, and submitted without leaving the
+//! daemon. Discovery runs inside the normal dispatch, so action policy,
+//! confirmation and the session's domain allowlist apply before any request.
 
 use std::process::Stdio;
 use std::time::Duration;
+use tokio::time::{timeout_at, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -12,6 +15,7 @@ use tokio::process::Command;
 use url::Url;
 
 use super::actions::DaemonState;
+use super::network::DomainFilter;
 
 /// Marks an error string as `poppy:<code>: <message>`.
 pub const ERROR_PREFIX: &str = "poppy:";
@@ -35,7 +39,48 @@ fn same_resource(a: &str, b: &str) -> bool {
     }
 }
 
-/// Steps 1 to 3 of the browser join, with the authorizer between them.
+fn check_domain(filter: &Option<DomainFilter>, url: &str) -> Result<(), crate::poppy::JoinError> {
+    match filter {
+        Some(filter) => filter
+            .check_url(url)
+            .map_err(|message| crate::poppy::JoinError {
+                code: "domain_not_allowed",
+                message,
+            }),
+        None => Ok(()),
+    }
+}
+
+/// Reads the Company's `poppy.json`. The session's domain allowlist is checked
+/// on the discovery URL and on every redirect hop before it is requested, and
+/// on the endpoint the document names before the browser navigates to it.
+async fn discover(
+    cmd: &Value,
+    state: &DaemonState,
+    deadline: Instant,
+) -> Result<crate::poppy::Discovery, String> {
+    let url = cmd
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'url' parameter")?;
+    let trust = match cmd.get("tls") {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|e| format!("Invalid TLS options: {e}"))?,
+        None => crate::tls::TrustOptions::default(),
+    };
+    let to_error = |e: crate::poppy::JoinError| fail(e.code, e.message);
+    let filter = state.domain_filter.read().await.clone();
+    let target = crate::poppy::target(url).map_err(to_error)?;
+    let discovery = crate::poppy::fetch(target, deadline, &trust, |hop| {
+        check_domain(&filter, hop.as_str())
+    })
+    .await
+    .map_err(to_error)?;
+    check_domain(&filter, &discovery.endpoint).map_err(to_error)?;
+    Ok(discovery)
+}
+
+/// Discovery, then steps 1 to 3 of the browser join, with the authorizer between them.
 pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let field = |name: &str| {
         cmd.get(name)
@@ -43,14 +88,16 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
             .map(str::to_string)
             .ok_or_else(|| format!("Missing '{}' parameter", name))
     };
-    let (endpoint, authorizer, origin) =
-        (field("endpoint")?, field("authorizer")?, field("origin")?);
+    let authorizer = field("authorizer")?;
     let cwd = cmd.get("cwd").and_then(Value::as_str);
     let timeout_ms = state.timeout_ms(cmd);
 
     state
         .refuse_auto_connect()
         .map_err(|e| fail("auto_connect_refused", e))?;
+    // One deadline covers discovery, navigation, the authorizer and the submit.
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let discovery = discover(cmd, state, deadline).await?;
     let session_id = state
         .browser
         .as_ref()
@@ -58,7 +105,23 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
         .active_session_id()?
         .to_string();
 
-    let result = run_join(state, &endpoint, &authorizer, &origin, cwd, timeout_ms).await;
+    let join = run_join(
+        state,
+        &discovery.endpoint,
+        &authorizer,
+        &discovery.origin,
+        cwd,
+        deadline,
+    );
+    let result = timeout_at(deadline, join).await.unwrap_or_else(|_| {
+        Err(fail(
+            "join_failed",
+            format!(
+                "Timed out after {}ms waiting for the join to finish",
+                timeout_ms
+            ),
+        ))
+    });
     if result.is_err() {
         leave_join_page(state, &session_id).await;
     }
@@ -71,7 +134,7 @@ async fn run_join(
     authorizer: &str,
     origin: &str,
     cwd: Option<&str>,
-    timeout_ms: u64,
+    deadline: Instant,
 ) -> Result<Value, String> {
     super::actions::handle_navigate(&json!({ "url": endpoint }), state)
         .await
@@ -92,7 +155,7 @@ async fn run_join(
         "origin": origin,
         "poppy_version": "1.0",
     });
-    let signed_in = run_authorizer(authorizer, cwd, &input, &code, timeout_ms).await?;
+    let signed_in = run_authorizer(authorizer, cwd, &input, &code, deadline).await?;
 
     // Subscribe before submitting so the navigation cannot be missed.
     let session_id = mgr.active_session_id()?.to_string();
@@ -129,17 +192,9 @@ async fn run_join(
             }
         }
     };
-    let url = tokio::time::timeout(Duration::from_millis(timeout_ms), wait)
+    let url = timeout_at(deadline, wait)
         .await
-        .map_err(|_| {
-            fail(
-                "join_failed",
-                format!(
-                    "Timed out after {}ms waiting for the join to finish",
-                    timeout_ms
-                ),
-            )
-        })??;
+        .map_err(|_| fail("join_failed", "Timed out waiting for the join to finish"))??;
     // A Company's error page stays on the endpoint; success leaves it.
     if same_resource(&url, endpoint) {
         return Err(fail(
@@ -210,7 +265,7 @@ async fn run_authorizer(
     cwd: Option<&str>,
     input: &Value,
     code: &str,
-    timeout_ms: u64,
+    deadline: Instant,
 ) -> Result<bool, String> {
     let failed = |message: String| fail("authorizer_failed", message);
     let mut cmd = shell_command(command);
@@ -234,9 +289,9 @@ async fn run_authorizer(
         drop(stdin);
         child.wait_with_output().await
     };
-    let output = tokio::time::timeout(Duration::from_millis(timeout_ms), run)
+    let output = timeout_at(deadline, run)
         .await
-        .map_err(|_| failed(format!("Authorizer did not finish within {}ms", timeout_ms)))?
+        .map_err(|_| failed("Authorizer did not finish before the join timed out".to_string()))?
         .map_err(|e| failed(format!("Could not wait for authorizer: {}", e)))?;
     interpret_output(
         output.status.success(),
@@ -282,6 +337,10 @@ fn interpret_output(success: bool, stdout: &str, code: &str) -> Result<bool, Str
 mod tests {
     use super::*;
 
+    fn in_ms(ms: u64) -> Instant {
+        Instant::now() + Duration::from_millis(ms)
+    }
+
     #[test]
     fn authorizer_output_is_interpreted() {
         assert_eq!(
@@ -326,7 +385,7 @@ mod tests {
         let cwd = dir.path().to_str().unwrap();
         let input = json!({ "code": "bc_1" });
         assert_eq!(
-            run_authorizer(script, Some(cwd), &input, "bc_1", 5_000).await,
+            run_authorizer(script, Some(cwd), &input, "bc_1", in_ms(5_000)).await,
             Ok(true)
         );
     }
@@ -335,10 +394,13 @@ mod tests {
     #[tokio::test]
     async fn a_slow_authorizer_is_stopped_at_the_timeout() {
         let started = std::time::Instant::now();
-        let err = run_authorizer("sleep 5", None, &json!({}), "bc_1", 100)
+        let err = run_authorizer("sleep 5", None, &json!({}), "bc_1", in_ms(100))
             .await
             .unwrap_err();
-        assert!(err.contains("did not finish within 100ms"), "{err}");
+        assert!(
+            err.contains("did not finish before the join timed out"),
+            "{err}"
+        );
         assert!(started.elapsed() >= Duration::from_millis(100));
         assert!(started.elapsed() < Duration::from_secs(5));
     }

@@ -1692,7 +1692,9 @@ fn main() {
     };
     attach_input_mode(&mut cmd, &flags);
     if cmd.get("action").and_then(|v| v.as_str()) == Some("poppy_join") {
-        prepare_poppy_join(&mut cmd, &flags);
+        cmd["cwd"] = json!(std::env::current_dir()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_default());
     }
     // Stdin batches are read before launch decisions so a batch of `read`
     // commands is recognized as browserless, like one given as arguments.
@@ -1701,7 +1703,9 @@ fn main() {
         cmd["argv"] = json!(read_batch_stdin(&flags));
     }
     match cmd.get("action").and_then(|v| v.as_str()) {
-        Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
+        Some("read" | "poppy_join") => {
+            cmd["tls"] = json!(tls::session_options(&flags, &flags.session))
+        }
         Some("close") => forget_before_close(&flags.session),
         _ => {}
     }
@@ -1982,33 +1986,6 @@ fn main() {
             } else {
                 eprintln!("{} {}", color::error_indicator(), e);
             }
-            exit(1);
-        }
-    }
-}
-
-/// Discovers the Company for `poppy join` and rewrites the command for the
-/// daemon, which loads the page, runs the authorizer and submits the form.
-fn prepare_poppy_join(cmd: &mut serde_json::Value, flags: &Flags) {
-    let url = cmd.get("url").and_then(|v| v.as_str()).unwrap_or_default();
-    let timeout = flags
-        .default_timeout
-        .or_else(|| connection::running_daemon_default_timeout(&flags.session))
-        .unwrap_or(poppy::DEFAULT_TIMEOUT_MS);
-    let trust = tls::session_options(flags, &flags.session);
-    match poppy::discover(url, timeout, &trust) {
-        Ok(discovery) => {
-            cmd["endpoint"] = json!(discovery.endpoint);
-            cmd["origin"] = json!(discovery.origin);
-            cmd["cwd"] = json!(std::env::current_dir()
-                .map(|dir| dir.to_string_lossy().into_owned())
-                .unwrap_or_default());
-            if let Some(fields) = cmd.as_object_mut() {
-                fields.remove("url");
-            }
-        }
-        Err(error) => {
-            poppy::print_failure(flags.json, &error);
             exit(1);
         }
     }

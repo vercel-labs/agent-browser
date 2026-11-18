@@ -36,12 +36,12 @@ The command refuses a session opened with `--auto-connect`, because that attache
 
 ## How a join works
 
-1. **Discovery.** The CLI fetches `https://<host>/.well-known/poppy.json` and checks that `protocol_version` is `1.x` and `organization.domain` matches the host.
+1. **Discovery.** The daemon fetches `https://<host>/.well-known/poppy.json`, after action policy, confirmation and the session's allowed domains have been checked. It follows redirects one hop at a time and checks the allowed domains before each request. It checks that `protocol_version` is `1.x` and that `organization.domain` matches the host that serves the document.
 2. **The browser receives a code.** The daemon navigates the current tab to the browser session endpoint, through the normal navigation path and its allowed domains, and reads the one-time code from the page's form.
 3. **The authorizer authorizes the code.** The daemon starts the authorizer and writes one JSON line to its stdin.
 4. **The browser submits the code.** The daemon submits the form. The join succeeded when the browser leaves the endpoint.
 
-Steps 2 to 4 run in one daemon action, so the code never reaches the CLI process or model context. It is single-use, expires quickly, and is bound to the browser that loaded the page. Once submitted it is spent, and it may still appear in `network requests` and HAR output.
+The whole join runs in one daemon action within one deadline, `AGENT_BROWSER_DEFAULT_TIMEOUT`, so the code never reaches the CLI process or model context. It is single-use, expires quickly, and is bound to the browser that loaded the page. Once submitted it is spent, and it may still appear in `network requests` and HAR output.
 
 ## Authorizer contract
 
@@ -83,7 +83,8 @@ The daemon passes `error` through as the command's `code`. A nonzero exit with n
   </thead>
   <tbody>
     <tr><td><code>not_supported</code></td><td>The site has no <code>poppy.json</code>.</td></tr>
-    <tr><td><code>discovery_failed</code></td><td>The document is invalid, does not match the host, declares another major version, or is not served over HTTPS.</td></tr>
+    <tr><td><code>discovery_failed</code></td><td>The document is invalid, does not match the host, declares another major version, is not served over HTTPS, redirects in a loop, or does not answer in time.</td></tr>
+    <tr><td><code>domain_not_allowed</code></td><td>The discovery URL, a redirect hop or the browser session endpoint is outside the session's allowed domains. Nothing is requested for that URL.</td></tr>
     <tr><td><code>web_disabled</code></td><td>The site asks agents not to use a browser.</td></tr>
     <tr><td><code>no_browser_session_endpoint</code></td><td>The site has no browser join.</td></tr>
     <tr><td><code>auto_connect_refused</code></td><td>The session was opened with <code>--auto-connect</code>.</td></tr>
