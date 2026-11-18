@@ -19,7 +19,9 @@ use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
 use super::auth;
-use super::browser::{should_track_target, BrowserEvents, BrowserManager, WaitUntil, WedgeReport};
+use super::browser::{
+    should_track_target, BrowserEvents, BrowserManager, TabKeep, WaitUntil, WedgeReport,
+};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
@@ -3456,6 +3458,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    if let Some(mgr) = state.browser.as_mut() {
+        let session = &state.session_id;
+        let unpinned = |target: &str| tab_binding::pinned_owner(target, session).is_none();
+        mgr.thaw_active_tab(unpinned).await;
+    }
+
     // WebDriver backend: reject unsupported CDP-only actions
     if matches!(state.backend_type, BackendType::WebDriver)
         && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
@@ -3606,6 +3614,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "tab_new" => handle_tab_new(cmd, state).await,
         "tab_switch" => handle_tab_switch(cmd, state).await,
         "tab_close" => handle_tab_close(cmd, state).await,
+        "tab_keep" => handle_tab_keep(cmd, state).await,
         "viewport" => handle_viewport(cmd, state).await,
         "useragent" | "user_agent" => handle_user_agent(cmd, state).await,
         "set_media" => handle_set_media(cmd, state).await,
@@ -6660,6 +6669,10 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 /// daemon restarts the CLI asks for (upgrade, changed options) keep them.
 async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
+    let unfreeze_error = match state.browser.as_mut() {
+        Some(mgr) => mgr.thaw_frozen_tabs().await.err(),
+        None => None,
+    };
     close_all_browser_backends(state).await?;
     state.attached_target = None;
 
@@ -6719,6 +6732,9 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
     };
     if unsaved > 0 {
         reply["unsaved"] = json!({ "steps": unsaved });
+    }
+    if let Some(err) = unfreeze_error {
+        reply["unfreezeError"] = json!(err);
     }
     if let Some(err) = pin_release_error {
         reply["pinReleaseError"] = json!(err);
@@ -8547,6 +8563,25 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "tabs": tabs }))
 }
 
+/// Refuses a tab that another session pinned with `--pin-tab`. `None` checks
+/// the active tab.
+fn check_tab_unlocked(state: &DaemonState, tab_id: Option<u32>) -> Result<(), String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let target_id = match tab_id {
+        Some(id) => mgr.target_id_for_tab(id),
+        None => Some(mgr.active_target_id()?),
+    };
+    if let Some(target_id) = target_id {
+        if let Some(owner) = super::tab_binding::pinned_owner(target_id, &state.session_id) {
+            return Err(format!(
+                "tab_locked: tab {} is pinned by session '{}' (--pin-tab); close that session or use another tab",
+                target_id, owner
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
@@ -8609,18 +8644,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         mgr.resolve_tab_ref(&tab_ref)?
     };
-    if let Some(target_id) = state
-        .browser
-        .as_ref()
-        .and_then(|mgr| mgr.target_id_for_tab(tab_id))
-    {
-        if let Some(owner) = super::tab_binding::pinned_owner(target_id, &state.session_id) {
-            return Err(format!(
-                "tab_locked: tab {} is pinned by session '{}' (--pin-tab); close that session or use another tab",
-                target_id, owner
-            ));
-        }
-    }
+    check_tab_unlocked(state, Some(tab_id))?;
     let dialog_session = state
         .pending_dialog
         .as_ref()
@@ -8696,6 +8720,20 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     state.active_frame_id = None;
     state.refresh_active_iframe_sessions().await;
     Ok(result)
+}
+
+async fn handle_tab_keep(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let keep = TabKeep::parse(cmd.get("keep").and_then(Value::as_str).unwrap_or_default())?;
+    let tab_id = match cmd.get("tabId").and_then(Value::as_str) {
+        Some(tab_ref) => {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            Some(mgr.resolve_tab_ref(&super::browser::TabRef::parse(tab_ref)?)?)
+        }
+        None => None,
+    };
+    check_tab_unlocked(state, tab_id)?;
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    mgr.set_tab_keep(tab_id, keep).await
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
