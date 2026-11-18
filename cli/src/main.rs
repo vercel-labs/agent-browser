@@ -2462,6 +2462,13 @@ mod tests {
         provider: Option<&str>,
         auto_connect: bool,
     ) -> (Flags, serde_json::Value) {
+        // Parsing reads the process environment, which other tests mutate.
+        let _env = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_CDP_HEADERS",
+            "AGENT_BROWSER_PROVIDER",
+            "AGENT_BROWSER_AUTO_CONNECT",
+        ]);
         let (mut flags, cmd) = flags_of(args);
         if !flags.cli_cdp {
             flags.cdp = cdp.map(str::to_string).or(flags.cdp);
