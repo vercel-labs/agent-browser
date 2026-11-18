@@ -3832,10 +3832,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if let Some(ref server) = state.stream_server {
         let duration_ms = cmd_start.elapsed().as_millis() as u64;
-        let success = resp
-            .get("status")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| s == "success");
+        let success = command_succeeded(&resp);
         let data = resp.get("data").cloned().unwrap_or(Value::Null);
         server.broadcast_result(&id, action, success, &data, duration_ms);
 
@@ -4549,6 +4546,14 @@ async fn adopt_replacement_tab(
     state.drain_cdp_events_background().await?;
     state.refresh_active_iframe_sessions().await;
     Ok(())
+}
+
+/// Whether a command's response reports success. Responses carry a boolean
+/// `success` (`success_response` / `error_response`); there is no `status`.
+fn command_succeeded(resp: &Value) -> bool {
+    resp.get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Replacing a wedged tab opens one tab and closes another, so it runs only
@@ -15610,6 +15615,19 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_stream_reports_a_command_s_own_success() {
+        assert!(super::command_succeeded(&super::success_response(
+            "1",
+            serde_json::json!({})
+        )));
+        assert!(!super::command_succeeded(&super::error_response(
+            "2",
+            "Element not found"
+        )));
+        assert!(!super::command_succeeded(&serde_json::json!({ "id": "3" })));
+    }
+
     /// Serves `Browser.getVersion` on one fixed `ws://` address for any number
     /// of connections and counts the calls.
     async fn version_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
