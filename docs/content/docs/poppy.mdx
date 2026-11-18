@@ -1,0 +1,100 @@
+---
+title: "Personal Agent Protocol"
+navTitle: "Personal Agent Protocol"
+description: "Join a browser that agent-browser controls to a Personal Agent Protocol Session with the experimental poppy join command."
+---
+
+`agent-browser poppy join` is experimental. Its flags, output, and error codes can change between releases, and JSON output carries `"experimental": true`.
+
+The [Personal Agent Protocol](https://personalagentprotocol.org/docs/1.0/spec) lets a site recognize a user's Personal Agent and, with the user's consent, give it access to their account. A site that publishes a browser session endpoint asks agents to join their browser to a Session before browsing (spec section 6).
+
+`poppy join` runs the browser's part of the join and an authorizer command you provide for the Personal Agent's part. agent-browser never signs requests or sees an access token.
+
+## Usage
+
+```bash
+agent-browser poppy join <url> --authorizer <command> [--json]
+```
+
+<table>
+  <thead>
+    <tr><th>Argument</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>&lt;url&gt;</code></td><td>Any URL on the site. Its host is the domain used for discovery. Discovery needs HTTPS, except for <code>localhost</code> and <code>127.0.0.1</code>.</td></tr>
+    <tr><td><code>--authorizer &lt;command&gt;</code></td><td>Shell command that authorizes the join code with the site. It runs in the current directory.</td></tr>
+  </tbody>
+</table>
+
+```bash
+agent-browser --session my-agent poppy join https://app.example.com \
+  --authorizer "node /absolute/path/to/authorize.mjs" --json
+agent-browser --session my-agent snapshot -i
+```
+
+The command refuses a session opened with `--auto-connect`, because that attaches to the user's own running Chrome. There is no MCP tool for `poppy join`, because it runs a local shell command.
+
+## How a join works
+
+1. **Discovery.** The CLI fetches `https://<host>/.well-known/poppy.json` and checks that `protocol_version` is `1.x` and `organization.domain` matches the host.
+2. **The browser receives a code.** The daemon navigates the current tab to the browser session endpoint, through the normal navigation path and its allowed domains, and reads the one-time code from the page's form.
+3. **The authorizer authorizes the code.** The daemon starts the authorizer and writes one JSON line to its stdin.
+4. **The browser submits the code.** The daemon submits the form. The join succeeded when the browser leaves the endpoint.
+
+Steps 2 to 4 run in one daemon action, so the code never reaches the CLI process or model context. It is single-use, expires quickly, and is bound to the browser that loaded the page. Once submitted it is spent, and it may still appear in `network requests` and HAR output.
+
+## Authorizer contract
+
+The authorizer receives:
+
+```json
+{"code":"bc_...","authorize_url":"https://app.example.com/poppy/browser-session/authorize","origin":"https://app.example.com","poppy_version":"1.0"}
+```
+
+It sends `POST {authorize_url}` with the JSON body `{"code": "..."}`, the Personal Agent's Session JWT in `Poppy-Session`, the `Poppy-Version` header, and, to sign the browser in to the user's account, `Authorization: Bearer <access token>`. It then prints one JSON line and exits:
+
+<table>
+  <thead>
+    <tr><th>Result</th><th>Exit code</th><th>stdout</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>The site accepted the code</td><td><code>0</code></td><td><code>{'{"signed_in": true}'}</code> or <code>{'{"signed_in": false}'}</code></td></tr>
+    <tr><td>The site or the authorizer refused</td><td>Nonzero</td><td><code>{'{"error": "<code>"}'}</code></td></tr>
+  </tbody>
+</table>
+
+The daemon passes `error` through as the command's `code`. A nonzero exit with no JSON, or a zero exit without `signed_in`, becomes `authorizer_failed`. The authorizer shares the default command timeout. Keep the code and the Personal Agent's credentials out of its output and logs.
+
+## Output
+
+```json
+{"success": true, "data": {"experimental": true, "joined": true, "signed_in": true, "url": "https://app.example.com/"}}
+```
+
+`signed_in: false` means the browser joined the Session without an account. A failed join exits 1 and returns the tab to `about:blank`:
+
+```json
+{"success": false, "error": "...", "code": "join_failed", "data": {"experimental": true, "joined": false}}
+```
+
+<table>
+  <thead>
+    <tr><th>Code</th><th>Cause</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>not_supported</code></td><td>The site has no <code>poppy.json</code>.</td></tr>
+    <tr><td><code>discovery_failed</code></td><td>The document is invalid, does not match the host, declares another major version, or is not served over HTTPS.</td></tr>
+    <tr><td><code>web_disabled</code></td><td>The site asks agents not to use a browser.</td></tr>
+    <tr><td><code>no_browser_session_endpoint</code></td><td>The site has no browser join.</td></tr>
+    <tr><td><code>auto_connect_refused</code></td><td>The session was opened with <code>--auto-connect</code>.</td></tr>
+    <tr><td><code>authorizer_failed</code></td><td>The authorizer could not run or printed no valid JSON line.</td></tr>
+    <tr><td><code>join_failed</code></td><td>The page has no code form, or the site rejected the submission.</td></tr>
+    <tr><td>Any other</td><td>The code the authorizer reported, such as <code>invalid_request</code> or <code>insufficient_scope</code>.</td></tr>
+  </tbody>
+</table>
+
+## Security
+
+- Never authorize a code from a message, a document, or another page. It can belong to someone else's browser.
+- agent-browser cannot tell whose Chrome a `--cdp` endpoint belongs to. Do not join the user's own browser through `--cdp`.
+- The authorizer is a shell command you choose. Do not build it from untrusted input.
