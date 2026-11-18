@@ -2115,7 +2115,7 @@ impl DaemonState {
                             if let Some(ref server) = self.stream_server {
                                 server.broadcast_console(level, &text, &raw_args);
                             }
-                            self.event_tracker.add_console(level, &text, raw_args);
+                            self.event_tracker.add_console(level, &text, &raw_args);
                         }
                         "Runtime.exceptionThrown" => {
                             if let Ok(ex_event) =
@@ -17783,8 +17783,11 @@ mod tests {
         let (add, remove) = ("Runtime.evaluate", "Runtime.releaseObject");
         client.send_command_no_params(add, None).await.unwrap();
         state.drain_cdp_events();
-        assert_eq!(state.event_tracker.console_entries.len(), 1);
-        assert_eq!(state.event_tracker.console_entries[0].text, "from the page");
+        assert_eq!(state.event_tracker.console_entries().len(), 1);
+        assert_eq!(
+            state.event_tracker.console_entries()[0].text,
+            "from the page"
+        );
         assert_eq!(state.tracked_requests.len(), 1);
         assert_eq!(state.har_entries.len(), 1);
         assert_eq!(state.webmcp.tools("").unwrap()[0].name, "search");

@@ -3589,6 +3589,10 @@ Usage: agent-browser console [--clear]
 
 View browser console output (log, warn, error, info).
 
+The daemon keeps the latest 1,000 messages, and drops the oldest sooner once they hold about
+8 MiB. A message keeps up to 64 KiB of text; longer text ends with ...[truncated N bytes].
+Arguments that hold more than 64 KiB are replaced by a note.
+
 Options:
   --clear              Clear console log buffer
 
@@ -3608,6 +3612,9 @@ agent-browser errors - View page errors
 Usage: agent-browser errors [--clear]
 
 View JavaScript errors and uncaught exceptions.
+
+The daemon keeps the latest 1,000 errors, and drops the oldest sooner once they hold about
+8 MiB. An error keeps up to 64 KiB of text; longer text ends with ...[truncated N bytes].
 
 Options:
   --clear              Clear error buffer
