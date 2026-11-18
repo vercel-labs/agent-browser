@@ -122,7 +122,7 @@ export function BrowserDesktopScene({ desktop }: { desktop: boolean }) {
  * step with .ab-home and SHOT_REGION.wide if either moves. */
 const SERVER_TARGETS: Targets = {
   home: { x: 274, y: 348, width: 1, height: 1 },
-  'shot-region': { x: 36, y: 188, width: 436, height: 184 },
+  'shot-region': { x: 36, y: 180, width: 436, height: 192 },
 };
 /** The dock's icons wait this long after mount, then for the browser to be idle. */
 const ASSETS_AFTER = 2_500;

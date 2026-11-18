@@ -1713,6 +1713,24 @@ fn parse_command_inner(
                     }
                     Ok(cmd)
                 }
+                Some("keep") if rest.len() > 1 => {
+                    let keep = rest[1];
+                    if !matches!(keep, "live" | "throttled" | "frozen") {
+                        return Err(ParseError::UnknownSubcommand {
+                            subcommand: keep.to_string(),
+                            valid_options: &["live", "throttled", "frozen"],
+                        });
+                    }
+                    let mut cmd = json!({ "id": id, "action": "tab_keep", "keep": keep });
+                    if let Some(tab_ref) = rest.get(2) {
+                        cmd["tabId"] = json!(tab_ref);
+                    }
+                    Ok(cmd)
+                }
+                Some("keep") => Err(ParseError::MissingArguments {
+                    context: "tab keep".to_string(),
+                    usage: "tab keep <live|throttled|frozen> [t<N>|label|target]",
+                }),
                 Some(tab_ref) => Ok(json!({
                     "id": id,
                     "action": "tab_switch",
@@ -5337,6 +5355,27 @@ mod tests {
         let cmd = parse_command(&args("tab select"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
         assert_eq!(cmd["tabId"], "select");
+    }
+
+    #[test]
+    fn test_tab_keep_modes() {
+        let cmd = parse_command(&args("tab keep live"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_keep");
+        assert_eq!(cmd["keep"], "live");
+        assert!(cmd.get("tabId").is_none());
+
+        let cmd = parse_command(&args("tab keep frozen t2"), &default_flags()).unwrap();
+        assert_eq!(cmd["keep"], "frozen");
+        assert_eq!(cmd["tabId"], "t2");
+
+        assert!(matches!(
+            parse_command(&args("tab keep"), &default_flags()),
+            Err(ParseError::MissingArguments { .. })
+        ));
+        assert!(matches!(
+            parse_command(&args("tab keep warm"), &default_flags()),
+            Err(ParseError::UnknownSubcommand { .. })
+        ));
     }
 
     // === Network ===
