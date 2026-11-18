@@ -315,10 +315,7 @@ pub async fn save_state(
             let dir = get_sessions_dir();
             let _ = fs::create_dir_all(&dir);
             let name = session_name.unwrap_or("default");
-            if !is_valid_session_name(name) {
-                return Err(session_name_error(name));
-            }
-            dir.join(format!("{}-{}.json", name, session_id_str))
+            dir.join(format!("{}.json", state_base_name(name, session_id_str)?))
                 .to_string_lossy()
                 .to_string()
         }
@@ -344,9 +341,7 @@ pub async fn save_auto_state_transactional(
     session_id_str: &str,
     visited_origins: &HashSet<String>,
 ) -> Result<String, String> {
-    if !is_valid_session_name(session_name) {
-        return Err(session_name_error(session_name));
-    }
+    let base_name = state_base_name(session_name, session_id_str)?;
 
     let dir = get_sessions_dir();
     fs::create_dir_all(&dir)
@@ -361,7 +356,6 @@ pub async fn save_auto_state_transactional(
         )
     })?;
 
-    let base_name = format!("{}-{}", session_name, session_id_str);
     let final_json_path = dir.join(format!("{}.json", base_name));
     let final_path = if std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").is_ok() {
         PathBuf::from(format!("{}.enc", final_json_path.to_string_lossy()))
@@ -639,29 +633,31 @@ pub fn state_show(path: &str) -> Result<Value, String> {
     }))
 }
 
-pub fn state_clear(path: Option<&str>) -> Result<Value, String> {
+/// Deletes the state file at `path`, or every state file saved under `name`, or all of them when `all` is set; a name wins over `all`. Legacy files another key could own are kept and listed in `skipped`.
+pub fn state_clear(path: Option<&str>, name: Option<&str>, all: bool) -> Result<Value, String> {
     if let Some(p) = path {
         fs::remove_file(p).map_err(|e| format!("Failed to delete state: {}", e))?;
         return Ok(json!({ "deleted": p }));
     }
-
-    let dir = get_sessions_dir();
-    if !dir.exists() {
-        return Ok(json!({ "deleted": 0 }));
+    if name.is_none() && !all {
+        return Err("state clear needs a session name or --all".to_string());
     }
 
-    let mut count = 0;
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if is_state_file(&path) {
-                let _ = fs::remove_file(&path);
-                count += 1;
-            }
-        }
+    let (files, skipped) = matching_state_files(&get_sessions_dir(), name)?;
+    for path in &files {
+        fs::remove_file(path)
+            .map_err(|e| format!("Failed to delete state {}: {}", path.display(), e))?;
     }
 
-    Ok(json!({ "deleted": count }))
+    let mut result = json!({ "deleted": files.len() });
+    if !skipped.is_empty() {
+        let skipped: Vec<String> = skipped
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+        result["skipped"] = json!(skipped);
+    }
+    Ok(result)
 }
 
 pub fn state_clean(max_age_days: u64) -> Result<Value, String> {
@@ -755,41 +751,130 @@ fn decrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
     Ok(plaintext)
 }
 
-pub fn find_auto_state_file(session_name: &str) -> Option<String> {
+fn state_base_name(session_name: &str, session_id: &str) -> Result<String, String> {
+    if !is_valid_session_name(session_name) {
+        return Err(session_name_error(session_name));
+    }
+    if !is_valid_session_name(session_id) {
+        return Err(format!("Invalid state session ID: {}", session_id));
+    }
+    Ok(format!("v2@.{}.{}", session_name, session_id))
+}
+
+fn state_file_owner(fname: &str, name: &str) -> Option<bool> {
+    let stem = [".json.enc.previous", ".json.previous", ".json.enc", ".json"]
+        .iter()
+        .find_map(|suffix| fname.strip_suffix(suffix))?;
+
+    if let Some((owner, id)) = stem
+        .strip_prefix("v2@.")
+        .and_then(|rest| rest.split_once('.'))
+    {
+        if is_valid_session_name(owner) && is_valid_session_name(id) {
+            return (owner == name).then_some(true);
+        }
+    }
+
+    if stem.contains('.') {
+        return None;
+    }
+
+    let mut owners = HashSet::new();
+    for (index, _) in stem.match_indices('-') {
+        let (owner, rest) = stem.split_at(index);
+        let id = &rest[1..];
+        if is_valid_session_name(owner) && is_valid_session_name(id) {
+            owners.insert(owner);
+        }
+    }
+
+    owners.contains(name).then_some(owners.len() == 1)
+}
+
+/// State files owned only by `name`, plus state files whose legacy name another key could
+/// also own; ambiguous files are left in place and reported instead of being deleted.
+fn matching_state_files(
+    dir: &std::path::Path,
+    name: Option<&str>,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
+    if let Some(name) = name {
+        if !is_valid_session_name(name) {
+            return Err(session_name_error(name));
+        }
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
+        Err(e) => {
+            return Err(format!(
+                "Failed to read sessions dir {}: {}",
+                dir.display(),
+                e
+            ))
+        }
+    };
+    let mut files = Vec::new();
+    let mut skipped = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| format!("Failed to read sessions dir {}: {}", dir.display(), e))?;
+        let path = entry.path();
+        if !is_state_file(&path) {
+            continue;
+        }
+        if let Some(name) = name {
+            match state_file_owner(&entry.file_name().to_string_lossy(), name) {
+                Some(true) => {}
+                Some(false) => {
+                    skipped.push(path);
+                    continue;
+                }
+                None => continue,
+            }
+        }
+        files.push(path);
+    }
+    Ok((files, skipped))
+}
+
+fn find_state_file_by_ownership(session_name: &str, definite: bool) -> Option<String> {
     if !is_valid_session_name(session_name) {
         return None;
     }
 
     let dir = get_sessions_dir();
-    if !dir.exists() {
-        return None;
-    }
-    let prefix = format!("{}-", session_name);
-    let mut best_path: Option<(String, std::time::SystemTime)> = None;
+    let entries = fs::read_dir(&dir).ok()?;
+    let mut best_path: Option<(PathBuf, std::time::SystemTime)> = None;
 
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let fname = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let is_match = fname.starts_with(&prefix)
-                && (fname.ends_with(".json") || fname.ends_with(".json.enc"));
-            if !is_match {
-                continue;
-            }
-            let modified = fs::metadata(&path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(std::time::UNIX_EPOCH);
-            if best_path.as_ref().is_none_or(|(_, t)| modified > *t) {
-                best_path = Some((path.to_string_lossy().to_string(), modified));
-            }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let fname = entry.file_name().to_string_lossy().to_string();
+        if !(fname.ends_with(".json") || fname.ends_with(".json.enc")) {
+            continue;
+        }
+        if state_file_owner(&fname, session_name) != Some(definite) {
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+        if best_path.as_ref().is_none_or(|(_, m)| modified > *m) {
+            best_path = Some((path, modified));
         }
     }
-    best_path.map(|(p, _)| p)
+    best_path.map(|(p, _)| p.to_string_lossy().to_string())
+}
+
+/// Find the newest unambiguously owned active state file for `session_name`.
+pub fn find_auto_state_file(session_name: &str) -> Option<String> {
+    find_state_file_by_ownership(session_name, true)
+}
+
+/// Find the newest active legacy state file whose ownership is ambiguous for `session_name`.
+pub fn find_ambiguous_auto_state_file(session_name: &str) -> Option<String> {
+    find_state_file_by_ownership(session_name, false)
 }
 
 /// Dispatch a state management command from its JSON payload.
@@ -806,7 +891,9 @@ pub fn dispatch_state_command(cmd: &Value) -> Option<Result<Value, String>> {
         ),
         "state_clear" => {
             let path = cmd.get("path").and_then(|v| v.as_str());
-            Some(state_clear(path))
+            let name = cmd.get("sessionName").and_then(|v| v.as_str());
+            let all = cmd.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+            Some(state_clear(path, name, all))
         }
         "state_clean" => {
             let days = cmd.get("days").and_then(|v| v.as_u64()).unwrap_or(30);
@@ -854,6 +941,39 @@ pub fn get_sessions_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    fn write_state_fixture(path: &std::path::Path) {
+        let state = StorageState {
+            cookies: vec![Cookie {
+                name: "session".to_string(),
+                value: "fixture".to_string(),
+                domain: ".example.com".to_string(),
+                path: "/".to_string(),
+                expires: 0.0,
+                size: 0,
+                http_only: true,
+                secure: true,
+                session: true,
+                same_site: Some("Lax".to_string()),
+            }],
+            origins: vec![OriginStorage {
+                origin: "https://example.com".to_string(),
+                local_storage: vec![StorageEntry {
+                    name: "token".to_string(),
+                    value: "fixture".to_string(),
+                }],
+                session_storage: vec![],
+            }],
+        };
+        let data = serde_json::to_vec(&state).unwrap();
+        let data = if is_encrypted_state(path) {
+            encrypt_data(&data, "fixture-key").unwrap()
+        } else {
+            data
+        };
+        fs::write(path, data).unwrap();
+    }
 
     #[test]
     fn test_storage_state_serialization() {
@@ -908,7 +1028,11 @@ mod tests {
 
     #[test]
     fn test_state_clear_nonexistent_file() {
-        let result = state_clear(Some("/tmp/nonexistent-agent-browser-state-file.json"));
+        let result = state_clear(
+            Some("/tmp/nonexistent-agent-browser-state-file.json"),
+            None,
+            false,
+        );
         assert!(result.is_err());
     }
 
@@ -925,6 +1049,7 @@ mod tests {
         )));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_state_clear_removes_transactional_backups() {
         let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
@@ -934,16 +1059,236 @@ mod tests {
 
         let sessions = get_sessions_dir();
         fs::create_dir_all(&sessions).unwrap();
-        fs::write(sessions.join("auth-test.json"), "{}").unwrap();
-        fs::write(sessions.join("auth-test.json.previous"), "{}").unwrap();
-        fs::write(sessions.join("auth-test.json.enc.previous"), "encrypted").unwrap();
+        for file in [
+            "auth-test-one.json",
+            "auth-test-one.json.previous",
+            "auth-test-one.json.enc.previous",
+        ] {
+            write_state_fixture(&sessions.join(file));
+        }
 
-        let result = state_clear(None).unwrap();
+        let result = state_clear(None, None, true).unwrap();
 
         assert_eq!(result["deleted"], 3);
-        assert!(!sessions.join("auth-test.json").exists());
-        assert!(!sessions.join("auth-test.json.previous").exists());
-        assert!(!sessions.join("auth-test.json.enc.previous").exists());
+        assert!(!sessions.join("auth-test-one.json").exists());
+        assert!(!sessions.join("auth-test-one.json.previous").exists());
+        assert!(!sessions.join("auth-test-one.json.enc.previous").exists());
+    }
+
+    #[test]
+    fn test_state_base_name_uses_validated_v2_components() {
+        assert_eq!(
+            state_base_name("auth-admin", "browser-one").unwrap(),
+            "v2@.auth-admin.browser-one"
+        );
+        for id in ["", "browser.one", "../browser"] {
+            assert!(state_base_name("auth", id).is_err());
+        }
+        assert!(state_base_name("auth.admin", "browser").is_err());
+    }
+
+    #[test]
+    fn test_state_file_owner_distinguishes_formats_and_collisions() {
+        for (file, key, expected) in [
+            ("auth-browser.json", "auth", Some(true)),
+            ("auth-browser.json", "auth-browser", None),
+            ("auth-browser-one.json", "auth", Some(false)),
+            ("auth-browser-one.json", "auth-browser", Some(false)),
+            ("auth-browser-one-two.json", "auth-browser-one", Some(false)),
+            ("auth.backup.json", "auth", None),
+            ("auth-browser.one.json", "auth", None),
+            ("auth-browser.one.json", "auth-browser", None),
+            ("v2@.auth.browser.json", "auth", Some(true)),
+            ("v2@.auth.browser.json", "v2", None),
+            (
+                "v2@.auth-browser.session-one.json",
+                "auth-browser",
+                Some(true),
+            ),
+            ("v2@.auth-browser.session-one.json", "auth", None),
+            ("v2@.auth-browser.session-one.json", "v2", None),
+        ] {
+            assert_eq!(state_file_owner(file, key), expected, "{file}, {key}");
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_named_clear_keeps_ambiguous_legacy_files_and_reports_them() {
+        let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("HOME", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
+        let sessions = get_sessions_dir();
+        fs::create_dir_all(&sessions).unwrap();
+        let ambiguous = sessions.join("my-app-default.json");
+        let owned = sessions.join("v2@.my-app.browser.json");
+        for path in [&ambiguous, &owned] {
+            write_state_fixture(path);
+        }
+
+        assert_eq!(
+            PathBuf::from(find_auto_state_file("my-app").unwrap()),
+            owned
+        );
+        assert_eq!(
+            PathBuf::from(find_ambiguous_auto_state_file("my-app").unwrap()),
+            ambiguous
+        );
+
+        let cleared = state_clear(None, Some("my-app"), false).unwrap();
+        assert_eq!(cleared["deleted"], 1);
+        assert_eq!(
+            cleared["skipped"],
+            json!([ambiguous.to_string_lossy().to_string()])
+        );
+        assert!(!owned.exists());
+        assert!(ambiguous.exists());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_state_restore_and_clear_unambiguous_files() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "HOME",
+            "AGENT_BROWSER_NAMESPACE",
+            "AGENT_BROWSER_ENCRYPTION_KEY",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("HOME", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        guard.set("AGENT_BROWSER_ENCRYPTION_KEY", "fixture-key");
+
+        let sessions = get_sessions_dir();
+        fs::create_dir_all(&sessions).unwrap();
+        assert!(find_auto_state_file("auth").is_none());
+        let now = std::time::SystemTime::now();
+        for (i, file) in [
+            "auth-old.json",
+            "v2@.auth.browser-current.json",
+            "v2@.auth.browser-current-encrypted.json.enc",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let path = sessions.join(file);
+            write_state_fixture(&path);
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(now + std::time::Duration::from_secs(i as u64 + 1))
+                .unwrap();
+            let found = find_auto_state_file("auth").unwrap();
+            assert_eq!(PathBuf::from(&found), path);
+            assert!(validate_state_file(&found).is_ok());
+        }
+
+        for file in [
+            "v2@.auth.backup.json.previous",
+            "v2@.auth.backup.json.enc.previous",
+            "v2@.auth-admin.browser.json",
+        ] {
+            write_state_fixture(&sessions.join(file));
+        }
+        assert!(find_auto_state_file("auth")
+            .unwrap()
+            .ends_with("v2@.auth.browser-current-encrypted.json.enc"));
+        assert!(find_auto_state_file("auth-admin")
+            .unwrap()
+            .ends_with("v2@.auth-admin.browser.json"));
+        assert!(find_auto_state_file("auth-ad").is_none());
+        assert!(dispatch_state_command(&json!({"action":"state_clear"}))
+            .unwrap()
+            .is_err());
+        let cleared = dispatch_state_command(&json!({"action":"state_clear","sessionName":"auth"}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared["deleted"], 5);
+        assert!(sessions.join("v2@.auth-admin.browser.json").exists());
+        assert!(find_auto_state_file("auth").is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_ambiguous_files_are_skipped_by_restore_and_by_named_clear() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "HOME",
+            "AGENT_BROWSER_NAMESPACE",
+            "AGENT_BROWSER_ENCRYPTION_KEY",
+        ]);
+        guard.set("AGENT_BROWSER_NAMESPACE", "team-one");
+        guard.set("AGENT_BROWSER_ENCRYPTION_KEY", "fixture-key");
+
+        for suffix in [".json", ".json.enc", ".json.previous", ".json.enc.previous"] {
+            let dir = tempfile::tempdir().unwrap();
+            guard.set("HOME", dir.path().to_str().unwrap());
+            let sessions = get_sessions_dir();
+            fs::create_dir_all(&sessions).unwrap();
+            let ambiguous = sessions.join(format!("auth-worker-one{suffix}"));
+            let other = sessions.join("v2@.other.browser.json");
+            for path in [&ambiguous, &other] {
+                write_state_fixture(path);
+                assert!(validate_state_file(path.to_str().unwrap()).is_ok());
+            }
+
+            for key in ["auth", "auth-worker"] {
+                assert!(find_auto_state_file(key).is_none());
+                if suffix.ends_with(".previous") {
+                    assert!(find_ambiguous_auto_state_file(key).is_none());
+                } else {
+                    assert_eq!(
+                        PathBuf::from(find_ambiguous_auto_state_file(key).unwrap()),
+                        ambiguous
+                    );
+                }
+            }
+
+            let definite = sessions.join("v2@.auth.browser.json");
+            let definite_prefix = sessions.join("v2@.auth-worker.browser.json");
+            for path in [&definite, &definite_prefix] {
+                write_state_fixture(path);
+                assert!(validate_state_file(path.to_str().unwrap()).is_ok());
+            }
+            assert_eq!(
+                PathBuf::from(find_auto_state_file("auth").unwrap()),
+                definite
+            );
+            assert_eq!(
+                PathBuf::from(find_auto_state_file("auth-worker").unwrap()),
+                definite_prefix
+            );
+
+            for key in ["auth", "auth-worker"] {
+                let cleared = state_clear(None, Some(key), false).unwrap();
+                assert_eq!(cleared["deleted"], 1);
+                assert_eq!(
+                    cleared["skipped"],
+                    json!([ambiguous.to_string_lossy().to_string()])
+                );
+                assert!(!sessions.join(format!("v2@.{key}.browser.json")).exists());
+                assert!(ambiguous.exists());
+                assert!(other.exists());
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_state_clear_reports_directory_errors() {
+        let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("HOME", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        assert!(find_auto_state_file("auth").is_none());
+        assert!(find_auto_state_file("invalid.name").is_none());
+
+        let sessions = get_sessions_dir();
+        fs::create_dir_all(sessions.parent().unwrap()).unwrap();
+        fs::write(&sessions, "not a directory").unwrap();
+        assert!(find_auto_state_file("auth").is_none());
+        assert!(state_clear(None, Some("auth"), false).is_err());
     }
 
     #[test]
