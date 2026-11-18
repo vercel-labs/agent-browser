@@ -2,7 +2,7 @@
 
 import { ActionButton, IconCheck, BrandMark } from './compat';
 import { cn } from '@/lib/utils';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useProduct } from './product-context';
 
 // Keep the copy feedback within the button’s existing footprint.
@@ -30,8 +30,9 @@ function CopyIcon() {
 
 // Overlap the agent marks in three small, monochrome circles.
 function AgentLogoStack() {
+  const ringMaskId = useId();
   const badge =
-    'flex size-6 items-center justify-center rounded-full bg-gray-1000 text-background-100 shadow-[inset_0_0_0_1px_color-mix(in_srgb,currentColor_25%,transparent)]';
+    'flex size-6 items-center justify-center rounded-full bg-gray-1000 text-background-100 transition-colors group-hover:bg-[hsl(0_0%_22%)] dark:group-hover:bg-[hsl(0_0%_80%)]';
   return (
     <span aria-hidden className="relative inline-flex h-6 w-14 shrink-0">
       <span className={cn(badge, 'absolute left-0 z-0')}>
@@ -43,6 +44,40 @@ function AgentLogoStack() {
       <span className={cn(badge, 'absolute left-8 z-20')}>
         <BrandMark name="cursor" size={14} />
       </span>
+      {/* One translucent layer lets outer rings blend with the logos without darkening at crossings. */}
+      <svg
+        className="pointer-events-none absolute -left-px -top-px z-30 text-background-100"
+        height={26}
+        viewBox="-1 -1 58 26"
+        width={58}
+      >
+        <defs>
+          <mask
+            id={ringMaskId}
+            height={26}
+            maskUnits="userSpaceOnUse"
+            style={{ maskType: 'luminance' }}
+            width={58}
+            x={-1}
+            y={-1}
+          >
+            <circle cx={12} cy={12} fill="none" r={12.5} stroke="white" />
+            <circle cx={28} cy={12} fill="black" r={12} />
+            <circle cx={28} cy={12} fill="none" r={12.5} stroke="white" />
+            <circle cx={44} cy={12} fill="black" r={12} />
+            <circle cx={44} cy={12} fill="none" r={12.5} stroke="white" />
+          </mask>
+        </defs>
+        <rect
+          fill="currentColor"
+          fillOpacity={0.25}
+          height={26}
+          mask={`url(#${ringMaskId})`}
+          width={58}
+          x={-1}
+          y={-1}
+        />
+      </svg>
     </span>
   );
 }
@@ -112,24 +147,22 @@ function CopyPromptButton({
               : label
         }
         onClick={copy}
+        prefix={showAgentIcons ? <AgentLogoStack /> : undefined}
+        suffix={<CopyGlyph copied={status === 'copied'} />}
         variant="default"
-        className={cn('group', showAgentIcons && 'pl-1! pr-2!')}
+        className={cn('group', showAgentIcons && 'pl-2! pr-2!')}
       >
-        <span className="flex items-center gap-2">
-          {showAgentIcons && <AgentLogoStack />}
-          <span className="grid place-items-center">
-            {reservedLabels.map((text) => (
-              <span
-                key={text}
-                aria-hidden="true"
-                className="invisible col-start-1 row-start-1 whitespace-nowrap"
-              >
-                {text}
-              </span>
-            ))}
-            <span className="col-start-1 row-start-1 whitespace-nowrap">{visibleLabel}</span>
-          </span>
-          <CopyGlyph copied={status === 'copied'} />
+        <span className="grid place-items-center">
+          {reservedLabels.map((text) => (
+            <span
+              key={text}
+              aria-hidden="true"
+              className="invisible col-start-1 row-start-1 whitespace-nowrap"
+            >
+              {text}
+            </span>
+          ))}
+          <span className="col-start-1 row-start-1 whitespace-nowrap">{visibleLabel}</span>
         </span>
       </ActionButton>
       <span role="status" className="sr-only">
