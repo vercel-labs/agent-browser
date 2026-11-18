@@ -2,7 +2,7 @@
 
 import { ActionButton, IconCheck, BrandMark } from './compat';
 import { cn } from '@/lib/utils';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useProduct } from './product-context';
 
 // Keep the copy feedback within the button’s existing footprint.
@@ -30,8 +30,9 @@ function CopyIcon() {
 
 // Overlap the agent marks in three small, monochrome circles.
 function AgentLogoStack() {
+  const ringMaskId = useId();
   const badge =
-    'flex size-6 items-center justify-center rounded-full bg-gray-1000 text-background-100 shadow-[inset_0_0_0_1px_color-mix(in_srgb,currentColor_25%,transparent)]';
+    'flex size-6 items-center justify-center rounded-full bg-gray-1000 text-background-100';
   return (
     <span aria-hidden className="relative inline-flex h-6 w-14 shrink-0">
       <span className={cn(badge, 'absolute left-0 z-0')}>
@@ -43,6 +44,38 @@ function AgentLogoStack() {
       <span className={cn(badge, 'absolute left-8 z-20')}>
         <BrandMark name="cursor" size={14} />
       </span>
+      {/* Paint the translucent rings once so overlapping edges cannot compound their opacity. */}
+      <svg
+        className="pointer-events-none absolute inset-0 z-30 text-background-100"
+        height={24}
+        viewBox="0 0 56 24"
+        width={56}
+      >
+        <defs>
+          <mask
+            id={ringMaskId}
+            height={24}
+            maskUnits="userSpaceOnUse"
+            style={{ maskType: 'luminance' }}
+            width={56}
+            x={0}
+            y={0}
+          >
+            <circle cx={12} cy={12} fill="none" r={11.5} stroke="white" />
+            <circle cx={28} cy={12} fill="black" r={12} />
+            <circle cx={28} cy={12} fill="none" r={11.5} stroke="white" />
+            <circle cx={44} cy={12} fill="black" r={12} />
+            <circle cx={44} cy={12} fill="none" r={11.5} stroke="white" />
+          </mask>
+        </defs>
+        <rect
+          fill="currentColor"
+          fillOpacity={0.25}
+          height={24}
+          mask={`url(#${ringMaskId})`}
+          width={56}
+        />
+      </svg>
     </span>
   );
 }
