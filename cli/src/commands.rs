@@ -398,6 +398,101 @@ pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     }
 }
 
+/// One accepted command flag, its aliases, and whether it consumes a value.
+struct FlagSpec {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    takes_value: bool,
+}
+
+impl FlagSpec {
+    fn matches(&self, arg: &str) -> bool {
+        self.name == arg || self.aliases.iter().any(|alias| *alias == arg)
+    }
+}
+
+/// A command argument after classification.
+enum ScannedArg<'a> {
+    BoolFlag(&'static str),
+    ValueFlag { name: &'static str, value: &'a str },
+    Data(&'a str),
+}
+
+/// The scanner's position relative to the `--` marker.
+#[derive(Clone, Copy)]
+enum ArgState {
+    Options,
+    Literal,
+}
+
+/// Classifies command arguments as known flags or positional data, treating `--` as the end of options.
+struct ArgScanner<'a> {
+    args: &'a [&'a str],
+    flags: &'static [FlagSpec],
+    command: &'static str,
+    usage: &'static str,
+    batch_item: bool,
+    index: usize,
+    state: ArgState,
+}
+
+impl<'a> ArgScanner<'a> {
+    fn new(
+        args: &'a [&'a str],
+        flags: &'static [FlagSpec],
+        command: &'static str,
+        usage: &'static str,
+        batch_item: bool,
+    ) -> Self {
+        Self {
+            args,
+            flags,
+            command,
+            usage,
+            batch_item,
+            index: 0,
+            state: ArgState::Options,
+        }
+    }
+
+    fn next(&mut self) -> Result<Option<ScannedArg<'a>>, ParseError> {
+        while let Some(&arg) = self.args.get(self.index) {
+            self.index += 1;
+            match (self.state, arg) {
+                (ArgState::Literal, arg) => return Ok(Some(ScannedArg::Data(arg))),
+                (ArgState::Options, "--") => {
+                    self.state = ArgState::Literal;
+                }
+                (ArgState::Options, arg) if arg.len() > 1 && arg.starts_with('-') => {
+                    reject_batch_global_flag(self.batch_item, arg)?;
+                    let Some(flag) = self.flags.iter().find(|flag| flag.matches(arg)) else {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("unknown flag '{}' for {}", arg, self.command),
+                            usage: self.usage,
+                        });
+                    };
+                    if flag.takes_value {
+                        let value = self.args.get(self.index).copied().ok_or_else(|| {
+                            ParseError::MissingArguments {
+                                context: format!("{} {}", self.command, flag.name),
+                                usage: self.usage,
+                            }
+                        })?;
+                        self.index += 1;
+                        return Ok(Some(ScannedArg::ValueFlag {
+                            name: flag.name,
+                            value,
+                        }));
+                    }
+                    return Ok(Some(ScannedArg::BoolFlag(flag.name)));
+                }
+                (ArgState::Options, arg) => return Ok(Some(ScannedArg::Data(arg))),
+            }
+        }
+        Ok(None)
+    }
+}
+
 fn parse_command_inner(
     args: &[String],
     flags: &Flags,
@@ -891,44 +986,59 @@ fn parse_command_inner(
             // screenshot [selector] [path] [--full/-f]
             // selector: @ref or CSS selector
             // path: file path (contains / or . or ends with known extension)
+            const FLAGS: &[FlagSpec] = &[
+                FlagSpec {
+                    name: "--full",
+                    aliases: &["-f"],
+                    takes_value: false,
+                },
+                FlagSpec {
+                    name: "--if-changed",
+                    aliases: &[],
+                    takes_value: false,
+                },
+                FlagSpec {
+                    name: "--threshold",
+                    aliases: &[],
+                    takes_value: true,
+                },
+            ];
+            const USAGE: &str =
+                "screenshot [selector] [path] [--full|-f] [--if-changed] [--threshold <0-1>]";
             let mut full_page = false;
             let mut if_changed = false;
             let mut threshold = None;
             let mut positional = Vec::new();
-            let mut i = 0;
-            while i < rest.len() {
-                match rest[i] {
-                    "--full" | "-f" => full_page = true,
-                    "--if-changed" => if_changed = true,
-                    "--threshold" => {
-                        let raw = rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
-                            context: "screenshot --threshold".to_string(),
-                            usage: "screenshot [selector] [path] [--if-changed] [--threshold <0-1>]",
-                        })?;
+            let mut scanner = ArgScanner::new(&rest, FLAGS, "screenshot", USAGE, batch_item);
+            while let Some(arg) = scanner.next()? {
+                match arg {
+                    ScannedArg::BoolFlag("--full") => full_page = true,
+                    ScannedArg::BoolFlag("--if-changed") => if_changed = true,
+                    ScannedArg::ValueFlag {
+                        name: "--threshold",
+                        value: raw,
+                    } => {
                         let value = raw.parse::<f64>().map_err(|_| ParseError::InvalidValue {
                             message: format!(
                                 "--threshold expects a number from 0 to 1, got '{}'",
                                 raw
                             ),
-                            usage:
-                                "screenshot [selector] [path] [--if-changed] [--threshold <0-1>]",
+                            usage: USAGE,
                         })?;
                         if !(0.0..=1.0).contains(&value) {
                             return Err(ParseError::InvalidValue {
                                 message: format!("--threshold must be from 0 to 1, got '{}'", raw),
-                                usage: "screenshot [selector] [path] [--if-changed] [--threshold <0-1>]",
+                                usage: USAGE,
                             });
                         }
                         threshold = Some(value);
                         if_changed = true;
-                        i += 1;
                     }
-                    arg => {
-                        reject_batch_global_flag(batch_item, arg)?;
-                        positional.push(arg);
+                    ScannedArg::Data(value) => positional.push(value),
+                    ScannedArg::BoolFlag(name) | ScannedArg::ValueFlag { name, .. } => {
+                        unreachable!("screenshot flag {name} has no handler")
                     }
                 }
-                i += 1;
             }
             let (selector, path) = match (positional.first(), positional.get(1)) {
                 (Some(first), Some(second)) => {
@@ -5576,6 +5686,72 @@ mod tests {
     fn test_screenshot_threshold_requires_value() {
         let result = parse_command(&args("screenshot --threshold"), &default_flags());
         assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    #[test]
+    fn test_screenshot_double_dash_treats_following_tokens_as_data() {
+        let cmd = parse_command(&args("screenshot -- --full-page.png"), &default_flags()).unwrap();
+        assert_eq!(cmd["selector"], serde_json::Value::Null);
+        assert_eq!(cmd["path"], "--full-page.png");
+
+        let cmd = parse_command(
+            &args("screenshot body -- --full-page.png"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["selector"], "body");
+        assert_eq!(cmd["path"], "--full-page.png");
+    }
+
+    #[test]
+    fn test_screenshot_rejects_unknown_flag_instead_of_using_it_as_data() {
+        for command in ["screenshot body --full-page", "screenshot --full-page"] {
+            let err = parse_command(&args(command), &default_flags())
+                .unwrap_err()
+                .format();
+            assert!(
+                err.contains("unknown flag '--full-page' for screenshot"),
+                "{command}: {err}"
+            );
+            assert!(
+                err.contains("Usage: agent-browser screenshot"),
+                "{command}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_screenshot_keeps_known_flags_and_valid_payloads() {
+        let cmd = parse_command(
+            &args("screenshot .btn ./button.png -f --if-changed --threshold 0.025"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["selector"], ".btn");
+        assert_eq!(cmd["path"], "./button.png");
+        assert_eq!(cmd["fullPage"], true);
+        assert_eq!(cmd["ifChanged"], true);
+        assert_eq!(cmd["threshold"], 0.025);
+    }
+
+    #[test]
+    fn test_screenshot_batch_keeps_global_error_and_rejects_unknown_flag() {
+        let err = parse_batch_command(&args("screenshot --init-script probe.js"), &default_flags())
+            .unwrap_err()
+            .format();
+        assert!(err.contains("outer batch invocation"), "{err}");
+
+        let err = parse_batch_command(&args("screenshot body --full-page"), &default_flags())
+            .unwrap_err()
+            .format();
+        assert!(
+            err.contains("unknown flag '--full-page' for screenshot"),
+            "{err}"
+        );
+
+        let cmd =
+            parse_batch_command(&args("screenshot -- --init-script"), &default_flags()).unwrap();
+        assert_eq!(cmd["selector"], "--init-script");
     }
 
     // === Snapshot ===
