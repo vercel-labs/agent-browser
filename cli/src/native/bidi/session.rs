@@ -300,7 +300,16 @@ impl FirefoxSession {
             }
         };
         let in_place = [Key::UserAgent, Key::DownloadPath];
-        if let Err(error) = session.apply_attached_settings(options, &in_place).await {
+        let applied = match within_attach_deadline(
+            deadline,
+            emulation::apply_to_context(&session, session.contexts.active()),
+        )
+        .await
+        {
+            Ok(()) => session.apply_attached_settings(options, &in_place).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = applied {
             session.close().await;
             return Err(error);
         }
@@ -427,7 +436,6 @@ impl FirefoxSession {
         if let Some(contexts) = tree["contexts"].as_array() {
             session.record_context_origins(contexts);
         }
-        emulation::apply_to_context(&session, session.contexts.active()).await?;
         Ok(session)
     }
 
