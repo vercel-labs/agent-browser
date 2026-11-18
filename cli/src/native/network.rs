@@ -606,30 +606,137 @@ pub struct ErrorEntry {
     pub column: Option<i64>,
 }
 
+/// Most console messages and most page errors the tracker keeps, each.
+const MAX_TRACKED_ENTRIES: usize = 1000;
+/// Most text one console message or page error keeps; the rest is cut off.
+const MAX_ENTRY_TEXT_BYTES: usize = 64 * 1024;
+/// Most memory the arguments of one console message may hold; past it they are dropped.
+const MAX_ENTRY_ARGS_BYTES: usize = 64 * 1024;
+const ARGS_OMITTED: &str = "[arguments omitted: too large]";
+/// Longest source URL a page error keeps.
+const MAX_ENTRY_URL_BYTES: usize = 8 * 1024;
+/// Most bytes the console messages, and separately the page errors, may hold together.
+const MAX_RETAINED_BYTES: usize = 8 * 1024 * 1024;
+
+/// A copy of `text` of at most `limit` bytes, cut on a character boundary and marked as cut.
+fn clip(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[truncated {} bytes]", &text[..end], text.len() - end)
+}
+
+/// Takes `bytes` from `left`, or `None` when that much is no longer available.
+fn spend(left: &mut usize, bytes: usize) -> Option<()> {
+    *left = left.checked_sub(bytes)?;
+    Some(())
+}
+
+fn weigh_value(value: &Value, left: &mut usize) -> Option<()> {
+    spend(left, std::mem::size_of::<Value>())?;
+    match value {
+        Value::String(text) => spend(left, text.len()),
+        Value::Array(items) => items.iter().try_for_each(|item| weigh_value(item, left)),
+        Value::Object(fields) => fields.iter().try_for_each(|(key, item)| {
+            spend(left, std::mem::size_of::<String>() + key.len())?;
+            weigh_value(item, left)
+        }),
+        _ => Some(()),
+    }
+}
+
+/// The memory `args` hold, counting every value and string in them, or `None` as soon as that is
+/// known to pass `limit`, so a huge value is never walked to the end.
+fn args_bytes_within(args: &[Value], limit: usize) -> Option<usize> {
+    let mut left = limit;
+    args.iter()
+        .try_for_each(|arg| weigh_value(arg, &mut left))?;
+    Some(limit - left)
+}
+
+/// Entries kept in arrival order, oldest dropped first once either the entry count or the total
+/// weight of what is kept would pass its limit. It is the only place that decides what stays.
+struct BoundedLog<T> {
+    entries: Vec<T>,
+    weights: Vec<usize>,
+    total: usize,
+}
+
+impl<T> BoundedLog<T> {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            weights: Vec::new(),
+            total: 0,
+        }
+    }
+
+    fn push(&mut self, entry: T, weight: usize) {
+        while !self.entries.is_empty()
+            && (self.entries.len() >= MAX_TRACKED_ENTRIES
+                || self.total + weight > MAX_RETAINED_BYTES)
+        {
+            self.entries.remove(0);
+            self.total -= self.weights.remove(0);
+        }
+        self.entries.push(entry);
+        self.weights.push(weight);
+        self.total += weight;
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.weights.clear();
+        self.total = 0;
+    }
+}
+
+/// Console messages and page errors the page produced, kept within fixed memory bounds: every
+/// entry is cut to a size limit before it is copied in, and the oldest go once the entries
+/// together would hold more than their share.
 pub struct EventTracker {
-    pub console_entries: Vec<ConsoleEntry>,
-    pub error_entries: Vec<ErrorEntry>,
-    pub max_entries: usize,
+    console: BoundedLog<ConsoleEntry>,
+    errors: BoundedLog<ErrorEntry>,
 }
 
 impl EventTracker {
     pub fn new() -> Self {
         Self {
-            console_entries: Vec::new(),
-            error_entries: Vec::new(),
-            max_entries: 1000,
+            console: BoundedLog::new(),
+            errors: BoundedLog::new(),
         }
     }
 
-    pub fn add_console(&mut self, level: &str, text: &str, args: Vec<Value>) {
-        if self.console_entries.len() >= self.max_entries {
-            self.console_entries.remove(0);
-        }
-        self.console_entries.push(ConsoleEntry {
-            level: level.to_string(),
-            text: text.to_string(),
-            args,
-        });
+    pub fn console_entries(&self) -> &[ConsoleEntry] {
+        &self.console.entries
+    }
+
+    pub fn error_entries(&self) -> &[ErrorEntry] {
+        &self.errors.entries
+    }
+
+    pub fn add_console(&mut self, level: &str, text: &str, args: &[Value]) {
+        let text = clip(text, MAX_ENTRY_TEXT_BYTES);
+        let (args, args_bytes) = match args_bytes_within(args, MAX_ENTRY_ARGS_BYTES) {
+            Some(bytes) => (args.to_vec(), bytes),
+            None => (
+                vec![json!({ "type": "string", "value": ARGS_OMITTED })],
+                std::mem::size_of::<Value>() + ARGS_OMITTED.len(),
+            ),
+        };
+        let weight = std::mem::size_of::<ConsoleEntry>() + level.len() + text.len() + args_bytes;
+        self.console.push(
+            ConsoleEntry {
+                level: level.to_string(),
+                text,
+                args,
+            },
+            weight,
+        );
     }
 
     pub fn add_error(
@@ -639,29 +746,33 @@ impl EventTracker {
         line: Option<i64>,
         col: Option<i64>,
     ) {
-        if self.error_entries.len() >= self.max_entries {
-            self.error_entries.remove(0);
-        }
-        self.error_entries.push(ErrorEntry {
-            text: text.to_string(),
-            url: url.map(String::from),
-            line,
-            column: col,
-        });
+        let text = clip(text, MAX_ENTRY_TEXT_BYTES);
+        let url = url.map(|url| clip(url, MAX_ENTRY_URL_BYTES));
+        let weight =
+            std::mem::size_of::<ErrorEntry>() + text.len() + url.as_ref().map_or(0, String::len);
+        self.errors.push(
+            ErrorEntry {
+                text,
+                url,
+                line,
+                column: col,
+            },
+            weight,
+        );
     }
 
     pub fn clear_console(&mut self) {
-        self.console_entries.clear();
+        self.console.clear();
     }
 
     /// Removes all captured page errors.
     pub fn clear_errors(&mut self) {
-        self.error_entries.clear();
+        self.errors.clear();
     }
 
     pub fn get_console_json(&self) -> Value {
         let messages: Vec<Value> = self
-            .console_entries
+            .console_entries()
             .iter()
             .map(|e| {
                 let mut msg = json!({ "type": e.level, "text": e.text });
@@ -678,7 +789,7 @@ impl EventTracker {
 
     pub fn get_errors_json(&self) -> Value {
         let entries: Vec<Value> = self
-            .error_entries
+            .error_entries()
             .iter()
             .map(|e| {
                 json!({
@@ -854,11 +965,90 @@ mod tests {
     #[test]
     fn test_event_tracker() {
         let mut tracker = EventTracker::new();
-        tracker.add_console("log", "hello", vec![]);
+        tracker.add_console("log", "hello", &[]);
         tracker.add_error("oops", Some("test.js"), Some(1), Some(5));
 
-        assert_eq!(tracker.console_entries.len(), 1);
-        assert_eq!(tracker.error_entries.len(), 1);
+        assert_eq!(tracker.console_entries().len(), 1);
+        assert_eq!(tracker.error_entries().len(), 1);
+    }
+
+    #[test]
+    fn test_a_long_console_text_is_cut_on_a_character_boundary_and_marked() {
+        let mut tracker = EventTracker::new();
+        let text = "\u{20ac}".repeat(MAX_ENTRY_TEXT_BYTES);
+        tracker.add_console("log", &text, &[]);
+
+        let kept = &tracker.console_entries()[0].text;
+        let (head, marker) = kept.split_once("...[truncated ").unwrap();
+        assert!(head.len() <= MAX_ENTRY_TEXT_BYTES);
+        assert!(text.starts_with(head));
+        assert_eq!(
+            marker,
+            format!("{} bytes]", text.len() - head.len()),
+            "the marker reports exactly what was cut"
+        );
+    }
+
+    #[test]
+    fn test_console_args_over_the_limit_are_replaced_by_a_note() {
+        let mut tracker = EventTracker::new();
+        let huge = vec![json!({ "type": "string", "value": "A".repeat(MAX_ENTRY_ARGS_BYTES) })];
+        tracker.add_console("log", "short", &huge);
+        let small = vec![json!({ "type": "string", "value": "ok" })];
+        tracker.add_console("log", "short", &small);
+
+        let entries = tracker.console_entries();
+        assert_eq!(entries[0].text, "short");
+        assert_eq!(
+            entries[0].args,
+            vec![json!({ "type": "string", "value": ARGS_OMITTED })]
+        );
+        assert_eq!(entries[1].args, small);
+    }
+
+    #[test]
+    fn test_retained_console_memory_stays_bounded_and_drops_the_oldest_first() {
+        let mut tracker = EventTracker::new();
+        let big = "x".repeat(MAX_ENTRY_TEXT_BYTES);
+        let fill = |tracker: &mut EventTracker| {
+            for n in 0..400 {
+                tracker.add_console("log", &format!("{n}:{big}"), &[]);
+                assert!(tracker.console.total <= MAX_RETAINED_BYTES);
+            }
+        };
+        fill(&mut tracker);
+
+        let kept = tracker.console_entries().len();
+        assert!(kept < 400, "the byte limit evicts before the count limit");
+        assert!(tracker.console_entries()[kept - 1].text.starts_with("399:"));
+        assert!(tracker.console_entries()[0]
+            .text
+            .starts_with(&format!("{}:", 400 - kept)));
+
+        tracker.clear_console();
+        assert_eq!(tracker.console.total, 0);
+        fill(&mut tracker);
+        assert_eq!(tracker.console_entries().len(), kept);
+    }
+
+    #[test]
+    fn test_page_errors_are_bounded_in_text_url_and_total() {
+        let mut tracker = EventTracker::new();
+        let big = "e".repeat(MAX_ENTRY_TEXT_BYTES * 2);
+        let url = format!(
+            "https://example.test/{}",
+            "u".repeat(MAX_ENTRY_URL_BYTES * 4)
+        );
+        for _ in 0..400 {
+            tracker.add_error(&big, Some(&url), Some(1), Some(1));
+            assert!(tracker.errors.total <= MAX_RETAINED_BYTES);
+        }
+
+        let entry = &tracker.error_entries()[0];
+        assert!(entry.text.len() < MAX_ENTRY_TEXT_BYTES + 64);
+        assert!(entry.url.as_ref().unwrap().len() < MAX_ENTRY_URL_BYTES + 64);
+        assert!(tracker.error_entries().len() < 400);
+        assert_eq!((entry.line, entry.column), (Some(1), Some(1)));
     }
 
     #[test]
@@ -868,7 +1058,7 @@ mod tests {
             json!({"type": "string", "value": "hello"}),
             json!({"type": "number", "value": 42}),
         ];
-        tracker.add_console("log", "hello 42", raw_args);
+        tracker.add_console("log", "hello 42", &raw_args);
 
         let result = tracker.get_console_json();
         let messages = result.get("messages").unwrap().as_array().unwrap();
@@ -883,7 +1073,7 @@ mod tests {
     #[test]
     fn test_console_json_empty_args_omits_field() {
         let mut tracker = EventTracker::new();
-        tracker.add_console("log", "text only", vec![]);
+        tracker.add_console("log", "text only", &[]);
 
         let result = tracker.get_console_json();
         let messages = result.get("messages").unwrap().as_array().unwrap();
