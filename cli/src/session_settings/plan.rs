@@ -170,21 +170,29 @@ impl Running {
                     .iter()
                     .filter(|(key, _)| patch.is_ambient(*key) && !ambient_headers(key)),
             )
-            .chain(patch.iter().filter(|(key, _)| ambient_headers(key)));
+            .chain(
+                patch
+                    .iter()
+                    .filter(|(key, _)| patch.is_ambient(*key) && ambient_headers(key)),
+            );
         for (key, requested) in ordered {
             if ambient_headers(&key) {
                 // Headers go to the endpoint the invocation names, and to no
-                // other. One named here carries them. A default endpoint
-                // carries them only when it applied above or is the running
-                // one: if the session stays on another endpoint, they are
-                // dropped rather than sent to it. With no endpoint named,
-                // headers given explicitly update the running one; those from
-                // the environment or config have none to follow.
-                let send = match patch.get(Key::Cdp) {
-                    Some(_) if !patch.is_ambient(Key::Cdp) => true,
-                    Some(r) => matches!(r, Requested::Set(v) if next.get(Key::Cdp) == Some(v)),
-                    None => !patch.is_ambient(Key::CdpHeaders),
-                };
+                // other. A default endpoint carries them only when it applied
+                // above or is the running one: if the session stays on another
+                // endpoint, the headers from the environment or config for it
+                // are dropped rather than sent to that one. Headers on the
+                // command line are free of any default endpoint, so they go
+                // with the endpoint the command names, or update the attached
+                // one when it names none.
+                let send = !patch.is_ambient(Key::CdpHeaders)
+                    || match patch.get(Key::Cdp) {
+                        Some(_) if !patch.is_ambient(Key::Cdp) => true,
+                        Some(r) => {
+                            matches!(r, Requested::Set(v) if next.get(Key::Cdp) == Some(v))
+                        }
+                        None => false,
+                    };
                 if !send {
                     continue;
                 }

@@ -1530,7 +1530,18 @@ fn a_reset_reapplies_the_ambient_target_the_session_already_runs() {
 fn headers_never_reach_a_session_that_stays_on_another_endpoint() {
     let attached = running_with(&[(Key::Cdp, json!("ws://a.example/cdp"))]);
     // The default endpoint B is skipped because the session stays on A, and
-    // the headers given for B are dropped with it.
+    // the environment headers given for B are dropped with it.
+    let f = ambient_flags(Some("ws://b.example/cdp"), None, Some(ENV_HEADERS));
+    let (headers, changes) = headers_after(&attached, &f);
+    assert_eq!(
+        attached.plan(&Patch::from_flags(&f)).next.connection(),
+        Connection::Cdp("ws://a.example/cdp".to_string())
+    );
+    assert_eq!(headers, None);
+    assert!(changes.is_empty(), "{changes:?}");
+
+    // Headers on the command line are not tied to a default endpoint, so a
+    // skipped one leaves them to update the attached endpoint.
     let mut f = ambient_flags(Some("ws://b.example/cdp"), None, Some(OWN_HEADERS));
     f.cli_cdp_headers = true;
     let plan = attached.plan(&Patch::from_flags(&f));
@@ -1538,8 +1549,8 @@ fn headers_never_reach_a_session_that_stays_on_another_endpoint() {
         plan.next.connection(),
         Connection::Cdp("ws://a.example/cdp".to_string())
     );
-    assert_eq!(plan.next.cdp_headers(), None);
-    assert!(plan.changes.is_empty());
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(OWN_HEADERS));
+    assert_eq!(changed_keys(&plan), vec![Key::CdpHeaders]);
 
     // Headers alone, with no other endpoint named, update the attached one.
     let mut f = blank_flags();
