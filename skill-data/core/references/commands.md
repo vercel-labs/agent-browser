@@ -2,6 +2,8 @@
 
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md. Unknown commands exit with status 1, including when you request command help.
 
+These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`. Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently.
+
 ## Linux dependencies
 
 On Linux, `agent-browser install --with-deps` installs system dependencies with the detected package manager. It runs that package manager directly as root and uses `sudo` for non-root users. If you are not root and `sudo` is unavailable, it reports that root privileges or `sudo` are required.
@@ -143,6 +145,7 @@ agent-browser screenshot path.png # Save to specific path
 agent-browser screenshot --full   # Full page
 agent-browser screenshot --if-changed # Recommended: skip unchanged images to save tokens
 agent-browser screenshot --threshold 0.01 # Ignore changes affecting at most 1% of pixels
+agent-browser screenshot body -- --draft.png # Literal path starting with -
 agent-browser pdf output.pdf      # Save as PDF
 ```
 
