@@ -44,36 +44,38 @@ function AgentLogoStack() {
       <span className={cn(badge, 'absolute left-8 z-20')}>
         <BrandMark name="cursor" size={14} />
       </span>
-      {/* Paint the translucent rings once so overlapping edges cannot compound their opacity. */}
+      {/* One translucent layer lets outer rings blend with the logos without darkening at crossings. */}
       <svg
-        className="pointer-events-none absolute inset-0 z-30 text-background-100"
-        height={24}
-        viewBox="0 0 56 24"
-        width={56}
+        className="pointer-events-none absolute -left-px -top-px z-30 text-background-100"
+        height={26}
+        viewBox="-1 -1 58 26"
+        width={58}
       >
         <defs>
           <mask
             id={ringMaskId}
-            height={24}
+            height={26}
             maskUnits="userSpaceOnUse"
             style={{ maskType: 'luminance' }}
-            width={56}
-            x={0}
-            y={0}
+            width={58}
+            x={-1}
+            y={-1}
           >
-            <circle cx={12} cy={12} fill="none" r={11.5} stroke="white" />
+            <circle cx={12} cy={12} fill="none" r={12.5} stroke="white" />
             <circle cx={28} cy={12} fill="black" r={12} />
-            <circle cx={28} cy={12} fill="none" r={11.5} stroke="white" />
+            <circle cx={28} cy={12} fill="none" r={12.5} stroke="white" />
             <circle cx={44} cy={12} fill="black" r={12} />
-            <circle cx={44} cy={12} fill="none" r={11.5} stroke="white" />
+            <circle cx={44} cy={12} fill="none" r={12.5} stroke="white" />
           </mask>
         </defs>
         <rect
           fill="currentColor"
           fillOpacity={0.25}
-          height={24}
+          height={26}
           mask={`url(#${ringMaskId})`}
-          width={56}
+          width={58}
+          x={-1}
+          y={-1}
         />
       </svg>
     </span>
