@@ -2,13 +2,21 @@
 
 import { Section, MarketingGrid, Tabs } from './compat';
 import { useId } from 'react';
+import { track } from '@vercel/analytics';
 import { PRODUCTS, useProduct, type Product } from './product-context';
+import { HERO_PRODUCT_SELECTED_EVENT, heroProductSelectedEvent } from './hero-product-event';
 import { cn } from '@/lib/utils';
 import { ProductActions } from './product-actions';
 import { HeroBrowserVisual } from './hero-browser-visual';
 
 function ProductSwitcher({ id }: { id: string }) {
   const { selected, setSelected } = useProduct();
+  const selectProduct = (product: Product) => {
+    const event = heroProductSelectedEvent(product, selected);
+    if (!event) return;
+    track(HERO_PRODUCT_SELECTED_EVENT, event);
+    setSelected(product);
+  };
   return (
     <div className="relative h-10 w-fit max-w-full rounded-full bg-gray-100 p-1">
       <span
@@ -21,7 +29,7 @@ function ProductSwitcher({ id }: { id: string }) {
         tabClassName="m-0! rounded-full! h-8! justify-center px-4! py-0! font-[family-name:var(--font-geist-sans)]! text-[14px]! font-medium! aria-selected:bg-transparent!"
         variant="secondary"
         selected={selected}
-        setSelected={setSelected}
+        setSelected={selectProduct}
         tabs={(['browser', 'desktop'] as const).map((key) => ({
           title: key === 'browser' ? 'Browser' : 'Desktop',
           value: key,
