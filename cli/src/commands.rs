@@ -1727,6 +1727,10 @@ fn parse_command_inner(
                     }
                     Ok(cmd)
                 }
+                Some("keep") => Err(ParseError::MissingArguments {
+                    context: "tab keep".to_string(),
+                    usage: "tab keep <live|throttled> [t<N>|label|target]",
+                }),
                 Some(tab_ref) => Ok(json!({
                     "id": id,
                     "action": "tab_switch",
@@ -5364,9 +5368,10 @@ mod tests {
         assert_eq!(cmd["keep"], "throttled");
         assert_eq!(cmd["tabId"], "t2");
 
-        let cmd = parse_command(&args("tab keep"), &default_flags()).unwrap();
-        assert_eq!(cmd["action"], "tab_switch");
-        assert_eq!(cmd["tabId"], "keep");
+        assert!(matches!(
+            parse_command(&args("tab keep"), &default_flags()),
+            Err(ParseError::MissingArguments { .. })
+        ));
         assert!(matches!(
             parse_command(&args("tab keep warm"), &default_flags()),
             Err(ParseError::UnknownSubcommand { .. })

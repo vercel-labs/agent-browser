@@ -348,7 +348,7 @@ A live tab uses as much CPU as a front tab. Five busy background tabs used 0.05 
 
 In a browser that agent-browser didn't launch (`--cdp` or `--auto-connect`), a live tab's timers can still run slower than a front tab's: 6 to 8 ticks per second instead of 10 on a page that doesn't animate. Start that browser with `--disable-renderer-backgrounding` to get the full rate. Browsers that agent-browser launches already have the flag.
 
-`tab list` marks a live tab with `(live)`, and `tab list --json` reports `"keep": "live"` or `"keep": "throttled"` for every tab. `tab keep` uses the Chrome DevTools Protocol, so it isn't available on the WebDriver backend (Safari, iOS).
+`tab list` marks a live tab with `(live)`, and `tab list --json` reports `"keep": "live"` or `"keep": "throttled"` for every tab. The setting belongs to the session that set it, so a tab another session keeps live still shows as throttled here. `tab keep` uses the Chrome DevTools Protocol, so it isn't available on the WebDriver backend (Safari, iOS).
 
 ### Snapshot deltas
 
