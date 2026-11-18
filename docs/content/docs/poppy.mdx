@@ -83,7 +83,7 @@ The daemon passes `error` through as the command's `code`. A nonzero exit with n
   </thead>
   <tbody>
     <tr><td><code>not_supported</code></td><td>The site has no <code>poppy.json</code>.</td></tr>
-    <tr><td><code>discovery_failed</code></td><td>The document is invalid, does not match the host, declares another major version, is not served over HTTPS, redirects outside the well-known path or to a non-public address, redirects in a loop, or does not answer in time.</td></tr>
+    <tr><td><code>discovery_failed</code></td><td>The document is invalid, does not match the host, declares another major version, is not served over HTTPS, redirects outside the well-known path or to a non-public address, redirects in a loop, is larger than 2 MB, or does not answer in time.</td></tr>
     <tr><td><code>domain_not_allowed</code></td><td>The discovery URL, a redirect hop or the browser session endpoint is outside the session's allowed domains. Nothing is requested for that URL.</td></tr>
     <tr><td><code>web_disabled</code></td><td>The site asks agents not to use a browser.</td></tr>
     <tr><td><code>no_browser_session_endpoint</code></td><td>The site has no browser join.</td></tr>

@@ -6,6 +6,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use futures_util::StreamExt;
 use reqwest::{redirect::Policy, Client};
 use serde_json::Value;
 use url::Url;
@@ -14,6 +15,8 @@ use crate::native::flow::net::{is_link_local_or_metadata, is_non_public};
 use crate::tls::TrustOptions;
 
 const WELL_KNOWN: &str = "/.well-known/poppy.json";
+/// Discovery documents are small, so a larger body is refused instead of read.
+const BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 /// A failed join with a machine-readable code.
 #[derive(Debug, PartialEq, Eq)]
@@ -280,12 +283,37 @@ pub async fn fetch(
     if status == 404 || status == 410 {
         return Err(interpret(&host, status, "").unwrap_err());
     }
-    let body = tokio::time::timeout_at(deadline, response.text())
-        .await
-        .map_err(|_| discovery_failed(format!("Reading {} timed out", url)))?
-        .map_err(|e| discovery_failed(format!("Could not read {}: {}", url, e)))?;
+    let body = read_body(response, &url, deadline).await?;
     let endpoint = interpret(&host, status, &body)?;
     Ok(Discovery { origin, endpoint })
+}
+
+/// Reads the document, refusing one larger than `BODY_LIMIT`.
+async fn read_body(
+    response: reqwest::Response,
+    url: &Url,
+    deadline: tokio::time::Instant,
+) -> Result<String, JoinError> {
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    loop {
+        let chunk = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .map_err(|_| discovery_failed(format!("Reading {} timed out", url)))?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk =
+            chunk.map_err(|e| discovery_failed(format!("Could not read {}: {}", url, e)))?;
+        if bytes.len() + chunk.len() > BODY_LIMIT {
+            return Err(discovery_failed(format!(
+                "{} is larger than {} bytes",
+                url, BODY_LIMIT
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[cfg(test)]
@@ -420,5 +448,33 @@ mod tests {
         let err =
             check_address("evil.example", "169.254.169.254".parse().unwrap(), true).unwrap_err();
         assert!(err.message.contains("link-local"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_document_larger_than_the_limit_is_refused() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let body = format!("{{\"padding\":\"{}\"}}", "x".repeat(BODY_LIMIT));
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+        });
+
+        let target = target(&format!("http://127.0.0.1:{}/", port)).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let err = fetch(target, deadline, &TrustOptions::default(), |_| Ok(()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "discovery_failed");
+        assert!(err.message.contains("larger than"), "{err:?}");
     }
 }
