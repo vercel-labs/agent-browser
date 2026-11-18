@@ -147,24 +147,22 @@ function CopyPromptButton({
               : label
         }
         onClick={copy}
+        prefix={showAgentIcons ? <AgentLogoStack /> : undefined}
+        suffix={<CopyGlyph copied={status === 'copied'} />}
         variant="default"
-        className={cn('group', showAgentIcons && 'pl-1! pr-2!')}
+        className={cn('group', showAgentIcons && 'pl-2! pr-2!')}
       >
-        <span className="flex items-center gap-2">
-          {showAgentIcons && <AgentLogoStack />}
-          <span className="grid place-items-center">
-            {reservedLabels.map((text) => (
-              <span
-                key={text}
-                aria-hidden="true"
-                className="invisible col-start-1 row-start-1 whitespace-nowrap"
-              >
-                {text}
-              </span>
-            ))}
-            <span className="col-start-1 row-start-1 whitespace-nowrap">{visibleLabel}</span>
-          </span>
-          <CopyGlyph copied={status === 'copied'} />
+        <span className="grid place-items-center">
+          {reservedLabels.map((text) => (
+            <span
+              key={text}
+              aria-hidden="true"
+              className="invisible col-start-1 row-start-1 whitespace-nowrap"
+            >
+              {text}
+            </span>
+          ))}
+          <span className="col-start-1 row-start-1 whitespace-nowrap">{visibleLabel}</span>
         </span>
       </ActionButton>
       <span role="status" className="sr-only">
