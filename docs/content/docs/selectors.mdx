@@ -40,9 +40,12 @@ agent-browser click "[data-testid='submit']"
 
 ## Text & XPath
 
+`text=<text>` selects the first leaf element whose text content contains `<text>`. Matching is case-sensitive. Text selectors also work with selector-based actions and `count`.
+
 ```bash
 agent-browser click "text=Submit"
 agent-browser click "xpath=//button[@type='submit']"
+agent-browser get count "text=Submit"
 ```
 
 ## Semantic locators

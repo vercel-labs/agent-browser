@@ -3698,6 +3698,8 @@ async fn e2e_element_queries() {
         "<input id='enabled' value='test'>",
         "<input id='disabled' disabled value='nope'>",
         "<a id='link' href='https://example.com' data-testid='my-link'>Click me</a>",
+        "<button onclick='document.getElementById(&quot;click-count&quot;).textContent=&quot;clicked&quot;'>Submit</button>",
+        "<p id='click-count'></p>",
         "</body></html>"
     );
 
@@ -3767,6 +3769,30 @@ async fn e2e_element_queries() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["value"], "my-link");
+
+    // text= selectors work anywhere a CSS selector is accepted.
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "count", "selector": "text=Submit" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["count"], 1);
+
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "click", "selector": "text=Submit" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "12", "action": "gettext", "selector": "#click-count" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "clicked");
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

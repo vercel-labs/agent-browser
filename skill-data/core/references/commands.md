@@ -73,6 +73,8 @@ Delta history is per tab and option set. Responses are `full`, `unchanged`, or `
 
 ## Interactions (use @refs from snapshot)
 
+Selector arguments also accept `text=<text>`, which selects the first leaf element whose text content contains `<text>` with case-sensitive matching. It works with selector-based actions and `get count`.
+
 ```bash
 agent-browser click @e1           # Click
 agent-browser click @e1 --new-tab # Click and open in new tab
