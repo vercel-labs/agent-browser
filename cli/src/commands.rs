@@ -413,6 +413,13 @@ fn parse_command_inner(
 
     reject_batch_global_flag(batch_item, &args[0])?;
     let cmd = args[0].as_str();
+    if batch_item && cmd == "poppy" {
+        // Discovery runs in the CLI before the daemon action, so a join is not a batch step.
+        return Err(ParseError::InvalidValue {
+            message: "poppy join cannot run inside batch".to_string(),
+            usage: "agent-browser poppy join <url> --authorizer <command>",
+        });
+    }
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let id = gen_id();
 
@@ -7594,6 +7601,16 @@ mod tests {
         let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "batch");
         assert_eq!(cmd["bail"], false);
+    }
+
+    #[test]
+    fn test_batch_rejects_poppy_join() {
+        let err = parse_batch_command(
+            &args("poppy join https://example.com --authorizer auth"),
+            &default_flags(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
     }
 
     #[test]

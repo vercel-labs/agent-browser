@@ -54,6 +54,14 @@ impl Company {
             .unwrap();
         serde_json::from_slice(&output.stdout).unwrap()
     }
+
+    fn submits(&self) -> u64 {
+        let output = Command::new("curl")
+            .args(["-s", &format!("{}/_submits", self.origin())])
+            .output()
+            .unwrap();
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
 }
 
 impl Drop for Company {
@@ -233,6 +241,37 @@ fn e2e_poppy_join_reports_a_rejected_form() {
     let session = Session::new();
     let output = session.join(&company, &[]);
     assert_failure(&output, "join_failed");
+    assert_eq!(company.submits(), 1, "the form was never submitted");
+    assert_code_absent(&company, &output);
+    assert_blank(&session);
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_keeps_the_code_out_of_the_landing_url() {
+    let company = Company::start("codeurl");
+    let session = Session::new();
+    let output = session.join(&company, &[]);
+    let value = stdout_json(&output);
+    assert_eq!(value["data"]["joined"], true, "{value}");
+    assert!(
+        value["data"]["url"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted]"),
+        "{value}"
+    );
+    assert_code_absent(&company, &output);
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_fails_when_the_redirect_leaves_the_allowed_domains() {
+    let company = Company::start("offsite");
+    let session = Session::new();
+    let output = session.join(&company, &[("AGENT_BROWSER_ALLOWED_DOMAINS", "127.0.0.1")]);
+    assert_failure(&output, "join_failed");
+    assert_eq!(company.submits(), 1, "the form was never submitted");
     assert_code_absent(&company, &output);
     assert_blank(&session);
 }

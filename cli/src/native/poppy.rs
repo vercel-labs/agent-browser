@@ -147,6 +147,16 @@ async fn run_join(
             "The Company did not accept the browser session form",
         ));
     }
+    // A redirect the domain filter blocked commits a synthetic error page.
+    if let Some(filter) = state.domain_filter.read().await.as_ref() {
+        if filter.check_url(&url).is_err() {
+            return Err(fail(
+                "join_failed",
+                "The join redirected to a host outside the allowed domains",
+            ));
+        }
+    }
+    let url = url.replace(&code, "[redacted]");
     state.ref_map.invalidate_page(&session_id);
     Ok(json!({ "experimental": true, "joined": true, "signed_in": signed_in, "url": url }))
 }
@@ -299,6 +309,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_authorizer_gets_one_json_line_in_its_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -313,12 +324,16 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_slow_authorizer_is_stopped_at_the_timeout() {
+        let started = std::time::Instant::now();
         let err = run_authorizer("sleep 5", None, &json!({}), "bc_1", 100)
             .await
             .unwrap_err();
-        assert!(err.starts_with("poppy:authorizer_failed: "), "{err}");
+        assert!(err.contains("did not finish within 100ms"), "{err}");
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

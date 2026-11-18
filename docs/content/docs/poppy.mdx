@@ -71,7 +71,7 @@ The daemon passes `error` through as the command's `code`. A nonzero exit with n
 {"success": true, "data": {"experimental": true, "joined": true, "signed_in": true, "url": "https://app.example.com/"}}
 ```
 
-`signed_in: false` means the browser joined the Session without an account. A failed join exits 1 and returns the tab to `about:blank`:
+`signed_in: false` means the browser joined the Session without an account. A failed join exits 1. If it failed after the browser session page loaded, the tab returns to `about:blank`; a discovery failure leaves the tab where it was:
 
 ```json
 {"success": false, "error": "...", "code": "join_failed", "data": {"experimental": true, "joined": false}}

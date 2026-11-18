@@ -76,7 +76,10 @@ fn interpret(host: &str, status: u16, body: &str) -> Result<String, JoinError> {
         .get("protocol_version")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if version.split_once('.').map(|(major, _)| major) != Some("1") {
+    let compatible = version
+        .split_once('.')
+        .is_some_and(|(major, minor)| major == "1" && minor.parse::<u32>().is_ok());
+    if !compatible {
         return Err(discovery_failed(format!(
             "Unsupported protocol_version '{}'",
             version
@@ -136,6 +139,9 @@ async fn discover_async(
         .await
         .map_err(|e| discovery_failed(format!("Request to {} failed: {}", url, e)))?;
     let status = response.status().as_u16();
+    if status == 404 || status == 410 {
+        return Err(interpret(&host, status, "").unwrap_err());
+    }
     let body = response
         .text()
         .await
@@ -218,10 +224,13 @@ mod tests {
     fn other_failures_are_discovery_failed() {
         assert_eq!(code(500, ""), "discovery_failed");
         assert_eq!(code(200, "not json"), "discovery_failed");
-        assert_eq!(
-            code(200, &doc(json!({ "protocol_version": "2.0" }))),
-            "discovery_failed"
-        );
+        for version in ["2.0", "1.invalid", "1", "1."] {
+            assert_eq!(
+                code(200, &doc(json!({ "protocol_version": version }))),
+                "discovery_failed",
+                "{version}"
+            );
+        }
         assert_eq!(
             code(
                 200,

@@ -1,6 +1,6 @@
 // Fixture Company for the browser join (Personal Agent Protocol section 6).
-// Usage: node company.mjs <normal|scope|reject>. Prints its port, then serves.
-// GET /_codes lists the codes issued so far.
+// Usage: node company.mjs <normal|scope|reject|codeurl|offsite>. Prints its port, then serves.
+// GET /_codes lists the codes issued so far; GET /_submits counts form submissions.
 import http from "node:http";
 
 const mode = process.argv[2] ?? "normal";
@@ -8,6 +8,7 @@ const TOKEN = "valid-token";
 const codes = new Map();
 const sessions = new Map();
 let counter = 0;
+let submits = 0;
 
 const cookie = (req, name) =>
   (req.headers.cookie ?? "").split(";").map((p) => p.trim().split("=")).find(([k]) => k === name)?.[1];
@@ -33,6 +34,7 @@ const server = http.createServer((req, res) => {
       });
     }
     if (route === "GET /_codes") return json(200, [...codes.keys()]);
+    if (route === "GET /_submits") return json(200, submits);
     if (route === "GET /join") {
       const n = counter++;
       const code = `bc_fixture${n}`;
@@ -52,15 +54,22 @@ const server = http.createServer((req, res) => {
       return send(204);
     }
     if (route === "POST /join") {
+      submits++;
       const entry = codes.get(new URLSearchParams(body).get("code"));
       const valid = entry && !entry.used && entry.cookie === cookie(req, "__Host-join");
       if (entry) entry.used = true;
       if (!valid || entry.authorized === null || mode === "reject") return json(400, { error: "invalid_request" });
       const sid = `sid${counter++}`;
       sessions.set(sid, entry.authorized);
-      return send(303, { location: "/", "set-cookie": `__Host-session=${sid}; Path=/; Secure; HttpOnly; SameSite=Lax` });
+      const location =
+        mode === "codeurl"
+          ? `/?from=${new URLSearchParams(body).get("code")}`
+          : mode === "offsite"
+            ? `http://localhost:${server.address().port}/`
+            : "/";
+      return send(303, { location, "set-cookie": `__Host-session=${sid}; Path=/; Secure; HttpOnly; SameSite=Lax` });
     }
-    if (route === "GET /") {
+    if (req.method === "GET" && req.url.split("?")[0] === "/") {
       const who = sessions.get(cookie(req, "__Host-session"));
       const page = who === true ? "signed in as user_1" : who === false ? "signed out session" : "anonymous visitor";
       return html(`<!doctype html><title>Home</title><p>${page}</p>`);

@@ -45,7 +45,7 @@ Success prints `{"success": true, "data": {"experimental": true, "joined": true,
 - `join_failed`: the page had no code form, or the site rejected the submission. Run the join again.
 - Any other code came from the authorizer, such as `invalid_request`, `insufficient_scope`, `invalid_session`, `invalid_token`, or `version_unsupported`. Do not retry `version_unsupported`.
 
-After a failed join the tab returns to `about:blank`. A signed-out browser still belongs to the Session. To sign in again, run the join again with the same authorizer.
+When a join fails after the browser session page has loaded, the tab returns to `about:blank`. A discovery failure leaves the tab where it was. A signed-out browser still belongs to the Session. To sign in again, run the join again with the same authorizer.
 
 ## Safety
 
