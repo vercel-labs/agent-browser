@@ -20,7 +20,9 @@ use super::network::DomainFilter;
 /// Marks an error string as `poppy:<code>: <message>`.
 pub const ERROR_PREFIX: &str = "poppy:";
 
-const READ_CODE: &str = "document.querySelector('form input[name=code]')?.value ?? null";
+/// The endpoint page's URL and the code in its form, read from one document.
+const READ_CODE: &str = "(() => ({ href: location.href, \
+                      code: document.querySelector('form input[name=code]')?.value ?? null }))()";
 const SUBMIT: &str = "(() => { const i = document.querySelector('form input[name=code]'); \
                       if (!i || !i.form) return false; i.form.submit(); return true; })()";
 
@@ -140,11 +142,21 @@ async fn run_join(
         .await
         .map_err(|e| fail("join_failed", e))?;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let code = mgr
+    let page = mgr
         .evaluate(READ_CODE, None)
         .await
-        .map_err(|e| fail("join_failed", e))?
-        .as_str()
+        .map_err(|e| fail("join_failed", e))?;
+    let href = page.get("href").and_then(Value::as_str).unwrap_or_default();
+    // The code is read only from the endpoint the Company published.
+    if !same_resource(href, endpoint) {
+        return Err(fail(
+            "join_failed",
+            "The browser session page is not the endpoint the Company published",
+        ));
+    }
+    let code = page
+        .get("code")
+        .and_then(Value::as_str)
         .filter(|c| !c.is_empty())
         .map(str::to_string)
         .ok_or_else(|| fail("join_failed", "The browser session page has no code form"))?;

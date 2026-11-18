@@ -43,7 +43,7 @@ Success prints `{"success": true, "data": {"experimental": true, "joined": true,
 - `discovery_failed`: the discovery document is invalid, does not match the host, or is not served over HTTPS. Do not join.
 - `auto_connect_refused`: the session uses `--auto-connect`. Open a session in a browser agent-browser launches.
 - `authorizer_failed`: the authorizer exited without a valid JSON line. Fix the authorizer.
-- `join_failed`: the page had no code form, or the site rejected the submission. Run the join again.
+- `join_failed`: the tab was not on the endpoint, the page had no code form, or the site rejected the submission. Run the join again.
 - Any other code came from the authorizer, such as `invalid_request`, `insufficient_scope`, `invalid_session`, `invalid_token`, or `version_unsupported`. Do not retry `version_unsupported`.
 
 When a join fails after the browser session page has loaded, the tab returns to `about:blank`. A discovery failure leaves the tab where it was. The whole join runs within `AGENT_BROWSER_DEFAULT_TIMEOUT`. A signed-out browser still belongs to the Session. To sign in again, run the join again with the same authorizer.

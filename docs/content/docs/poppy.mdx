@@ -37,7 +37,7 @@ The command refuses a session opened with `--auto-connect`, because that attache
 ## How a join works
 
 1. **Discovery.** The daemon fetches `https://<host>/.well-known/poppy.json`, after action policy, confirmation and the session's allowed domains have been checked. It follows redirects one hop at a time, and before each request it checks the allowed domains and requires the well-known path with no query. A join that starts on a public host connects only to public addresses, and no hop connects to a link-local or cloud metadata address. It checks that `protocol_version` is `1.x` and that `organization.domain` matches the host that serves the document.
-2. **The browser receives a code.** The daemon navigates the current tab to the browser session endpoint, through the normal navigation path and its allowed domains, and reads the one-time code from the page's form.
+2. **The browser receives a code.** The daemon navigates the current tab to the browser session endpoint, through the normal navigation path and its allowed domains, and reads the one-time code from that page's form. If a redirect takes the tab to any other page, the join fails instead of reading that page's form.
 3. **The authorizer authorizes the code.** The daemon starts the authorizer and writes one JSON line to its stdin.
 4. **The browser submits the code.** The daemon submits the form. The join succeeded when the browser leaves the endpoint.
 
@@ -89,7 +89,7 @@ The daemon passes `error` through as the command's `code`. A nonzero exit with n
     <tr><td><code>no_browser_session_endpoint</code></td><td>The site has no browser join.</td></tr>
     <tr><td><code>auto_connect_refused</code></td><td>The session was opened with <code>--auto-connect</code>.</td></tr>
     <tr><td><code>authorizer_failed</code></td><td>The authorizer could not run or printed no valid JSON line.</td></tr>
-    <tr><td><code>join_failed</code></td><td>The page has no code form, or the site rejected the submission.</td></tr>
+    <tr><td><code>join_failed</code></td><td>The tab is not on the endpoint, the page has no code form, or the site rejected the submission.</td></tr>
     <tr><td>Any other</td><td>The code the authorizer reported, such as <code>invalid_request</code> or <code>insufficient_scope</code>.</td></tr>
   </tbody>
 </table>

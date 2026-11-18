@@ -83,6 +83,10 @@ impl Company {
         self.counter("uploads")
     }
 
+    fn authorize(&self) -> u64 {
+        self.counter("authorize")
+    }
+
     fn redirects(&self) -> u64 {
         self.counter("redirects")
     }
@@ -450,4 +454,31 @@ fn e2e_poppy_join_refuses_a_redirect_to_a_link_local_address() {
         1,
         "the redirect target was requested"
     );
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_reads_the_code_only_from_the_endpoint() {
+    let company = Company::start("formredirect");
+    let session = Session::new();
+    let output = session.join(&company, &[]);
+    assert_failure(&output, "join_failed");
+    assert!(
+        text(&output).contains("not the endpoint"),
+        "{}",
+        text(&output)
+    );
+    // The page the tab landed on was never read, so its code never reached the Company.
+    assert_eq!(
+        company.authorize(),
+        0,
+        "the third-party code was sent to the Company"
+    );
+    assert_eq!(company.submits(), 0, "the third-party form was submitted");
+    assert!(
+        !text(&output).contains("bc_third_party"),
+        "{}",
+        text(&output)
+    );
+    assert_blank(&session);
 }

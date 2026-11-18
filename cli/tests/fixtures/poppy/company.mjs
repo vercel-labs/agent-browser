@@ -1,6 +1,6 @@
 // Fixture Company for the browser join (Personal Agent Protocol section 6).
-// Usage: node company.mjs <normal|scope|reject|codeurl|offsite|deadport|canonical|upload|query>. Prints its port, then serves.
-// GET /_codes lists issued codes; GET /_hosts (per Host), /_discoveries, /_uploads, /_submits and /_redirects count poppy.json requests, upload-path requests, form submissions and accepted joins.
+// Usage: node company.mjs <normal|scope|reject|codeurl|offsite|deadport|canonical|upload|query|linklocal|formredirect>. Prints its port, then serves.
+// GET /_codes lists issued codes; GET /_hosts (per Host), /_discoveries, /_uploads, /_authorize, /_submits and /_redirects count poppy.json requests, upload-path requests, authorize calls, form submissions and accepted joins.
 import http from "node:http";
 
 const mode = process.argv[2] ?? "normal";
@@ -12,6 +12,7 @@ let submits = 0;
 let redirects = 0;
 let discoveries = 0;
 let uploads = 0;
+let authorize = 0;
 const hosts = {};
 
 const cookie = (req, name) =>
@@ -60,8 +61,12 @@ const server = http.createServer((req, res) => {
     if (route === "GET /_hosts") return json(200, hosts);
     if (route === "GET /_discoveries") return json(200, discoveries);
     if (route === "GET /_uploads") return json(200, uploads);
+    if (route === "GET /_authorize") return json(200, authorize);
     if (route === "GET /_redirects") return json(200, redirects);
     if (route === "GET /join") {
+      // formredirect: the endpoint sends the tab to a page on another host that carries a code form.
+      if (mode === "formredirect")
+        return send(302, { location: `http://localhost:${server.address().port}/third-party` });
       const n = counter++;
       const code = `bc_fixture${n}`;
       codes.set(code, { cookie: `jc${n}`, authorized: null, used: false });
@@ -70,7 +75,13 @@ const server = http.createServer((req, res) => {
         { "set-cookie": `__Host-join=jc${n}; Path=/; Max-Age=60; Secure; HttpOnly; SameSite=Strict` },
       );
     }
+    if (route === "GET /third-party") {
+      return html(
+        `<form method="post" action="http://127.0.0.1:${server.address().port}/join"><input type="hidden" name="code" value="bc_third_party"><button>Continue</button></form>`,
+      );
+    }
     if (route === "POST /join/authorize") {
+      authorize++;
       const token = req.headers.authorization?.replace("Bearer ", "");
       if (token && token !== TOKEN) return json(401, { error: "invalid_token" });
       if (token && mode === "scope") return json(403, { error: "insufficient_scope" });
