@@ -5921,6 +5921,45 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_typed_with_shift_is_gathered_as_the_shifted_characters() {
+        let secret = traits("password", "", "");
+        // The last value is the modifier mask the daemon holds from `keydown`.
+        let mut r = recorded(&[]);
+        for (action, key, held) in [
+            ("press", "Shift+h", 0),
+            ("press", "Shift+1", 0),
+            ("keydown", "Shift", 0),
+            ("press", "a", 8),
+            ("keyup", "Shift", 8),
+            ("press", "b", 0),
+        ] {
+            r.begin(
+                action,
+                &json!({ "action": action, "key": key }),
+                &crate::native::element::RefMap::new(),
+                None,
+                Some(&secret),
+                held,
+            );
+        }
+        assert_withheld(&mut r, "H!Ab");
+        assert_kept(&mut r, "h1ab");
+        // A held Control makes `press v` a paste, not the character `v`.
+        let mut r = recorded(&[]);
+        for (action, key, held) in [("keydown", "Control", 0), ("press", "v", 2)] {
+            r.begin(
+                action,
+                &json!({ "action": action, "key": key }),
+                &crate::native::element::RefMap::new(),
+                None,
+                Some(&secret),
+                held,
+            );
+        }
+        assert_eq!(r.unknown_secret_seqs, vec![2]);
+    }
+
+    #[test]
     fn a_paste_into_a_secret_field_redacts_the_step_and_drops_what_it_tagged() {
         let secret = traits("password", "", "");
         let mut r = recorded(&[]);
