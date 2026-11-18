@@ -1315,10 +1315,18 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 } else {
                     " ".to_string()
                 };
+                let keep = match tab.get("keep").and_then(|v| v.as_str()) {
+                    Some("live") => " (live)",
+                    Some("frozen") => " (frozen)",
+                    _ => "",
+                };
                 if let Some(label) = tab_label {
-                    println!("{} [{}] {} {} - {}", marker, tab_id, label, title, url);
+                    println!(
+                        "{} [{}] {} {} - {}{}",
+                        marker, tab_id, label, title, url, keep
+                    );
                 } else {
-                    println!("{} [{}] {} - {}", marker, tab_id, title, url);
+                    println!("{} [{}] {} - {}{}", marker, tab_id, title, url, keep);
                 }
             }
             return;
@@ -1349,6 +1357,17 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                         note
                     );
                 }
+                return;
+            }
+        }
+        if action == Some("tab_keep") {
+            if let Some(tab_id) = data.get("tabId").and_then(|v| v.as_str()) {
+                let state = match data.get("keep").and_then(|v| v.as_str()) {
+                    Some("live") => "stays live in the background",
+                    Some("frozen") => "is frozen until you switch to it",
+                    _ => "is throttled in the background",
+                };
+                println!("{} Tab [{}] {}", color::success_indicator(), tab_id, state);
                 return;
             }
         }
@@ -3245,6 +3264,14 @@ or `T<N>` tab-id form. CDP target ids (from `tab list --json`) are also accepted
 as tab refs; unlike `t<N>` ids they stay stable across daemon restarts.
 Rejected labels preserve the current tab's refs and selected frame.
 
+Chrome throttles every tab that is not in front: timers slow to about one per
+second and animation frames stop. `tab keep live` keeps a tab running at full
+speed in the background and makes the page report visible and focused; it costs
+CPU, so set it only on tabs that need it. `tab keep frozen` pauses a background
+tab completely until you switch to it, and the active tab cannot be frozen.
+`tab keep throttled` returns a tab to the default. Without a tab ref the command
+applies to the active tab, and `tab list` shows the setting.
+
 Tabs opened with `tab new` or `click --new-tab` inherit the session's user
 agent, headers, HTTP credentials, init scripts, routes, and emulation
 overrides before their first document loads.
@@ -3262,6 +3289,8 @@ Operations:
   new [url]                  Open a new tab
   new --label <name> [url]   Open a new tab with a label like `docs` or `app`
   close [t<N>|label|target]  Close a tab (current if no ref given)
+  keep <live|throttled|frozen> [t<N>|label|target]
+                             Set how a tab runs while it is in the background
   <t<N>|label|target>        Switch to a tab by id, label, or CDP target id
 
 Global Options:
@@ -3279,6 +3308,9 @@ Examples:
   agent-browser tab close
   agent-browser tab close t1
   agent-browser tab close docs
+  agent-browser tab keep live
+  agent-browser tab keep throttled t2
+  agent-browser tab keep frozen t2
   agent-browser tab list --json                        # Includes CDP target ids
   agent-browser tab close 4A0B7C4E1F2D3A4B5C6D7E8F90A1B2C3  # Close by target id
 "##
@@ -4536,6 +4568,7 @@ Storage:
 
 Tabs:
   tab [new|list|close|<n>]   Manage tabs
+  tab keep <mode> [<n>]      Keep a background tab live, throttled, or frozen
 
 Diff:
   diff snapshot              Compare current vs last snapshot

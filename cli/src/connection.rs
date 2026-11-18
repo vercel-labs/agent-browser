@@ -1,4 +1,4 @@
-use crate::session_files::{remove_daemon_files, SessionFile};
+use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
 use crate::validation::sanitize_session_component;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -963,7 +963,40 @@ pub(crate) fn prevent_stdio_handle_inheritance() {
     }
 }
 
+/// Exclusive hold on a session's `.lock` file, released when dropped or when
+/// the process exits. The file is opened close-on-exec, so a spawned daemon
+/// does not keep the lock.
+struct SpawnLock {
+    _file: fs::File,
+}
+
+impl SpawnLock {
+    fn acquire(session: &str) -> Result<Self, String> {
+        let socket_dir = get_socket_dir();
+        fs::create_dir_all(&socket_dir)
+            .map_err(|e| format!("Failed to create socket directory: {}", e))?;
+        let path = SessionFile::Lock.path_in(&socket_dir, session);
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| format!("Failed to open session lock {}: {}", path.display(), e))?;
+        file.lock()
+            .map_err(|e| format!("Failed to lock session {}: {}", session, e))?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Returns a ready daemon for the session, starting one if needed. Callers for
+/// the same session take turns, so one that arrives while another is starting
+/// the daemon attaches to it.
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
+    let _lock = SpawnLock::acquire(session)?;
+    ensure_daemon_locked(session, opts)
+}
+
+fn ensure_daemon_locked(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
     let mut restarted = false;
 
     // Socket connectivity is the sole liveness check — no PID check — so
@@ -1156,6 +1189,15 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
         }
 
         thread::sleep(Duration::from_millis(100));
+    }
+
+    // The daemon never became reachable; do not leave it running unattended.
+    if let Some(mut child) = daemon_child {
+        let _ = child.kill();
+        let _ = child.wait();
+        if spawned_pid.is_some_and(|pid| owns_session(&socket_dir, session, pid)) {
+            remove_daemon_files(&socket_dir, session);
+        }
     }
 
     #[cfg(unix)]
@@ -2171,5 +2213,40 @@ mod tests {
         // No config, no file created.
         record_daemon_default_timeout("never-started", Some(1));
         assert!(!get_config_path("never-started").exists());
+    }
+
+    #[test]
+    fn test_spawn_lock_waits_for_the_holder() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let first = SpawnLock::acquire("lock-test").unwrap();
+        let acquired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = acquired.clone();
+        let waiter = thread::spawn(move || {
+            let _second = SpawnLock::acquire("lock-test").unwrap();
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // The waiter is blocked for as long as the first lock is held.
+        thread::sleep(Duration::from_millis(300));
+        assert!(!acquired.load(std::sync::atomic::Ordering::SeqCst));
+
+        drop(first);
+        waiter.join().unwrap();
+        assert!(acquired.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_spawn_lock_is_per_session() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let _a = SpawnLock::acquire("lock-a").unwrap();
+        let _b = SpawnLock::acquire("lock-b").unwrap();
     }
 }
