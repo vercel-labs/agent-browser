@@ -107,6 +107,43 @@ async fn eval_origin_storage(
     parse_origin_storage(&data)
 }
 
+/// Temporary targets this daemon opened to read other origins' storage
+/// (`collect_storage_via_temp_target`), from creation until `Target.closeTarget`
+/// has answered.
+static STORAGE_TARGETS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether a `Target.attachedToTarget` event is this daemon's own attachment
+/// to one of its temporary storage targets, which the network-control handler
+/// must leave alone.
+///
+/// That handler sets a session up with `Page.enable` and the rest before it
+/// answers the next `Fetch.requestPaused`. Chrome holds `Page.enable` on the
+/// storage session until the session's `Page.navigate` commits, and with proxy
+/// credentials or a domain filter that navigation waits on a request paused
+/// by the target's auto-attached session, which only the same handler
+/// answers. The two waited on each other until the 10 s setup limit, so
+/// closing or autosaving a named session that had visited a second origin
+/// took 10 s and held every command queued behind it.
+///
+/// Only an attachment that is not waiting for the debugger is the daemon's
+/// own: the target's auto-attached session arrives paused
+/// (`waitForDebuggerOnStart`), carries the target's controls, and is set up
+/// and resumed as before.
+pub(crate) fn owns_storage_attachment(target_id: &str, waiting_for_debugger: bool) -> bool {
+    let targets = STORAGE_TARGETS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    is_own_storage_attachment(&targets, target_id, waiting_for_debugger)
+}
+
+fn is_own_storage_attachment(
+    storage_targets: &[String],
+    target_id: &str,
+    waiting_for_debugger: bool,
+) -> bool {
+    !waiting_for_debugger && storage_targets.iter().any(|id| id == target_id)
+}
+
 /// Create a temporary CDP target, navigate it to each origin to collect localStorage,
 /// then close it. Uses Fetch interception to serve blank HTML instead of making real
 /// network requests.
@@ -126,6 +163,12 @@ async fn collect_storage_via_temp_target(
         .await?;
 
     let target_id = create_result.target_id;
+    // Registered before the attach below, so the attach event cannot reach
+    // the network-control handler first (see `owns_storage_attachment`).
+    STORAGE_TARGETS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(target_id.clone());
 
     // Ensure the target is closed even if attach or later steps fail
     let result = collect_storage_in_target(client, &target_id, origins, origin_js).await;
@@ -133,10 +176,16 @@ async fn collect_storage_via_temp_target(
     let _ = client
         .send_command_typed::<_, Value>(
             "Target.closeTarget",
-            &CloseTargetParams { target_id },
+            &CloseTargetParams {
+                target_id: target_id.clone(),
+            },
             None,
         )
         .await;
+    STORAGE_TARGETS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|id| id != &target_id);
 
     result
 }
@@ -854,6 +903,25 @@ pub fn get_sessions_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_daemons_own_attachment_to_a_storage_target_is_left_alone() {
+        let targets = vec!["STORAGE".to_string()];
+        assert!(is_own_storage_attachment(&targets, "STORAGE", false));
+    }
+
+    #[test]
+    fn the_paused_auto_attached_session_of_a_storage_target_is_still_set_up() {
+        let targets = vec!["STORAGE".to_string()];
+        assert!(!is_own_storage_attachment(&targets, "STORAGE", true));
+    }
+
+    #[test]
+    fn any_other_target_is_set_up() {
+        let targets = vec!["STORAGE".to_string()];
+        assert!(!is_own_storage_attachment(&targets, "PAGE", false));
+        assert!(!is_own_storage_attachment(&[], "STORAGE", false));
+    }
 
     #[test]
     fn test_storage_state_serialization() {
