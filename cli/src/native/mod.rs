@@ -3,6 +3,8 @@ pub mod a11y;
 #[allow(dead_code)]
 pub mod actions;
 #[allow(dead_code)]
+pub mod apc;
+#[allow(dead_code)]
 pub mod auth;
 #[allow(dead_code)]
 pub mod browser;

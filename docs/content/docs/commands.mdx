@@ -352,6 +352,15 @@ In a browser that agent-browser didn't launch (`--cdp` or `--auto-connect`), a l
 
 `tab list` marks a tab with `(live)` or `(frozen)`, and `tab list --json` reports `"keep": "live" | "throttled" | "frozen"` for every tab. `tab keep` uses the Chrome DevTools Protocol, so it isn't available on the WebDriver backend (Safari, iOS).
 
+### Experimental snapshot source
+
+```bash
+agent-browser snapshot -i --source apc
+agent-browser snapshot -i --source apc --viewport
+```
+
+`--source apc` is experimental. It builds the tree from Chrome's Annotated Page Content and keeps the `@eN` refs working. It works in Chrome and Chromium only, relies on an internal schema that can change between releases, and falls back to `--source ax` automatically. See [Snapshots](/snapshots) for behavior and limits.
+
 ### Snapshot deltas
 
 ```bash
