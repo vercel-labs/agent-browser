@@ -1729,7 +1729,7 @@ fn parse_command_inner(
                 }
                 Some("keep") => Err(ParseError::MissingArguments {
                     context: "tab keep".to_string(),
-                    usage: "tab keep <live|throttled> [t<N>|label|target]",
+                    usage: "tab keep <live|throttled|frozen> [t<N>|label|target]",
                 }),
                 Some(tab_ref) => Ok(json!({
                     "id": id,
