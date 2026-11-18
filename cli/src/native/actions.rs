@@ -24293,6 +24293,37 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(state.proxy_credentials.read().await.is_none());
     }
 
+    /// The Firefox network dispatcher answers proxy challenges from the daemon's credential
+    /// slot, so a Firefox launch must rebind that slot to its own proxy before the dispatcher
+    /// exists. A Chrome session's credentials must never reach a different proxy.
+    #[tokio::test]
+    async fn test_a_firefox_launch_replaces_the_previous_browsers_proxy_credentials() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Engine, json!("firefox"));
+        state
+            .settings
+            .set(Key::Proxy, json!("http://proxy-b.example:8080"));
+        state.settings.set(
+            Key::ExecutablePath,
+            json!("/nonexistent/agent-browser-firefox"),
+        );
+        *state.proxy_credentials.write().await = Some(("userA".to_string(), "passA".to_string()));
+
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+        assert!(state.proxy_credentials.read().await.is_none());
+
+        state.settings.set(Key::ProxyUsername, json!("userB"));
+        state.settings.set(Key::ProxyPassword, json!("passB"));
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+        assert_eq!(
+            *state.proxy_credentials.read().await,
+            Some(("userB".to_string(), "passB".to_string()))
+        );
+    }
+
     #[tokio::test]
     async fn test_switching_to_an_external_browser_drops_inherited_local_settings() {
         let (_env, mut state) = isolated_state();
