@@ -161,7 +161,7 @@ impl Running {
         // endpoint: they go last, and only with an endpoint this command sends
         // or the one the session already runs.
         let mut ambient_open: Option<bool> = None;
-        let ambient_headers = |key: &Key| patch.is_ambient(*key) && *key == Key::CdpHeaders;
+        let ambient_headers = |key: &Key| *key == Key::CdpHeaders;
         let ordered = patch
             .iter()
             .filter(|(key, _)| !patch.is_ambient(*key))
@@ -173,13 +173,19 @@ impl Running {
             .chain(patch.iter().filter(|(key, _)| ambient_headers(key)));
         for (key, requested) in ordered {
             if ambient_headers(&key) {
-                let named_here = patch.get(Key::Cdp).is_some() && !patch.is_ambient(Key::Cdp);
-                // The default endpoint applied above, or is the running one.
-                let same_endpoint = patch.is_ambient(Key::Cdp)
-                    && patch.get(Key::Cdp).is_some_and(
-                        |r| matches!(r, Requested::Set(v) if next.get(Key::Cdp) == Some(v)),
-                    );
-                if !(named_here || same_endpoint) {
+                // Headers go to the endpoint the invocation names, and to no
+                // other. One named here carries them. A default endpoint
+                // carries them only when it applied above or is the running
+                // one: if the session stays on another endpoint, they are
+                // dropped rather than sent to it. With no endpoint named,
+                // headers given explicitly update the running one; those from
+                // the environment or config have none to follow.
+                let send = match patch.get(Key::Cdp) {
+                    Some(_) if !patch.is_ambient(Key::Cdp) => true,
+                    Some(r) => matches!(r, Requested::Set(v) if next.get(Key::Cdp) == Some(v)),
+                    None => !patch.is_ambient(Key::CdpHeaders),
+                };
+                if !send {
                     continue;
                 }
             } else if patch.is_ambient(key)
@@ -210,8 +216,7 @@ impl Running {
                     } else {
                         self.effective(key)
                     };
-                    if current.as_ref() == Some(value) && !patch.is_changed_in_place(key)
-                    {
+                    if current.as_ref() == Some(value) && !patch.is_changed_in_place(key) {
                         continue;
                     }
                     if is_local_only(key) && next.connection() != Connection::Local {

@@ -124,6 +124,15 @@ fn command_names_target(cmd: &serde_json::Value) -> bool {
         && (cmd.get("cdpPort").is_some() || cmd.get("cdpUrl").is_some())
 }
 
+/// The endpoint a `connect` envelope names.
+fn named_endpoint(cmd: &serde_json::Value) -> Option<String> {
+    match (cmd.get("cdpUrl"), cmd.get("cdpPort")) {
+        (Some(url), _) => url.as_str().map(str::to_string),
+        (_, Some(port)) => Some(port.to_string()),
+        _ => None,
+    }
+}
+
 /// The settings patch one command carries. A browserless command never
 /// launches a browser, so CA trust does not apply to it.
 fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings::Patch {
@@ -132,6 +141,12 @@ fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings:
     // or config target must not ride along and replace it.
     if command_names_target(cmd) {
         patch = patch.without_ambient_connection();
+        // Headers from the environment or config belong to the endpoint they
+        // name, so another endpoint never receives them.
+        let fits = named_endpoint(cmd).is_some_and(|e| flags.default_headers_fit(&e));
+        if !flags.cli_cdp_headers && !fits {
+            patch.remove(session_settings::Key::CdpHeaders);
+        }
     }
     // Asking for a running browser's CDP URL never launches or relaunches one,
     // so launch settings do not apply to it.
@@ -2365,9 +2380,12 @@ mod tests {
         for target in ["wss://x.example/cdp", "9222"] {
             let wire = settings_with_env_target(&["connect", target]);
             assert!(wire.get("cdp").is_none(), "{target}: {wire}");
-            assert_eq!(wire["cdp-headers"], r#"{"A":"env"}"#, "{target}: {wire}");
+            // The environment headers belong to the environment endpoint.
+            assert!(wire.get("cdp-headers").is_none(), "{target}: {wire}");
             assert!(wire.get("ambient").is_none(), "{target}: {wire}");
         }
+        let wire = settings_with_env_target(&["connect", "ws://env.example/cdp"]);
+        assert_eq!(wire["cdp-headers"], r#"{"A":"env"}"#, "{wire}");
     }
 
     #[test]
@@ -2447,6 +2465,8 @@ mod tests {
         let (mut flags, cmd) = flags_of(args);
         if !flags.cli_cdp {
             flags.cdp = cdp.map(str::to_string).or(flags.cdp);
+        } else {
+            flags.default_cdp = cdp.map(str::to_string);
         }
         if !flags.cli_provider {
             flags.provider = provider.map(str::to_string).or(flags.provider);
@@ -2471,6 +2491,72 @@ mod tests {
         assert_eq!(cmd["waitUntil"], "none");
         let cmd = open(&["-p", "", "open", "example.com"], None);
         assert!(cmd.get("waitUntil").is_none(), "{cmd}");
+    }
+
+    /// The `cdpHeaders` and `settings` headers one `connect` carries.
+    fn connect_headers_of(
+        args: &[&str],
+        env_cdp: Option<&str>,
+        env_headers: Option<&str>,
+    ) -> (Option<serde_json::Value>, Option<String>) {
+        let (mut flags, _) = with_defaults(args, env_cdp, None, false);
+        if !flags.cli_cdp_headers {
+            flags.cdp_headers = env_headers.map(str::to_string);
+        }
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let cmd = crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        let patch = command_settings(&flags, &cmd);
+        let plan = session_settings::Running::defaults().plan(&patch);
+        (cmd.get("cdpHeaders").cloned(), plan.next.cdp_headers())
+    }
+
+    #[test]
+    fn environment_headers_go_only_to_the_endpoint_they_belong_to() {
+        let env = r#"{"X":"env"}"#;
+        // Another endpoint named by `connect` never receives them.
+        let (envelope, settings) =
+            connect_headers_of(&["connect", "9223"], Some("9222"), Some(env));
+        assert_eq!((envelope, settings), (None, None));
+        let (envelope, settings) = connect_headers_of(
+            &["connect", "https://other.example/cdp"],
+            Some("9222"),
+            Some(env),
+        );
+        assert_eq!((envelope, settings), (None, None));
+        // The same endpoint does.
+        let (envelope, settings) =
+            connect_headers_of(&["connect", "9222"], Some("9222"), Some(env));
+        assert_eq!(envelope, Some(serde_json::json!({"X": "env"})));
+        assert_eq!(settings.as_deref(), Some(env));
+        // With no endpoint in the environment they go with the one named.
+        let (envelope, _) = connect_headers_of(&["connect", "9223"], None, Some(env));
+        assert_eq!(envelope, Some(serde_json::json!({"X": "env"})));
+        // Headers on the command line always go with the endpoint named.
+        let (envelope, _) = connect_headers_of(
+            &["connect", "9223", "--cdp-headers", r#"{"Y":"own"}"#],
+            Some("9222"),
+            Some(env),
+        );
+        assert_eq!(envelope, Some(serde_json::json!({"Y": "own"})));
+    }
+
+    #[test]
+    fn environment_headers_do_not_follow_cdp_to_another_endpoint() {
+        let env = r#"{"X":"env"}"#;
+        let patch_of = |args: &[&str], env_cdp: &str| {
+            let (mut flags, _) = with_defaults(args, Some(env_cdp), None, false);
+            flags.cdp_headers = Some(env.to_string());
+            session_settings::Patch::from_flags(&flags)
+        };
+        let headers = |args: &[&str], env_cdp: &str| {
+            let plan = session_settings::Running::defaults().plan(&patch_of(args, env_cdp));
+            plan.next.cdp_headers()
+        };
+        assert_eq!(headers(&["--cdp", "9223", "get", "url"], "9222"), None);
+        assert_eq!(
+            headers(&["--cdp", "9222", "get", "url"], "9222").as_deref(),
+            Some(env)
+        );
     }
 
     #[test]

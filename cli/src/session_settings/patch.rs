@@ -132,10 +132,16 @@ impl Patch {
                 // this invocation sends one.
                 Key::CdpHeaders => (
                     flags.cli_cdp_headers
-                        || flags
-                            .cdp_headers
-                            .as_deref()
-                            .is_some_and(|v| !v.trim().is_empty()),
+                        || flags.cdp_headers.as_deref().is_some_and(|v| {
+                            // Defaults belong to the endpoint they name: not
+                            // to a different one given with `--cdp`.
+                            !v.trim().is_empty()
+                                && (!flags.cli_cdp
+                                    || targets
+                                        .cdp
+                                        .as_deref()
+                                        .is_none_or(|cdp| flags.default_headers_fit(cdp)))
+                        }),
                     flags.cli_cdp_headers,
                 ),
                 _ => (

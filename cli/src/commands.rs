@@ -329,6 +329,15 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+/// The headers a `connect` sends to the endpoint it names: those given on the
+/// command line, or the ones the environment or config set for that endpoint.
+fn connect_headers<'a>(flags: &'a Flags, endpoint: &str) -> Option<&'a str> {
+    flags
+        .cdp_headers
+        .as_deref()
+        .filter(|_| flags.cli_cdp_headers || flags.default_headers_fit(endpoint))
+}
+
 /// Parses `--cdp-headers`: a JSON object of string values sent on the CDP
 /// WebSocket handshake (distinct from page-level `--headers`).
 pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
@@ -1376,7 +1385,7 @@ fn parse_command_inner(
                 || endpoint.starts_with("https://")
             {
                 let mut cmd = json!({ "id": id, "action": "launch", "cdpUrl": endpoint });
-                if let Some(ref raw) = flags.cdp_headers {
+                if let Some(raw) = connect_headers(flags, endpoint) {
                     cmd["cdpHeaders"] =
                         parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
                             message,
@@ -1414,7 +1423,7 @@ fn parse_command_inner(
                     }
                 };
                 let mut cmd = json!({ "id": id, "action": "launch", "cdpPort": port });
-                if let Some(ref raw) = flags.cdp_headers {
+                if let Some(raw) = connect_headers(flags, endpoint) {
                     cmd["cdpHeaders"] =
                         parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
                             message,
@@ -4057,6 +4066,7 @@ mod tests {
             cli_auto_connect: false,
             cli_cdp: false,
             cli_cdp_headers: false,
+            default_cdp: None,
             cli_provider: false,
             no_auto_connect: false,
             cli_restore: false,

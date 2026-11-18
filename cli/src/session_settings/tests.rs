@@ -1526,6 +1526,35 @@ fn a_reset_reapplies_the_ambient_target_the_session_already_runs() {
     );
 }
 
+#[test]
+fn headers_never_reach_a_session_that_stays_on_another_endpoint() {
+    let attached = running_with(&[(Key::Cdp, json!("ws://a.example/cdp"))]);
+    // The default endpoint B is skipped because the session stays on A, and
+    // the headers given for B are dropped with it.
+    let mut f = ambient_flags(Some("ws://b.example/cdp"), None, Some(OWN_HEADERS));
+    f.cli_cdp_headers = true;
+    let plan = attached.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://a.example/cdp".to_string())
+    );
+    assert_eq!(plan.next.cdp_headers(), None);
+    assert!(plan.changes.is_empty());
+
+    // Headers alone, with no other endpoint named, update the attached one.
+    let mut f = blank_flags();
+    f.cdp_headers = Some(OWN_HEADERS.to_string());
+    f.cli_cdp_headers = true;
+    let plan = attached.plan(&Patch::from_flags(&f));
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(OWN_HEADERS));
+
+    // The default endpoint when it is the attached one takes them.
+    let mut f = ambient_flags(Some("ws://a.example/cdp"), None, Some(OWN_HEADERS));
+    f.cli_cdp_headers = true;
+    let plan = attached.plan(&Patch::from_flags(&f));
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(OWN_HEADERS));
+}
+
 const ENV_HEADERS: &str = r#"{"Authorization":"env"}"#;
 const OWN_HEADERS: &str = r#"{"Authorization":"own"}"#;
 
