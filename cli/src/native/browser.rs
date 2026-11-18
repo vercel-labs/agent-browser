@@ -492,6 +492,9 @@ pub struct BrowserManager {
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
+    /// CDP target ids of the tabs kept live: focus emulation is held on them,
+    /// so they run at full speed while another tab is in front.
+    live_tabs: HashSet<String>,
     active_page_index: usize,
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
@@ -720,6 +723,7 @@ impl BrowserManager {
                 browser_process: Some(process),
                 ws_url,
                 pages: Vec::new(),
+                live_tabs: HashSet::new(),
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
@@ -830,6 +834,7 @@ impl BrowserManager {
             browser_process: None,
             ws_url,
             pages: Vec::new(),
+            live_tabs: HashSet::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -1147,6 +1152,7 @@ impl BrowserManager {
             )
             .await;
         let was_bound = self.bound_target_id.as_deref() == Some(target_id.as_str());
+        self.live_tabs.remove(&target_id);
         let page = &mut self.pages[self.active_page_index];
         page.url = "about:blank".to_string();
         page.title.clear();
@@ -1727,6 +1733,7 @@ impl BrowserManager {
             browser_process: None,
             ws_url,
             pages: Vec::new(),
+            live_tabs: HashSet::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -1880,9 +1887,47 @@ impl BrowserManager {
                     "url": p.url,
                     "type": p.target_type,
                     "active": i == self.active_page_index && !self.bound_target_is_gone(),
+                    "keep": if self.live_tabs.contains(&p.target_id) { "live" } else { "throttled" },
                 })
             })
             .collect()
+    }
+
+    /// Keeps a tab running at full speed in the background by holding focus
+    /// emulation on it, or returns it to the browser's own throttling. `None`
+    /// targets the active tab.
+    pub async fn set_tab_live(&mut self, tab_id: Option<u32>, live: bool) -> Result<Value, String> {
+        let index = match tab_id {
+            Some(id) => self
+                .pages
+                .iter()
+                .position(|p| p.tab_id == id)
+                .ok_or_else(|| format!("Tab ID {} not found", id))?,
+            None => {
+                self.check_bound()?;
+                self.active_page_index
+            }
+        };
+        let page = self.pages.get(index).ok_or("No active page")?;
+        if self.live_tabs.contains(&page.target_id) != live {
+            self.client
+                .send_command(
+                    "Emulation.setFocusEmulationEnabled",
+                    Some(json!({ "enabled": live })),
+                    Some(&page.session_id),
+                )
+                .await?;
+            if live {
+                self.live_tabs.insert(page.target_id.clone());
+            } else {
+                self.live_tabs.remove(&page.target_id);
+            }
+        }
+        Ok(json!({
+            "tabId": format_tab_id(page.tab_id),
+            "label": page.label,
+            "keep": if live { "live" } else { "throttled" },
+        }))
     }
 
     /// Resolve a user-supplied `TabRef` (either `t<N>` or a label) to the
@@ -2124,6 +2169,7 @@ impl BrowserManager {
         }
 
         let page = self.pages.remove(target_index);
+        self.live_tabs.remove(&page.target_id);
         self.update_active_page_after_removal(target_index);
         let closed_tab_id = page.tab_id;
         let closed_label = page.label.clone();
@@ -2513,6 +2559,7 @@ impl BrowserManager {
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
             let page = self.pages.remove(pos);
+            self.live_tabs.remove(target_id);
             self.update_active_page_after_removal(pos);
             // If the destroyed target was the bound tab (closed externally,
             // e.g. by another session sharing this browser), fail loudly
@@ -2754,6 +2801,7 @@ async fn initialize_lightpanda_manager(
             browser_process: None,
             ws_url: ws_url.clone(),
             pages: Vec::new(),
+            live_tabs: HashSet::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -2865,6 +2913,7 @@ async fn initialize_obscura_manager(
             browser_process: None,
             ws_url: ws_url.clone(),
             pages: Vec::new(),
+            live_tabs: HashSet::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -3770,6 +3819,7 @@ mod tests {
             browser_process: None,
             ws_url,
             pages,
+            live_tabs: HashSet::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -3832,6 +3882,7 @@ mod tests {
             browser_process: None,
             ws_url: format!("ws://{}", addr),
             pages: Vec::new(),
+            live_tabs: HashSet::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,

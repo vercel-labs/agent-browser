@@ -469,6 +469,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--no-default-browser-check".to_string(),
         "--disable-background-networking".to_string(),
         "--disable-backgrounding-occluded-windows".to_string(),
+        "--disable-renderer-backgrounding".to_string(),
         "--disable-component-update".to_string(),
         "--disable-default-apps".to_string(),
         "--disable-hang-monitor".to_string(),

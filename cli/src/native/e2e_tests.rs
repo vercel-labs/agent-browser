@@ -3176,6 +3176,45 @@ async fn e2e_tabs() {
     assert_success(&resp);
 }
 
+/// A live tab keeps its timers running behind another tab, and goes back to
+/// the browser's throttling when asked.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_live() {
+    let mut state = DaemonState::new();
+    let ticker = "data:text/html,<script>var ticks=0;setInterval(()=>ticks++,100)</script>";
+    let mut run = async |action: &str, mut cmd: Value| {
+        cmd["id"] = json!(action);
+        cmd["action"] = json!(action);
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_success(&resp);
+        resp
+    };
+    run("launch", json!({ "headless": true })).await;
+    run("navigate", json!({ "url": ticker })).await;
+
+    let resp = run("tab_keep", json!({ "keep": "live" })).await;
+    assert_eq!(get_data(&resp)["tabId"], "t1");
+    run("evaluate", json!({ "script": "ticks = 0" })).await;
+    run("tab_new", json!({})).await;
+    let resp = run("tab_list", json!({})).await;
+    assert_eq!(get_data(&resp)["tabs"][0]["keep"], "live");
+    assert_eq!(get_data(&resp)["tabs"][1]["keep"], "throttled");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    run("tab_switch", json!({ "tabId": "t1" })).await;
+    let resp = run("evaluate", json!({ "script": "ticks" })).await;
+    let ticks = get_data(&resp)["result"].as_f64().unwrap_or_default();
+    assert!(
+        ticks >= 20.0,
+        "a live tab ticks about 30 times in 3s, got {ticks}"
+    );
+
+    run("tab_keep", json!({ "keep": "throttled" })).await;
+    let resp = run("tab_list", json!({})).await;
+    assert_eq!(get_data(&resp)["tabs"][0]["keep"], "throttled");
+    run("close", json!({})).await;
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_tab_ids_not_reused() {
