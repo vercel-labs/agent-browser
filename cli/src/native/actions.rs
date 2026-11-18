@@ -3428,6 +3428,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .as_ref()
         .map(|patch| state.settings.plan(patch))
         .filter(|plan| plan.relaunch);
+    if let Some(plan) = launch_plan.as_ref() {
+        if let Err(e) = validate_firefox_relaunch(&plan.next, &plugins_from_command_or_env(cmd)) {
+            let mut resp = error_response(&id, &e);
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            return resp;
+        }
+    }
 
     let skip_launch = skip_launch_action(action);
     let restore_key_change_needs_launch = !skip_launch
@@ -5069,7 +5076,12 @@ async fn auto_launch_inner(
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
     if state.settings.engine().as_deref() == Some("firefox") {
-        validate_firefox_launch(state, &options, &plugins, &state.settings.connection())?;
+        validate_firefox_launch(
+            &state.settings,
+            &options,
+            &plugins,
+            &state.settings.connection(),
+        )?;
     }
     if has_active_browser_session(state) {
         close_before_implicit_relaunch(state).await?;
@@ -6005,21 +6017,38 @@ async fn detect_attach_connection(
 const FIREFOX_ATTACH_PIN_TAB_ERROR: &str =
     "--pin-tab is not supported with Firefox attach; pass --no-pin-tab to disable it";
 
+/// Rejects a relaunch into Firefox whose settings it cannot launch with. It runs on the planned
+/// settings before the relaunch closes the running browser, so a rejected option leaves it alone.
+fn validate_firefox_relaunch(
+    next: &Running,
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<(), String> {
+    if next.engine().as_deref() != Some("firefox") {
+        return Ok(());
+    }
+    let mut options = next.launch_options();
+    options.ca_cert = next
+        .get(Key::CaCert)
+        .and_then(Value::as_str)
+        .map(String::from);
+    validate_firefox_launch(next, &options, plugins, &next.connection())
+}
+
 /// Rejects the settings Firefox cannot start or attach with. It runs before a relaunch closes
 /// the running browser, so a rejected option leaves that browser and its pages alone.
 fn validate_firefox_launch(
-    state: &DaemonState,
+    settings: &Running,
     options: &LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
     connection: &Connection,
 ) -> Result<(), String> {
-    if state.settings.captures_flow() {
+    if settings.captures_flow() {
         return Err("--capture flow is not supported with --engine firefox".to_string());
     }
     bidi::firefox::validate_firefox_options(options, connection)?;
     bidi::firefox::validate_firefox_settings(
-        &state.settings.enable_features(),
-        &state.settings.init_scripts(),
+        &settings.enable_features(),
+        &settings.init_scripts(),
         plugins,
     )
 }
@@ -6033,7 +6062,7 @@ async fn launch_firefox(
     allowed_domains: Vec<String>,
     strict_state: bool,
 ) -> Result<Value, String> {
-    validate_firefox_launch(state, &options, &plugins, &connection)?;
+    validate_firefox_launch(&state.settings, &options, &plugins, &connection)?;
     let cdp = match connection {
         Connection::Cdp(cdp) => Some(cdp),
         _ => None,
@@ -6695,6 +6724,10 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .or_else(|| state.settings.engine());
     let patch = launch_envelope_patch(cmd, engine.as_deref());
     check_capture_setting(&patch)?;
+    validate_firefox_relaunch(
+        &state.settings.plan(&patch).next,
+        &plugins_from_command_or_env(cmd),
+    )?;
     let had_browser_before_launch = has_active_browser_session(state);
 
     let mut outcome = apply_settings_patch(state, &patch, SettingsPass::Launch).await?;
