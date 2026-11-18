@@ -204,7 +204,7 @@ pub const RENDERS_INIT: &str = r#"
 
   const MAX_COMPONENTS = 200;
   const data = {};
-  const fps = { frames: [], last: 0, rafId: 0 };
+  const fps = { count: 0, sum: 0, min: Infinity, max: 0, drops: 0, last: 0, rafId: 0 };
 
   window.__AB_RENDERS__ = data;
   window.__AB_RENDERS_FPS__ = fps;
@@ -212,7 +212,15 @@ pub const RENDERS_INIT: &str = r#"
   window.__AB_RENDERS_ACTIVE__ = true;
 
   function fpsLoop(now) {
-    if (fps.last > 0) fps.frames.push(now - fps.last);
+    if (fps.last > 0) {
+      const dt = now - fps.last;
+      const sample = dt > 0 ? 1000 / dt : 0;
+      fps.count++;
+      fps.sum += sample;
+      fps.min = Math.min(fps.min, sample);
+      fps.max = Math.max(fps.max, sample);
+      if (sample < 30) fps.drops++;
+    }
     fps.last = now;
     fps.rafId = requestAnimationFrame(fpsLoop);
   }
@@ -397,14 +405,12 @@ pub const RENDERS_STOP: &str = r#"
   let fpsStats = { avg: 0, min: 0, max: 0, drops: 0 };
   if (fpsData) {
     cancelAnimationFrame(fpsData.rafId);
-    if (fpsData.frames.length > 0) {
-      const fpsSamples = fpsData.frames.map((dt) => (dt > 0 ? 1000 / dt : 0));
-      const sum = fpsSamples.reduce((a, b) => a + b, 0);
+    if (fpsData.count > 0) {
       fpsStats = {
-        avg: Math.round(sum / fpsSamples.length),
-        min: Math.round(Math.min(...fpsSamples)),
-        max: Math.round(Math.max(...fpsSamples)),
-        drops: fpsSamples.filter((f) => f < 30).length,
+        avg: Math.round(fpsData.sum / fpsData.count),
+        min: Math.round(fpsData.min),
+        max: Math.round(fpsData.max),
+        drops: fpsData.drops,
       };
     }
   }
