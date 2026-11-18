@@ -1280,6 +1280,16 @@ fn close_completed(resp: &connection::Response) -> bool {
             == Some(true)
 }
 
+/// Whether the invocation asks to close every session before the `--` marker.
+fn close_all_requested(args: &[String]) -> bool {
+    matches!(
+        args.first().map(|s| s.as_str()),
+        Some("close") | Some("quit") | Some("exit")
+    ) && flags::before_end_of_options(args)
+        .iter()
+        .any(|arg| arg == "--all")
+}
+
 fn run_close_all(flags: &Flags) {
     // walk_daemons auto-cleans stale .pid / .sock / .stream sidecar files and
     // separates out the standalone dashboard. We only want to send `close` to
@@ -1643,11 +1653,7 @@ fn main() {
     }
 
     // Handle close --all: close all active sessions
-    if matches!(
-        clean.first().map(|s| s.as_str()),
-        Some("close") | Some("quit") | Some("exit")
-    ) && clean.iter().any(|a| a == "--all")
-    {
+    if close_all_requested(&clean) {
         run_close_all(&flags);
         return;
     }
@@ -2208,6 +2214,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn close_all_requested_ignores_marker_after_end_of_options() {
+        let clean = |command: &str| {
+            crate::flags::clean_args(
+                &command
+                    .split_whitespace()
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        assert!(close_all_requested(&clean("close --all")));
+        assert!(close_all_requested(&clean("quit --all")));
+        assert!(close_all_requested(&clean("exit --all")));
+        assert!(!close_all_requested(&clean("close -- --all")));
+        assert!(!close_all_requested(&clean("quit -- --all")));
+        assert!(!close_all_requested(&clean("exit -- --all")));
+        assert!(close_all_requested(&clean("close --all -- --all")));
+    }
 
     #[test]
     fn dashboard_config_comparison_rejects_unknown_or_changed_settings() {

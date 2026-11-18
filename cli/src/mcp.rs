@@ -1796,7 +1796,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_BATCH,
             "Batch",
-            "Run multiple commands sequentially. Unknown commands and subcommands return errors. Set global flags on the batch invocation or MCP server. Command arguments can contain flag-like text. A batch containing only get cdp-url commands never launches a browser.",
+            "Run multiple commands sequentially. Unknown commands and subcommands return errors. Put -- before a dash-leading literal argument inside a command array; set global flags on the batch invocation or MCP server, not inside command arrays. A batch containing only get cdp-url commands never launches a browser.",
             json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" }, "omitCommand": { "type": "boolean", "description": "Replace only command arrays with a stable zero-based input index. Does not make output safe for secrets: errors and response data are unchanged; type echoes typed text, and get value/eval may return input values." } }),
             &["commands"],
         ),
@@ -2546,9 +2546,9 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SET_CREDENTIALS => call_set_credentials(arguments),
         TOOL_SET_MEDIA => call_set_media(arguments),
         TOOL_NETWORK_ROUTE => call_network_route(arguments),
-        TOOL_NETWORK_UNROUTE => call_optional_one(arguments, &["network", "unroute"], "url"),
+        TOOL_NETWORK_UNROUTE => call_network_unroute(arguments),
         TOOL_NETWORK_REQUESTS => call_network_requests(arguments),
-        TOOL_NETWORK_REQUEST => call_one_string(arguments, "network request", "requestId"),
+        TOOL_NETWORK_REQUEST => call_network_request(arguments),
         TOOL_NETWORK_HAR_START => {
             let mut args: Vec<String> = ["network", "har", "start"]
                 .iter()
@@ -3712,24 +3712,58 @@ fn set_media_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
 }
 
 fn call_network_route(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = network_route_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn network_route_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
     let url = required_string(arguments, "url")?;
-    let mut args = vec!["network".to_string(), "route".to_string(), url];
+    let mut options = vec!["network".to_string(), "route".to_string()];
     if optional_bool(arguments, "abort")?.unwrap_or(false) {
-        args.push("--abort".to_string());
+        options.push("--abort".to_string());
     }
     if let Some(body) = optional_string(arguments, "body")? {
-        args.push("--body".to_string());
-        args.push(body);
+        options.push("--body".to_string());
+        options.push(body);
     }
     if let Some(origin) = optional_string(arguments, "allowOrigin")? {
-        args.push("--allow-origin".to_string());
-        args.push(origin);
+        options.push("--allow-origin".to_string());
+        options.push(origin);
     }
     if let Some(resource_type) = optional_string(arguments, "resourceType")? {
-        args.push("--resource-type".to_string());
-        args.push(resource_type);
+        options.push("--resource-type".to_string());
+        options.push(resource_type);
     }
-    call_cli_tool(arguments, args, None)
+    Ok(literal_positionals(options, vec![url]))
+}
+
+fn call_network_unroute(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = network_unroute_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn network_unroute_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let positionals: Vec<String> = optional_string(arguments, "url")?
+        .filter(|url| !url.is_empty())
+        .into_iter()
+        .collect();
+    Ok(literal_positionals(
+        vec!["network".to_string(), "unroute".to_string()],
+        positionals,
+    ))
+}
+
+fn call_network_request(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = network_request_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn network_request_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let request_id = required_string(arguments, "requestId")?;
+    Ok(literal_positionals(
+        vec!["network".to_string(), "request".to_string()],
+        vec![request_id],
+    ))
 }
 
 fn call_network_requests(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -6275,12 +6309,43 @@ mod tests {
         assert_eq!(parsed["action"], "vitals");
         assert_eq!(parsed["url"], "--vitals.test");
 
-        // Session names cannot start with a dash, so this pins the option/positional order.
         let arguments = json!({ "name": "work-2", "all": true });
         let parsed = parse(&arguments, state_clear_args(&arguments).unwrap());
         assert_eq!(parsed["action"], "state_clear");
         assert_eq!(parsed["sessionName"], "work-2");
         assert_eq!(parsed["all"], true);
+    }
+
+    #[test]
+    fn network_route_unroute_and_request_values_stay_literal() {
+        fn round_trip(arguments: &Value, argv: LiteralArgs) -> Value {
+            let (args, literal_start) = argv;
+            let cli = cli_tool_args_at(arguments, args, literal_start, None).unwrap();
+            let flags = crate::flags::parse_flags(&cli);
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap()
+        }
+
+        let arguments = json!({ "url": "--api", "abort": true });
+        let (args, literal_start) = network_route_args(&arguments).unwrap();
+        assert_eq!(args, ["network", "route", "--abort", "--", "--api"]);
+        let parsed = round_trip(&arguments, (args, literal_start));
+        assert_eq!(parsed["action"], "route");
+        assert_eq!(parsed["url"], "--api");
+        assert_eq!(parsed["abort"], true);
+
+        let arguments = json!({ "url": "--api" });
+        let (args, literal_start) = network_unroute_args(&arguments).unwrap();
+        assert_eq!(args, ["network", "unroute", "--", "--api"]);
+        let parsed = round_trip(&arguments, (args, literal_start));
+        assert_eq!(parsed["action"], "unroute");
+        assert_eq!(parsed["url"], "--api");
+
+        let arguments = json!({ "requestId": "--3" });
+        let (args, literal_start) = network_request_args(&arguments).unwrap();
+        assert_eq!(args, ["network", "request", "--", "--3"]);
+        let parsed = round_trip(&arguments, (args, literal_start));
+        assert_eq!(parsed["action"], "request_detail");
+        assert_eq!(parsed["requestId"], "--3");
     }
 
     #[test]

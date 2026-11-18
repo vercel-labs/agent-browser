@@ -770,8 +770,11 @@ echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-com
 
 Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Keep command-specific options and literal command arguments inside each item.
 
+Global flags belong only on the outer invocation, never inside an item. Inside an item, put command flags before `--`; a path or selector after `--` is literal. For example, the item `screenshot body -- --draft.png` passes `--draft.png` as the path.
+
 ```bash
 agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
+agent-browser batch "open https://example.com" "screenshot body -- --draft.png"
 ```
 
 With `--json --omit-command`, rows use a stable zero-based `index` field on success, failure, or `--bail`; default JSON output keeps the `command` field. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.

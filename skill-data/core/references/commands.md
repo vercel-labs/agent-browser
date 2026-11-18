@@ -49,10 +49,13 @@ agent-browser batch \
   "navigate http://localhost:3000/target"
 ```
 
-Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Keep command-specific options and literal command arguments inside each item:
+Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Keep command-specific options and literal command arguments inside each item.
+
+Global flags belong only on the outer invocation, never inside an item. Inside an item, put command flags before `--`; a path or selector after `--` is literal. For example, the item `screenshot body -- --draft.png` passes `--draft.png` as the path.
 
 ```bash
 agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
+agent-browser batch "open https://example.com" "screenshot body -- --draft.png"
 ```
 
 `open` with no URL gives you a clean launch so interception rules and cookies can take effect on the *first* real navigation. Pass `--init-script <path>` at launch to install a script before navigation. Use this flow for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.

@@ -34,7 +34,7 @@ impl ParseError {
     pub fn format(&self) -> String {
         match self {
             ParseError::UnknownCommand { command } => {
-                format!("Unknown command: {}", command)
+                format!("Unknown command: {}", escape_control_chars(command))
             }
             ParseError::UnknownSubcommand {
                 subcommand,
@@ -42,20 +42,27 @@ impl ParseError {
             } => {
                 format!(
                     "Unknown subcommand: {}\nValid options: {}",
-                    subcommand,
+                    escape_control_chars(subcommand),
                     valid_options.join(", ")
                 )
             }
             ParseError::MissingArguments { context, usage } => {
                 format!(
                     "Missing arguments for: {}\nUsage: agent-browser {}",
-                    context, usage
+                    escape_control_chars(context),
+                    usage
                 )
             }
             ParseError::InvalidValue { message, usage } => {
-                format!("{}\nUsage: agent-browser {}", message, usage)
+                format!(
+                    "{}\nUsage: agent-browser {}",
+                    escape_control_chars(message),
+                    usage
+                )
             }
-            ParseError::InvalidSessionName { name } => session_name_error(name),
+            ParseError::InvalidSessionName { name } => {
+                session_name_error(&escape_control_chars(name))
+            }
         }
     }
 }
@@ -411,6 +418,11 @@ impl FlagSpec {
     }
 }
 
+/// Reports whether a token is a recognized option or the `--` separator.
+fn is_option_token(value: &str, flags: &[FlagSpec]) -> bool {
+    value == "--" || flags.iter().any(|flag| flag.matches(value)) || is_global_flag(value)
+}
+
 /// A command argument after classification.
 enum ScannedArg<'a> {
     BoolFlag(&'static str),
@@ -506,12 +518,15 @@ impl<'a> ArgScanner<'a> {
                     }
                     if let Some(flag) = self.flags.iter().find(|flag| flag.matches(arg)) {
                         if flag.takes_value {
-                            let value = self.args.get(self.index).copied().ok_or_else(|| {
-                                ParseError::MissingArguments {
+                            let value = self
+                                .args
+                                .get(self.index)
+                                .copied()
+                                .filter(|value| !is_option_token(value, self.flags))
+                                .ok_or_else(|| ParseError::MissingArguments {
                                     context: format!("{} {}", self.command, flag.name),
                                     usage: self.usage,
-                                }
-                            })?;
+                                })?;
                             self.index += 1;
                             return Ok(Some(ScannedArg::ValueFlag {
                                 name: flag.name,
@@ -527,11 +542,7 @@ impl<'a> ArgScanner<'a> {
                         return Ok(Some(ScannedArg::Data(arg)));
                     }
                     return Err(ParseError::InvalidValue {
-                        message: format!(
-                            "unknown flag '{}' for {}",
-                            escape_control_chars(arg),
-                            self.command
-                        ),
+                        message: format!("unknown flag '{}' for {}", arg, self.command),
                         usage: self.usage,
                     });
                 }
@@ -1022,6 +1033,16 @@ fn parse_command_inner(
             }
             if !obj.contains_key("direction") {
                 obj.insert("direction".to_string(), json!("down"));
+            }
+            let direction = obj
+                .get("direction")
+                .and_then(Value::as_str)
+                .unwrap_or("down");
+            if !matches!(direction, "up" | "down" | "left" | "right") {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Invalid scroll direction: {}", direction),
+                    usage: USAGE,
+                });
             }
             if !obj.contains_key("amount") {
                 obj.insert("amount".to_string(), json!(300));
@@ -8874,15 +8895,20 @@ mod tests {
 
     #[test]
     fn test_snapshot_depth_rejects_invalid_operands() {
-        for value in ["--full", "abc"] {
-            let err = parse_command(
-                &args(&format!("snapshot --depth {}", value)),
-                &default_flags(),
-            )
+        let err = parse_command(&args("snapshot --depth --full"), &default_flags()).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ParseError::MissingArguments { context, .. }
+                    if context.as_str() == "snapshot --depth"
+            ),
+            "{err:?}"
+        );
+
+        let err = parse_command(&args("snapshot --depth abc"), &default_flags())
             .unwrap_err()
             .format();
-            assert!(err.contains("--depth expects an integer"), "{value}: {err}");
-        }
+        assert!(err.contains("--depth expects an integer"), "{err}");
 
         let cmd = parse_command(&args("snapshot --depth -1"), &default_flags()).unwrap();
         assert_eq!(cmd["maxDepth"], -1);
@@ -8893,7 +8919,62 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_flag_errors_escape_control_characters() {
+    fn test_value_flags_do_not_swallow_recognized_options() {
+        for (command, expected_context) in [
+            ("screenshot --threshold --full", "screenshot --threshold"),
+            ("snapshot --selector --full", "snapshot --selector"),
+            ("network route * --body --abort", "network route --body"),
+            (
+                "record start demo.webm --fps --cursor",
+                "record start --fps",
+            ),
+            ("network route * --body --", "network route --body"),
+        ] {
+            let err = parse_command(&args(command), &default_flags()).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    ParseError::MissingArguments { context, .. }
+                        if context.as_str() == expected_context
+                ),
+                "{command}: {err:?}"
+            );
+        }
+
+        let cmd = parse_command(&args("network route * --body -x"), &default_flags()).unwrap();
+        assert_eq!(cmd["response"]["body"], "-x");
+
+        let err =
+            parse_command(&args("screenshot --threshold -0.5"), &default_flags()).unwrap_err();
+        assert!(matches!(err, ParseError::InvalidValue { .. }), "{err:?}");
+
+        let err =
+            parse_command(&args("record start demo.webm --fps -1"), &default_flags()).unwrap_err();
+        assert!(matches!(err, ParseError::InvalidValue { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn test_scroll_rejects_invalid_direction() {
+        for command in ["scroll -100", "scroll sideways"] {
+            let err = parse_command(&args(command), &default_flags())
+                .unwrap_err()
+                .format();
+            assert!(
+                err.contains("Invalid scroll direction:"),
+                "{command}: {err}"
+            );
+        }
+
+        let cmd = parse_command(&args("scroll down -100"), &default_flags()).unwrap();
+        assert_eq!(cmd["direction"], "down");
+        assert_eq!(cmd["amount"], -100);
+
+        let cmd = parse_command(&args("scroll down 500"), &default_flags()).unwrap();
+        assert_eq!(cmd["amount"], 500);
+    }
+
+    #[test]
+    fn test_parse_errors_escape_control_characters_consistently() {
         let err = parse_command(&args("screenshot --\u{1b}[2J"), &default_flags())
             .unwrap_err()
             .format();
@@ -8902,6 +8983,22 @@ mod tests {
             "{err}"
         );
         assert!(!err.contains('\u{1b}'), "{err}");
+        assert!(!err.contains(r"\\u{1b}"), "{err}");
+        assert!(err.contains("\nUsage: agent-browser screenshot"), "{err}");
+
+        for (command, expected) in [
+            ("\u{1b}[2J", r"Unknown command: \u{1b}[2J"),
+            ("get \u{1b}[2J", r"Unknown subcommand: \u{1b}[2J"),
+            ("swipe \u{1b}[2J", r"Invalid swipe direction: \u{1b}[2J"),
+            ("state clear \u{1b}[2J", r"Invalid session name '\u{1b}[2J'"),
+        ] {
+            let err = parse_command(&args(command), &default_flags())
+                .unwrap_err()
+                .format();
+            assert!(err.contains(expected), "{command}: {err}");
+            assert!(!err.contains('\u{1b}'), "{command}: {err}");
+            assert!(!err.contains(r"\\u{1b}"), "{command}: {err}");
+        }
 
         let err = parse_command(&args("screenshot --full-page"), &default_flags())
             .unwrap_err()
