@@ -4,7 +4,6 @@ import { Section, MarketingGrid, Tabs } from './compat';
 import { useId } from 'react';
 import { track } from '@vercel/analytics';
 import { PRODUCTS, useProduct, type Product } from './product-context';
-import { HERO_PRODUCT_SELECTED_EVENT, heroProductSelectedEvent } from './hero-product-event';
 import { cn } from '@/lib/utils';
 import { ProductActions } from './product-actions';
 import { HeroBrowserVisual } from './hero-browser-visual';
@@ -12,9 +11,11 @@ import { HeroBrowserVisual } from './hero-browser-visual';
 function ProductSwitcher({ id }: { id: string }) {
   const { selected, setSelected } = useProduct();
   const selectProduct = (product: Product) => {
-    const event = heroProductSelectedEvent(product, selected);
-    if (!event) return;
-    track(HERO_PRODUCT_SELECTED_EVENT, event);
+    if (product === selected) return;
+    track('homepage_hero_product_selected', {
+      product,
+      previous_product: selected,
+    });
     setSelected(product);
   };
   return (

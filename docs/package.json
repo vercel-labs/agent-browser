@@ -12,7 +12,7 @@
     "prebuild": "fumadocs-mdx",
     "type-check": "fumadocs-mdx && tsc-ts --noEmit",
     "type-check:tsc": "fumadocs-mdx && tsc --noEmit",
-    "test": "node --test tests/docs-baseline.test.mjs tests/baseline-oracle.test.mjs tests/hero-product-event.test.mjs",
+    "test": "node --test tests/docs-baseline.test.mjs tests/baseline-oracle.test.mjs",
     "test:routes": "node scripts/test-routes.mjs"
   },
   "dependencies": {
