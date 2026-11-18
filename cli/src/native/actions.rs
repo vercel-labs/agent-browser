@@ -6710,8 +6710,13 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     };
 
     let previous_refs = state.ref_map.ref_ids();
+    // A snapshot that fails (a scope selector that matches nothing, a CDP
+    // error) shows nothing new, so it leaves the refs of the one before:
+    // clearing them first made every earlier ref "Unknown ref" until the next
+    // snapshot that succeeded.
+    let refs_before = state.ref_map.clone();
     state.ref_map.begin_snapshot();
-    let tree = snapshot::take_snapshot(
+    let tree = match snapshot::take_snapshot(
         &mgr.client,
         &session_id,
         &options,
@@ -6719,7 +6724,14 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         state.active_frame_id.as_deref(),
         &state.iframe_sessions,
     )
-    .await?;
+    .await
+    {
+        Ok(tree) => tree,
+        Err(error) => {
+            state.ref_map = refs_before;
+            return Err(error);
+        }
+    };
 
     let url = mgr.get_url().await.unwrap_or_default();
 
@@ -15610,6 +15622,58 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_snapshot_that_fails_keeps_the_refs_of_the_one_before() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // A browser with one page whose `document.querySelector` finds nothing.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/browser/mock",
+            listener.local_addr().unwrap().port()
+        );
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+            while let Some(Ok(Message::Text(text))) = rx.next().await {
+                let cmd: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let Some(id) = cmd["id"].as_u64() else {
+                    continue;
+                };
+                let result = match cmd["method"].as_str().unwrap_or("") {
+                    "Target.getTargets" => json!({ "targetInfos": [{ "targetId": "page",
+                        "type": "page", "title": "page", "url": "https://example.com/",
+                        "attached": false }] }),
+                    "Target.attachToTarget" => json!({ "sessionId": "S-page" }),
+                    "Target.getTargetInfo" => json!({ "targetInfo": { "targetId": "page",
+                        "type": "page", "title": "page", "url": "https://example.com/",
+                        "attached": true } }),
+                    "Runtime.evaluate" => {
+                        json!({ "result": { "type": "object", "subtype": "null" } })
+                    }
+                    _ => json!({}),
+                };
+                let reply = json!({ "id": id, "result": result }).to_string();
+                if tx.send(Message::Text(reply.into())).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut state = DaemonState::new();
+        state.browser = Some(BrowserManager::connect_cdp(&url).await.unwrap());
+        state
+            .ref_map
+            .add_with_frame("e5".to_string(), Some(5), "button", "Add one", None, None);
+
+        let error = handle_snapshot(&json!({ "selector": "#does-not-exist" }), &mut state)
+            .await
+            .expect_err("the scope matches nothing");
+        assert!(error.contains("did not match any element"), "{error}");
+        assert!(state.ref_map.ref_ids().contains("e5"));
+    }
+
     /// Serves `Browser.getVersion` on one fixed `ws://` address for any number
     /// of connections and counts the calls.
     async fn version_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
