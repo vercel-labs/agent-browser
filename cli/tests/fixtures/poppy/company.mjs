@@ -1,5 +1,5 @@
 // Fixture Company for the browser join (Personal Agent Protocol section 6).
-// Usage: node company.mjs <normal|scope|reject|codeurl|offsite|deadport|canonical>. Prints its port, then serves.
+// Usage: node company.mjs <normal|scope|reject|codeurl|offsite|deadport|canonical|upload|query>. Prints its port, then serves.
 // GET /_codes lists issued codes; GET /_hosts (per Host), /_discoveries, /_submits and /_redirects count poppy.json requests, form submissions and accepted joins.
 import http from "node:http";
 
@@ -15,6 +15,12 @@ const hosts = {};
 
 const cookie = (req, name) =>
   (req.headers.cookie ?? "").split(";").map((p) => p.trim().split("=")).find(([k]) => k === name)?.[1];
+
+const document = (origin) => ({
+  protocol_version: "1.0",
+  organization: { domain: origin.slice("http://".length) },
+  web: { browser_session_endpoint: `${origin}/join` },
+});
 
 const server = http.createServer((req, res) => {
   let body = "";
@@ -36,11 +42,13 @@ const server = http.createServer((req, res) => {
       if (mode === "canonical" && req.headers.host.startsWith("127.0.0.1")) {
         return send(301, { location: `http://localhost:${server.address().port}/.well-known/poppy.json` });
       }
-      return json(200, {
-        protocol_version: "1.0",
-        organization: { domain: origin.slice("http://".length) },
-        web: { browser_session_endpoint: `${origin}/join` },
-      });
+      // upload, query: the well-known URL redirects to a document outside the well-known path.
+      if (mode === "upload") return send(302, { location: "/uploads/poppy.json" });
+      if (mode === "query") return send(302, { location: "/.well-known/poppy.json?v=1" });
+      return json(200, document(origin));
+    }
+    if (route === "GET /uploads/poppy.json" || route === "GET /.well-known/poppy.json?v=1") {
+      return json(200, document(origin));
     }
     if (route === "GET /_codes") return json(200, [...codes.keys()]);
     if (route === "GET /_submits") return json(200, submits);

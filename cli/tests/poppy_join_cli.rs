@@ -412,3 +412,18 @@ fn e2e_poppy_join_waits_for_a_slow_authorizer_within_the_timeout() {
     assert_eq!(output.status.code(), Some(0), "{value}");
     assert_eq!(value["data"]["joined"], true, "{value}");
 }
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_rejects_a_document_outside_the_well_known_path() {
+    for mode in ["upload", "query"] {
+        let company = Company::start(mode);
+        let session = Session::new();
+        let output = session.join(&company, &[]);
+        assert_failure(&output, "discovery_failed");
+        assert!(
+            company.codes().is_empty(),
+            "{mode}: the join page was loaded"
+        );
+    }
+}

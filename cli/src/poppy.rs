@@ -189,6 +189,13 @@ pub async fn fetch(
         let origin = format!("{}://{}", url.scheme(), host);
         break (response, host, origin);
     };
+    // Only the well-known path speaks for a host; an upload elsewhere on it must not.
+    if url.path() != WELL_KNOWN || url.query().is_some() {
+        return Err(discovery_failed(format!(
+            "Discovery ended at {}, not at {}",
+            url, WELL_KNOWN
+        )));
+    }
     let status = response.status().as_u16();
     if status == 404 || status == 410 {
         return Err(interpret(&host, status, "").unwrap_err());
