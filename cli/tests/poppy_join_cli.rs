@@ -55,12 +55,20 @@ impl Company {
         serde_json::from_slice(&output.stdout).unwrap()
     }
 
-    fn submits(&self) -> u64 {
+    fn counter(&self, name: &str) -> u64 {
         let output = Command::new("curl")
-            .args(["-s", &format!("{}/_submits", self.origin())])
+            .args(["-s", &format!("{}/_{}", self.origin(), name)])
             .output()
             .unwrap();
         serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    fn submits(&self) -> u64 {
+        self.counter("submits")
+    }
+
+    fn redirects(&self) -> u64 {
+        self.counter("redirects")
     }
 }
 
@@ -271,7 +279,25 @@ fn e2e_poppy_join_fails_when_the_redirect_leaves_the_allowed_domains() {
     let session = Session::new();
     let output = session.join(&company, &[("AGENT_BROWSER_ALLOWED_DOMAINS", "127.0.0.1")]);
     assert_failure(&output, "join_failed");
-    assert_eq!(company.submits(), 1, "the form was never submitted");
+    assert_eq!(company.redirects(), 1, "the site never redirected the join");
+    assert!(
+        text(&output).contains("outside the allowed domains"),
+        "{}",
+        text(&output)
+    );
+    assert_code_absent(&company, &output);
+    assert_blank(&session);
+}
+
+#[test]
+#[ignore]
+fn e2e_poppy_join_fails_when_the_redirect_target_does_not_load() {
+    let company = Company::start("deadport");
+    let session = Session::new();
+    let output = session.join(&company, &[]);
+    assert_failure(&output, "join_failed");
+    assert_eq!(company.redirects(), 1, "the site never redirected the join");
+    assert!(text(&output).contains("did not load"), "{}", text(&output));
     assert_code_absent(&company, &output);
     assert_blank(&session);
 }

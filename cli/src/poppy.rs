@@ -76,9 +76,9 @@ fn interpret(host: &str, status: u16, body: &str) -> Result<String, JoinError> {
         .get("protocol_version")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let compatible = version
-        .split_once('.')
-        .is_some_and(|(major, minor)| major == "1" && minor.parse::<u32>().is_ok());
+    let compatible = version.split_once('.').is_some_and(|(major, minor)| {
+        major == "1" && !minor.is_empty() && minor.bytes().all(|b| b.is_ascii_digit())
+    });
     if !compatible {
         return Err(discovery_failed(format!(
             "Unsupported protocol_version '{}'",
@@ -224,7 +224,7 @@ mod tests {
     fn other_failures_are_discovery_failed() {
         assert_eq!(code(500, ""), "discovery_failed");
         assert_eq!(code(200, "not json"), "discovery_failed");
-        for version in ["2.0", "1.invalid", "1", "1."] {
+        for version in ["2.0", "1.invalid", "1", "1.", "1.+7"] {
             assert_eq!(
                 code(200, &doc(json!({ "protocol_version": version }))),
                 "discovery_failed",

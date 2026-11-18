@@ -147,6 +147,13 @@ async fn run_join(
             "The Company did not accept the browser session form",
         ));
     }
+    // A target that fails to load commits a browser error page, not a site page.
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(fail(
+            "join_failed",
+            "The page the join redirected to did not load",
+        ));
+    }
     // A redirect the domain filter blocked commits a synthetic error page.
     if let Some(filter) = state.domain_filter.read().await.as_ref() {
         if filter.check_url(&url).is_err() {
