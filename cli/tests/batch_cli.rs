@@ -437,7 +437,7 @@ fn batch_send_error_preserves_identity_without_a_daemon_response() {
                 continue;
             }
             let mut line = String::new();
-            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let _ = BufReader::new(&stream).read_line(&mut line);
             if line.is_empty() {
                 continue;
             }
