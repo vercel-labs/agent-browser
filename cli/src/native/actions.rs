@@ -731,6 +731,20 @@ fn default_idle_shutdown_is_blocked(
 }
 
 impl DaemonState {
+    /// Fails when this session is attached through `--auto-connect`, which
+    /// is the user's own browser, not one the agent controls.
+    pub(super) fn refuse_auto_connect(&self) -> Result<(), String> {
+        if self.attached_target == Some(AttachedTarget::AutoConnect)
+            || self.settings.connection() == Connection::AutoConnect
+        {
+            return Err(
+                "This session is attached through --auto-connect; use a dedicated or --cdp browser"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     /// The client received the `page_wedged` response to request `id`, so it
     /// is not replayed. A newer report from another request stays pending.
     pub fn wedge_report_delivered(&mut self, id: &str) {
@@ -888,7 +902,7 @@ impl DaemonState {
     /// configured `default_timeout_ms` (from `AGENT_BROWSER_DEFAULT_TIMEOUT`).
     /// All wait-family handlers should use this instead of reading the
     /// timeout field and providing their own fallback.
-    fn timeout_ms(&self, cmd: &Value) -> u64 {
+    pub(super) fn timeout_ms(&self, cmd: &Value) -> u64 {
         cmd.get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.default_timeout_ms)
@@ -2891,6 +2905,9 @@ fn policy_actions_for_command(
     if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
         actions.push("navigate".to_string());
     }
+    if action == "poppy_join" {
+        actions.push("navigate".to_string());
+    }
     if let Some(flow) = flow.filter(|_| action == "flow_run") {
         actions.extend(flow.run_writes().iter().map(|w| w.action()));
     }
@@ -3526,6 +3543,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             }
         }
         "navigate" => handle_navigate(cmd, state).await,
+        "poppy_join" => super::poppy::handle_join(cmd, state).await,
         "read" => handle_read(cmd, state).await,
         "url" => handle_url(state).await,
         "cdp_url" => handle_cdp_url(state).await,
@@ -3761,6 +3779,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             resp
         }
         (Ok(data), None) => success_response(&id, data),
+        (Err(e), None) if e.starts_with(super::poppy::ERROR_PREFIX) => {
+            poppy_error_response(&id, &e)
+        }
         (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
     attach_tab_gone_data(&mut resp, state);
@@ -6285,7 +6306,7 @@ async fn launch_safari(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }))
 }
 
-async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(super) async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd
         .get("url")
         .and_then(|v| v.as_str())
@@ -15569,6 +15590,16 @@ fn inject_lifecycle(
     );
 }
 
+/// Splits `poppy:<code>: <message>` into the error envelope with its code.
+fn poppy_error_response(id: &str, error: &str) -> Value {
+    let rest = error.trim_start_matches(super::poppy::ERROR_PREFIX);
+    let (code, message) = rest.split_once(": ").unwrap_or(("join_failed", rest));
+    let mut resp = error_response(id, message);
+    resp["code"] = json!(code);
+    resp["data"] = json!({ "experimental": true, "joined": false });
+    resp
+}
+
 fn error_response(id: &str, error: &str) -> Value {
     let mut resp = json!({
         "id": id,
@@ -16324,6 +16355,36 @@ mod tests {
         assert_eq!(error, "Recording already active");
         assert!(state.recording_state.active);
         assert!(state.browser.is_none());
+    }
+
+    #[test]
+    fn auto_connect_is_refused_for_a_poppy_join() {
+        let mut state = DaemonState::new();
+        assert!(state.refuse_auto_connect().is_ok());
+        state.settings.set(Key::AutoConnect, json!(true));
+        assert!(state.refuse_auto_connect().is_err());
+
+        let mut state = DaemonState::new();
+        state.attached_target = Some(AttachedTarget::AutoConnect);
+        assert!(state.refuse_auto_connect().is_err());
+
+        let mut state = DaemonState::new();
+        state.attached_target = Some(AttachedTarget::CdpPort(9222));
+        assert!(state.refuse_auto_connect().is_ok());
+    }
+
+    #[test]
+    fn a_poppy_error_carries_its_code() {
+        let resp = poppy_error_response(
+            "1",
+            "poppy:invalid_request: The authorizer reported an error",
+        );
+        assert_eq!(resp["code"], "invalid_request");
+        assert_eq!(resp["error"], "The authorizer reported an error");
+        assert_eq!(
+            resp["data"],
+            json!({ "experimental": true, "joined": false })
+        );
     }
 
     #[tokio::test]

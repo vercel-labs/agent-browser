@@ -1041,6 +1041,7 @@ mod tests {
             "mcp",
             "plugin",
             "plugins",
+            "poppy", // runs a local shell command
             "profiles",
             "upgrade",
         ];

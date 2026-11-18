@@ -177,6 +177,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "chat"
             | "webmcp"
             | "flow"
+            | "poppy"
     )
 }
 
@@ -475,6 +476,7 @@ fn parse_command_inner(
         "reload" => Ok(json!({ "id": id, "action": "reload" })),
         "read" => parse_read(&rest, &id, flags),
         "webmcp" => parse_webmcp(&rest, &id),
+        "poppy" => parse_poppy(&rest, &id),
         "flow" => parse_flow(&rest, &id),
 
         // === Core Actions ===
@@ -2462,6 +2464,51 @@ fn set_invoke_params(
     command["params"] = params;
     *has_params = true;
     Ok(())
+}
+
+const POPPY_JOIN_USAGE: &str = "poppy join <url> --authorizer <command>";
+
+fn parse_poppy(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    let subcommand = rest.first().ok_or_else(|| ParseError::MissingArguments {
+        context: "poppy".to_string(),
+        usage: POPPY_JOIN_USAGE,
+    })?;
+    if *subcommand != "join" {
+        return Err(ParseError::UnknownSubcommand {
+            subcommand: subcommand.to_string(),
+            valid_options: &["join"],
+        });
+    }
+    let mut url = None;
+    let mut authorizer = None;
+    let mut args = rest[1..].iter().copied();
+    while let Some(arg) = args.next() {
+        match arg {
+            "--authorizer" => authorizer = args.next(),
+            other if other.starts_with("--") => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unknown poppy join option: {}", other),
+                    usage: POPPY_JOIN_USAGE,
+                });
+            }
+            other if url.is_none() => url = Some(other),
+            other => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unexpected argument for poppy join: {}", other),
+                    usage: POPPY_JOIN_USAGE,
+                });
+            }
+        }
+    }
+    match (url, authorizer) {
+        (Some(url), Some(authorizer)) => {
+            Ok(json!({ "id": id, "action": "poppy_join", "url": url, "authorizer": authorizer }))
+        }
+        _ => Err(ParseError::MissingArguments {
+            context: "poppy join".to_string(),
+            usage: POPPY_JOIN_USAGE,
+        }),
+    }
 }
 
 fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
@@ -6898,6 +6945,31 @@ mod tests {
             message.contains("Invalid JSON for WebMCP params"),
             "gave: {message}"
         );
+    }
+
+    #[test]
+    fn test_poppy_join_parses_url_and_authorizer() {
+        let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        let cmd = parse_command(
+            &args("poppy join https://example.com --authorizer ./auth.sh"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "poppy_join");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["authorizer"], "./auth.sh");
+        for bad in [
+            "poppy join https://example.com",
+            "poppy join --authorizer x",
+            "poppy join https://example.com --authorizer",
+            "poppy join https://example.com --nope x",
+            "poppy leave",
+        ] {
+            assert!(
+                parse_command(&args(bad), &default_flags()).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
