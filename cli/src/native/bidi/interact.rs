@@ -96,7 +96,9 @@ struct PointerPlan {
     value: Value,
 }
 
-/// Scrolls the target into view and applies the shared actionability and blocker checks.
+/// Scrolls the target into view and applies the shared actionability and blocker checks. The
+/// geometry is read in the isolated sandbox, so the page cannot choose the point the pointer
+/// state records.
 pub(super) async fn prepare(
     ff: &FirefoxSession,
     target: &Target,
@@ -105,11 +107,11 @@ pub(super) async fn prepare(
 ) -> Result<(f64, f64), String> {
     let result = ff
         .bidi
-        .call_function(
+        .call_function_on_in_sandbox(
             &target.context,
+            super::client::SANDBOX,
             &prepare_js(),
-            Some(target.node_ref()),
-            Vec::new(),
+            target.node_ref(),
         )
         .await?;
     if action.requires_actionable() {
@@ -130,16 +132,7 @@ pub(super) async fn prepare(
             .ok_or("Firefox could not find the click context")?;
         let mut point = position;
         for (parent, child) in path.iter().rev() {
-            let frames = super::query::locate_nodes(
-                &ff.bidi,
-                parent,
-                json!({ "type": "context", "value": { "context": child } }),
-                None,
-            )
-            .await?;
-            let [frame] = frames.as_slice() else {
-                return Err("Firefox could not verify the click frame".to_string());
-            };
+            let frame = verified_frame(ff, parent, child).await?;
             let js = format!(
                 r#"function() {{
                     const at = () => {{
@@ -199,32 +192,47 @@ pub(super) async fn perform_actions(
     Ok(reply.is_none())
 }
 
-const MAP_POINT_JS: &str = r#"function(x, y, direction) {
-    let win = window;
-    while (win && win.frameElement) {
-        const frame = win.frameElement;
-        const rect = frame.getBoundingClientRect(), style = win.parent.getComputedStyle(frame);
-        x += direction * (rect.left + frame.clientLeft + parseFloat(style.paddingLeft));
-        y += direction * (rect.top + frame.clientTop + parseFloat(style.paddingTop));
-        win = win.parent;
-    }
-    return [x, y, win === win.top];
+const FRAME_ORIGIN_JS: &str = r#"function() {
+    const rect = this.getBoundingClientRect(), style = getComputedStyle(this);
+    return [
+        rect.x + this.clientLeft + parseFloat(style.paddingLeft),
+        rect.y + this.clientTop + parseFloat(style.paddingTop),
+    ];
 }"#;
 
-const FRAME_OFFSETS_JS: &str = r#"function() {
-    const frames = [];
-    const visit = root => {
-        for (const el of root.querySelectorAll('*')) {
-            if ((el.tagName === 'IFRAME' || el.tagName === 'FRAME') && el.contentWindow) {
-                const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
-                frames.push([el.contentWindow, rect.left + el.clientLeft + parseFloat(style.paddingLeft), rect.top + el.clientTop + parseFloat(style.paddingTop)]);
-            }
-            if (el.shadowRoot) visit(el.shadowRoot);
-        }
+/// The frame element that hosts `child` inside `parent`, as the browser reports it. Exactly one
+/// element must match, so a page cannot substitute another frame for the one it was asked about.
+async fn verified_frame(ff: &FirefoxSession, parent: &str, child: &str) -> Result<Value, String> {
+    let frames = super::query::locate_nodes(
+        &ff.bidi,
+        parent,
+        json!({ "type": "context", "value": { "context": child } }),
+        None,
+    )
+    .await?;
+    let [frame] = frames.as_slice() else {
+        return Err("Firefox could not verify the frame".to_string());
     };
-    visit(document);
-    return frames;
-}"#;
+    Ok(json!({ "sharedId": frame["sharedId"] }))
+}
+
+/// Where `child`'s viewport begins inside `parent`'s viewport. The frame is the browser's own
+/// handle and its geometry is read in the parent's isolated sandbox, never in the page's realm.
+async fn frame_origin(
+    ff: &FirefoxSession,
+    parent: &str,
+    child: &str,
+) -> Result<(f64, f64), String> {
+    let frame = verified_frame(ff, parent, child).await?;
+    let origin = ff
+        .bidi
+        .call_function_on_in_sandbox(parent, super::client::SANDBOX, FRAME_ORIGIN_JS, frame)
+        .await?;
+    match (origin[0].as_f64(), origin[1].as_f64()) {
+        (Some(x), Some(y)) => Ok((x, y)),
+        _ => Err("Firefox returned an invalid frame offset".to_string()),
+    }
+}
 
 fn context_path(node: &Value, target: &str, path: &mut Vec<(String, String)>) -> bool {
     let Some(parent) = node["context"].as_str() else {
@@ -268,6 +276,10 @@ async fn get_context_path(
     Ok(found.then_some(path))
 }
 
+/// Converts a point between `context`'s viewport and the top-level viewport the pointer state is
+/// kept in: `direction` is 1 going up to the top level and -1 coming back down. The path comes
+/// from the browser's context tree and each hop from a verified frame handle, so nothing the page
+/// computes decides where the pointer is recorded.
 async fn map_mouse_position(
     ff: &FirefoxSession,
     context: &str,
@@ -277,52 +289,16 @@ async fn map_mouse_position(
     if context == ff.contexts.active_tab() {
         return Ok(position);
     }
-    let point = ff
-        .bidi
-        .call_function(
-            context,
-            MAP_POINT_JS,
-            None,
-            vec![json!(position.0), json!(position.1), json!(direction)],
-        )
-        .await?;
-    if point[2] == false {
-        let path = get_context_path(ff, context)
-            .await?
-            .ok_or("Firefox could not find the mouse context")?;
-        let mut mapped = position;
-        for (parent, child) in path {
-            let frames = ff
-                .bidi
-                .call_function_in_sandbox(&parent, super::client::SANDBOX, FRAME_OFFSETS_JS, vec![])
-                .await?;
-            let frame = frames
-                .as_array()
-                .and_then(|frames| {
-                    frames
-                        .iter()
-                        .find(|frame| frame[0].as_str() == Some(child.as_str()))
-                })
-                .ok_or("Firefox could not find the mouse frame")?;
-            mapped.0 += f64::from(direction)
-                * frame[1]
-                    .as_f64()
-                    .ok_or("Firefox returned an invalid frame offset")?;
-            mapped.1 += f64::from(direction)
-                * frame[2]
-                    .as_f64()
-                    .ok_or("Firefox returned an invalid frame offset")?;
-        }
-        return Ok(mapped);
+    let path = get_context_path(ff, context)
+        .await?
+        .ok_or("Firefox could not find the mouse context")?;
+    let mut mapped = position;
+    for (parent, child) in path {
+        let (x, y) = frame_origin(ff, &parent, &child).await?;
+        mapped.0 += f64::from(direction) * x;
+        mapped.1 += f64::from(direction) * y;
     }
-    Ok((
-        point[0]
-            .as_f64()
-            .ok_or("Firefox returned an invalid mouse position")?,
-        point[1]
-            .as_f64()
-            .ok_or("Firefox returned an invalid mouse position")?,
-    ))
+    Ok(mapped)
 }
 
 async fn local_mouse_position(state: &DaemonState) -> Result<(f64, f64), String> {
@@ -392,10 +368,10 @@ async fn move_mouse(
     let mut path = pointer_mousemove(from, to, options);
     let edge = ff
         .bidi
-        .call_function(
+        .call_function_in_sandbox(
             context,
+            super::client::SANDBOX,
             "() => [innerWidth - 1, innerHeight - 1]",
-            None,
             vec![],
         )
         .await?;
@@ -1572,22 +1548,59 @@ mod tests {
                     "dblclick" => dblclick(&command, &mut state).await.unwrap(),
                     _ => hover(&command, &mut state).await.unwrap(),
                 };
+                let expected = if target_context == "ctx-frame" {
+                    (40.0 + FRAME_ORIGIN.0, 50.0 + FRAME_ORIGIN.1)
+                } else {
+                    (40.0, 50.0)
+                };
                 assert_eq!(
                     (state.mouse_state.x, state.mouse_state.y),
-                    (40.0, 50.0),
+                    expected,
                     "{action}: selected={selected_context}, target={target_context}"
                 );
             }
         }
     }
 
-    fn connected(params: &Value) -> Value {
-        if params["functionDeclaration"] == MAP_POINT_JS {
-            return json!({ "type": "success", "result": { "type": "array", "value": [
-                { "type": "number", "value": params["arguments"][0]["value"] },
-                { "type": "number", "value": params["arguments"][1]["value"] }
-            ] } });
+    /// A hostile page answers whatever runs in its own realm with coordinates aimed at a control
+    /// in its parent; only the sandbox, the frame handle and the context tree are honest.
+    fn hostile_page(params: &Value) -> Value {
+        let function = params["functionDeclaration"].as_str().unwrap_or_default();
+        if function.contains("isConnected") || params["target"]["sandbox"].is_string() {
+            return connected(params);
         }
+        if function.contains("getClientRects") {
+            return located_at((440.0, 305.0), None);
+        }
+        json!({ "type": "success", "result": { "type": "array", "value": [
+            { "type": "number", "value": 460 },
+            { "type": "number", "value": 325 },
+            { "type": "boolean", "value": true },
+        ] } })
+    }
+
+    #[tokio::test]
+    async fn a_page_cannot_choose_the_position_the_pointer_state_records() {
+        for action in ["click", "hover"] {
+            let (mut state, _) = state_with_refs(hostile_page).await;
+            let ff = state.firefox.as_mut().unwrap();
+            ff.refs.retain(|(_, shared_id, _), _| shared_id != "sid-1");
+            ff.refs
+                .insert(("ctx-frame".into(), "sid-1".into(), "doc".into()), 7);
+            let command = json!({"selector": "@e1"});
+            match action {
+                "click" => click(&command, &mut state).await.unwrap(),
+                _ => hover(&command, &mut state).await.unwrap(),
+            };
+            assert_eq!(
+                (state.mouse_state.x, state.mouse_state.y),
+                (40.0 + FRAME_ORIGIN.0, 50.0 + FRAME_ORIGIN.1),
+                "{action}"
+            );
+        }
+    }
+
+    fn connected(params: &Value) -> Value {
         if params["functionDeclaration"]
             .as_str()
             .is_some_and(|js| js.contains("isConnected"))
@@ -1597,10 +1610,23 @@ mod tests {
         located(None)
     }
 
+    const FRAME_ORIGIN: (f64, f64) = (5.0, 7.0);
+
+    fn frame_origin_reply((x, y): (f64, f64)) -> Value {
+        json!({ "type": "success", "result": { "type": "array", "value": [
+            { "type": "number", "value": x },
+            { "type": "number", "value": y },
+        ] } })
+    }
+
     fn located(blocker: Option<&str>) -> Value {
+        located_at((40.0, 50.0), blocker)
+    }
+
+    fn located_at((x, y): (f64, f64), blocker: Option<&str>) -> Value {
         let mut entries = vec![
-            json!(["x", { "type": "number", "value": 40 }]),
-            json!(["y", { "type": "number", "value": 50 }]),
+            json!(["x", { "type": "number", "value": x }]),
+            json!(["y", { "type": "number", "value": y }]),
             json!(["reason", { "type": "null" }]),
             json!(["blocker", { "type": "null" }]),
         ];
@@ -1639,6 +1665,9 @@ mod tests {
             match request["method"].as_str() {
                 Some("browsingContext.getTree") => json!({ "contexts": [{ "context": "ctx-active", "children": [{ "context": "ctx-frame" }] }] }),
                 Some("browsingContext.locateNodes") => json!({ "nodes": [{ "sharedId": "frame" }] }),
+                Some("script.callFunction") if params["functionDeclaration"] == FRAME_ORIGIN_JS => {
+                    frame_origin_reply(FRAME_ORIGIN)
+                }
                 Some("script.callFunction") if params["this"]["sharedId"] == "frame" => located(None),
                 Some("script.callFunction") if params["functionDeclaration"] == "() => document" => {
                     json!({ "type": "success", "result": { "type": "node", "sharedId": "doc" } })
@@ -1648,6 +1677,8 @@ mod tests {
             }
         })
         .await;
+        ff.contexts
+            .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
         ff.refs
             .insert(("ctx-active".into(), "sid-1".into(), "doc".into()), 7);
         ff.refs
