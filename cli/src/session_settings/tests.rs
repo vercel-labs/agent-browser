@@ -1512,6 +1512,20 @@ fn an_explicit_reset_lets_an_ambient_target_apply() {
     );
 }
 
+#[test]
+fn a_reset_reapplies_the_ambient_target_the_session_already_runs() {
+    // `-p ""` clears the running endpoint, and the same endpoint as a default
+    // applies again to the now target-less session.
+    let running = running_with(&[(Key::Cdp, json!("ws://env.example/cdp"))]);
+    let mut f = ambient_flags(Some("ws://env.example/cdp"), Some(""), None);
+    f.cli_provider = true;
+    let plan = running.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://env.example/cdp".to_string())
+    );
+}
+
 const ENV_HEADERS: &str = r#"{"Authorization":"env"}"#;
 const OWN_HEADERS: &str = r#"{"Authorization":"own"}"#;
 

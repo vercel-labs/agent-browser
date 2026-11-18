@@ -202,8 +202,15 @@ impl Running {
                     }
                 }
                 Requested::Set(value) => {
-                    if self.effective(key).as_ref() == Some(value)
-                        && !patch.is_changed_in_place(key)
+                    // A default is checked against the session as this patch
+                    // left it: a reset earlier in the patch may have cleared
+                    // the running value, and the default then applies again.
+                    let current = if patch.is_ambient(key) {
+                        next.effective(key)
+                    } else {
+                        self.effective(key)
+                    };
+                    if current.as_ref() == Some(value) && !patch.is_changed_in_place(key)
                     {
                         continue;
                     }
