@@ -57,12 +57,13 @@ fn host_with_port(url: &Url) -> Option<String> {
     })
 }
 
-/// HTTPS, or plain HTTP to a loopback host for local testing.
-fn check_scheme(url: &Url) -> Result<(), JoinError> {
-    let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1"));
+/// HTTPS, or plain HTTP to a loopback host when the join started on this
+/// machine, for local testing.
+fn check_scheme(url: &Url, local: bool) -> Result<(), JoinError> {
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1"));
     match url.scheme() {
         "https" => Ok(()),
-        "http" if local => Ok(()),
+        "http" if loopback && local => Ok(()),
         _ => Err(discovery_failed(format!("{} is not an HTTPS URL", url))),
     }
 }
@@ -102,6 +103,27 @@ fn check_address(host: &str, ip: IpAddr, local: bool) -> Result<(), JoinError> {
     }))
 }
 
+/// Resolves `host` once, within `deadline`.
+async fn resolve(
+    host: &str,
+    port: u16,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<SocketAddr>, JoinError> {
+    let lookup = tokio::time::timeout_at(deadline, tokio::net::lookup_host((host, port)));
+    let addrs: Vec<SocketAddr> = lookup
+        .await
+        .map_err(|_| discovery_failed(format!("Resolving {} timed out", host)))?
+        .map_err(|e| discovery_failed(format!("Could not resolve {}: {}", host, e)))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(discovery_failed(format!(
+            "{} did not resolve to any address",
+            host
+        )));
+    }
+    Ok(addrs)
+}
+
 /// A client for one hop, pinned to the addresses that were checked, so the
 /// address that passed `check_address` is the address that is used.
 async fn client_for(
@@ -121,18 +143,7 @@ async fn client_for(
         Some(url::Host::Ipv6(ip)) => check_address(host, IpAddr::V6(ip), local)?,
         _ => {
             let port = url.port_or_known_default().unwrap_or(443);
-            let lookup = tokio::time::timeout_at(deadline, tokio::net::lookup_host((host, port)));
-            let addrs: Vec<SocketAddr> = lookup
-                .await
-                .map_err(|_| discovery_failed(format!("Resolving {} timed out", host)))?
-                .map_err(|e| discovery_failed(format!("Could not resolve {}: {}", host, e)))?
-                .collect();
-            if addrs.is_empty() {
-                return Err(discovery_failed(format!(
-                    "{} did not resolve to any address",
-                    host
-                )));
-            }
+            let addrs = resolve(host, port, deadline).await?;
             for addr in &addrs {
                 check_address(host, addr.ip(), local)?;
             }
@@ -144,8 +155,35 @@ async fn client_for(
         .map_err(|e| discovery_failed(format!("Failed to create HTTP client: {}", e)))
 }
 
+/// The endpoint is a page this browser loads, so it reaches only the addresses
+/// a discovery hop may: public ones unless the join started locally, and never
+/// link-local or cloud metadata.
+async fn check_endpoint(
+    endpoint: &str,
+    local: bool,
+    deadline: tokio::time::Instant,
+) -> Result<(), JoinError> {
+    let url = Url::parse(endpoint)
+        .map_err(|e| discovery_failed(format!("Invalid browser_session_endpoint: {}", e)))?;
+    check_scheme(&url, local)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| discovery_failed(format!("{} has no host", endpoint)))?;
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => check_address(host, IpAddr::V4(ip), local),
+        Some(url::Host::Ipv6(ip)) => check_address(host, IpAddr::V6(ip), local),
+        _ => {
+            let port = url.port_or_known_default().unwrap_or(443);
+            for addr in resolve(host, port, deadline).await? {
+                check_address(host, addr.ip(), local)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Reads a `/.well-known/poppy.json` response for the Company at `host`.
-fn interpret(host: &str, status: u16, body: &str) -> Result<String, JoinError> {
+fn interpret(host: &str, status: u16, body: &str, local: bool) -> Result<String, JoinError> {
     if status == 404 || status == 410 {
         return Err(JoinError {
             code: "not_supported",
@@ -198,14 +236,16 @@ fn interpret(host: &str, status: u16, body: &str) -> Result<String, JoinError> {
         })?;
     let url = Url::parse(endpoint)
         .map_err(|e| discovery_failed(format!("Invalid browser_session_endpoint: {}", e)))?;
-    check_scheme(&url)?;
+    // A join that started on a public host gets an HTTPS endpoint, so a remote
+    // document cannot name a plain-HTTP service on this machine.
+    check_scheme(&url, local)?;
     Ok(endpoint.to_string())
 }
 
 /// Resolves the discovery URL for `raw_url` without touching the network.
 pub fn target(raw_url: &str) -> Result<Target, JoinError> {
     let url = crate::read::normalize_url(raw_url).map_err(discovery_failed)?;
-    check_scheme(&url)?;
+    check_scheme(&url, started_locally(&url))?;
     let host =
         host_with_port(&url).ok_or_else(|| discovery_failed(format!("{} has no host", raw_url)))?;
     let origin = format!("{}://{}", url.scheme(), host);
@@ -228,7 +268,9 @@ fn is_redirect(status: u16) -> bool {
 /// before any DNS lookup or connection, and the address check in `client_for`
 /// runs before the connection too. A hop fetches only the well-known path with
 /// no query, so a file uploaded elsewhere on a host cannot speak for it. The
-/// document's `organization.domain` must match the host that finally serves it.
+/// document's `organization.domain` must match the host that finally serves it,
+/// and the endpoint it names is held to the same address rules as a hop, so a
+/// remote document cannot aim the browser at a service on this machine.
 /// Everything stops at `deadline`.
 pub async fn fetch(
     target: Target,
@@ -241,7 +283,7 @@ pub async fn fetch(
     let local = started_locally(&url);
     let mut seen: Vec<Url> = Vec::new();
     let (response, host, origin) = loop {
-        check_scheme(&url)?;
+        check_scheme(&url, local)?;
         // Only the well-known path speaks for a host; an upload elsewhere on it must not.
         if url.path() != WELL_KNOWN || url.query().is_some() {
             return Err(discovery_failed(format!(
@@ -281,10 +323,11 @@ pub async fn fetch(
     };
     let status = response.status().as_u16();
     if status == 404 || status == 410 {
-        return Err(interpret(&host, status, "").unwrap_err());
+        return Err(interpret(&host, status, "", local).unwrap_err());
     }
     let body = read_body(response, &url, deadline).await?;
-    let endpoint = interpret(&host, status, &body)?;
+    let endpoint = interpret(&host, status, &body, local)?;
+    check_endpoint(&endpoint, local, deadline).await?;
     Ok(Discovery { origin, endpoint })
 }
 
@@ -335,17 +378,19 @@ mod tests {
     }
 
     fn code(status: u16, body: &str) -> &'static str {
-        interpret("example.com", status, body).unwrap_err().code
+        interpret("example.com", status, body, false)
+            .unwrap_err()
+            .code
     }
 
     #[test]
     fn a_valid_document_yields_the_endpoint() {
         assert_eq!(
-            interpret("example.com", 200, &doc(json!({}))).unwrap(),
+            interpret("example.com", 200, &doc(json!({})), false).unwrap(),
             "https://example.com/join"
         );
         let minor = doc(json!({ "protocol_version": "1.7" }));
-        assert!(interpret("example.com", 200, &minor).is_ok());
+        assert!(interpret("example.com", 200, &minor, false).is_ok());
     }
 
     #[test]
@@ -389,6 +434,42 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_document_cannot_name_an_endpoint_on_this_machine() {
+        let loopback =
+            doc(json!({ "web": { "browser_session_endpoint": "http://127.0.0.1:8080/" } }));
+        assert_eq!(code(200, &loopback), "discovery_failed");
+
+        let local = json!({
+            "protocol_version": "1.0",
+            "organization": { "domain": "127.0.0.1:8080" },
+            "web": { "browser_session_endpoint": "http://127.0.0.1:8080/join" },
+        })
+        .to_string();
+        assert!(interpret("127.0.0.1:8080", 200, &local, false).is_err());
+        assert_eq!(
+            interpret("127.0.0.1:8080", 200, &local, true).unwrap(),
+            "http://127.0.0.1:8080/join"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remote_document_cannot_name_a_non_public_endpoint_address() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        for endpoint in [
+            "https://127.0.0.1:8080/",
+            "https://[::1]/",
+            "https://10.0.0.7/",
+            "https://169.254.169.254/",
+        ] {
+            let err = check_endpoint(endpoint, false, deadline).await.unwrap_err();
+            assert_eq!(err.code, "discovery_failed", "{endpoint}");
+        }
+        assert!(check_endpoint("https://127.0.0.1:8080/", true, deadline)
+            .await
+            .is_ok());
+    }
+
+    #[test]
     fn the_target_is_the_well_known_url_of_the_origin() {
         let target = target("http://127.0.0.1:3000/some/page").unwrap();
         assert_eq!(target.origin, "http://127.0.0.1:3000");
@@ -401,11 +482,13 @@ mod tests {
     }
 
     #[test]
-    fn plain_http_is_only_for_loopback() {
-        assert!(check_scheme(&Url::parse("http://127.0.0.1:3000/").unwrap()).is_ok());
-        assert!(check_scheme(&Url::parse("http://localhost/").unwrap()).is_ok());
-        assert!(check_scheme(&Url::parse("http://example.com/").unwrap()).is_err());
-        assert!(check_scheme(&Url::parse("https://example.com/").unwrap()).is_ok());
+    fn plain_http_is_only_for_a_local_join_on_a_loopback_host() {
+        assert!(check_scheme(&Url::parse("http://127.0.0.1:3000/").unwrap(), true).is_ok());
+        assert!(check_scheme(&Url::parse("http://localhost/").unwrap(), true).is_ok());
+        assert!(check_scheme(&Url::parse("http://example.com/").unwrap(), true).is_err());
+        assert!(check_scheme(&Url::parse("https://example.com/").unwrap(), false).is_ok());
+        // A join that started on a public host gets an HTTPS endpoint only.
+        assert!(check_scheme(&Url::parse("http://127.0.0.1:8080/").unwrap(), false).is_err());
     }
 
     #[test]

@@ -40,7 +40,7 @@ Success prints `{"success": true, "data": {"experimental": true, "joined": true,
 - `domain_not_allowed`: the discovery URL, a redirect or the session endpoint is outside the session's allowed domains. Nothing was requested. Do not widen the allowlist without the user's say.
 - `web_disabled`: the site asks agents not to use a browser. Use the agent or APIs it lists.
 - `no_browser_session_endpoint`: the site has no browser join. Browse it signed out.
-- `discovery_failed`: the discovery document is invalid, does not match the host, is not served over HTTPS, is larger than 2 MB, or a hop redirected outside the well-known path or to a non-public address. Do not join.
+- `discovery_failed`: the discovery document is invalid, does not match the host, is not served over HTTPS, is larger than 2 MB, names an endpoint that is not HTTPS or reaches a non-public address, or a hop redirected outside the well-known path or to a non-public address. Do not join.
 - `auto_connect_refused`: the session uses `--auto-connect`. Open a session in a browser agent-browser launches.
 - `authorizer_failed`: the authorizer exited without a valid JSON line. Fix the authorizer.
 - `join_failed`: the tab was not on the endpoint, the page had no code form, or the site rejected the submission. Run the join again.

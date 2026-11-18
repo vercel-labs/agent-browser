@@ -4593,7 +4593,9 @@ Personal Agent Protocol (experimental):
                              JSON line on stdin and prints {{"signed_in": bool}}, or
                              {{"error": code}} with a nonzero exit. The code is single-use
                              and browser-bound, and may appear spent in network requests
-                             and HAR
+                             and HAR. Discovery refuses a document or endpoint that is not
+                             HTTPS or that reaches a non-public address, unless the join
+                             started on a loopback host
 
 Saved flows (experimental, open the session with --capture flow):
   flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed
