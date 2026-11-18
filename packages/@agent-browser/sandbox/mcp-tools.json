@@ -4261,6 +4261,42 @@
     {
       "annotations": {
         "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Set how a tab runs while it is in the background. live keeps it at full speed and makes the page report visible and focused. throttled is the browser default. frozen pauses it until you switch to it. Omit tab for the current tab, which cannot be frozen.",
+      "inputSchema": {
+        "properties": {
+          "keep": {
+            "enum": [
+              "live",
+              "throttled",
+              "frozen"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "tab": {
+            "description": "Tab id (t1), label, or CDP target id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "keep"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_tab_keep",
+      "profiles": [
+        "tabs"
+      ],
+      "title": "Tab keep"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
         "readOnlyHint": true
       },
       "description": "List tabs.",
