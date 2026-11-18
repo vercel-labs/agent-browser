@@ -1468,9 +1468,9 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_TAB_KEEP,
             "Tab keep",
-            "Set how a tab runs while it is in the background. live keeps it at full speed and makes the page report visible and focused. throttled is the browser default. Omit tab for the current tab.",
+            "Set how a tab runs while it is in the background. live keeps it at full speed and makes the page report visible and focused. throttled is the browser default. frozen pauses it until you switch to it. Omit tab for the current tab, which cannot be frozen.",
             json!({
-                "keep": { "type": "string", "enum": ["live", "throttled"] },
+                "keep": { "type": "string", "enum": ["live", "throttled", "frozen"] },
                 "tab": { "type": "string", "description": "Tab id (t1), label, or CDP target id." }
             }),
             &["keep"],

@@ -19,7 +19,7 @@ use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
 use super::auth;
-use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport};
+use super::browser::{should_track_target, BrowserManager, TabKeep, WaitUntil, WedgeReport};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
@@ -3429,6 +3429,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    if let Some(mgr) = state.browser.as_mut() {
+        let session = &state.session_id;
+        let unpinned = |target: &str| tab_binding::pinned_owner(target, session).is_none();
+        mgr.thaw_active_tab(unpinned).await;
+    }
+
     // WebDriver backend: reject unsupported CDP-only actions
     if matches!(state.backend_type, BackendType::WebDriver)
         && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
@@ -6595,6 +6601,10 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 /// daemon restarts the CLI asks for (upgrade, changed options) keep them.
 async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
+    let unfreeze_error = match state.browser.as_mut() {
+        Some(mgr) => mgr.thaw_frozen_tabs().await.err(),
+        None => None,
+    };
     close_all_browser_backends(state).await?;
     state.attached_target = None;
 
@@ -6658,6 +6668,9 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
     };
     if unsaved > 0 {
         reply["unsaved"] = json!({ "steps": unsaved });
+    }
+    if let Some(err) = unfreeze_error {
+        reply["unfreezeError"] = json!(err);
     }
     if let Some(err) = pin_release_error {
         reply["pinReleaseError"] = json!(err);
@@ -8646,11 +8659,7 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 }
 
 async fn handle_tab_keep(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let live = match cmd.get("keep").and_then(Value::as_str) {
-        Some("live") => true,
-        Some("throttled") => false,
-        _ => return Err("Missing 'keep' parameter (expected live or throttled)".to_string()),
-    };
+    let keep = TabKeep::parse(cmd.get("keep").and_then(Value::as_str).unwrap_or_default())?;
     let tab_id = match cmd.get("tabId").and_then(Value::as_str) {
         Some(tab_ref) => {
             let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
@@ -8660,7 +8669,7 @@ async fn handle_tab_keep(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     };
     check_tab_unlocked(state, tab_id)?;
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    mgr.set_tab_live(tab_id, live).await
+    mgr.set_tab_keep(tab_id, keep).await
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

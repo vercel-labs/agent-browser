@@ -4263,13 +4263,14 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set how a tab runs while it is in the background. live keeps it at full speed and makes the page report visible and focused. throttled is the browser default. Omit tab for the current tab.",
+      "description": "Set how a tab runs while it is in the background. live keeps it at full speed and makes the page report visible and focused. throttled is the browser default. frozen pauses it until you switch to it. Omit tab for the current tab, which cannot be frozen.",
       "inputSchema": {
         "properties": {
           "keep": {
             "enum": [
               "live",
-              "throttled"
+              "throttled",
+              "frozen"
             ],
             "type": "string"
           },

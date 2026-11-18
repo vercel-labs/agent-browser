@@ -1715,10 +1715,10 @@ fn parse_command_inner(
                 }
                 Some("keep") if rest.len() > 1 => {
                     let keep = rest[1];
-                    if !matches!(keep, "live" | "throttled") {
+                    if !matches!(keep, "live" | "throttled" | "frozen") {
                         return Err(ParseError::UnknownSubcommand {
                             subcommand: keep.to_string(),
-                            valid_options: &["live", "throttled"],
+                            valid_options: &["live", "throttled", "frozen"],
                         });
                     }
                     let mut cmd = json!({ "id": id, "action": "tab_keep", "keep": keep });
@@ -1729,7 +1729,7 @@ fn parse_command_inner(
                 }
                 Some("keep") => Err(ParseError::MissingArguments {
                     context: "tab keep".to_string(),
-                    usage: "tab keep <live|throttled> [t<N>|label|target]",
+                    usage: "tab keep <live|throttled|frozen> [t<N>|label|target]",
                 }),
                 Some(tab_ref) => Ok(json!({
                     "id": id,
@@ -5364,8 +5364,8 @@ mod tests {
         assert_eq!(cmd["keep"], "live");
         assert!(cmd.get("tabId").is_none());
 
-        let cmd = parse_command(&args("tab keep throttled t2"), &default_flags()).unwrap();
-        assert_eq!(cmd["keep"], "throttled");
+        let cmd = parse_command(&args("tab keep frozen t2"), &default_flags()).unwrap();
+        assert_eq!(cmd["keep"], "frozen");
         assert_eq!(cmd["tabId"], "t2");
 
         assert!(matches!(
