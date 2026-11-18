@@ -5076,12 +5076,7 @@ async fn auto_launch_inner(
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
     if state.settings.engine().as_deref() == Some("firefox") {
-        validate_firefox_launch(
-            &state.settings,
-            &options,
-            &plugins,
-            &state.settings.connection(),
-        )?;
+        validate_firefox_launch(state, &options, &plugins, &state.settings.connection()).await?;
     }
     if has_active_browser_session(state) {
         close_before_implicit_relaunch(state).await?;
@@ -6031,12 +6026,11 @@ fn validate_firefox_relaunch(
         .get(Key::CaCert)
         .and_then(Value::as_str)
         .map(String::from);
-    validate_firefox_launch(next, &options, plugins, &next.connection())
+    check_firefox_launch_flags(next, &options, plugins, &next.connection())
 }
 
-/// Rejects the settings Firefox cannot start or attach with. It runs before a relaunch closes
-/// the running browser, so a rejected option leaves that browser and its pages alone.
-fn validate_firefox_launch(
+/// Rejects the options and settings Firefox cannot start or attach with.
+fn check_firefox_launch_flags(
     settings: &Running,
     options: &LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
@@ -6053,6 +6047,37 @@ fn validate_firefox_launch(
     )
 }
 
+/// Rejects the launch Firefox cannot start or attach with: its flags, a pinned tab it cannot
+/// enforce on an attached browser, and an allowlist it cannot enforce. It runs before a relaunch
+/// closes the running browser, so a rejected option leaves that browser and its pages alone.
+async fn validate_firefox_launch(
+    state: &DaemonState,
+    options: &LaunchOptions,
+    plugins: &[crate::plugins::PluginConfig],
+    connection: &Connection,
+) -> Result<(), String> {
+    check_firefox_launch_flags(&state.settings, options, plugins, connection)?;
+    let cdp = match connection {
+        Connection::Cdp(cdp) => Some(cdp.as_str()),
+        _ => None,
+    };
+    if cdp.is_some() && state.pin_tab {
+        return Err(FIREFOX_ATTACH_PIN_TAB_ERROR.to_string());
+    }
+    let allowed_domains = current_allowed_domains(state).await;
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        allowed_domains: &allowed_domains,
+        cdp_url: cdp,
+        cdp_port: None,
+        auto_connect: false,
+        profile: options.profile.as_deref(),
+        provider_name: None,
+        args: &options.args,
+        restore_key: state.session_name.as_deref(),
+        storage_state: options.storage_state.as_deref(),
+    })
+}
+
 /// Starts or attaches to Firefox with the session's resolved settings.
 async fn launch_firefox(
     state: &mut DaemonState,
@@ -6062,26 +6087,12 @@ async fn launch_firefox(
     allowed_domains: Vec<String>,
     strict_state: bool,
 ) -> Result<Value, String> {
-    validate_firefox_launch(&state.settings, &options, &plugins, &connection)?;
+    validate_firefox_launch(state, &options, &plugins, &connection).await?;
     let cdp = match connection {
         Connection::Cdp(cdp) => Some(cdp),
         _ => None,
     };
     let attached = cdp.is_some();
-    if attached && state.pin_tab {
-        return Err(FIREFOX_ATTACH_PIN_TAB_ERROR.to_string());
-    }
-    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        allowed_domains: &allowed_domains,
-        cdp_url: cdp.as_deref(),
-        cdp_port: None,
-        auto_connect: false,
-        profile: options.profile.as_deref(),
-        provider_name: None,
-        args: &options.args,
-        restore_key: state.session_name.as_deref(),
-        storage_state: options.storage_state.as_deref(),
-    })?;
     let attach_target = match cdp.as_deref() {
         Some(target) => Some(
             if let Some(parsed) = bidi::attach::parse_attach_url(target)? {
@@ -25121,6 +25132,37 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(state.proxy_credentials.read().await.is_none());
     }
 
+    /// The Firefox network dispatcher answers proxy challenges from the daemon's credential
+    /// slot, so a Firefox launch must rebind that slot to its own proxy before the dispatcher
+    /// exists. A Chrome session's credentials must never reach a different proxy.
+    #[tokio::test]
+    async fn test_a_firefox_launch_replaces_the_previous_browsers_proxy_credentials() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Engine, json!("firefox"));
+        state
+            .settings
+            .set(Key::Proxy, json!("http://proxy-b.example:8080"));
+        state.settings.set(
+            Key::ExecutablePath,
+            json!("/nonexistent/agent-browser-firefox"),
+        );
+        *state.proxy_credentials.write().await = Some(("userA".to_string(), "passA".to_string()));
+
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+        assert!(state.proxy_credentials.read().await.is_none());
+
+        state.settings.set(Key::ProxyUsername, json!("userB"));
+        state.settings.set(Key::ProxyPassword, json!("passB"));
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+        assert_eq!(
+            *state.proxy_credentials.read().await,
+            Some(("userB".to_string(), "passB".to_string()))
+        );
+    }
+
     #[tokio::test]
     async fn test_switching_to_an_external_browser_drops_inherited_local_settings() {
         let (_env, mut state) = isolated_state();
@@ -25935,6 +25977,23 @@ mod firefox_routing_tests {
             "{error}"
         );
         assert!(state.firefox.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_relaunch_rejected_for_its_allowlist_leaves_the_running_firefox_alone() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        state.settings.set(Key::Engine, json!("firefox"));
+        state.session_name = Some("k".into());
+        *state.domain_filter.write().await = Some(network::DomainFilter::new("a.test"));
+
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+
+        assert!(
+            error.contains("--allowed-domains") && error.contains("--restore"),
+            "{error}"
+        );
+        assert!(state.firefox.is_some(), "the running Firefox was closed");
     }
 
     #[tokio::test]
