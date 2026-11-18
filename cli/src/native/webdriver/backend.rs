@@ -142,6 +142,7 @@ pub const WEBDRIVER_UNSUPPORTED_ACTIONS: &[&str] = &[
     "network",
     "har_start",
     "har_stop",
+    "tab_keep",
 ];
 
 #[cfg(test)]

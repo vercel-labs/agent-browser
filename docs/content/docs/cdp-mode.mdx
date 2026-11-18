@@ -95,6 +95,8 @@ With `--pin-tab`:
 - Tabs opened by other sessions or the user never steal the pinned session's active tab
 - Another session cannot take a pinned tab with `tab <ref>` while the pinning session is running; the switch fails with `tab_locked` naming the owner
 
+Chrome throttles a pinned tab that is not the front tab of its window: its timers slow to about one per second and animation frames stop. Run `agent-browser tab keep live` in that session to keep the tab running while it is hidden. See [Background tab modes](/commands#background-tab-modes) for the cost, and for the Chrome flag that gives a browser you started yourself the full timer rate.
+
 The flag is sticky per session: pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit close releases it so other sessions can take the tab, and the next pinned command pins again. Pass `--no-pin-tab` to explicitly turn the pin off again. See [Sessions](/sessions) for the multi-session workflow and [Commands](/commands) for tab refs by CDP target id.
 
 The structured <code>lastUrl</code> is emitted only for sanitized HTTP(S) URLs and <code>about:blank</code>. Credentials, query strings, and fragments are removed from HTTP(S) URLs, while opaque URLs such as <code>data:</code> are omitted. Batch JSON exposes the recovery object under <code>result</code>.
@@ -163,5 +165,7 @@ Use the `-p` flag to connect to a cloud browser provider or configured `browser.
 ```bash
 agent-browser -p browserbase open https://example.com
 ```
+
+A `browser.provider` plugin that returns `directPage: true` connects to a page socket instead of a browser endpoint. Console messages, network requests, HAR recording, tracing, and profiling apply to that page.
 
 See the [Providers](/providers/browser-use) section for setup and configuration of each built-in provider: [Browser Use](/providers/browser-use), [Browserbase](/providers/browserbase), [Browserless](/providers/browserless), [Kernel](/providers/kernel), and [AgentCore](/providers/agentcore).

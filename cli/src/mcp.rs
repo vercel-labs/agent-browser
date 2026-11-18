@@ -10,6 +10,8 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+
+use crate::native::pointer::{Modifiers, MouseButton};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
@@ -99,6 +101,7 @@ const TOOL_TAB_NEW: &str = "agent_browser_tab_new";
 const TOOL_TAB_LIST: &str = "agent_browser_tab_list";
 const TOOL_TAB_SWITCH: &str = "agent_browser_tab_switch";
 const TOOL_TAB_CLOSE: &str = "agent_browser_tab_close";
+const TOOL_TAB_KEEP: &str = "agent_browser_tab_keep";
 const TOOL_WINDOW_NEW: &str = "agent_browser_window_new";
 const TOOL_FRAME_SWITCH: &str = "agent_browser_frame_switch";
 const TOOL_FRAME_MAIN: &str = "agent_browser_frame_main";
@@ -477,6 +480,7 @@ const TABS_PROFILE_TOOLS: &[&str] = &[
     TOOL_TAB_LIST,
     TOOL_TAB_SWITCH,
     TOOL_TAB_CLOSE,
+    TOOL_TAB_KEEP,
     TOOL_WINDOW_NEW,
     TOOL_FRAME_SWITCH,
     TOOL_FRAME_MAIN,
@@ -850,7 +854,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL. On macOS, installed browsers are searched in /Applications, then ~/Applications. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
+            "Launch the browser and optionally navigate to a URL. On macOS, installed browsers are searched in /Applications, then ~/Applications. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. A plugin provider that returns directPage: true connects to a page socket, so console messages, network requests, HAR recording, tracing, and profiling apply to that page. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
@@ -961,7 +965,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
+            "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text." },
@@ -978,9 +982,11 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLICK,
             "Click element",
-            "Click an element by @ref or CSS selector.",
+            "Click an element by @ref or CSS selector, optionally with another mouse button or held modifier keys.",
             json!({
                 "selector": selector_schema(),
+                "button": mouse_button_schema(),
+                "modifiers": click_modifiers_schema(),
                 "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab after applying session setup." },
                 "human": { "type": "boolean", "default": false, "description": "Approach the target with seeded, curved mouse movement." }
             }),
@@ -1121,8 +1127,13 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DBLCLICK,
             "Double-click element",
-            "Double-click an element.",
-            json!({ "selector": selector_schema() }),
+            "Double-click an element, optionally with another mouse button or held modifier keys.",
+            json!({
+                "selector": selector_schema(),
+                "button": mouse_button_schema(),
+                "modifiers": click_modifiers_schema(),
+                "human": { "type": "boolean", "default": false, "description": "Approach the target with seeded, curved mouse movement." }
+            }),
             &["selector"],
         ),
         tool(
@@ -1455,6 +1466,16 @@ fn parity_tools() -> Vec<Value> {
             "Close a tab by id (t1), label, or CDP target id. Omit to close the current tab.",
             json!({ "tab": { "type": "string", "description": "Tab id (t1), label, or CDP target id." } }),
             &[],
+        ),
+        tool(
+            TOOL_TAB_KEEP,
+            "Tab keep",
+            "Set how a tab runs while it is in the background. live keeps it at full speed and makes the page report visible and focused. throttled is the browser default. frozen pauses it until you switch to it. Omit tab for the current tab, which cannot be frozen.",
+            json!({
+                "keep": { "type": "string", "enum": ["live", "throttled", "frozen"] },
+                "tab": { "type": "string", "description": "Tab id (t1), label, or CDP target id." }
+            }),
+            &["keep"],
         ),
         tool(
             TOOL_WINDOW_NEW,
@@ -2069,8 +2090,21 @@ fn key_schema() -> Value {
 fn mouse_button_schema() -> Value {
     json!({
         "type": "string",
-        "enum": ["left", "right", "middle"],
+        "enum": MouseButton::ALL.map(|button| button.name()),
         "default": "left",
+        "description": "Mouse button. Defaults to left.",
+    })
+}
+
+fn click_modifiers_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "string",
+            "enum": Modifiers::NAMES,
+        },
+        "minItems": 1,
+        "description": "Modifier keys held during the click.",
     })
 }
 
@@ -2447,11 +2481,11 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_OPEN => call_open(arguments),
         TOOL_READ => call_read(arguments),
         TOOL_SNAPSHOT => call_snapshot(arguments),
-        TOOL_CLICK => call_click(arguments),
+        TOOL_CLICK => call_click(arguments, "click"),
         TOOL_BACK => call_literal(arguments, &["back"]),
         TOOL_FORWARD => call_literal(arguments, &["forward"]),
         TOOL_RELOAD => call_literal(arguments, &["reload"]),
-        TOOL_DBLCLICK => call_simple_selector(arguments, "dblclick"),
+        TOOL_DBLCLICK => call_click(arguments, "dblclick"),
         TOOL_FILL => call_fill(arguments),
         TOOL_TYPE => call_type(arguments),
         TOOL_PRESS => call_press(arguments),
@@ -2542,6 +2576,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_TAB_LIST => call_literal(arguments, &["tab", "list"]),
         TOOL_TAB_SWITCH => call_one_string(arguments, "tab", "tab"),
         TOOL_TAB_CLOSE => call_optional_one(arguments, &["tab", "close"], "tab"),
+        TOOL_TAB_KEEP => call_cli_tool(arguments, tab_keep_command_args(arguments)?, None),
         TOOL_WINDOW_NEW => call_literal(arguments, &["window", "new"]),
         TOOL_FRAME_SWITCH => call_one_string(arguments, "frame", "frame"),
         TOOL_FRAME_MAIN => call_literal(arguments, &["frame", "main"]),
@@ -2877,6 +2912,14 @@ fn call_optional_one(arguments: &Value, parts: &[&str], key: &str) -> Result<Val
     call_cli_tool(arguments, args, None)
 }
 
+/// CLI args for the tab keep tool.
+fn tab_keep_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = command_parts("tab keep");
+    args.push(required_string(arguments, "keep")?);
+    args.extend(optional_string(arguments, "tab")?.filter(|tab| !tab.is_empty()));
+    Ok(args)
+}
+
 fn call_key_command(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
     let key = required_string(arguments, "key")?;
     call_cli_tool(arguments, vec![command.to_string(), key], None)
@@ -3101,20 +3144,28 @@ fn call_simple_selector(arguments: &Value, command: &str) -> Result<Value, Proto
     call_cli_tool(arguments, vec![command.to_string(), selector], None)
 }
 
-fn click_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+fn click_command_args(arguments: &Value, command: &str) -> Result<Vec<String>, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
-    let mut args = vec!["click".to_string(), selector];
-    if optional_bool(arguments, "newTab")?.unwrap_or(false) {
+    let mut args = vec![command.to_string(), selector];
+    if command == "click" && optional_bool(arguments, "newTab")?.unwrap_or(false) {
         args.push("--new-tab".to_string());
     }
     if optional_bool(arguments, "human")?.unwrap_or(false) {
         args.push("--human".to_string());
     }
+    if let Some(button) = optional_string(arguments, "button")? {
+        args.push("--button".to_string());
+        args.push(button);
+    }
+    if let Some(modifiers) = optional_string_array(arguments, "modifiers")? {
+        args.push("--modifiers".to_string());
+        args.push(modifiers.join(","));
+    }
     Ok(args)
 }
 
-fn call_click(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, click_command_args(arguments)?, None)
+fn call_click(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, click_command_args(arguments, command)?, None)
 }
 
 fn call_fill(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -5450,6 +5501,16 @@ mod tests {
     }
 
     #[test]
+    fn tab_keep_uses_canonical_cli_command() {
+        let args = tab_keep_command_args(&json!({"keep": "live", "tab": "t2"})).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let command = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(command["action"], "tab_keep");
+        assert_eq!(command["keep"], "live");
+        assert_eq!(command["tabId"], "t2");
+    }
+
+    #[test]
     fn reject_unknown_arguments_accepts_declared_and_shared_keys() {
         let definition = find_tool(TOOL_CLICK).unwrap();
         let args = json!({"selector": "@e1", "session": "s", "timeoutMs": 5});
@@ -5548,13 +5609,49 @@ mod tests {
 
     #[test]
     fn click_command_args_include_new_tab() {
-        let args = click_command_args(&json!({
-            "selector": "@e1",
-            "newTab": true,
-        }))
+        let args = click_command_args(
+            &json!({
+                "selector": "@e1",
+                "newTab": true,
+            }),
+            "click",
+        )
         .unwrap();
 
         assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+    }
+
+    #[test]
+    fn click_tools_forward_button_and_modifiers_to_cli_parser() {
+        for command in ["click", "dblclick"] {
+            let args = click_command_args(
+                &json!({
+                    "selector": "@e1",
+                    "button": "right",
+                    "modifiers": ["control", "shift"],
+                }),
+                command,
+            )
+            .unwrap();
+
+            assert_eq!(
+                args,
+                vec![
+                    command,
+                    "@e1",
+                    "--button",
+                    "right",
+                    "--modifiers",
+                    "control,shift"
+                ]
+            );
+
+            let flags = crate::flags::parse_flags(&args);
+            let parsed = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(parsed["action"], json!(command));
+            assert_eq!(parsed["button"], json!("right"));
+            assert_eq!(parsed["modifiers"], json!(10));
+        }
     }
 
     #[test]
@@ -6131,7 +6228,8 @@ mod tests {
     async fn mcp_human_click_preserves_session_mode() {
         let mut state = crate::native::actions::DaemonState::new();
         for human in [true, false] {
-            let args = click_command_args(&json!({"selector": "#target", "human": human})).unwrap();
+            let args = click_command_args(&json!({"selector": "#target", "human": human}), "click")
+                .unwrap();
             let flags = crate::flags::parse_flags(&args);
             let mut command = crate::commands::parse_command(&args, &flags).unwrap();
             assert_eq!(command.get("inputMode"), human.then_some(&json!("human")));

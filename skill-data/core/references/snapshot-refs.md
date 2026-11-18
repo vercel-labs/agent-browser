@@ -62,6 +62,21 @@ URL: https://example.com
   @e14 [a] "Privacy Policy"
 ```
 
+### Hints for ambiguous controls
+
+A control with an empty accessible name, or a name shared with another ref in the same snapshot, gets a hint read from the DOM after its ref:
+
+```
+- link [ref=e1] hint="img:cart"
+- button [ref=e2] hint="icon:icon-trash; in:Blue mug"
+- button [ref=e3] hint="icon:fa-heart; in:Blue mug"
+- button [ref=e4] hint="img:pencil; id:edit-btn; in:Blue mug"
+- textbox "Email" [ref=e5] hint="name:login-email"
+- textbox "Email" [ref=e6] hint="name:newsletter-email"
+```
+
+Hints are on by default in every snapshot mode and also appear in the `snapshot` text of `--json` output. A hint is not the accessible name, so `find role <role> --name` and stale-ref recovery ignore it: act on these elements by ref. Iframe refs never get a hint, and a control with nothing to read prints no hint.
+
 ## Using Refs
 
 Once you have refs, interact directly:
