@@ -1,3 +1,4 @@
+use rust_embed::Embed;
 use serde_json::json;
 use std::env;
 use std::fs;
@@ -9,7 +10,11 @@ use crate::color;
 struct SkillInfo {
     name: String,
     description: String,
-    dir: PathBuf,
+    /// `None` when the skill is served from the copy compiled into the binary.
+    dir: Option<PathBuf>,
+    content: String,
+    /// Supplementary files as `(relative path, content)`, sorted by path.
+    files: Vec<(String, String)>,
     /// When true, the skill is omitted from `skills list` and `skills get --all`
     /// but can still be fetched by name via `skills get <name>`. Used for
     /// bootstrap stubs that exist for external tooling (e.g. `npx skills add`)
@@ -28,6 +33,44 @@ struct SkillInfo {
 ///
 /// Both are shipped in the npm package and searched by `discover_skills`.
 const SKILL_DIRS: &[&str] = &["skills", "skill-data"];
+
+const SUPPLEMENTARY_DIRS: &[&str] = &["references", "templates"];
+
+/// `skill-data/` compiled into the binary, so standalone release binaries can
+/// serve version-matched skills without any files on disk. Builds without the
+/// directory (for example from the crates.io package) embed nothing.
+#[derive(Embed)]
+#[folder = "../skill-data/"]
+#[allow_missing = true]
+struct EmbeddedSkillData;
+
+/// Skills on disk take precedence so `AGENT_BROWSER_SKILLS_DIR`, package
+/// installs, and `~/.agent-browser` keep working; the embedded copy is the
+/// fallback.
+enum SkillSource {
+    Dirs(Vec<PathBuf>),
+    Embedded,
+}
+
+impl SkillSource {
+    fn find() -> Option<Self> {
+        let dirs = find_skills_dirs();
+        if !dirs.is_empty() {
+            Some(Self::Dirs(dirs))
+        } else if EmbeddedSkillData::iter().next().is_some() {
+            Some(Self::Embedded)
+        } else {
+            None
+        }
+    }
+
+    fn skills(&self) -> Vec<SkillInfo> {
+        match self {
+            Self::Dirs(dirs) => discover_skills(dirs),
+            Self::Embedded => discover_embedded_skills(),
+        }
+    }
+}
 
 /// Locate the package root that contains the skill directories.
 ///
@@ -160,12 +203,55 @@ fn discover_skills(dirs: &[PathBuf]) -> Vec<SkillInfo> {
                 skills.push(SkillInfo {
                     name,
                     description,
-                    dir: path,
+                    files: collect_supplementary_files(&path),
+                    dir: Some(path),
+                    content,
                     hidden,
                 });
             }
         }
     }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+/// Discover skills compiled into the binary, mirroring `discover_skills`.
+fn discover_embedded_skills() -> Vec<SkillInfo> {
+    let embedded: Vec<(String, String)> = EmbeddedSkillData::iter()
+        .filter_map(|path| {
+            let data = EmbeddedSkillData::get(&path)?.data.into_owned();
+            Some((path.into_owned(), String::from_utf8(data).ok()?))
+        })
+        .collect();
+
+    let mut skills: Vec<SkillInfo> = embedded
+        .iter()
+        .filter_map(|(path, content)| {
+            let skill_dir = path
+                .strip_suffix("/SKILL.md")
+                .filter(|dir| !dir.contains('/'))?;
+            let (name, description, hidden) = parse_frontmatter(content)?;
+            let mut files: Vec<(String, String)> = embedded
+                .iter()
+                .filter_map(|(path, content)| {
+                    let rel = path.strip_prefix(skill_dir)?.strip_prefix('/')?;
+                    let (subdir, file_name) = rel.split_once('/')?;
+                    (SUPPLEMENTARY_DIRS.contains(&subdir) && !file_name.contains('/'))
+                        .then(|| (rel.to_string(), content.clone()))
+                })
+                .collect();
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            Some(SkillInfo {
+                name,
+                description,
+                dir: None,
+                content: content.clone(),
+                files,
+                hidden,
+            })
+        })
+        .collect();
 
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
@@ -185,15 +271,10 @@ fn truncate_description(desc: &str, max_len: usize) -> String {
     format!("{}...", &desc[..end])
 }
 
-/// Read the full SKILL.md content (including frontmatter).
-fn read_skill_full(skill_md: &Path) -> Option<String> {
-    fs::read_to_string(skill_md).ok()
-}
-
 /// Collect all supplementary files (references/, templates/) for a skill.
 fn collect_supplementary_files(skill_dir: &Path) -> Vec<(String, String)> {
     let mut files = Vec::new();
-    for subdir_name in &["references", "templates"] {
+    for subdir_name in SUPPLEMENTARY_DIRS {
         let subdir = skill_dir.join(subdir_name);
         if !subdir.is_dir() {
             continue;
@@ -264,10 +345,10 @@ fn print_error(json_mode: bool, message: &str) {
 }
 
 fn run_get_refs(skill: &SkillInfo, refs: &[String], json_mode: bool) {
-    let files = collect_supplementary_files(&skill.dir);
+    let files = &skill.files;
     let mut selected = Vec::new();
     for wanted in refs {
-        match resolve_ref(&files, wanted) {
+        match resolve_ref(files, wanted) {
             Ok(file) => {
                 if !selected.contains(&file) {
                     selected.push(file);
@@ -321,11 +402,8 @@ fn run_get_refs(skill: &SkillInfo, refs: &[String], json_mode: bool) {
     }
 }
 
-fn run_list(skills_dirs: &[PathBuf], json_mode: bool) {
-    let skills: Vec<SkillInfo> = discover_skills(skills_dirs)
-        .into_iter()
-        .filter(|s| !s.hidden)
-        .collect();
+fn run_list(source: &SkillSource, json_mode: bool) {
+    let skills: Vec<SkillInfo> = source.skills().into_iter().filter(|s| !s.hidden).collect();
     if skills.is_empty() {
         if json_mode {
             println!(
@@ -366,14 +444,14 @@ fn run_list(skills_dirs: &[PathBuf], json_mode: bool) {
 }
 
 fn run_get(
-    skills_dirs: &[PathBuf],
+    source: &SkillSource,
     names: &[String],
     get_all: bool,
     full: bool,
     refs: &[String],
     json_mode: bool,
 ) {
-    let all_skills = discover_skills(skills_dirs);
+    let all_skills = source.skills();
 
     let targets: Vec<&SkillInfo> = if get_all {
         all_skills.iter().filter(|s| !s.hidden).collect()
@@ -445,21 +523,17 @@ fn run_get(
         let items: Vec<serde_json::Value> = targets
             .iter()
             .map(|s| {
-                let skill_md = s.dir.join("SKILL.md");
-                let content = read_skill_full(&skill_md).unwrap_or_default();
                 let mut obj = json!({
                     "name": s.name,
-                    "content": content,
+                    "content": s.content,
                 });
-                if full {
-                    let supplementary = collect_supplementary_files(&s.dir);
-                    if !supplementary.is_empty() {
-                        let files: Vec<serde_json::Value> = supplementary
-                            .iter()
-                            .map(|(path, content)| json!({ "path": path, "content": content }))
-                            .collect();
-                        obj["files"] = json!(files);
-                    }
+                if full && !s.files.is_empty() {
+                    let files: Vec<serde_json::Value> = s
+                        .files
+                        .iter()
+                        .map(|(path, content)| json!({ "path": path, "content": content }))
+                        .collect();
+                    obj["files"] = json!(files);
                 }
                 obj
             })
@@ -473,16 +547,12 @@ fn run_get(
             if i > 0 {
                 println!("\n---\n");
             }
-            let skill_md = s.dir.join("SKILL.md");
-            if let Some(content) = read_skill_full(&skill_md) {
-                print!("{}", content);
-                if !content.ends_with('\n') {
-                    println!();
-                }
+            print!("{}", s.content);
+            if !s.content.ends_with('\n') {
+                println!();
             }
             if full {
-                let supplementary = collect_supplementary_files(&s.dir);
-                for (path, content) in &supplementary {
+                for (path, content) in &s.files {
                     println!("\n--- {} ---\n", path);
                     print!("{}", content);
                     if !content.ends_with('\n') {
@@ -494,19 +564,23 @@ fn run_get(
     }
 }
 
-fn run_path(skills_dirs: &[PathBuf], name: Option<&str>, json_mode: bool) {
+fn run_path(source: &SkillSource, name: Option<&str>, json_mode: bool) {
     match name {
         Some(name) => {
-            let all_skills = discover_skills(skills_dirs);
+            let all_skills = source.skills();
             match all_skills.iter().find(|s| s.name == name) {
-                Some(s) => {
-                    let path = s.dir.to_string_lossy().to_string();
+                Some(SkillInfo { dir: None, .. }) => print_embedded_location(
+                    json!({ "name": name, "location": "embedded" }),
+                    json_mode,
+                ),
+                Some(SkillInfo { dir: Some(dir), .. }) => {
+                    let path = dir.to_string_lossy().to_string();
                     if json_mode {
                         println!(
                             "{}",
                             serde_json::to_string(&json!({
                                 "success": true,
-                                "data": { "name": s.name, "path": path },
+                                "data": { "name": name, "path": path },
                             }))
                             .unwrap_or_default()
                         );
@@ -532,7 +606,11 @@ fn run_path(skills_dirs: &[PathBuf], name: Option<&str>, json_mode: bool) {
             }
         }
         None => {
-            let paths: Vec<String> = skills_dirs
+            let SkillSource::Dirs(dirs) = source else {
+                print_embedded_location(json!({ "location": "embedded", "paths": [] }), json_mode);
+                return;
+            };
+            let paths: Vec<String> = dirs
                 .iter()
                 .map(|d| d.to_string_lossy().to_string())
                 .collect();
@@ -554,9 +632,22 @@ fn run_path(skills_dirs: &[PathBuf], name: Option<&str>, json_mode: bool) {
     }
 }
 
+/// `skills path` for embedded skills, which have no directory to print.
+fn print_embedded_location(data: serde_json::Value, json_mode: bool) {
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({ "success": true, "data": data })).unwrap_or_default()
+        );
+    } else {
+        println!(
+            "Skills are embedded in this binary. Run `agent-browser skills get <name>` to print one."
+        );
+    }
+}
+
 pub fn run_skills(args: &[String], json_mode: bool) {
-    let skills_dirs = find_skills_dirs();
-    if skills_dirs.is_empty() {
+    let Some(source) = SkillSource::find() else {
         if json_mode {
             println!(
                 "{}",
@@ -573,12 +664,12 @@ pub fn run_skills(args: &[String], json_mode: bool) {
             );
         }
         exit(1);
-    }
+    };
 
     let subcommand = args.get(1).map(|s| s.as_str());
 
     match subcommand {
-        None | Some("list") => run_list(&skills_dirs, json_mode),
+        None | Some("list") => run_list(&source, json_mode),
         Some("get") => {
             let mut names = Vec::new();
             let mut refs = Vec::new();
@@ -605,11 +696,11 @@ pub fn run_skills(args: &[String], json_mode: bool) {
                     },
                 }
             }
-            run_get(&skills_dirs, &names, get_all, full, &refs, json_mode);
+            run_get(&source, &names, get_all, full, &refs, json_mode);
         }
         Some("path") => {
             let name = args.get(2).map(|s| s.as_str());
-            run_path(&skills_dirs, name, json_mode);
+            run_path(&source, name, json_mode);
         }
         Some(unknown) => {
             if json_mode {
@@ -833,6 +924,25 @@ mod tests {
                     skill.name
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_embedded_skills_match_skill_data() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../skill-data");
+        let on_disk = discover_skills(&[root]);
+        let embedded = discover_embedded_skills();
+        assert!(embedded
+            .iter()
+            .any(|s| s.name == "core" && !s.files.is_empty()));
+        assert_eq!(embedded.len(), on_disk.len());
+        for (embedded, on_disk) in embedded.iter().zip(&on_disk) {
+            assert_eq!(embedded.name, on_disk.name);
+            assert_eq!(embedded.description, on_disk.description);
+            assert_eq!(embedded.hidden, on_disk.hidden);
+            assert_eq!(embedded.content, on_disk.content, "{}", embedded.name);
+            assert_eq!(embedded.files, on_disk.files, "{}", embedded.name);
+            assert!(embedded.dir.is_none());
         }
     }
 }
