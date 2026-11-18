@@ -220,6 +220,33 @@ fn command_is_browserless(cmd: &serde_json::Value) -> bool {
     }
 }
 
+/// Whether this invocation attaches to a browser agent-browser does not launch
+/// (`--cdp`, `--auto-connect`, `-p`, or `connect`). `--ca-cert` cannot change
+/// that browser's trust store, so, as for a browserless command, it only adds
+/// to the roots agent-browser verifies its own connection to the browser with.
+fn command_attaches_browser(flags: &Flags, cmd: &serde_json::Value) -> bool {
+    let attach_launch = cmd.get("action").and_then(|v| v.as_str()) == Some("launch")
+        && (cmd.get("cdpUrl").is_some()
+            || cmd.get("cdpPort").is_some()
+            || cmd.get("provider").is_some()
+            || cmd.get("autoConnect").and_then(|v| v.as_bool()) == Some(true));
+    attach_launch || flags.cdp.is_some() || flags.auto_connect || flags.provider.is_some()
+}
+
+/// `read` always carries the CLI's trust roots. A command that can launch or
+/// attach a browser carries them when they differ from the defaults, so the
+/// daemon verifies a remote CDP endpoint or provider API the same way.
+fn attach_tls_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("read") {
+        cmd["tls"] = json!(tls::session_options(flags, &flags.session));
+    } else if native::actions::command_launches_browser(cmd) {
+        let trust = tls::session_options(flags, &flags.session);
+        if !trust.is_default() {
+            cmd["tls"] = json!(trust);
+        }
+    }
+}
+
 fn restore_key_from_flags(flags: &Flags) -> Option<&str> {
     flags.restore.as_deref().or(flags.session_name.as_deref())
 }
@@ -280,21 +307,6 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     }
     if flags.ca_cert.is_some() && flags.clear_ca_cert {
         return Some("Cannot use --ca-cert with --no-ca-cert");
-    }
-    if flags.ca_cert.is_some() && flags.cdp.is_some() {
-        return Some(
-            "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)",
-        );
-    }
-    if flags.ca_cert.is_some() && flags.auto_connect {
-        return Some(
-            "Cannot use --ca-cert with --auto-connect (--ca-cert requires a locally launched Chromium browser on Linux)",
-        );
-    }
-    if flags.ca_cert.is_some() && flags.provider.is_some() {
-        return Some(
-            "Cannot use --ca-cert with -p/--provider (--ca-cert requires a locally launched Chromium browser on Linux)",
-        );
     }
     if flags.ca_cert.is_some() && flags.profile.is_some() {
         return Some(
@@ -1688,10 +1700,9 @@ fn main() {
     {
         cmd["argv"] = json!(read_batch_stdin(&flags));
     }
-    match cmd.get("action").and_then(|v| v.as_str()) {
-        Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
-        Some("close") => forget_before_close(&flags.session),
-        _ => {}
+    attach_tls_to_command(&mut cmd, &flags);
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("close") {
+        forget_before_close(&flags.session);
     }
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
@@ -1790,16 +1801,17 @@ fn main() {
         return;
     }
 
-    let launch_mode_error = if command_is_browserless(&cmd) {
-        let ca_cert = flags.ca_cert.take();
-        let clear_ca_cert = std::mem::take(&mut flags.clear_ca_cert);
-        let error = incompatible_launch_mode_error(&flags);
-        flags.ca_cert = ca_cert;
-        flags.clear_ca_cert = clear_ca_cert;
-        error
-    } else {
-        incompatible_launch_mode_error(&flags)
-    };
+    let launch_mode_error =
+        if command_is_browserless(&cmd) || command_attaches_browser(&flags, &cmd) {
+            let ca_cert = flags.ca_cert.take();
+            let clear_ca_cert = std::mem::take(&mut flags.clear_ca_cert);
+            let error = incompatible_launch_mode_error(&flags);
+            flags.ca_cert = ca_cert;
+            flags.clear_ca_cert = clear_ca_cert;
+            error
+        } else {
+            incompatible_launch_mode_error(&flags)
+        };
     if let Some(msg) = launch_mode_error {
         if flags.json {
             print_json_error(msg);
@@ -2090,10 +2102,9 @@ fn run_batch(
             }
         };
         attach_input_mode(&mut parsed, flags);
-        match parsed.get("action").and_then(|v| v.as_str()) {
-            Some("read") => parsed["tls"] = json!(tls::session_options(flags, &flags.session)),
-            Some("close") => tls::clear_session(&flags.session),
-            _ => {}
+        attach_tls_to_command(&mut parsed, flags);
+        if parsed.get("action").and_then(|v| v.as_str()) == Some("close") {
+            tls::clear_session(&flags.session);
         }
 
         let action = parsed
@@ -2874,18 +2885,6 @@ mod tests {
         lightpanda.engine = Some("lightpanda".to_string());
 
         let cases = [
-            (
-                with_ca(launch_mode_flags(false, true, false, false)),
-                "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)",
-            ),
-            (
-                with_ca(launch_mode_flags(true, false, false, false)),
-                "Cannot use --ca-cert with --auto-connect (--ca-cert requires a locally launched Chromium browser on Linux)",
-            ),
-            (
-                with_ca(launch_mode_flags(false, false, true, false)),
-                "Cannot use --ca-cert with -p/--provider (--ca-cert requires a locally launched Chromium browser on Linux)",
-            ),
             (
                 ignore_errors,
                 "Cannot use --ca-cert with --ignore-https-errors",

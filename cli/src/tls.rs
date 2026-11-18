@@ -1,9 +1,10 @@
-//! Trust roots for the CLI's own HTTPS requests.
+//! Trust roots for the CLI's own TLS connections.
 //!
 //! By default the CLI verifies peers against the Mozilla roots compiled into
 //! the binary. A private CA installed by a sandbox, MDM profile, or enterprise
 //! image is invisible to that list, so an HTTPS-intercepting proxy breaks
-//! `install`, `upgrade`, `doctor` probes, and `read` with `UnknownIssuer`.
+//! `install`, `upgrade`, `doctor` probes, `read`, and the daemon's CDP
+//! connections to `wss://` and `https://` endpoints with `UnknownIssuer`.
 //!
 //! Two opt-ins widen the trust store. Neither disables verification:
 //!
@@ -12,13 +13,15 @@
 //! - `--ca-cert <path>` adds a PEM bundle or DER certificate on top of the
 //!   selected roots. `SSL_CERT_FILE` is honored as an ambient fallback.
 //!
-//! Session commands such as `read` send the resolved options with every
-//! request, so the daemon holds no trust state. An explicit selection made on
+//! Session commands such as `read` and `launch` send the resolved options with
+//! every request, so the daemon never derives trust from its own environment.
+//! It keeps the options of the launch that opened a remote CDP connection only
+//! to reach that same endpoint again. An explicit selection made on
 //! the command line is saved beside the session until `close`, which keeps it
 //! in effect when the daemon restarts for an unrelated config change.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
@@ -218,19 +221,38 @@ fn add_ca_bundle(store: &mut RootCertStore, path: &str) -> Result<usize, String>
     Ok(bundle.certificates().len())
 }
 
+/// TLS client configuration for the selected roots, or `None` for default
+/// options so callers keep their built-in roots unchanged.
+pub fn client_config(opts: &TrustOptions) -> Result<Option<ClientConfig>, String> {
+    if opts.is_default() {
+        return Ok(None);
+    }
+    Ok(Some(
+        ClientConfig::builder()
+            .with_root_certificates(build_root_store(opts)?)
+            .with_no_client_auth(),
+    ))
+}
+
 /// Apply the selected roots to an HTTP client builder. Default options leave
 /// the builder unchanged.
 pub fn apply_to_reqwest(
     builder: reqwest::ClientBuilder,
     opts: &TrustOptions,
 ) -> Result<reqwest::ClientBuilder, String> {
-    if opts.is_default() {
-        return Ok(builder);
-    }
-    let config = ClientConfig::builder()
-        .with_root_certificates(build_root_store(opts)?)
-        .with_no_client_auth();
-    Ok(builder.use_preconfigured_tls(config))
+    Ok(match client_config(opts)? {
+        Some(config) => builder.use_preconfigured_tls(config),
+        None => builder,
+    })
+}
+
+/// Connector for a `wss://` WebSocket, such as a remote CDP endpoint. Default
+/// options return `None`, which keeps the compiled-in roots of
+/// tokio-tungstenite.
+pub fn websocket_connector(
+    opts: &TrustOptions,
+) -> Result<Option<tokio_tungstenite::Connector>, String> {
+    Ok(client_config(opts)?.map(|config| tokio_tungstenite::Connector::Rustls(Arc::new(config))))
 }
 
 /// One-line description of the selected roots, for `agent-browser doctor`.
@@ -321,6 +343,26 @@ mod tests {
         assert_eq!(value["useSystemCa"], true);
         assert_eq!(value["caCert"], "/tmp/ca.pem");
         assert_eq!(serde_json::from_value::<TrustOptions>(value).unwrap(), opts);
+    }
+
+    #[test]
+    fn websocket_connector_only_for_selected_roots() {
+        assert!(websocket_connector(&TrustOptions::default())
+            .unwrap()
+            .is_none());
+        let opts = TrustOptions {
+            use_system_ca: true,
+            ..TrustOptions::default()
+        };
+        assert!(matches!(
+            websocket_connector(&opts),
+            Ok(Some(tokio_tungstenite::Connector::Rustls(_)))
+        ));
+        let missing = TrustOptions {
+            ca_cert: Some("/nonexistent/ca.pem".to_string()),
+            ..TrustOptions::default()
+        };
+        assert!(websocket_connector(&missing).is_err());
     }
 
     #[test]

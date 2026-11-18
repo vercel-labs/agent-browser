@@ -276,6 +276,42 @@ fn read_trust_survives_a_daemon_restart_until_close() {
     read(&session, &a.url(), &[], false);
 }
 
+/// `connect` verifies a `wss://` CDP endpoint with the same roots as `read`.
+/// The fixture answers the upgrade with plain HTTP, so a trusted handshake
+/// ends in a WebSocket error instead of a certificate error.
+#[test]
+fn connect_verifies_wss_cdp_endpoint_with_session_trust() {
+    let a = TlsServer::a();
+    let url = format!("wss://localhost:{}/devtools/browser", a.port);
+    let connect = |session: &Session, options: &[&str]| -> String {
+        let mut args = options.to_vec();
+        args.extend(["connect", url.as_str()]);
+        let response = session.run(&args);
+        assert_eq!(response["success"], false, "{args:?}: {response}");
+        response["error"].as_str().unwrap_or_default().to_string()
+    };
+
+    let session = Session::new();
+    let error = connect(&session, &[]);
+    assert!(error.contains("UnknownIssuer"), "{error}");
+    assert_eq!(a.requests.load(Ordering::SeqCst), 0);
+
+    let ca = session.ca("ca.pem", CA_A);
+    let error = connect(&session, &["--ca-cert", ca.to_str().unwrap()]);
+    assert!(!error.contains("certificate"), "{error}");
+    assert_eq!(a.requests.load(Ordering::SeqCst), 1);
+
+    let wrong = session.ca("wrong.pem", CA_B);
+    let error = connect(&session, &["--ca-cert", wrong.to_str().unwrap()]);
+    assert!(error.contains("UnknownIssuer"), "{error}");
+
+    let mut ambient = Session::new();
+    ambient.system_bundle = Some(ambient.ca("bundle.pem", CA_A));
+    let error = connect(&ambient, &[]);
+    assert!(!error.contains("certificate"), "{error}");
+    assert_eq!(a.requests.load(Ordering::SeqCst), 2);
+}
+
 #[test]
 fn trust_preserves_hostname_and_expiry_validation() {
     let a = TlsServer::a();

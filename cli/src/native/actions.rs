@@ -52,6 +52,7 @@ use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSU
 use super::webdriver::ios;
 use super::webdriver::safari;
 use super::webmcp;
+use crate::tls::TrustOptions;
 
 /// Wait strategy used by `auth_login` when navigating to the login page.
 ///
@@ -89,6 +90,8 @@ pub struct PendingConfirmation {
 struct ActiveProviderSession {
     session: providers::ProviderSession,
     plugins: Vec<crate::plugins::PluginConfig>,
+    /// Roots the session was created with, so closing it reaches the same API.
+    trust: TrustOptions,
 }
 
 /// Captured request/response metadata used to export HAR 1.2 files.
@@ -388,14 +391,11 @@ fn validate_ca_cert_launch_mode(
     engine: Option<&str>,
     external_launch: bool,
 ) -> Result<(), String> {
-    if options.ca_cert.is_none() {
+    // An attached browser keeps its own trust store. The CA only verifies the
+    // daemon's connection to it, through the command's `tls` options, and
+    // the browser trust is applied again on the next local launch.
+    if options.ca_cert.is_none() || external_launch {
         return Ok(());
-    }
-    if external_launch {
-        return Err(
-            "CA trust is active for this session and requires a locally launched Chromium browser on Linux. Pass --no-ca-cert to clear it before using CDP, auto-connect, or a provider."
-                .to_string(),
-        );
     }
     if engine.is_some_and(|value| !value.eq_ignore_ascii_case("chrome")) {
         return Err("--ca-cert is supported only with the Chrome engine on Linux".to_string());
@@ -688,6 +688,10 @@ pub struct DaemonState {
     /// External browser this session attached to; target-less launches resolve to it.
     attached_target: Option<AttachedTarget>,
     effective_ca_cert: Option<EffectiveCaCert>,
+    /// Roots that verify a remote CDP endpoint's TLS: the `tls` options of the
+    /// last command that could launch a browser, kept so the daemon reaches
+    /// that endpoint the same way when it reconnects on its own.
+    remote_trust: TrustOptions,
     /// Whether browser-level auto-attach has been enabled for the current
     /// browser so top-level popups pause before their first request.
     network_auto_attach_installed: bool,
@@ -858,6 +862,7 @@ impl DaemonState {
             cdp_headers: None,
             attached_target: None,
             effective_ca_cert: None,
+            remote_trust: TrustOptions::default(),
             network_auto_attach_installed: false,
             viewport: None,
             session_setup: SessionSetup::default(),
@@ -2577,13 +2582,12 @@ async fn attach_provider_cdp(
     {
         return Err("Browser Use did not return a usable cdpUrl".to_string());
     }
+    let trust = state.remote_trust.clone();
     let attach = async {
         if conn.direct_page {
-            BrowserManager::connect_cdp_direct(&conn.ws_url).await
-        } else if ws_headers.is_some() {
-            BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers).await
+            BrowserManager::connect_cdp_direct(&conn.ws_url, &trust).await
         } else {
-            BrowserManager::connect_cdp(&conn.ws_url).await
+            BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers, &trust).await
         }
     };
     if provider_is_browser_use(provider) {
@@ -2615,15 +2619,22 @@ fn remember_active_provider_session(
     plugins: &[crate::plugins::PluginConfig],
 ) {
     state.active_provider_connection = true;
+    let trust = state.remote_trust.clone();
     state.active_provider_session = session.map(|session| ActiveProviderSession {
         session,
         plugins: plugins.to_vec(),
+        trust,
     });
 }
 
 async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), String> {
     if let Some(active) = state.active_provider_session.as_ref() {
-        providers::close_provider_session_with_plugins(&active.session, &active.plugins).await?;
+        providers::close_provider_session_with_plugins(
+            &active.session,
+            &active.plugins,
+            &active.trust,
+        )
+        .await?;
     }
     state.active_provider_session = None;
     state.active_provider_connection = false;
@@ -2715,6 +2726,19 @@ fn is_auth_login_no_navigate(cmd: &Value) -> bool {
 /// Whether `cmd` may launch or relaunch the session's browser. Commands that
 /// cannot apply only the live settings, so launch settings and a forced
 /// relaunch wait for the next command that can.
+/// The roots a command carries for remote CDP endpoints and provider APIs. The
+/// CLI sends `tls` only when it differs from the defaults (`--ca-cert`,
+/// `--use-system-ca`, `SSL_CERT_FILE`), so an absent field means the
+/// compiled-in roots.
+fn remote_trust_from_command(cmd: &Value) -> Result<TrustOptions, String> {
+    match cmd.get("tls") {
+        Some(value) if !value.is_null() => {
+            serde_json::from_value(value.clone()).map_err(|e| format!("Invalid TLS options: {e}"))
+        }
+        _ => Ok(TrustOptions::default()),
+    }
+}
+
 pub(crate) fn command_launches_browser(cmd: &Value) -> bool {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
     (!skip_launch_action(action) || action == "launch") && !is_auth_login_no_navigate(cmd)
@@ -3139,6 +3163,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // command too. Launch settings wait until the launch itself: a command that
     // is denied or needs confirmation leaves the browser and its settings alone.
     let launches = command_launches_browser(cmd);
+    if launches {
+        match remote_trust_from_command(cmd) {
+            Ok(trust) => state.remote_trust = trust,
+            Err(e) => return error_response(&id, &e),
+        }
+    }
     let mut launch_patch: Option<Patch> = None;
     let mut settings_outcome = if action == "close" {
         SettingsOutcome::default()
@@ -4866,7 +4896,9 @@ async fn auto_launch_inner(
         })?;
         let headers =
             cdp_headers_for(state, &cdp).or_else(|| cdp_headers_from_settings(&state.settings));
-        let mgr = BrowserManager::connect_cdp_when_listening(&cdp, headers.clone()).await?;
+        let mgr =
+            BrowserManager::connect_cdp_when_listening(&cdp, headers.clone(), &state.remote_trust)
+                .await?;
         state.cdp_headers = headers.map(|headers| (cdp.clone(), headers));
         state.reset_input_state();
         state.browser = Some(mgr);
@@ -4958,12 +4990,22 @@ async fn auto_launch_inner(
             return result;
         }
         if !p.is_empty() {
-            let conn =
-                providers::connect_provider_with_plugins(&p, &plugins, &state.settings).await?;
+            let conn = providers::connect_provider_with_plugins(
+                &p,
+                &plugins,
+                &state.settings,
+                &state.remote_trust,
+            )
+            .await?;
             let provider_metadata = conn.metadata.clone();
             if conn.direct_page && !allowed_domains.is_empty() {
                 if let Some(ref ps) = conn.session {
-                    let _ = providers::close_provider_session_with_plugins(ps, &plugins).await;
+                    let _ = providers::close_provider_session_with_plugins(
+                        ps,
+                        &plugins,
+                        &state.remote_trust,
+                    )
+                    .await;
                 }
                 return Err(direct_page_allowed_domains_error());
             }
@@ -16974,7 +17016,11 @@ mod tests {
             }
         });
         let mut state = DaemonState::new();
-        state.browser = Some(BrowserManager::connect_cdp_direct(&url).await.unwrap());
+        state.browser = Some(
+            BrowserManager::connect_cdp_direct(&url, &TrustOptions::default())
+                .await
+                .unwrap(),
+        );
         let client = state.browser.as_ref().unwrap().client.clone();
         state.subscribe_to_browser_events();
         state.har_recording = true;
@@ -18791,6 +18837,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
                 ..crate::plugins::PluginConfig::default()
             }],
+            trust: TrustOptions::default(),
         });
 
         close_current_browser(&mut state).await.unwrap();
@@ -18809,6 +18856,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 session_id: "0e6ae5d0-93cf-4b9c-8c62-2c9c07b6c0f7".to_string(),
             },
             plugins: Vec::new(),
+            trust: TrustOptions::default(),
         }
     }
 
@@ -19888,7 +19936,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
-    fn test_provider_compatibility_uses_resolved_ca_cert_transition() {
+    fn test_external_launch_keeps_ca_trust_for_the_next_local_launch() {
         let mut state = DaemonState::new();
         state.effective_ca_cert = Some(EffectiveCaCert {
             path: "/tmp/first.pem".to_string(),
@@ -19898,15 +19946,52 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let retained = resolve_effective_ca_cert(&json!({}), &state).unwrap();
         let mut retained_options = LaunchOptions::default();
         apply_effective_ca_cert(&mut retained_options, &retained);
-        let error =
-            validate_ca_cert_launch_mode(&retained_options, Some("chrome"), true).unwrap_err();
-        assert!(error.contains("CA trust is active for this session"));
-        assert!(error.contains("--no-ca-cert"));
+        assert!(validate_ca_cert_launch_mode(&retained_options, Some("chrome"), true).is_ok());
+        assert_eq!(retained_options.ca_cert.as_deref(), Some("/tmp/first.pem"));
+    }
 
-        let cleared = resolve_effective_ca_cert(&json!({ "clearCaCert": true }), &state).unwrap();
-        let mut cleared_options = LaunchOptions::default();
-        apply_effective_ca_cert(&mut cleared_options, &cleared);
-        assert!(validate_ca_cert_launch_mode(&cleared_options, Some("chrome"), true).is_ok());
+    #[test]
+    fn test_remote_trust_comes_from_the_command() {
+        assert_eq!(
+            remote_trust_from_command(&json!({ "action": "launch" })).unwrap(),
+            TrustOptions::default()
+        );
+        let trust = remote_trust_from_command(&json!({
+            "action": "launch",
+            "cdpUrl": "wss://example.com/cdp",
+            "tls": { "useSystemCa": true, "caCert": "/tmp/proxy-ca.pem" }
+        }))
+        .unwrap();
+        assert!(trust.use_system_ca);
+        assert_eq!(trust.ca_cert.as_deref(), Some("/tmp/proxy-ca.pem"));
+        assert!(remote_trust_from_command(&json!({ "tls": { "useSystemCa": "yes" } })).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_only_launching_commands_replace_remote_trust() {
+        let mut state = DaemonState::new();
+        state.remote_trust = TrustOptions {
+            use_system_ca: true,
+            ..TrustOptions::default()
+        };
+        let _ = execute_command(
+            &json!({ "id": "1", "action": "deny", "confirmationId": "none" }),
+            &mut state,
+        )
+        .await;
+        assert!(state.remote_trust.use_system_ca);
+
+        // A malformed `tls` is rejected before anything launches.
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "launch", "cdpUrl": "ws://127.0.0.1:1", "tls": 1 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid TLS options"));
     }
 
     #[test]
@@ -19942,12 +20027,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
-    fn test_daemon_rejects_ca_cert_outside_local_chrome() {
+    fn test_daemon_rejects_ca_cert_for_unsupported_local_launches() {
         let ca = LaunchOptions {
             ca_cert: Some("/tmp/proxy-ca.pem".to_string()),
             ..Default::default()
         };
-        assert!(validate_ca_cert_launch_mode(&ca, Some("chrome"), true).is_err());
+        assert!(validate_ca_cert_launch_mode(&ca, Some("chrome"), true).is_ok());
         assert!(validate_ca_cert_launch_mode(&ca, Some("lightpanda"), false).is_err());
 
         let ignored = LaunchOptions {

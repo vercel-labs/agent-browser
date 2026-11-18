@@ -4,6 +4,7 @@
 //! Each provider returns a CDP WebSocket URL for connecting via BrowserManager.
 
 use crate::session_settings::Running;
+use crate::tls::TrustOptions;
 use serde_json::{json, Value};
 use std::env;
 use std::time::Duration;
@@ -32,18 +33,26 @@ pub struct ProviderConnection {
 /// along with session info for cleanup on failure.
 pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection, String> {
     let plugins = crate::plugins::plugins_from_env();
-    connect_provider_with_plugins(provider_name, &plugins, &Running::from_env()).await
+    connect_provider_with_plugins(
+        provider_name,
+        &plugins,
+        &Running::from_env(),
+        &TrustOptions::default(),
+    )
+    .await
 }
 
 /// Connects to a built-in provider or a plugin provider from the supplied
 /// registry. Callers that already loaded config must use this helper so policy
 /// checks and provider execution consult the same plugin list.
+/// `trust` selects the roots that verify the provider's API.
 pub async fn connect_provider_with_plugins(
     provider_name: &str,
     plugins: &[crate::plugins::PluginConfig],
     settings: &Running,
+    trust: &TrustOptions,
 ) -> Result<ProviderConnection, String> {
-    connect_provider_with_plugins_and_options(provider_name, plugins, settings, None).await
+    connect_provider_with_plugins_and_options(provider_name, plugins, settings, None, trust).await
 }
 
 /// Connects to a built-in provider or plugin provider with launch options
@@ -55,10 +64,11 @@ pub async fn connect_provider_with_plugins_and_options(
     plugins: &[crate::plugins::PluginConfig],
     settings: &Running,
     launch_options: Option<Value>,
+    trust: &TrustOptions,
 ) -> Result<ProviderConnection, String> {
     match provider_name.to_lowercase().as_str() {
         "browserbase" => {
-            let (url, session) = connect_browserbase().await?;
+            let (url, session) = connect_browserbase(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -67,7 +77,7 @@ pub async fn connect_provider_with_plugins_and_options(
             })
         }
         "browserless" => {
-            let (url, session) = connect_browserless().await?;
+            let (url, session) = connect_browserless(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -76,7 +86,7 @@ pub async fn connect_provider_with_plugins_and_options(
             })
         }
         "browser-use" | "browseruse" => {
-            let (url, session) = connect_browser_use().await?;
+            let (url, session) = connect_browser_use(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -85,7 +95,7 @@ pub async fn connect_provider_with_plugins_and_options(
             })
         }
         "kernel" => {
-            let (url, session) = connect_kernel().await?;
+            let (url, session) = connect_kernel(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -94,7 +104,7 @@ pub async fn connect_provider_with_plugins_and_options(
             })
         }
         "agentcore" => {
-            let (url, session) = connect_agentcore().await?;
+            let (url, session) = connect_agentcore(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -117,13 +127,15 @@ pub async fn connect_provider_with_plugins_and_options(
 /// Close a provider session (call on CDP connect failure).
 pub async fn close_provider_session(session: &ProviderSession) -> Result<(), String> {
     let plugins = crate::plugins::plugins_from_env();
-    close_provider_session_with_plugins(session, &plugins).await
+    close_provider_session_with_plugins(session, &plugins, &TrustOptions::default()).await
 }
 
-/// Close a provider session with the plugin registry that created it.
+/// Close a provider session with the plugin registry and trust roots that
+/// created it.
 pub async fn close_provider_session_with_plugins(
     session: &ProviderSession,
     plugins: &[crate::plugins::PluginConfig],
+    trust: &TrustOptions,
 ) -> Result<(), String> {
     if let Some(plugin_name) = session.provider.strip_prefix("plugin:") {
         if let Ok(cleanup) = serde_json::from_str::<Value>(&session.session_id) {
@@ -134,7 +146,7 @@ pub async fn close_provider_session_with_plugins(
         return Ok(());
     }
 
-    let client = reqwest::Client::new();
+    let client = provider_client(trust)?;
     match session.provider.as_str() {
         "browserbase" => {
             if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
@@ -155,6 +167,7 @@ pub async fn close_provider_session_with_plugins(
                 BROWSER_USE_API_BASE,
                 &session.session_id,
                 BROWSER_USE_STOP_DEADLINE,
+                trust,
             )
             .await;
         }
@@ -179,7 +192,7 @@ pub async fn close_provider_session_with_plugins(
         }
         "agentcore" => {
             // AgentCore session cleanup is handled via signed DELETE request
-            let _ = close_agentcore_session(&session.session_id).await;
+            let _ = close_agentcore_session(&session.session_id, trust).await;
         }
         _ => {}
     }
@@ -245,11 +258,13 @@ pub async fn connect_plugin_provider_with_plugins_and_options(
     })
 }
 
-async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_browserbase(
+    trust: &TrustOptions,
+) -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("BROWSERBASE_API_KEY")
         .map_err(|_| "BROWSERBASE_API_KEY environment variable is not set")?;
 
-    let client = reqwest::Client::new();
+    let client = provider_client(trust)?;
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
         .header("content-type", "application/json")
@@ -297,7 +312,9 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     ))
 }
 
-async fn connect_browserless() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_browserless(
+    trust: &TrustOptions,
+) -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("BROWSERLESS_API_KEY")
         .map_err(|_| "BROWSERLESS_API_KEY environment variable is not set")?;
 
@@ -325,7 +342,7 @@ async fn connect_browserless() -> Result<(String, Option<ProviderSession>), Stri
 
     let url = format!("{}/session", api_url.trim_end_matches('/'));
 
-    let client = reqwest::Client::new();
+    let client = provider_client(trust)?;
     let response = client
         .post(&url)
         .query(&[("token", &api_key)])
@@ -378,12 +395,21 @@ async fn connect_browserless() -> Result<(String, Option<ProviderSession>), Stri
     ))
 }
 
-async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), String> {
-    connect_browser_use_at(BROWSER_USE_API_BASE, BROWSER_USE_CREATE_DEADLINE).await
+async fn connect_browser_use(
+    trust: &TrustOptions,
+) -> Result<(String, Option<ProviderSession>), String> {
+    connect_browser_use_at(BROWSER_USE_API_BASE, BROWSER_USE_CREATE_DEADLINE, trust).await
 }
 
-fn browser_use_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+/// HTTP client for a provider API, verified against `trust`.
+fn provider_client(trust: &TrustOptions) -> Result<reqwest::Client, String> {
+    crate::tls::apply_to_reqwest(reqwest::Client::builder(), trust)?
+        .build()
+        .map_err(|e| format!("Provider HTTP client could not be initialized: {e}"))
+}
+
+fn browser_use_client(trust: &TrustOptions) -> Result<reqwest::Client, String> {
+    crate::tls::apply_to_reqwest(reqwest::Client::builder(), trust)?
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "Browser Use HTTP client could not be initialized".to_string())
@@ -410,6 +436,7 @@ async fn browser_use_response(request: reqwest::RequestBuilder) -> Result<Value,
 async fn connect_browser_use_at(
     base: &str,
     deadline: Duration,
+    trust: &TrustOptions,
 ) -> Result<(String, Option<ProviderSession>), String> {
     let key = env::var("BROWSER_USE_API_KEY")
         .map_err(|_| "BROWSER_USE_API_KEY environment variable is not set")?;
@@ -417,7 +444,7 @@ async fn connect_browser_use_at(
         format!("Browser Use create {error}; the browser may still have been created; inspect Browser Use Cloud before retrying")
     };
     let response = browser_use_response(
-        browser_use_client()?
+        browser_use_client(trust)?
             .post(format!("{base}/browsers"))
             .header("X-Browser-Use-API-Key", &key)
             .timeout(deadline)
@@ -445,6 +472,7 @@ async fn stop_browser_use_session_at(
     base: &str,
     session_id: &str,
     deadline: Duration,
+    trust: &TrustOptions,
 ) -> Result<(), String> {
     let id = uuid::Uuid::parse_str(session_id)
         .map_err(|_| "Browser Use session id is not a valid UUID")?;
@@ -455,7 +483,7 @@ async fn stop_browser_use_session_at(
         return Err("Browser Use session identity matches a credential".to_string());
     }
     let response = browser_use_response(
-        browser_use_client()?
+        browser_use_client(trust)?
             .patch(format!("{base}/browsers/{id}"))
             .header("X-Browser-Use-API-Key", key)
             .timeout(deadline)
@@ -524,7 +552,7 @@ fn kernel_profile_from_env() -> Option<Value> {
     Some(json!({ "name": name, "save_changes": save_changes }))
 }
 
-async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_kernel(trust: &TrustOptions) -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("KERNEL_API_KEY").ok();
     let endpoint =
         env::var("KERNEL_ENDPOINT").unwrap_or_else(|_| "https://api.onkernel.com".to_string());
@@ -554,7 +582,7 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
             .insert("profile".to_string(), profile);
     }
 
-    let client = reqwest::Client::new();
+    let client = provider_client(trust)?;
     let mut request = client.post(&url).header("Content-Type", "application/json");
     if let Some(ref key) = api_key {
         request = request.header("Authorization", format!("Bearer {}", key));
@@ -654,7 +682,9 @@ mod agentcore {
         AGENTCORE_WS_HEADERS.with(|cell| cell.borrow_mut().take())
     }
 
-    pub async fn connect() -> Result<(String, Option<ProviderSession>), String> {
+    pub async fn connect(
+        trust: &TrustOptions,
+    ) -> Result<(String, Option<ProviderSession>), String> {
         let region = env::var("AGENTCORE_REGION")
             .or_else(|_| env::var("AWS_REGION"))
             .or_else(|_| env::var("AWS_DEFAULT_REGION"))
@@ -693,7 +723,7 @@ mod agentcore {
 
         let signed_headers = sign_request("PUT", &url, &region, Some(&body)).await?;
 
-        let client = reqwest::Client::new();
+        let client = provider_client(trust)?;
         let mut req = client.put(&url).body(body.clone());
         for (key, value) in &signed_headers {
             req = req.header(key.as_str(), value.as_str());
@@ -948,7 +978,7 @@ mod agentcore {
         Ok(headers)
     }
 
-    pub async fn close_session(session_id: &str) -> Result<(), String> {
+    pub async fn close_session(session_id: &str, trust: &TrustOptions) -> Result<(), String> {
         let info = get_agentcore_info();
         let (region, browser_id) = match &info {
             Some(i) => (i.region.clone(), i.browser_identifier.clone()),
@@ -975,7 +1005,7 @@ mod agentcore {
 
         let signed_headers = sign_request("PUT", &url, &region, Some(&body)).await?;
 
-        let client = reqwest::Client::new();
+        let client = provider_client(trust)?;
         let mut req = client.put(&url).body(body);
         for (key, value) in &signed_headers {
             req = req.header(key.as_str(), value.as_str());
@@ -988,12 +1018,14 @@ mod agentcore {
 
 pub use agentcore::{get_agentcore_info, take_agentcore_ws_headers};
 
-async fn connect_agentcore() -> Result<(String, Option<ProviderSession>), String> {
-    agentcore::connect().await
+async fn connect_agentcore(
+    trust: &TrustOptions,
+) -> Result<(String, Option<ProviderSession>), String> {
+    agentcore::connect(trust).await
 }
 
-async fn close_agentcore_session(session_id: &str) -> Result<(), String> {
-    agentcore::close_session(session_id).await
+async fn close_agentcore_session(session_id: &str, trust: &TrustOptions) -> Result<(), String> {
+    agentcore::close_session(session_id, trust).await
 }
 
 #[cfg(test)]
@@ -1078,9 +1110,10 @@ mod tests {
         ] {
             let body = json!({"id":TEST_BROWSER_ID,"cdpUrl":endpoint});
             let (base, server) = browser_use_server(201, &body.to_string(), false);
-            let (url, session) = connect_browser_use_at(&base, Duration::from_secs(2))
-                .await
-                .unwrap();
+            let (url, session) =
+                connect_browser_use_at(&base, Duration::from_secs(2), &TrustOptions::default())
+                    .await
+                    .unwrap();
             assert_eq!(url, endpoint);
             assert_eq!(session.unwrap().session_id, TEST_BROWSER_ID);
             let request = server.join().unwrap();
@@ -1128,8 +1161,13 @@ mod tests {
             (500, "hostile-secret-body".to_string(), false),
         ] {
             let (base, server) = browser_use_server(status, &body, false);
-            let result =
-                stop_browser_use_session_at(&base, TEST_BROWSER_ID, Duration::from_secs(2)).await;
+            let result = stop_browser_use_session_at(
+                &base,
+                TEST_BROWSER_ID,
+                Duration::from_secs(2),
+                &TrustOptions::default(),
+            )
+            .await;
             assert_eq!(result.is_ok(), success, "{result:?}");
             if let Err(error) = result {
                 assert!(error.contains(TEST_BROWSER_ID));
@@ -1154,9 +1192,10 @@ mod tests {
             (200, r#"{"id":"../secret"}"#),
         ] {
             let (base, server) = browser_use_server(status, body, false);
-            let error = connect_browser_use_at(&base, Duration::from_secs(2))
-                .await
-                .unwrap_err();
+            let error =
+                connect_browser_use_at(&base, Duration::from_secs(2), &TrustOptions::default())
+                    .await
+                    .unwrap_err();
             assert!(error.contains("inspect Browser Use Cloud"));
             assert!(!error.contains("secret") && !error.contains("test-key-do-not-echo"));
             server.join().unwrap();
@@ -1167,17 +1206,21 @@ mod tests {
             &json!({"id":TEST_BROWSER_ID.to_uppercase()}).to_string(),
             false,
         );
-        let error = connect_browser_use_at(&base, Duration::from_secs(2))
+        let error = connect_browser_use_at(&base, Duration::from_secs(2), &TrustOptions::default())
             .await
             .unwrap_err();
         assert!(!error.to_lowercase().contains(TEST_BROWSER_ID));
         server.join().unwrap();
         guard.remove("BROWSER_USE_API_KEY");
         for id in ["../secret", TEST_BROWSER_ID] {
-            let error =
-                stop_browser_use_session_at("http://127.0.0.1:1", id, Duration::from_secs(1))
-                    .await
-                    .unwrap_err();
+            let error = stop_browser_use_session_at(
+                "http://127.0.0.1:1",
+                id,
+                Duration::from_secs(1),
+                &TrustOptions::default(),
+            )
+            .await
+            .unwrap_err();
             assert!(!error.contains("secret"));
         }
     }
@@ -1190,9 +1233,17 @@ mod tests {
             let deadline = Duration::from_millis(50);
             let started = std::time::Instant::now();
             let result = if create {
-                connect_browser_use_at(&base, deadline).await.map(|_| ())
+                connect_browser_use_at(&base, deadline, &TrustOptions::default())
+                    .await
+                    .map(|_| ())
             } else {
-                stop_browser_use_session_at(&base, TEST_BROWSER_ID, deadline).await
+                stop_browser_use_session_at(
+                    &base,
+                    TEST_BROWSER_ID,
+                    deadline,
+                    &TrustOptions::default(),
+                )
+                .await
             };
             assert!(result.unwrap_err().contains("timed out"));
             assert!(started.elapsed() < Duration::from_millis(400));
@@ -1257,7 +1308,7 @@ mod tests {
         );
         guard.set("KERNEL_ENDPOINT", &base);
 
-        let (ws_url, session) = connect_kernel().await.unwrap();
+        let (ws_url, session) = connect_kernel(&TrustOptions::default()).await.unwrap();
         assert_eq!(ws_url, "wss://example.com/cdp");
         assert_eq!(session.unwrap().session_id, "s1");
 
@@ -1283,6 +1334,7 @@ mod tests {
             "env-cloud",
             &[],
             &Running::from_env(),
+            &TrustOptions::default(),
         ));
 
         assert!(result.is_err());
@@ -1377,8 +1429,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             ..crate::plugins::PluginConfig::default()
         }];
 
-        rt.block_on(close_provider_session_with_plugins(&session, &plugins))
-            .unwrap();
+        rt.block_on(close_provider_session_with_plugins(
+            &session,
+            &plugins,
+            &TrustOptions::default(),
+        ))
+        .unwrap();
 
         let request = std::fs::read_to_string(marker_path).unwrap();
         assert!(request.contains(r#""type":"browser.close""#));
@@ -1427,6 +1483,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "cloud-browser",
             &plugins,
             &Running::from_env(),
+            &TrustOptions::default(),
         ))
         .unwrap();
 
@@ -1477,6 +1534,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "cloud-browser",
             &plugins,
             &Running::from_env(),
+            &TrustOptions::default(),
         ))
         .unwrap();
 
@@ -1537,6 +1595,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 "headed": true,
                 "userAgent": "cli-agent"
             })),
+            &TrustOptions::default(),
         ))
         .unwrap();
 
