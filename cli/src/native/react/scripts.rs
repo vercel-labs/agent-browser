@@ -264,21 +264,33 @@ pub const RENDERS_INIT: &str = r#"
       }
     }
     if (fiber.memoizedState !== alt.memoizedState) {
-      let curr = fiber.memoizedState;
-      let prev = alt.memoizedState;
-      let hookIdx = 0;
-      while (curr || prev) {
-        if ((curr && curr.memoizedState) !== (prev && prev.memoizedState)) {
-          changes.push({
-            type: "state",
-            name: "hook #" + hookIdx,
-            prev: brief(prev && prev.memoizedState),
-            next: brief(curr && curr.memoizedState),
-          });
+      if (fiber.tag === 1) {
+        const curr = fiber.memoizedState || {};
+        const prev = alt.memoizedState || {};
+        const allKeys = new Set([...Object.keys(curr), ...Object.keys(prev)]);
+        for (const k of allKeys) {
+          if (!Object.is(curr[k], prev[k]) ||
+              Object.prototype.hasOwnProperty.call(curr, k) !== Object.prototype.hasOwnProperty.call(prev, k)) {
+            changes.push({ type: "state", name: k, prev: brief(prev[k]), next: brief(curr[k]) });
+          }
         }
-        curr = curr && curr.next;
-        prev = prev && prev.next;
-        hookIdx++;
+      } else {
+        let curr = fiber.memoizedState;
+        let prev = alt.memoizedState;
+        let hookIdx = 0;
+        while (curr || prev) {
+          if ((curr && curr.memoizedState) !== (prev && prev.memoizedState)) {
+            changes.push({
+              type: "state",
+              name: "hook #" + hookIdx,
+              prev: brief(prev && prev.memoizedState),
+              next: brief(curr && curr.memoizedState),
+            });
+          }
+          curr = curr && curr.next;
+          prev = prev && prev.next;
+          hookIdx++;
+        }
       }
     }
     if (fiber.dependencies && fiber.dependencies.firstContext) {
