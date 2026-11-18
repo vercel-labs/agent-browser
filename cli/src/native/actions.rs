@@ -21,7 +21,7 @@ use super::a11y;
 use super::auth;
 use super::bidi;
 use super::bidi::attach::target_label;
-use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport};
+use super::browser::{should_track_target, BrowserManager, TabKeep, WaitUntil, WedgeReport};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
@@ -792,7 +792,7 @@ impl DaemonState {
 
     /// A session that starts with `settings` and keeps its security settings
     /// in `store`.
-    pub fn with_store(settings: Running, store: Arc<dyn Store>) -> Self {
+    pub fn with_store(mut settings: Running, store: Arc<dyn Store>) -> Self {
         let session_id =
             env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
         let security = settings.security();
@@ -804,6 +804,9 @@ impl DaemonState {
                 .ok()
                 .flatten()
                 .is_some_and(|b| b.pinned);
+        if pin_tab {
+            settings.set(Key::PinTab, Value::Bool(true));
+        }
         Self {
             browser: None,
             appium: None,
@@ -3339,63 +3342,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // element::set_active_frame for why this is mirrored).
     super::element::set_active_frame(state.active_frame_id.as_deref());
 
-    // `--pin-tab` from the client enables strict tab binding even when the
-    // daemon was started without the flag, and `--no-pin-tab` (pinTab: false)
-    // disables a sticky pin restored from disk or enabled earlier. Both are
-    // persisted with the binding so the setting survives daemon restarts;
-    // absence of the field leaves the current state untouched.
-    if cmd.get("pinTab").and_then(Value::as_bool) == Some(true)
-        && state
-            .firefox
-            .as_ref()
-            .is_some_and(bidi::session::FirefoxSession::is_attached)
-    {
-        return error_response(&id, FIREFOX_ATTACH_PIN_TAB_ERROR);
-    }
-    match cmd.get("pinTab").and_then(|v| v.as_bool()) {
-        Some(pin) if pin != state.pin_tab => {
-            // Persist the pinned state before committing it to live state, so a
-            // load/save failure leaves the daemon exactly as it was instead of
-            // reporting an error while the isolation mode already flipped.
-            match tab_binding::load(&state.session_id) {
-                Ok(Some(mut binding)) => {
-                    if binding.pinned != pin {
-                        binding.pinned = pin;
-                        if let Err(e) = tab_binding::save(&state.session_id, &binding) {
-                            return error_response(
-                                &id,
-                                &format!(
-                                    "cannot persist the pin-tab setting: {} — the change was \
-                                     not applied",
-                                    e
-                                ),
-                            );
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    return error_response(
-                        &id,
-                        &format!(
-                            "cannot read the session tab binding to update the pin state: {} \
-                             — delete the binding file to reset the session",
-                            e
-                        ),
-                    );
-                }
-            }
-            // Persistence succeeded (or there was nothing to write): commit the
-            // live state, and force a re-persist from the snapshot next time.
-            state.pin_tab = pin;
-            if let Some(ref mut mgr) = state.browser {
-                mgr.set_pin_tab(pin);
-            }
-            state.last_persisted_binding = None;
-        }
-        _ => {}
-    }
-
+    // The settings this invocation set ride on the command. Live settings
+    // apply now, before the policy checks, so a changed policy governs this
+    // command too. Launch settings wait until the launch itself: a command that
+    // is denied or needs confirmation leaves the browser and its settings alone.
     let launches = command_launches_browser(cmd);
     let mut launch_patch: Option<Patch> = None;
     let mut settings_patch: Option<Patch> = None;
@@ -3681,6 +3631,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    if let Some(mgr) = state.browser.as_mut() {
+        let session = &state.session_id;
+        let unpinned = |target: &str| tab_binding::pinned_owner(target, session).is_none();
+        mgr.thaw_active_tab(unpinned).await;
+    }
+
     let firefox_routed = state.engine == "firefox"
         && !matches!(action, "launch" | "confirm")
         && (!skip_launch || bidi::actions::handles(action));
@@ -3811,6 +3767,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "tab_new" => handle_tab_new(cmd, state).await,
         "tab_switch" => handle_tab_switch(cmd, state).await,
         "tab_close" => handle_tab_close(cmd, state).await,
+        "tab_keep" => handle_tab_keep(cmd, state).await,
         "viewport" => handle_viewport(cmd, state).await,
         "useragent" | "user_agent" => handle_user_agent(cmd, state).await,
         "set_media" => handle_set_media(cmd, state).await,
@@ -4146,6 +4103,7 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
     })?;
     if binding.as_ref().is_some_and(|b| b.pinned) {
         state.pin_tab = true;
+        state.settings.set(Key::PinTab, Value::Bool(true));
     }
     let pin = state.pin_tab;
     if state.browser.is_none() {
@@ -6462,6 +6420,30 @@ fn adjust_ca_patch(state: &mut DaemonState, patch: &mut Patch) -> Result<(), Str
     Ok(())
 }
 
+/// Writes `pin` into the session's tab binding, when one exists.
+/// Returns whether the binding on disk was changed.
+fn persist_pin_tab(session_id: &str, pin: bool) -> Result<bool, String> {
+    match tab_binding::load(session_id) {
+        Ok(Some(mut binding)) if binding.pinned != pin => {
+            binding.pinned = pin;
+            tab_binding::save(session_id, &binding)
+                .map(|()| true)
+                .map_err(|e| {
+                    format!(
+                        "cannot persist the pin-tab setting: {} — the change was not applied",
+                        e
+                    )
+                })
+        }
+        Ok(_) => Ok(false),
+        Err(e) => Err(format!(
+            "cannot read the session tab binding to update the pin state: {} — delete the \
+             binding file to reset the session",
+            e
+        )),
+    }
+}
+
 /// Which part of a settings patch a call applies.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsPass {
@@ -6507,6 +6489,15 @@ async fn apply_settings_patch(
     let ignored: Vec<Value> = plan.ignored.iter().map(|c| c.to_ignored_json()).collect();
     let changed = |key: Key| plan.changes.iter().any(|change| change.key == key);
 
+    if plan.next.pin_tab()
+        && state
+            .firefox
+            .as_ref()
+            .is_some_and(bidi::session::FirefoxSession::is_attached)
+    {
+        return Err(FIREFOX_ATTACH_PIN_TAB_ERROR.to_string());
+    }
+
     // Load the CA trust first: a bad bundle fails before anything changes.
     let ca_cert = if changed(Key::CaCert) || changed(Key::ClearCaCert) {
         let request = match plan.next.get(Key::CaCert).and_then(Value::as_str) {
@@ -6518,14 +6509,26 @@ async fn apply_settings_patch(
         None
     };
 
-    // Security settings are stored before they are applied, so a failed write
-    // leaves the session as it was and a stored setting never lags the running one.
+    // The pin binding and the security settings are stored before anything is
+    // applied, so a failed write leaves the session as it was and a stored
+    // setting never lags the running one. The two writes are not atomic: when
+    // the second fails, a pin binding this patch changed is put back.
+    let pin_written =
+        changed(Key::PinTab) && persist_pin_tab(&state.session_id, plan.next.pin_tab())?;
     let next_security = plan.next.security();
     if next_security != state.settings.security() {
-        state
-            .store
-            .save(&next_security)
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = state.store.save(&next_security) {
+            let mut message = e.to_string();
+            if pin_written {
+                if let Err(undo) = persist_pin_tab(&state.session_id, !plan.next.pin_tab()) {
+                    message.push_str(&format!(
+                        "; the pin-tab binding could not be restored: {}",
+                        undo
+                    ));
+                }
+            }
+            return Err(message);
+        }
     }
 
     let had_browser = has_active_browser_session(state);
@@ -6634,6 +6637,15 @@ async fn apply_settings_patch(
     }
     if let Some(ca_cert) = ca_cert {
         state.effective_ca_cert = ca_cert;
+    }
+    if was(Key::PinTab) {
+        let pin = next.pin_tab();
+        state.pin_tab = pin;
+        if let Some(ref mut mgr) = state.browser {
+            mgr.set_pin_tab(pin);
+        }
+        // Force a re-persist from the snapshot next time.
+        state.last_persisted_binding = None;
     }
     if was(Key::Cdp) || was(Key::CdpHeaders) {
         // The requested headers win over any cached for the endpoint, and
@@ -7195,6 +7207,10 @@ pub(crate) async fn handle_close(state: &mut DaemonState) -> Result<Value, Strin
 /// daemon restarts the CLI asks for (upgrade, changed options) keep them.
 async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
+    let unfreeze_error = match state.browser.as_mut() {
+        Some(mgr) => mgr.thaw_frozen_tabs().await.err(),
+        None => None,
+    };
     close_all_browser_backends(state).await?;
     state.attached_target = None;
 
@@ -7258,6 +7274,9 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
     };
     if unsaved > 0 {
         reply["unsaved"] = json!({ "steps": unsaved });
+    }
+    if let Some(err) = unfreeze_error {
+        reply["unfreezeError"] = json!(err);
     }
     if let Some(err) = pin_release_error {
         reply["pinReleaseError"] = json!(err);
@@ -9078,6 +9097,25 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "tabs": tabs }))
 }
 
+/// Refuses a tab that another session pinned with `--pin-tab`. `None` checks
+/// the active tab.
+fn check_tab_unlocked(state: &DaemonState, tab_id: Option<u32>) -> Result<(), String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let target_id = match tab_id {
+        Some(id) => mgr.target_id_for_tab(id),
+        None => Some(mgr.active_target_id()?),
+    };
+    if let Some(target_id) = target_id {
+        if let Some(owner) = super::tab_binding::pinned_owner(target_id, &state.session_id) {
+            return Err(format!(
+                "tab_locked: tab {} is pinned by session '{}' (--pin-tab); close that session or use another tab",
+                target_id, owner
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
@@ -9140,18 +9178,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         mgr.resolve_tab_ref(&tab_ref)?
     };
-    if let Some(target_id) = state
-        .browser
-        .as_ref()
-        .and_then(|mgr| mgr.target_id_for_tab(tab_id))
-    {
-        if let Some(owner) = super::tab_binding::pinned_owner(target_id, &state.session_id) {
-            return Err(format!(
-                "tab_locked: tab {} is pinned by session '{}' (--pin-tab); close that session or use another tab",
-                target_id, owner
-            ));
-        }
-    }
+    check_tab_unlocked(state, Some(tab_id))?;
     let dialog_session = state
         .pending_dialog
         .as_ref()
@@ -9227,6 +9254,20 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     state.active_frame_id = None;
     state.refresh_active_iframe_sessions().await;
     Ok(result)
+}
+
+async fn handle_tab_keep(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let keep = TabKeep::parse(cmd.get("keep").and_then(Value::as_str).unwrap_or_default())?;
+    let tab_id = match cmd.get("tabId").and_then(Value::as_str) {
+        Some(tab_ref) => {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            Some(mgr.resolve_tab_ref(&super::browser::TabRef::parse(tab_ref)?)?)
+        }
+        None => None,
+    };
+    check_tab_unlocked(state, tab_id)?;
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    mgr.set_tab_keep(tab_id, keep).await
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -17117,6 +17158,36 @@ mod tests {
         assert_eq!(changed_pixel_ratio(&previous, 2, 1, &[0; 8]), 1.0);
     }
 
+    #[tokio::test]
+    async fn pin_tab_false_disables_a_pin_read_from_disk_on_attach() {
+        use super::super::tab_binding::{load, save, TabBinding};
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("XDG_RUNTIME_DIR");
+        let mut state = DaemonState::new();
+        assert!(!state.pin_tab);
+        let session = state.session_id.clone();
+        // A binding written after boot, read back on attach.
+        save(
+            &session,
+            &TabBinding {
+                target_id: "ABCDEF0123456789".to_string(),
+                url: "https://example.com".to_string(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+        apply_tab_binding_on_attach(&mut state).await.unwrap();
+        assert!(state.pin_tab);
+
+        let off = json!({ "action": "state_list", "id": "off", "settings": { "pin-tab": false } });
+        let resp = execute_command(&off, &mut state).await;
+        assert_eq!(resp["success"], true);
+        assert!(!state.pin_tab);
+        assert!(!load(&session).unwrap().unwrap().pinned);
+    }
+
     /// A binding-recovery failure must tear the connection down: the attach
     /// paths set `state.browser` before calling this, so returning the error
     /// alone would let the next command skip the attach path and act on
@@ -24167,7 +24238,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let (_env, mut state, calls) = attached_firefox_state().await;
         for _ in 0..2 {
             let resp = execute_command(
-                &json!({ "id": "1", "action": "url", "pinTab": true }),
+                &json!({ "id": "1", "action": "url", "settings": { "pin-tab": true } }),
                 &mut state,
             )
             .await;
@@ -25762,6 +25833,38 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    async fn test_a_failing_store_restores_the_pin_binding_written_before_it() {
+        use super::super::tab_binding::{load, save, TabBinding};
+        let (_env, _) = isolated_state();
+        let mut state = DaemonState::with_store(Running::defaults(), FlakyStore::new(0));
+        let session = state.session_id.clone();
+        save(
+            &session,
+            &TabBinding {
+                target_id: "ABCDEF0123456789".to_string(),
+                url: "https://example.com".to_string(),
+                pinned: false,
+            },
+        )
+        .unwrap();
+        let before = state.settings.clone();
+        let patch = patch_with(vec![
+            set_to(Key::PinTab, json!(true)),
+            set_to(Key::ActionPolicy, json!("/p.json")),
+        ]);
+
+        let err = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
+            .await
+            .err()
+            .expect("the store write fails");
+
+        assert!(err.contains("disk full"), "{err}");
+        assert!(!load(&session).unwrap().unwrap().pinned, "pin write undone");
+        assert!(!state.pin_tab);
+        assert_eq!(state.settings, before);
+    }
+
+    #[tokio::test]
     async fn test_a_failing_store_fails_the_command_before_it_runs() {
         let (_env, _) = isolated_state();
         let mut state = DaemonState::with_store(Running::defaults(), FlakyStore::new(0));
@@ -25831,13 +25934,33 @@ mod firefox_routing_tests {
         "AGENT_BROWSER_PIN_TAB",
     ];
 
-    fn clean_env() -> EnvGuard<'static> {
+    /// The cleared environment of a routing test, with session files going to a scratch directory
+    /// instead of the user's. The directory outlives the environment guard's restore.
+    struct RoutingEnv {
+        _guard: EnvGuard<'static>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for RoutingEnv {
+        type Target = EnvGuard<'static>;
+
+        fn deref(&self) -> &Self::Target {
+            &self._guard
+        }
+    }
+
+    fn clean_env() -> RoutingEnv {
         let guard = EnvGuard::new(ENV);
         for name in ENV {
             guard.remove(name);
         }
         guard.set("AGENT_BROWSER_ENGINE", "firefox");
-        guard
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        RoutingEnv {
+            _guard: guard,
+            _dir: dir,
+        }
     }
 
     async fn firefox_state() -> (DaemonState, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -25977,6 +26100,25 @@ mod firefox_routing_tests {
             "{error}"
         );
         assert!(state.firefox.is_none());
+    }
+
+    #[tokio::test]
+    async fn pin_tab_is_refused_for_an_attached_firefox_before_anything_changes() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        assert!(state.firefox.as_ref().unwrap().is_attached());
+        let before = state.settings.clone();
+        let patch = Patch::from_entries(vec![(Key::PinTab, Requested::Set(json!(true)))]);
+
+        let error = match apply_settings_patch(&mut state, &patch, SettingsPass::BeforeGates).await
+        {
+            Ok(_) => panic!("the pin was accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, FIREFOX_ATTACH_PIN_TAB_ERROR);
+        assert!(!state.pin_tab);
+        assert_eq!(state.settings, before);
     }
 
     #[tokio::test]
@@ -26295,7 +26437,7 @@ mod firefox_routing_tests {
             &json!({
                 "id": "1",
                 "action": "launch",
-                "pinTab": true,
+                "settings": { "pin-tab": true },
                 "cdpUrl": "ws://127.0.0.1:9333/session",
                 "allowedDomains": []
             }),
