@@ -3428,6 +3428,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .as_ref()
         .map(|patch| state.settings.plan(patch))
         .filter(|plan| plan.relaunch);
+    if let Some(plan) = launch_plan.as_ref() {
+        if let Err(e) = validate_firefox_relaunch(&plan.next, &plugins_from_command_or_env(cmd)) {
+            let mut resp = error_response(&id, &e);
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            return resp;
+        }
+    }
 
     let skip_launch = skip_launch_action(action);
     let restore_key_change_needs_launch = !skip_launch
@@ -5957,71 +5964,75 @@ async fn handle_launch_for_target(
     result
 }
 
-fn combine_cdp_and_firefox_attach_errors(
-    cdp_error: &str,
-    target: &str,
-    bidi_error: &str,
-) -> String {
-    format!(
-        "{cdp_error}; WebDriver BiDi: no Firefox remote agent for {} ({bidi_error})",
-        target_label(target)
-    )
-}
-
-enum AttachConnection {
-    Cdp(Box<BrowserManager>),
-    Firefox(bidi::attach::AttachTarget),
-}
-
-async fn detect_attach_connection(
-    target: &str,
-    headers: Option<Vec<(String, String)>>,
-) -> Result<AttachConnection, String> {
-    let parsed = bidi::attach::parse_attach_url(target);
-    if let Ok(Some(target)) = &parsed {
-        return Ok(AttachConnection::Firefox(target.clone()));
+/// Rejects a relaunch into Firefox whose settings it cannot launch with. It runs on the planned
+/// settings before the relaunch closes the running browser, so a rejected option leaves it alone.
+fn validate_firefox_relaunch(
+    next: &Running,
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<(), String> {
+    if next.engine().as_deref() != Some("firefox") {
+        return Ok(());
     }
-    let cdp_error = match BrowserManager::connect_cdp_when_listening(target, headers).await {
-        Ok(manager) => return Ok(AttachConnection::Cdp(Box::new(manager))),
-        Err(error) => error,
-    };
-    let bidi = match parsed {
-        Err(error) => Err(error),
-        Ok(_) if bidi::attach::can_probe_attach_target(target) => {
-            bidi::attach::probe_attach_target(target).await
-        }
-        Ok(_) => return Err(cdp_error),
-    };
-    match bidi {
-        Ok(target) => Ok(AttachConnection::Firefox(target)),
-        Err(error) => Err(combine_cdp_and_firefox_attach_errors(
-            &cdp_error, target, &error,
-        )),
-    }
+    let mut options = next.launch_options();
+    options.ca_cert = next
+        .get(Key::CaCert)
+        .and_then(Value::as_str)
+        .map(String::from);
+    check_firefox_launch_flags(next, &options, plugins)
 }
 
-/// Why `--pin-tab` is refused for an attached Firefox: the binding cannot be enforced there, so
-/// a closed tab would hand later commands to another tab.
-const FIREFOX_ATTACH_PIN_TAB_ERROR: &str =
-    "--pin-tab is not supported with Firefox attach; pass --no-pin-tab to disable it";
-
-/// Rejects the settings Firefox cannot start or attach with. It runs before a relaunch closes
-/// the running browser, so a rejected option leaves that browser and its pages alone.
-fn validate_firefox_launch(
-    state: &DaemonState,
+/// Rejects the options and settings owned Firefox cannot launch with.
+fn check_firefox_launch_flags(
+    settings: &Running,
     options: &LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
     connection: &Connection,
 ) -> Result<(), String> {
-    if state.settings.captures_flow() {
-        return Err("--capture flow is not supported with --engine firefox".to_string());
-    }
-    bidi::firefox::validate_firefox_options(options, connection)?;
-    bidi::firefox::validate_firefox_settings(
-        &state.settings.enable_features(),
-        &state.settings.init_scripts(),
-        plugins,
+    let connection = settings.connection();
+    let cdp = match &connection {
+        Connection::Cdp(cdp) => Some(cdp.clone()),
+        _ => None,
+    };
+    let provider = match &connection {
+        Connection::Provider(provider) => Some(provider.clone()),
+        _ => None,
+    };
+    let enable_features = settings.enable_features();
+    let init_scripts = settings.init_scripts();
+    bidi::firefox::validate_launch(
+        options,
+        bidi::firefox::LaunchFlags {
+            cdp: cdp.as_deref(),
+            auto_connect: matches!(connection, Connection::AutoConnect),
+            provider: provider.as_deref(),
+            capture_flow: settings.captures_flow(),
+            enable_features: &enable_features,
+            init_scripts: &init_scripts,
+            plugins,
+        },
     )
+}
+
+/// Rejects the settings Firefox cannot launch with. It runs before a relaunch closes the running
+/// browser, so a rejected option leaves that browser and its pages alone.
+async fn validate_firefox_launch(
+    state: &DaemonState,
+    options: &LaunchOptions,
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<(), String> {
+    check_firefox_launch_flags(&state.settings, options, plugins)?;
+    let allowed_domains = current_allowed_domains(state).await;
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        allowed_domains: &allowed_domains,
+        cdp_url: None,
+        cdp_port: None,
+        auto_connect: false,
+        profile: None,
+        provider_name: None,
+        args: &[],
+        restore_key: state.session_name.as_deref(),
+        storage_state: options.storage_state.as_deref(),
+    })
 }
 
 /// Starts or attaches to Firefox with the session's resolved settings.
@@ -6695,6 +6706,10 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .or_else(|| state.settings.engine());
     let patch = launch_envelope_patch(cmd, engine.as_deref());
     check_capture_setting(&patch)?;
+    validate_firefox_relaunch(
+        &state.settings.plan(&patch).next,
+        &plugins_from_command_or_env(cmd),
+    )?;
     let had_browser_before_launch = has_active_browser_session(state);
 
     let mut outcome = apply_settings_patch(state, &patch, SettingsPass::Launch).await?;
@@ -25886,7 +25901,7 @@ mod firefox_routing_tests {
     #[tokio::test]
     async fn implicit_launch_rejects_cdp_settings_before_launching() {
         let _guard = clean_env();
-        let mut state = DaemonState::new();
+        let (mut state, _calls) = firefox_state().await;
         let resp = execute_command(
             &json!({"id":"1","action":"navigate","url":"https://a.test","settings":{"engine":"firefox","cdp":"ws://127.0.0.1:9222"}}),
             &mut state,
@@ -25898,7 +25913,7 @@ mod firefox_routing_tests {
             error.contains("No Firefox WebDriver BiDi endpoint"),
             "{error}"
         );
-        assert!(state.firefox.is_none());
+        assert!(state.firefox.is_some());
     }
 
     #[tokio::test]
