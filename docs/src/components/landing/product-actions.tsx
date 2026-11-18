@@ -32,7 +32,7 @@ function CopyIcon() {
 function AgentLogoStack() {
   const ringMaskId = useId();
   const badge =
-    'flex size-6 items-center justify-center rounded-full bg-gray-1000 text-background-100';
+    'flex size-6 items-center justify-center rounded-full text-background-100';
   return (
     <span aria-hidden className="relative inline-flex h-6 w-14 shrink-0">
       <span className={cn(badge, 'absolute left-0 z-0')}>
