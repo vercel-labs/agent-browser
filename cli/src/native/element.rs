@@ -478,7 +478,7 @@ pub(super) async fn ensure_ref_document_current(
     let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
     let stale = || {
         format!(
-            "Ref @{ref_id} is from a previous page. The page has navigated since the snapshot; take a new snapshot and use a fresh ref."
+            "Ref @{ref_id} is from a document that is no longer loaded (the page navigated or the frame was removed). Take a new snapshot and use a fresh ref."
         )
     };
     if issued_session != effective_session_id {

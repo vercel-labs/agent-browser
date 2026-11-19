@@ -6433,7 +6433,7 @@ async fn ref_title(state: &mut DaemonState) -> String {
 fn assert_previous_page(resp: &Value) {
     assert_eq!(resp["success"], false, "{resp}");
     assert!(
-        resp["error"].as_str().unwrap().contains("previous page"),
+        resp["error"].as_str().unwrap().contains("no longer loaded"),
         "{resp}"
     );
 }
