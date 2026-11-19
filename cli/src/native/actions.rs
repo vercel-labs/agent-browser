@@ -7376,7 +7376,12 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     // Parse modifier+key chords like "Control+a", "Shift+Enter", "Control+Shift+a"
     let (actual_key, modifiers) = parse_key_chord(key);
 
-    interaction::press_key_with_modifiers(&mgr.client, &session_id, &actual_key, modifiers).await?;
+    let dialog_opened =
+        interaction::press_key_with_modifiers(&mgr.client, &session_id, &actual_key, modifiers)
+            .await?;
+    if dialog_opened {
+        return Ok(json!({ "pressed": key, "dialogOpened": true }));
+    }
     Ok(json!({ "pressed": key }))
 }
 

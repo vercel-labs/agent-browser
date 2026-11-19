@@ -4394,6 +4394,65 @@ async fn e2e_press_dispatches_single_keystroke() {
     assert_success(&resp);
 }
 
+/// A key press that opens a confirm must return once the dialog opens, like
+/// `click` does, instead of waiting for a key ack the blocked page never sends.
+#[tokio::test]
+#[ignore]
+async fn e2e_press_returns_when_key_opens_confirm() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<button id=c onclick=\"document.title=confirm('Remove')?'yes':'no'\">",
+        "confirm</button>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "document.getElementById('c').focus()" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let started = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "press", "key": "Enter" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "press waited {:?} behind the dialog",
+        started.elapsed()
+    );
+    assert_eq!(get_data(&resp)["dialogOpened"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "dialog", "response": "dismiss" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "6", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "no");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Raw mouse regressions
 // ---------------------------------------------------------------------------

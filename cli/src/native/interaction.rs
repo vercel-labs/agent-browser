@@ -323,7 +323,7 @@ pub async fn type_text_into_active_context(
     Ok(())
 }
 
-pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Result<(), String> {
+pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Result<bool, String> {
     press_key_with_modifiers(client, session_id, key, None).await
 }
 
@@ -334,12 +334,15 @@ pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Resul
 ///
 /// Callers that need a platform-appropriate modifier (e.g. Cmd on macOS,
 /// Ctrl elsewhere) must choose the value themselves -- see `cfg!(target_os)`.
+///
+/// Returns true if a JavaScript dialog opened during the sequence; the
+/// remaining key event is then skipped since the page is blocked.
 pub async fn press_key_with_modifiers(
     client: &CdpClient,
     session_id: &str,
     key: &str,
     modifiers: Option<i32>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let (key_name, code, key_code) = named_key_info(key);
 
     // Suppress text insertion when Control (2) or Meta (4) modifiers are active,
@@ -351,39 +354,29 @@ pub async fn press_key_with_modifiers(
         key_text(&key_name)
     };
 
-    client
-        .send_command_typed::<_, Value>(
-            "Input.dispatchKeyEvent",
-            &DispatchKeyEventParams {
-                event_type: "keyDown".to_string(),
-                key: Some(key_name.clone()),
-                code: Some(code.clone()),
-                text: text.clone(),
-                unmodified_text: text.clone(),
-                windows_virtual_key_code: Some(key_code),
-                modifiers,
-            },
-            Some(session_id),
-        )
-        .await?;
+    let key_down = DispatchKeyEventParams {
+        event_type: "keyDown".to_string(),
+        key: Some(key_name.clone()),
+        code: Some(code.clone()),
+        text: text.clone(),
+        unmodified_text: text,
+        windows_virtual_key_code: Some(key_code),
+        modifiers,
+    };
+    if dispatch_key_or_dialog(client, session_id, &key_down).await? {
+        return Ok(true);
+    }
 
-    client
-        .send_command_typed::<_, Value>(
-            "Input.dispatchKeyEvent",
-            &DispatchKeyEventParams {
-                event_type: "keyUp".to_string(),
-                key: Some(key_name),
-                code: Some(code),
-                text: None,
-                unmodified_text: None,
-                windows_virtual_key_code: Some(key_code),
-                modifiers,
-            },
-            Some(session_id),
-        )
-        .await?;
-
-    Ok(())
+    let key_up = DispatchKeyEventParams {
+        event_type: "keyUp".to_string(),
+        key: Some(key_name),
+        code: Some(code),
+        text: None,
+        unmodified_text: None,
+        windows_virtual_key_code: Some(key_code),
+        modifiers,
+    };
+    dispatch_key_or_dialog(client, session_id, &key_up).await
 }
 
 pub async fn scroll(
@@ -1092,12 +1085,45 @@ async fn dispatch_mouse_or_dialog(
     accept_sessions: &[&str],
     params: &DispatchMouseEventParams,
 ) -> Result<bool, String> {
+    dispatch_input_or_dialog(
+        client,
+        "Input.dispatchMouseEvent",
+        session_id,
+        accept_sessions,
+        params,
+    )
+    .await
+}
+
+/// Key-event counterpart of `dispatch_mouse_or_dialog`: a key press that opens
+/// a confirm/prompt blocks the renderer just like a click does.
+async fn dispatch_key_or_dialog(
+    client: &CdpClient,
+    session_id: &str,
+    params: &DispatchKeyEventParams,
+) -> Result<bool, String> {
+    dispatch_input_or_dialog(
+        client,
+        "Input.dispatchKeyEvent",
+        session_id,
+        &[session_id],
+        params,
+    )
+    .await
+}
+
+async fn dispatch_input_or_dialog<P: serde::Serialize>(
+    client: &CdpClient,
+    method: &str,
+    session_id: &str,
+    accept_sessions: &[&str],
+    params: &P,
+) -> Result<bool, String> {
     use tokio::sync::broadcast::error::RecvError;
 
     // Subscribe before sending so the dialog event cannot slip past us.
     let mut events = client.subscribe();
-    let send =
-        client.send_command_typed::<_, Value>("Input.dispatchMouseEvent", params, Some(session_id));
+    let send = client.send_command_typed::<_, Value>(method, params, Some(session_id));
     tokio::pin!(send);
     loop {
         tokio::select! {
@@ -1510,6 +1536,47 @@ mod tests {
         assert_eq!(press.buttons, Some(2));
         assert_eq!(press.click_count, Some(2));
         assert_eq!(press.modifiers, Some(10));
+    }
+
+    /// A key press that opens a confirm/prompt must return as soon as the
+    /// dialog opens: the renderer cannot ack the key event while it is blocked.
+    #[tokio::test]
+    async fn press_key_returns_when_dialog_blocks_the_key_ack() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut key_events = Vec::new();
+            while let Some(Ok(message)) = ws.next().await {
+                if !message.is_text() {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                key_events.push(request["params"]["type"].as_str().unwrap().to_string());
+                // Never ack the keyDown: open a dialog instead, like a blocked renderer.
+                let event = r#"{"method":"Page.javascriptDialogOpening","params":{"type":"confirm","message":"Remove?"},"sessionId":"page"}"#;
+                ws.send(Message::Text(event.into())).await.unwrap();
+            }
+            key_events
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let opened = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            press_key_with_modifiers(&client, "page", "Enter", None),
+        )
+        .await
+        .expect("press must not wait for the key ack while a dialog is open")
+        .unwrap();
+        assert!(opened);
+
+        client.close().await;
+        let key_events = server.await.unwrap();
+        assert_eq!(key_events, ["keyDown"]);
     }
 
     #[test]
