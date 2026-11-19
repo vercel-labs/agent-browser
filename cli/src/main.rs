@@ -141,9 +141,10 @@ fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings:
         }
     }
     // Asking for a running browser's CDP URL never launches or relaunches one,
-    // so launch settings do not apply to it.
+    // so launch settings do not apply to it. A browser named with `--cdp` or
+    // `--auto-connect` is already running: the command attaches to it first.
     if command_is_cdp_url_metadata(cmd) {
-        return patch.without_launch_settings();
+        return patch.for_cdp_url();
     }
     if command_is_browserless(cmd) {
         patch.remove(session_settings::Key::CaCert);
@@ -2722,6 +2723,36 @@ mod tests {
         let (command, wire) = settings_of(&["--profile", "/tmp/p", "snapshot"]);
         assert!(!command_is_cdp_url_metadata(&command));
         assert_eq!(wire["profile"], "/tmp/p");
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_carries_the_browser_to_attach_to() {
+        let ws = "ws://127.0.0.1:9333/devtools/browser/x";
+        let (_, wire) = settings_of(&[
+            "--cdp",
+            ws,
+            "--cdp-headers",
+            r#"{"Authorization":"Bearer x"}"#,
+            "--profile",
+            "/tmp/p",
+            "--headed",
+            "get",
+            "cdp-url",
+        ]);
+        assert_eq!(wire["cdp"], ws, "{wire}");
+        assert!(wire.get("cdp-headers").is_some(), "{wire}");
+        assert!(
+            wire.get("profile").is_none() && wire.get("headed").is_none(),
+            "{wire}"
+        );
+
+        let (_, wire) = settings_of(&["--auto-connect", "--args", "--x", "get", "cdp-url"]);
+        assert_eq!(wire["auto-connect"], true, "{wire}");
+        assert!(wire.get("args").is_none(), "{wire}");
+
+        // A provider starts a browser instead of naming a running one.
+        let (_, wire) = settings_of(&["-p", "browserbase", "get", "cdp-url"]);
+        assert!(wire.get("provider").is_none(), "{wire}");
     }
 
     #[test]

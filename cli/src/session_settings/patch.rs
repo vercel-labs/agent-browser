@@ -215,6 +215,32 @@ impl Patch {
         live
     }
 
+    /// Whether the patch names a running browser to attach to: a `--cdp`
+    /// target or `--auto-connect`. A provider is not one, because it starts a
+    /// browser.
+    pub fn names_attach_target(&self) -> bool {
+        self.value(Key::Cdp)
+            .and_then(Value::as_str)
+            .is_some_and(|cdp| !cdp.is_empty())
+            || self.value(Key::AutoConnect) == Some(&Value::Bool(true))
+    }
+
+    /// What `get cdp-url` carries: the live settings and, when the patch names
+    /// a running browser to attach to, that target with its CDP headers.
+    /// Attaching is not a launch, so every other launch setting and a forced
+    /// relaunch stay out.
+    pub fn for_cdp_url(&self) -> Patch {
+        let mut patch = self.without_launch_settings();
+        if self.names_attach_target() {
+            for key in [Key::Cdp, Key::CdpHeaders, Key::AutoConnect] {
+                if let Some(requested) = self.entries.get(&key) {
+                    patch.entries.insert(key, requested.clone());
+                }
+            }
+        }
+        patch
+    }
+
     /// The patch without the security settings that apply at once (action
     /// policy, confirm actions): what a confirmation replay may apply, so it
     /// cannot put back a policy that changed after the command was parked.
