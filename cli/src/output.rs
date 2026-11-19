@@ -2801,7 +2801,9 @@ Usage: agent-browser snapshot [options]
 
 Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
-Refs can be reused across snapshots. Take a fresh snapshot after navigation.
+Refs can be reused across snapshots. Take a fresh snapshot after navigation:
+a ref issued for a document that has since been replaced, in the page or in its
+iframe, fails with "from a previous page".
 If a ref's element was replaced, the action uses the one element with the same
 role and name. If that is ambiguous, it fails: run snapshot again.
 Presentational iframes use the Iframe role for snapshots and stale-ref recovery.

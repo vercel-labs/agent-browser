@@ -249,6 +249,7 @@ Iframes are inlined in the snapshot, so their refs work directly. To scope a sna
 Run `agent-browser doctor` before anything else when a command fails unexpectedly, such as `Unknown command`, `Failed to connect`, a stale daemon, a version mismatch after `upgrade`, or missing Chrome. `doctor --fix` also runs destructive repairs.
 
 - **"Ref not found" or "Element not found: @eN"**: the page changed. Snapshot again and use the new refs.
+- **"Ref @eN is from a previous page"**: the page, or the iframe the ref lives in, loaded a new document after the snapshot, so nothing ran. Snapshot again.
 - **"Stale ref ... cannot be recovered"**: the element was replaced and duplicates make the match ambiguous, so nothing ran. Snapshot again.
 - **`page_wedged`**: the page stopped responding. When agent-browser launched the browser and the tab times out twice in a row, it is replaced by a blank one, so navigate again and snapshot. With `--cdp` or `--auto-connect`, or when policy gates `tab_new` or `tab_close`, the tab is left alone; close it or switch tabs.
 - **"Target closed: CDP session ... detached"**: the tab closed while the command ran, for example a script called `window.close()`. Run `agent-browser tab`, switch to a remaining tab, and snapshot.
