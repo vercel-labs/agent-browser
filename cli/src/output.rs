@@ -2105,6 +2105,9 @@ tools and unchanged catalogs add no context or discovery polling.
 
 The `goto` and `navigate` aliases still require a URL.
 
+Unknown flags are rejected. To pass a URL that starts with `-`, put flags
+before `--`; values after `--` are positional.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
@@ -2492,6 +2495,8 @@ Usage: agent-browser download <selector> <path>
 Clicks an element that triggers a download and saves the file to the specified path.
 Only works with a browser agent-browser launched; rejected over --cdp,
 --auto-connect, or a provider because the remote endpoint names the saved file.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Arguments:
   selector             Element to click (CSS selector or @ref)
@@ -2728,6 +2733,9 @@ saves to a temporary directory with a generated filename.
 Headless Chromium screenshots hide native scrollbars for consistent image output.
 Pass --hide-scrollbars false when launching to keep native scrollbars visible.
 
+Unknown flags are rejected. To pass a selector or path that starts with `-`,
+put flags before `--`; values after `--` are positional.
+
 Options:
   --full, -f           Capture full page (not just viewport)
   --if-changed         Recommended: skip unchanged images to save tokens
@@ -2760,6 +2768,7 @@ Examples:
   agent-browser screenshot --annotate --json       # JSON output with annotations
   agent-browser screenshot --screenshot-dir ./shots # Save to custom directory
   agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
+  agent-browser screenshot body -- --draft.png   # Literal path starting with -
 "##
         }
         "pdf" => {
@@ -2769,6 +2778,8 @@ agent-browser pdf - Save page as PDF
 Usage: agent-browser pdf <path>
 
 Saves the current page as a PDF file.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Global Options:
   --json               Output as JSON
@@ -3103,6 +3114,8 @@ agent-browser network - Network interception and monitoring
 Usage: agent-browser network <subcommand> [args]
 
 Intercept, mock, or monitor network requests.
+Unknown flags are rejected. To pass a path or URL that starts with `-`, put
+flags before `--`; values after `--` are positional.
 
 Subcommands:
   route <url> [options]      Intercept requests matching URL pattern
@@ -3461,6 +3474,8 @@ Usage: agent-browser trace start
        agent-browser trace stop [path]
 
 Record a Chrome DevTools trace for debugging.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Operations:
   start                Start recording trace
@@ -3487,6 +3502,8 @@ Usage: agent-browser profiler <operation> [options]
 Record a performance profile using Chrome DevTools Protocol (CDP) Tracing.
 The output JSON file can be loaded into Chrome DevTools Performance panel,
 Perfetto UI (https://ui.perfetto.dev/), or other trace analysis tools.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Operations:
   start                Start profiling
@@ -3534,6 +3551,8 @@ navigation unless you pass a URL. Capture starts on the page you already
 have open, so hydration and initial animations are not re-run cold.
 If a URL is provided, the active tab navigates there first.
 To record in a separate tab, run `tab new [url]` before `record start`.
+Unknown flags are rejected. To pass a path or URL that starts with `-`, put
+flags before `--`; values after `--` are positional.
 
 Requires ffmpeg on PATH with the libvpx and libx264 encoders (brew install
 ffmpeg, or apt install ffmpeg). Run `agent-browser doctor` to check.
@@ -3692,6 +3711,8 @@ agent-browser state - Manage browser state
 Usage: agent-browser state <operation> [args]
 
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
+Unknown flags are rejected. To pass a path or filename that starts with `-`,
+put flags before `--`; values after `--` are positional.
 
 Operations:
   save <path>                        Save current state to file
@@ -4129,6 +4150,8 @@ separated by blank lines (or as a JSON array with --json).
 Put global flags such as `--init-script` and `--enable` on the outer batch
 invocation. Keep command-specific options and literal command arguments inside
 each item.
+`close --all`, `quit --all`, and `exit --all` cannot run inside a batch;
+run the command outside the batch instead.
 
 Options:
   --bail               Stop on first error (default: continue all commands)
@@ -4471,6 +4494,17 @@ agent-browser - fast browser automation CLI for AI agents
 Usage: agent-browser <command> [args] [options]
 
 Unknown commands exit with status 1, including when help is requested.
+
+These commands reject unknown flags and use the same -- boundary.
+Navigation: open/goto/navigate, back/forward/reload, pushstate.
+Interaction: click/dblclick, hover/focus/check/uncheck, drag, scroll,
+scrollintoview, tap. Capture and files: screenshot, pdf, download,
+record start/restart. Inspection and state: snapshot, frame, highlight,
+console, errors, trace start/stop, profiler start/stop,
+state save/load/list/clear/show/clean, network, flow steps/list, react,
+vitals, close, inspect. Put flags before --; values after -- are positional.
+Commands that accept negative numbers take them directly. Other commands
+may validate options differently.
 
 Start here (for AI agents):
   agent-browser skills get core

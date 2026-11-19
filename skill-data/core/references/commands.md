@@ -2,6 +2,8 @@
 
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md. Unknown commands exit with status 1, including when you request command help.
 
+These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`. Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently.
+
 ## Linux dependencies
 
 On Linux, `agent-browser install --with-deps` installs system dependencies with the detected package manager. It runs that package manager directly as root and uses `sudo` for non-root users. If you are not root and `sudo` is unavailable, it reports that root privileges or `sudo` are required.
@@ -47,10 +49,13 @@ agent-browser batch \
   "navigate http://localhost:3000/target"
 ```
 
-Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Keep command-specific options and literal command arguments inside each item:
+Put global flags such as `--init-script` and `--enable` only on the outer batch invocation, never inside an item. Inside an item, `--` separates command flags from literal values only for commands that support `--` as an end-of-options marker. For those commands, put command flags before `--`; a path or selector after `--` is literal. Other commands may treat `--` as data. For example, the item `screenshot body -- --draft.png` passes `--draft.png` as the path.
+
+Batch items cannot run `close --all`, `quit --all`, or `exit --all`; run the command outside the batch instead.
 
 ```bash
 agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
+agent-browser batch "open https://example.com" "screenshot body -- --draft.png"
 ```
 
 `open` with no URL gives you a clean launch so interception rules and cookies can take effect on the *first* real navigation. Pass `--init-script <path>` at launch to install a script before navigation. Use this flow for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
@@ -143,6 +148,7 @@ agent-browser screenshot path.png # Save to specific path
 agent-browser screenshot --full   # Full page
 agent-browser screenshot --if-changed # Recommended: skip unchanged images to save tokens
 agent-browser screenshot --threshold 0.01 # Ignore changes affecting at most 1% of pixels
+agent-browser screenshot body -- --draft.png # Literal path starting with -
 agent-browser pdf output.pdf      # Save as PDF
 ```
 
