@@ -3222,7 +3222,7 @@
         "properties": {
           "annotate": {
             "default": false,
-            "description": "Number visible elements in the screenshot.",
+            "description": "Number visible elements in the screenshot. A failed annotated screenshot keeps the previous refs.",
             "type": "boolean"
           },
           "format": {
@@ -3788,7 +3788,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref.",
+      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref. A capture that fails, such as a selector that matches nothing, leaves the previous refs in place while the document is unchanged.",
       "inputSchema": {
         "properties": {
           "compact": {
