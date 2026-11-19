@@ -3910,6 +3910,86 @@ async fn e2e_wait() {
     assert_success(&resp);
 }
 
+// The daemon polls a wait with the state lock released: the command defers
+// its poll, other commands run meanwhile, and resuming answers as the inline
+// wait would.
+#[tokio::test]
+#[ignore]
+async fn e2e_deferred_wait_lets_commands_run_and_resumes_with_its_response() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<p>page</p>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let cases = [
+        (
+            json!({ "id": "3", "action": "waitforfunction", "expression": "window.ready === 1", "timeout": 10000 }),
+            json!({ "id": "s", "action": "evaluate", "script": "window.ready = 1" }),
+        ),
+        (
+            json!({ "id": "4", "action": "wait", "text": "Ready", "timeout": 10000 }),
+            json!({ "id": "s", "action": "evaluate", "script": "document.body.append('Ready')" }),
+        ),
+        (
+            json!({ "id": "5", "action": "waitforurl", "url": "**done**", "timeout": 10000 }),
+            json!({ "id": "s", "action": "navigate", "url": "data:text/html,<p>done</p>" }),
+        ),
+    ];
+    for (wait, satisfy) in cases {
+        state.defer_wait = true;
+        let resp = execute_command(&wait, &mut state).await;
+        assert_eq!(resp, Value::Null, "{wait}");
+        let deferred = state.take_deferred().expect("the wait deferred its poll");
+
+        // Commands run while the wait is pending, and can satisfy it.
+        assert_success(&execute_command(&json!({ "id": "r", "action": "url" }), &mut state).await);
+        assert_success(&execute_command(&satisfy, &mut state).await);
+
+        let polled = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            super::pending_wait::Cancel::new().run(deferred.poll),
+        )
+        .await
+        .expect("the poll settled");
+        let resp = super::actions::resume_command(&wait, deferred.resume, polled, &mut state).await;
+        assert_success(&resp);
+        assert_eq!(resp["id"], wait["id"]);
+        match wait["action"].as_str().unwrap() {
+            "waitforfunction" => assert_eq!(get_data(&resp)["result"], true),
+            "waitforurl" => assert_eq!(get_data(&resp)["url"], "data:text/html,<p>done</p>"),
+            _ => assert_eq!(get_data(&resp)["waited"], "text"),
+        }
+    }
+
+    // A cancelled poll reports why instead of the CDP error or timeout.
+    state.defer_wait = true;
+    let wait =
+        json!({ "id": "6", "action": "waitforfunction", "expression": "false", "timeout": 60000 });
+    execute_command(&wait, &mut state).await;
+    let deferred = state.take_deferred().expect("the wait deferred its poll");
+    let cancel = super::pending_wait::Cancel::new();
+    cancel.cancel(super::pending_wait::CLIENT_DISCONNECTED);
+    let polled = cancel.run(deferred.poll).await;
+    let resp = super::actions::resume_command(&wait, deferred.resume, polled, &mut state).await;
+    assert_eq!(resp["success"], false);
+    assert_eq!(
+        resp["error"],
+        "Wait cancelled: the client that issued it disconnected"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // wait --load on a page that already finished loading must resolve
 // immediately instead of waiting for a Page.loadEventFired that will never
 // come (the common case after a click that triggers an SPA navigation).

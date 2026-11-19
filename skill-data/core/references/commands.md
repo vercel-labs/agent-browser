@@ -193,6 +193,8 @@ After a page-changing action, prefer the selector, text, URL, or JavaScript cond
 
 A load-state wait runs for its whole timeout budget, taken from `--timeout` or `AGENT_BROWSER_DEFAULT_TIMEOUT`, and returns an error when it expires.
 
+Other commands in the same session run while a wait is pending, so you can read or interact with the page during a long wait. A pending wait ends early with a `Wait cancelled` error when the client that issued it disconnects, when `close` runs, or when the daemon shuts down.
+
 ## Mouse Control
 
 ```bash

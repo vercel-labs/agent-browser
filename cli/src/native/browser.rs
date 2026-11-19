@@ -1529,6 +1529,15 @@ impl BrowserManager {
         rx: &mut broadcast::Receiver<CdpEvent>,
         timeout: Duration,
     ) -> Result<(), LifecycleWaitError> {
+        Self::lifecycle_event(wait_until, session_id, rx, timeout).await
+    }
+
+    async fn lifecycle_event(
+        wait_until: WaitUntil,
+        session_id: &str,
+        rx: &mut broadcast::Receiver<CdpEvent>,
+        timeout: Duration,
+    ) -> Result<(), LifecycleWaitError> {
         let event_name = match wait_until {
             WaitUntil::Load => "Page.loadEventFired",
             WaitUntil::DomContentLoaded => "Page.domContentEventFired",
@@ -1632,11 +1641,22 @@ impl BrowserManager {
         session_id: &str,
         timeout_ms: u64,
     ) -> Result<(), String> {
+        Self::wait_for_load_state(&self.client, wait_until, session_id, timeout_ms).await
+    }
+
+    /// [`Self::wait_for_lifecycle_external`] on a shared client, so a wait can
+    /// poll without borrowing the browser manager.
+    pub(crate) async fn wait_for_load_state(
+        client: &CdpClient,
+        wait_until: WaitUntil,
+        session_id: &str,
+        timeout_ms: u64,
+    ) -> Result<(), String> {
         let timeout = Duration::from_millis(timeout_ms);
         let deadline = Instant::now() + timeout;
         // Subscribe before probing so a lifecycle event that fires between
         // the probe and the wait cannot be missed.
-        let mut rx = self.client.subscribe();
+        let mut rx = client.subscribe();
 
         // `wait_for_lifecycle` waits for the NEXT lifecycle event, which is
         // right mid-navigation but wrong for a standalone `wait --load`: a
@@ -1658,13 +1678,11 @@ impl BrowserManager {
                 return_by_value: Some(true),
                 await_promise: Some(false),
             };
-            let probe = self
-                .client
-                .send_command_typed::<EvaluateParams, EvaluateResult>(
-                    "Runtime.evaluate",
-                    &params,
-                    Some(session_id),
-                );
+            let probe = client.send_command_typed::<EvaluateParams, EvaluateResult>(
+                "Runtime.evaluate",
+                &params,
+                Some(session_id),
+            );
             // The probe draws from the same budget as the wait that follows.
             match tokio::time::timeout(remaining_budget(deadline), probe).await {
                 Ok(Ok(result)) => {
@@ -1678,7 +1696,7 @@ impl BrowserManager {
             }
         }
 
-        self.wait_for_lifecycle(wait_until, session_id, &mut rx, remaining_budget(deadline))
+        Self::lifecycle_event(wait_until, session_id, &mut rx, remaining_budget(deadline))
             .await
             .map_err(|error| lifecycle_wait_error(wait_until, timeout, error))
     }
