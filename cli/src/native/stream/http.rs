@@ -52,12 +52,8 @@ fn parse_origin(peeked: &[u8]) -> Option<String> {
 
 fn normalize_origin_authority(origin: &str) -> Option<String> {
     let url = url::Url::parse(origin).ok()?;
+    // `host_str` already brackets IPv6 literals.
     let host = url.host_str()?.to_ascii_lowercase();
-    let host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host
-    };
     let default_port = (url.scheme() == "http" && url.port() == Some(80))
         || (url.scheme() == "https" && url.port() == Some(443));
     Some(match url.port() {
@@ -137,10 +133,52 @@ fn is_same_origin_command_request(request: &str) -> bool {
     }
 }
 
-fn command_cors_headers(request: &str) -> String {
+fn has_loopback_host(request: &str) -> bool {
+    request_header_value(request, "host")
+        .map(normalize_host_authority)
+        .is_some_and(|host| is_loopback_authority(&host))
+}
+
+/// Browsers label every request with `Sec-Fetch-Site`; only requests from the
+/// page's own origin, or user-initiated ones, may pass.
+fn fetch_site_allows(request: &str) -> bool {
+    match request_header_value(request, "sec-fetch-site") {
+        None => true,
+        Some(site) => site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none"),
+    }
+}
+
+/// Reads accept same-origin browser metadata, or no `Origin`/`Referer` at all
+/// from a loopback `Host` (curl and the dashboard session proxy).
+fn is_same_origin_read_request(request: &str) -> bool {
+    if request_header_value(request, "origin").is_some()
+        || request_header_value(request, "referer").is_some()
+    {
+        return is_same_origin_command_request(request);
+    }
+    has_loopback_host(request)
+}
+
+/// Single gate for the whole `/api/` surface. Writes always require a
+/// same-origin `Origin` or `Referer`; reads also accept header-less loopback
+/// clients.
+fn is_authorized_api_request(method: &str, request: &str) -> bool {
+    if !fetch_site_allows(request) {
+        return false;
+    }
+    if method == "GET" || method == "HEAD" {
+        is_same_origin_read_request(request)
+    } else {
+        is_same_origin_command_request(request)
+    }
+}
+
+/// CORS headers for `/api/` responses. The origin is reflected only for
+/// same-origin requests; there is no wildcard.
+fn api_cors_headers(request: &str) -> String {
     match request_header_value(request, "origin") {
         Some(origin) if is_same_origin_command_request(request) => format!(
-            "Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\n"
+            "Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\n"
         ),
         _ => String::new(),
     }
@@ -180,54 +218,36 @@ pub(super) async fn handle_http_request(
     let path = first_line.split_whitespace().nth(1).unwrap_or("/");
     let origin = parse_origin(peeked);
 
+    if path.starts_with("/api/") && !is_authorized_api_request(method, &request) {
+        write_json_error_response_no_cors(
+            &mut stream,
+            "403 Forbidden",
+            "Origin or Referer does not match Host header.",
+        )
+        .await;
+        return;
+    }
+
     if method == "OPTIONS" {
-        if path == "/api/command" {
-            if !is_same_origin_command_request(&request) {
-                write_json_error_response_no_cors(
-                    &mut stream,
-                    "403 Forbidden",
-                    "Origin or Referer does not match Host header.",
-                )
-                .await;
-                return;
-            }
-
-            let cors_headers = command_cors_headers(&request);
-            let response = format!(
-                "HTTP/1.1 204 No Content\r\n{cors_headers}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-            return;
-        }
-
+        let cors_headers = if path.starts_with("/api/") {
+            api_cors_headers(&request)
+        } else {
+            CORS_HEADERS.to_string()
+        };
         let response = format!(
-            "HTTP/1.1 204 No Content\r\n{CORS_HEADERS}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 204 No Content\r\n{cors_headers}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         let _ = stream.write_all(response.as_bytes()).await;
         return;
     }
 
     if method == "POST" {
-        if path == "/api/command" && !is_same_origin_command_request(&request) {
-            write_json_error_response_no_cors(
-                &mut stream,
-                "403 Forbidden",
-                "Origin or Referer does not match Host header.",
-            )
-            .await;
-            return;
-        }
-
         let full_body = read_full_body(&mut stream, peeked).await;
         if full_body.is_none()
             && (path == "/api/chat" || path == "/api/sessions" || path == "/api/command")
         {
             let body = r#"{"error":"Request body too large"}"#;
-            let cors_headers = if path == "/api/command" {
-                command_cors_headers(&request)
-            } else {
-                CORS_HEADERS.to_string()
-            };
+            let cors_headers = api_cors_headers(&request);
             let response = format!(
                 "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
                 body.len()
@@ -250,8 +270,9 @@ pub(super) async fn handle_http_request(
                     ),
                 ),
             };
+            let cors_headers = api_cors_headers(&request);
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
                 resp_body.len()
             );
             let _ = stream.write_all(response.as_bytes()).await;
@@ -271,7 +292,7 @@ pub(super) async fn handle_http_request(
                     ),
                 ),
             };
-            let cors_headers = command_cors_headers(&request);
+            let cors_headers = api_cors_headers(&request);
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
                 resp_body.len()
@@ -324,8 +345,13 @@ pub(super) async fn handle_http_request(
         serve_embedded_file(path)
     };
 
+    let cors_headers = if path.starts_with("/api/") {
+        api_cors_headers(&request)
+    } else {
+        CORS_HEADERS.to_string()
+    };
     let response = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
         status,
         content_type,
         body.len()
@@ -740,5 +766,146 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(relayed.contains(r#""action":"tabs""#), "{relayed}");
+    }
+
+    fn assert_forbidden_without_cors(response: &str) {
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin"),
+            "forbidden response carried CORS headers: {response}"
+        );
+    }
+
+    fn api_request(method: &str, path: &str, headers: &str) -> String {
+        let body = if method == "POST" { "{}" } else { "" };
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost:7777\r\n{headers}Content-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    const API_ROUTES: [(&str, &str); 8] = [
+        ("GET", "/api/sessions"),
+        ("GET", "/api/tabs"),
+        ("GET", "/api/status"),
+        ("GET", "/api/models"),
+        ("GET", "/api/chat/status"),
+        ("POST", "/api/sessions"),
+        ("POST", "/api/chat"),
+        ("POST", "/api/command"),
+    ];
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_requests_are_rejected_on_every_api_route() {
+        for (method, path) in API_ROUTES {
+            let request = api_request(method, path, "Origin: https://evil.example\r\n");
+            assert_forbidden_without_cors(&send_request_to_handler(&request, "x").await);
+
+            let request = api_request(method, path, "Referer: https://evil.example/page\r\n");
+            assert_forbidden_without_cors(&send_request_to_handler(&request, "x").await);
+
+            let preflight = api_request("OPTIONS", path, "Origin: https://evil.example\r\n");
+            assert_forbidden_without_cors(&send_request_to_handler(&preflight, "x").await);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn other_loopback_port_is_cross_origin_on_every_api_route() {
+        for (method, path) in API_ROUTES {
+            let request = api_request(method, path, "Origin: http://localhost:3000\r\n");
+            assert_forbidden_without_cors(&send_request_to_handler(&request, "x").await);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn writes_without_origin_or_referer_are_rejected() {
+        for (method, path) in API_ROUTES.iter().filter(|(m, _)| *m == "POST") {
+            let request = api_request(method, path, "");
+            assert_forbidden_without_cors(&send_request_to_handler(&request, "x").await);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_metadata_cross_site_is_rejected_even_without_origin() {
+        for site in ["cross-site", "same-site"] {
+            let request = api_request("GET", "/api/tabs", &format!("Sec-Fetch-Site: {site}\r\n"));
+            assert_forbidden_without_cors(&send_request_to_handler(&request, "x").await);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rebinding_host_is_rejected_without_origin() {
+        let request = "GET /api/tabs HTTP/1.1\r\nHost: attacker.example:7777\r\n\r\n";
+        assert_forbidden_without_cors(&send_request_to_handler(request, "x").await);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_origin_and_dashboard_proxy_reads_succeed_without_wildcard_cors() {
+        let same_origin = api_request(
+            "GET",
+            "/api/tabs",
+            "Origin: http://localhost:7777\r\nSec-Fetch-Site: same-origin\r\n",
+        );
+        let response = send_request_to_handler(&same_origin, "x").await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(
+            response.contains("Access-Control-Allow-Origin: http://localhost:7777"),
+            "{response}"
+        );
+
+        // The dashboard session proxy sends no Origin and no Referer.
+        let proxy = "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nConnection: close\r\n\r\n";
+        let response = send_request_to_handler(proxy, "x").await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "{response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_origin_session_post_reaches_handler() {
+        // `{}` passes the gate and fails inside `spawn_session`, so no browser starts.
+        let request = api_request("POST", "/api/sessions", "Origin: http://localhost:7777\r\n");
+        let response = send_request_to_handler(&request, "x").await;
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "{response}"
+        );
+        assert!(response.contains("Missing"), "{response}");
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "{response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_assets_are_served_cross_origin() {
+        let request = "GET /index.html HTTP/1.1\r\nHost: localhost:7777\r\nOrigin: https://evil.example\r\n\r\n";
+        let response = send_request_to_handler(request, "x").await;
+        assert!(!response.starts_with("HTTP/1.1 403"), "{response}");
+    }
+
+    #[test]
+    fn ipv6_loopback_origin_matches_host_authority() {
+        assert_eq!(
+            normalize_origin_authority("http://[::1]:7777").as_deref(),
+            Some("[::1]:7777")
+        );
+        let request =
+            "GET /api/tabs HTTP/1.1\r\nHost: [::1]:7777\r\nOrigin: http://[::1]:7777\r\n\r\n";
+        assert!(is_authorized_api_request("GET", request));
+        assert!(is_authorized_api_request("POST", request));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unlisted_api_paths_are_gated_by_prefix() {
+        for method in ["GET", "POST", "OPTIONS"] {
+            let request = api_request(method, "/api/anything", "Origin: https://evil.example\r\n");
+            assert_forbidden_without_cors(&send_request_to_handler(&request, "x").await);
+        }
     }
 }
