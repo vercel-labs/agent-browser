@@ -8279,6 +8279,67 @@ async fn e2e_snapshot_selector_includes_shadow_root() {
     assert_success(&resp);
 }
 
+/// A selector whose first match is hidden still scopes the snapshot to the
+/// visible matches instead of failing with "No accessibility node found".
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_skips_hidden_first_match() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<div class='dropdown' style='display:none'>\
+        <ul role='listbox'><li role='option'>Closed list</li></ul></div>\
+        <div class='dropdown'><ul role='listbox'><li role='option'>Open list</li></ul></div>\
+        <button>Outside</button>";
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": ".dropdown" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    assert!(
+        snapshot.contains("Open list"),
+        "Snapshot should contain the visible match: {}",
+        snapshot
+    );
+    assert!(
+        !snapshot.contains("Closed list"),
+        "Snapshot should not contain the hidden match: {}",
+        snapshot
+    );
+    assert!(
+        !snapshot.contains("Outside"),
+        "Snapshot should not contain content outside the selector: {}",
+        snapshot
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "snapshot", "selector": ".missing" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{}", resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Test that InlineTextBox nodes are filtered from snapshot output while preserving
 /// the actual text content from parent elements.
 #[tokio::test]

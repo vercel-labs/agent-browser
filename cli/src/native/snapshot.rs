@@ -371,12 +371,14 @@ pub async fn take_snapshot(
         .await?;
 
     // If a CSS selector is provided, resolve the set of backendNodeIds that
-    // belong to the DOM subtree rooted at the matched element.  We use this
-    // set to pick the right AX subtree root(s) later.
+    // belong to the DOM subtrees rooted at every matched element. We use this
+    // set to pick the right AX subtree root(s) later. Every match counts, not
+    // just the first one: component libraries often keep closed (hidden)
+    // popovers in the DOM, and a hidden first match has no AX nodes.
     let selector_backend_ids: Option<std::collections::HashSet<i64>> =
         if let Some(ref selector) = options.selector {
             let js = format!(
-                "document.querySelector({})",
+                "Array.from(document.querySelectorAll({}))",
                 serde_json::to_string(selector).unwrap_or_default()
             );
             let result: EvaluateResult = client
@@ -403,31 +405,45 @@ pub async fn take_snapshot(
                     .unwrap_or(exception.text);
                 return Err(format!("Invalid selector '{}': {}", selector, detail));
             }
-            if result.result.subtype.as_deref() != Some("node") {
-                return Err(format!("Selector '{}' did not match any element", selector));
-            }
-            let object_id = result
+            let array_id = result
                 .result
                 .object_id
                 .ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
 
+            let props: Value = client
+                .send_command(
+                    "Runtime.getProperties",
+                    Some(serde_json::json!({ "objectId": array_id, "ownProperties": true })),
+                    Some(session_id),
+                )
+                .await?;
+            let match_ids = selector_match_object_ids(&props);
+            if match_ids.is_empty() {
+                return Err(format!("Selector '{}' did not match any element", selector));
+            }
+
             // Request the full DOM subtree (depth: -1), including shadow roots
             // (pierce), so we can collect all backendNodeIds that live under
-            // the matched element.
-            let describe: Value = client
-                .send_command(
+            // each matched element.
+            let describe_futures: Vec<_> = match_ids
+                .iter()
+                .map(|object_id| {
+                    client.send_command(
                     "DOM.describeNode",
                     Some(serde_json::json!({ "objectId": object_id, "depth": -1, "pierce": true })),
                     Some(session_id),
                 )
-                .await?;
-
-            let root_node = describe
-                .get("node")
-                .ok_or_else(|| format!("Could not resolve DOM node for selector '{}'", selector))?;
+                })
+                .collect();
 
             let mut ids = std::collections::HashSet::new();
-            collect_backend_node_ids(root_node, &mut ids);
+            for describe in futures_util::future::join_all(describe_futures).await {
+                let describe = describe?;
+                let root_node = describe.get("node").ok_or_else(|| {
+                    format!("Could not resolve DOM node for selector '{}'", selector)
+                })?;
+                collect_backend_node_ids(root_node, &mut ids);
+            }
 
             if ids.is_empty() {
                 return Err(format!(
@@ -1565,6 +1581,31 @@ fn build_dedup_set(ref_map: &RefMap) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// Pulls the element object ids out of a `Runtime.getProperties` response for
+/// the array built from `document.querySelectorAll`, in document order.
+fn selector_match_object_ids(props: &Value) -> Vec<String> {
+    let mut matches: Vec<(usize, String)> = props
+        .get("result")
+        .and_then(|v| v.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let index = entry.get("name")?.as_str()?.parse::<usize>().ok()?;
+                    let value = entry.get("value")?;
+                    if value.get("subtype").and_then(|v| v.as_str()) != Some("node") {
+                        return None;
+                    }
+                    let object_id = value.get("objectId")?.as_str()?;
+                    Some((index, object_id.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    matches.sort_by_key(|(index, _)| *index);
+    matches.into_iter().map(|(_, id)| id).collect()
+}
+
 /// Recursively collect all `backendNodeId` values from a CDP DOM node tree
 /// (as returned by `DOM.describeNode` with `depth: -1`).
 fn collect_backend_node_ids(node: &Value, ids: &mut std::collections::HashSet<i64>) {
@@ -1590,6 +1631,27 @@ fn collect_backend_node_ids(node: &Value, ids: &mut std::collections::HashSet<i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_selector_match_object_ids_keeps_nodes_in_order() {
+        let props = serde_json::json!({
+            "result": [
+                { "name": "1", "value": { "type": "object", "subtype": "node", "objectId": "second" } },
+                { "name": "length", "value": { "type": "number", "value": 2 } },
+                { "name": "0", "value": { "type": "object", "subtype": "node", "objectId": "first" } },
+                { "name": "__proto__", "value": { "type": "object", "subtype": "array", "objectId": "proto" } }
+            ]
+        });
+        assert_eq!(selector_match_object_ids(&props), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn test_selector_match_object_ids_empty_when_no_match() {
+        let props = serde_json::json!({
+            "result": [{ "name": "length", "value": { "type": "number", "value": 0 } }]
+        });
+        assert!(selector_match_object_ids(&props).is_empty());
+    }
 
     #[test]
     fn test_normalize_snapshot_name_preserves_word_boundaries() {
