@@ -80,8 +80,12 @@ import os from 'node:os';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 
+const realGet = https.get;
+// Only the github.com origin is served locally; the path is kept.
 https.get = (url, callback) =>
-  http.get(url.startsWith('https://github.com/') ? ${JSON.stringify(`${origin}/binary`)} : url, callback);
+  url.startsWith('https://github.com/')
+    ? http.get(url.replace('https://github.com', ${JSON.stringify(origin)}), callback)
+    : realGet(url, callback);
 os.platform = () => 'darwin';
 os.arch = () => 'arm64';
 childProcess.execSync = () => {
@@ -128,17 +132,51 @@ test('a truncated download leaves no file in bin/', async (t) => {
   assert.deepEqual(result.files, []);
 });
 
-for (const status of [301, 302, 307, 308]) {
-  test(`download follows a ${status} redirect`, async (t) => {
-    const result = await runPostinstall(t, (req, res) => {
-      if (req.url === '/binary') {
-        res.writeHead(status, { Location: `http://${req.headers.host}/final` }).end();
-      } else {
-        res.writeHead(200).end(payload);
-      }
-    });
-    assert.deepEqual(result.files.filter((name) => !name.startsWith('.')), ['agent-browser-darwin-arm64']);
-    assert.deepEqual(await readFile(result.binary), payload);
-    assert.equal((await stat(result.binary)).mode & 0o111, 0o111);
-  });
+const serveFinal = (redirect) => (req, res) => {
+  if (req.url === '/final') {
+    res.writeHead(200).end(payload);
+  } else {
+    redirect(req, res);
+  }
+};
+
+async function assertInstalled(result) {
+  assert.deepEqual(result.files.filter((name) => !name.startsWith('.')), ['agent-browser-darwin-arm64']);
+  assert.deepEqual(await readFile(result.binary), payload);
+  assert.equal((await stat(result.binary)).mode & 0o111, 0o111);
 }
+
+for (const status of [301, 302, 307, 308]) {
+  for (const location of ['/final', 'https://github.com/final']) {
+    test(`download follows a ${status} redirect to ${location}`, async (t) => {
+      const result = await runPostinstall(t, serveFinal((_req, res) => res.writeHead(status, { Location: location }).end()));
+      await assertInstalled(result);
+    });
+  }
+}
+
+test('a redirect to a non-https URL fails cleanly and leaves no file', async (t) => {
+  const result = await runPostinstall(t, (_req, res) => res.writeHead(302, { Location: 'http://127.0.0.1:1/final' }).end());
+  assert.match(result.stdout, /Could not download native binary/);
+  assert.deepEqual(result.files, []);
+});
+
+test('an invalid redirect Location fails cleanly and leaves no file', async (t) => {
+  const result = await runPostinstall(t, (_req, res) => res.writeHead(302, { Location: 'http://' }).end());
+  assert.match(result.stdout, /Could not download native binary/);
+  assert.deepEqual(result.files, []);
+});
+
+test('20 redirects are followed and a 21st fails', async (t) => {
+  let hops = 0;
+  const ok = await runPostinstall(t, (req, res) => {
+    if (req.url === '/final') return res.writeHead(200).end(payload);
+    if (++hops > 20) return res.writeHead(500).end();
+    res.writeHead(302, { Location: hops === 20 ? '/final' : '/hop' }).end();
+  });
+  await assertInstalled(ok);
+
+  const loop = await runPostinstall(t, (_req, res) => res.writeHead(302, { Location: '/loop' }).end());
+  assert.match(loop.stdout, /more than 20 redirects/);
+  assert.deepEqual(loop.files, []);
+});

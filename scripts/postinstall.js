@@ -60,28 +60,40 @@ async function downloadFile(url, dest) {
   }
 }
 
+// Matches the redirect limit of Node's built-in fetch.
+const MAX_REDIRECTS = 20;
+
 function fetchToFile(url, staged) {
   return new Promise((resolve, reject) => {
-    const request = (target) => {
-      get(target, (response) => {
-        if (REDIRECT_STATUSES.has(response.statusCode) && response.headers.location) {
-          response.resume();
-          request(new URL(response.headers.location, target).href);
-          return;
-        }
+    const request = (target, redirects) => {
+      try {
+        get(target, (response) => {
+          try {
+            if (REDIRECT_STATUSES.has(response.statusCode) && response.headers.location) {
+              response.resume();
+              if (redirects >= MAX_REDIRECTS) {
+                throw new Error(`Failed to download: more than ${MAX_REDIRECTS} redirects`);
+              }
+              request(new URL(response.headers.location, target).href, redirects + 1);
+              return;
+            }
 
-        if (response.statusCode !== 200) {
-          response.resume();
-          reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
-          return;
-        }
+            if (response.statusCode !== 200) {
+              response.resume();
+              throw new Error(`Failed to download: HTTP ${response.statusCode}`);
+            }
 
-        const file = createWriteStream(staged);
-        pipeline(response, file).then(resolve, reject);
-      }).on('error', reject);
+            pipeline(response, createWriteStream(staged)).then(resolve, reject);
+          } catch (err) {
+            reject(err);
+          }
+        }).on('error', reject);
+      } catch (err) {
+        reject(err);
+      }
     };
 
-    request(url);
+    request(url, 0);
   });
 }
 
