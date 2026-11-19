@@ -908,4 +908,12 @@ mod tests {
         assert!(is_authorized_api_request("GET", request));
         assert!(is_authorized_api_request("POST", request));
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unlisted_api_paths_are_gated_by_prefix() {
+        for method in ["GET", "POST", "OPTIONS"] {
+            let request = api_request(method, "/api/anything", "Origin: https://evil.example\r\n");
+            assert_forbidden_without_cors(&send_request_to_handler(&request, "x").await);
+        }
+    }
 }

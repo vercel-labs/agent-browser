@@ -43,6 +43,8 @@ Connect a WebSocket client to `ws://127.0.0.1:<port>`. Frame delivery starts aut
 
 The same port serves the preview UI and `/api/` JSON routes (`tabs`, `status`, `sessions`, `models`, `chat`, `command`). They are same-origin only: a `GET` may omit `Origin` and `Referer` when `Host` is loopback, while every `POST` needs a loopback-matching `Origin` or `Referer`. Anything else gets a 403 with no CORS headers.
 
+This does not cover the WebSocket: clients loaded from any `localhost`, `127.0.0.1`, `::1` or `file://` origin can still connect to it, receive frames and send input.
+
 ## Messages from the server
 
 Every message is JSON text with a `type` field.
