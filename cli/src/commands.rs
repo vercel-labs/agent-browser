@@ -329,6 +329,15 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+/// The headers a `connect` sends to the endpoint it names: those given on the
+/// command line, or the ones the environment or config set for that endpoint.
+fn connect_headers<'a>(flags: &'a Flags, endpoint: &str) -> Option<&'a str> {
+    flags
+        .cdp_headers
+        .as_deref()
+        .filter(|_| flags.cli_cdp_headers || flags.default_headers_fit(endpoint))
+}
+
 /// Parses `--cdp-headers`: a JSON object of string values sent on the CDP
 /// WebSocket handshake (distinct from page-level `--headers`).
 pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
@@ -449,7 +458,12 @@ fn parse_command_inner(
             };
             let url = normalize_navigation_url(url);
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
-            if flags.provider.is_some() {
+            // The provider that will apply: `--cdp` replaces a default one, and
+            // `-p ""` names none.
+            let provider = crate::session_settings::effective_targets(flags)
+                .provider
+                .filter(|p| !p.trim().is_empty());
+            if provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");
             }
             if let Some(ref headers_json) = flags.headers {
@@ -463,7 +477,7 @@ fn parse_command_inner(
                 nav_cmd["headers"] = headers;
             }
             // Include iOS device info if specified (needed for auto-launch with existing daemon)
-            if flags.provider.as_deref() == Some("ios") {
+            if provider.as_deref() == Some("ios") {
                 if let Some(ref device) = flags.device {
                     nav_cmd["iosDevice"] = json!(device);
                 }
@@ -1371,7 +1385,7 @@ fn parse_command_inner(
                 || endpoint.starts_with("https://")
             {
                 let mut cmd = json!({ "id": id, "action": "launch", "cdpUrl": endpoint });
-                if let Some(ref raw) = flags.cdp_headers {
+                if let Some(raw) = connect_headers(flags, endpoint) {
                     cmd["cdpHeaders"] =
                         parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
                             message,
@@ -1409,7 +1423,7 @@ fn parse_command_inner(
                     }
                 };
                 let mut cmd = json!({ "id": id, "action": "launch", "cdpPort": port });
-                if let Some(ref raw) = flags.cdp_headers {
+                if let Some(raw) = connect_headers(flags, endpoint) {
                     cmd["cdpHeaders"] =
                         parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
                             message,
@@ -4068,6 +4082,10 @@ mod tests {
             cli_webgpu: false,
             cli_no_webmcp: false,
             cli_auto_connect: false,
+            cli_cdp: false,
+            cli_cdp_headers: false,
+            default_cdp: None,
+            cli_provider: false,
             no_auto_connect: false,
             cli_restore: false,
             cli_pin_tab: false,

@@ -577,8 +577,18 @@ pub struct Flags {
     pub cli_no_webmcp: bool,
     /// True when `--auto-connect` was passed on the command line.
     pub cli_auto_connect: bool,
+    /// True when `--cdp`, `--cdp-headers` or `--provider` was passed on the command line.
+    /// Without it the value came from the environment or config and is only a
+    /// session default.
+    pub cli_cdp: bool,
+    pub cli_cdp_headers: bool,
+    /// The endpoint the environment or config names, kept when `--cdp`
+    /// replaces `cdp`. Headers from the same sources belong to it.
+    pub default_cdp: Option<String>,
+    pub cli_provider: bool,
     /// True when `--no-auto-connect` (or `--auto-connect false`) was passed:
-    /// the session returns to a local launch, whatever env or config say.
+    /// the session returns to a local launch, unless an env or config target
+    /// then applies to it as the session default.
     pub no_auto_connect: bool,
     pub cli_restore: bool,
     /// True when --pin-tab / --no-pin-tab was passed on the command line, so
@@ -587,6 +597,27 @@ pub struct Flags {
     pub cli_pin_tab: bool,
     /// True when `--input-mode` was explicitly passed, including `instant`.
     pub cli_input_mode: bool,
+}
+
+impl Flags {
+    /// The endpoint the environment or config names, whether or not `--cdp`
+    /// replaced it.
+    pub fn default_endpoint(&self) -> Option<&str> {
+        let value = if self.cli_cdp {
+            self.default_cdp.as_deref()
+        } else {
+            self.cdp.as_deref()
+        };
+        value.map(str::trim).filter(|v| !v.is_empty())
+    }
+
+    /// Whether `--cdp-headers` values from the environment or config may go to
+    /// `endpoint`. They belong to the endpoint those sources name; with none
+    /// named they go with whichever endpoint the command names.
+    pub fn default_headers_fit(&self, endpoint: &str) -> bool {
+        self.default_endpoint()
+            .is_none_or(|default| default == endpoint.trim())
+    }
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -843,6 +874,10 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         cli_webgpu: false,
         cli_no_webmcp: false,
         cli_auto_connect: false,
+        cli_cdp: false,
+        cli_cdp_headers: false,
+        default_cdp: None,
+        cli_provider: false,
         no_auto_connect: false,
         cli_restore: false,
         cli_pin_tab: false,
@@ -1022,13 +1057,18 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             }
             "--cdp" => {
                 if let Some(s) = args.get(i + 1) {
+                    if !flags.cli_cdp {
+                        flags.default_cdp = flags.cdp.clone();
+                    }
                     flags.cdp = Some(s.clone());
+                    flags.cli_cdp = true;
                     i += 1;
                 }
             }
             "--cdp-headers" => {
                 if let Some(h) = args.get(i + 1) {
                     flags.cdp_headers = Some(h.clone());
+                    flags.cli_cdp_headers = true;
                     i += 1;
                 }
             }
@@ -1079,6 +1119,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             "-p" | "--provider" => {
                 if let Some(p) = args.get(i + 1) {
                     flags.provider = Some(p.clone());
+                    flags.cli_provider = true;
                     i += 1;
                 }
             }
