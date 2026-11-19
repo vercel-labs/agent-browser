@@ -11378,6 +11378,15 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &state.iframe_sessions,
     );
 
+    // Read before the tree: a navigation in between is caught when the ref resolves.
+    let document = super::element::current_document(
+        &mgr.client,
+        &session_id,
+        state.active_frame_id.as_deref(),
+        &state.iframe_sessions,
+    )
+    .await;
+
     let ax_tree: GetFullAXTreeResult = mgr
         .client
         .send_command_typed_raw(
@@ -11399,14 +11408,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
         state.active_frame_id.as_deref(),
     );
-    if let Some((session, loader)) = super::element::current_document(
-        &mgr.client,
-        &session_id,
-        state.active_frame_id.as_deref(),
-        &state.iframe_sessions,
-    )
-    .await
-    {
+    if let Some((session, loader)) = document {
         state.ref_map.bind_document(&temp_ref, &session, &loader);
     }
     state.ref_map.set_next_ref_num(ref_num + 1);

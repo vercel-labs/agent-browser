@@ -6327,6 +6327,36 @@ const REF_FIXTURE_ROUTES: &[(&str, &str)] = &[
         "/fb.html",
         "<title>FB</title><button onclick=\"parent.document.title='FB-DANGER'\">Act</button>",
     ),
+    (
+        "/b2.html",
+        "<title>B2</title><button onclick=\"document.title='B2-CLICKED'\">Continue</button>",
+    ),
+    // The element reports itself disconnected while the page navigates, so
+    // resolution falls back to a role/name query on the new document.
+    (
+        "/trap-fallback.html",
+        "<title>T</title><button id='b'>Continue</button>\
+         <script>window.arm = () => {\
+           const b = document.getElementById('b'); let fired = 0;\
+           Object.defineProperty(b, 'isConnected', { get() {\
+             if (!fired) { fired = 1; location.href = '/b2.html';\
+               const t = performance.now(); while (performance.now() - t < 400); return false; }\
+             return true; } });\
+         };</script>",
+    ),
+    // Resolution succeeds on the element, but the page navigates while its
+    // click point is computed.
+    (
+        "/trap-point.html",
+        "<title>T</title><button id='b'>Continue</button>\
+         <script>window.arm = () => {\
+           const b = document.getElementById('b');\
+           b.scrollIntoViewIfNeeded = () => { location.href = '/b2.html'; };\
+           let n = 0; const orig = b.getBoundingClientRect.bind(b);\
+           b.getBoundingClientRect = () => { const r = orig(); n++; return new DOMRect(r.x + n, r.y, r.width, r.height); };\
+           window.setTimeout = () => 0; window.requestAnimationFrame = () => 0;\
+         };</script>",
+    ),
     // Cross-site iframe: `localhost` and `127.0.0.1` are different sites.
     (
         "/x.html",
@@ -6549,6 +6579,55 @@ async fn e2e_ref_fails_after_cross_site_iframe_navigation() {
 
     assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
     server.abort();
+}
+
+async fn ref_fails_when_the_page_navigates_during_resolution(route: &str) {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}{route}") }),
+        )
+        .await,
+    );
+    let snap = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    let cont = snapshot_ref(&snap, "\"Continue\"");
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "a", "action": "evaluate", "script": "window.arm(); 1" }),
+        )
+        .await,
+    );
+
+    // The navigation lands while the ref resolves: the click must fail with
+    // the stale-ref error and never reach /b2.html's button.
+    assert_previous_page(&ref_click(&mut state, &cont).await);
+    ref_wait_until(&mut state, "document.title === 'B2'").await;
+    assert_eq!(ref_title(&mut state).await, "B2");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_fails_when_fallback_would_query_the_new_document() {
+    ref_fails_when_the_page_navigates_during_resolution("/trap-fallback.html").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_reports_navigation_during_click_point_resolution() {
+    ref_fails_when_the_page_navigates_during_resolution("/trap-point.html").await;
 }
 
 #[tokio::test]
