@@ -2364,6 +2364,39 @@ fn find_tool(name: &str) -> Option<Value> {
 }
 
 /// Returns an error naming any argument keys the tool's input schema does not declare.
+/// Rejects values outside a property's schema `enum`, so a closed set never
+/// reaches the CLI as free text.
+fn reject_invalid_enum_values(definition: &Value, arguments: &Value) -> Result<(), ProtocolError> {
+    let (Some(props), Some(args)) = (
+        definition
+            .pointer("/inputSchema/properties")
+            .and_then(|v| v.as_object()),
+        arguments.as_object(),
+    ) else {
+        return Ok(());
+    };
+    for (key, schema) in props {
+        let (Some(allowed), Some(Value::String(given))) =
+            (schema.get("enum").and_then(|v| v.as_array()), args.get(key))
+        else {
+            continue;
+        };
+        if !allowed.iter().any(|v| v.as_str() == Some(given.as_str())) {
+            let names: Vec<&str> = allowed.iter().filter_map(|v| v.as_str()).collect();
+            let (last, init) = names.split_last().unwrap_or((&"", &[]));
+            let list = if init.is_empty() {
+                last.to_string()
+            } else {
+                format!("{}, or {last}", init.join(", "))
+            };
+            return Err(ProtocolError::invalid_params(format!(
+                "{key} expects {list}, got '{given}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn reject_unknown_arguments(
     name: &str,
     definition: &Value,
@@ -2473,6 +2506,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
     }
 
     reject_unknown_arguments(name, &tool_def, arguments)?;
+    reject_invalid_enum_values(&tool_def, arguments)?;
 
     match name {
         TOOL_TOOLS_PROFILES => call_tools_profiles(config),
@@ -2827,6 +2861,8 @@ fn cli_tool_args_at(
     let literal_boundary = literal_start
         .or_else(|| fill_or_type_boundary(&command_args))
         .filter(|index| command_args.get(*index).map(String::as_str) == Some("--"));
+    let mut caller_values = Vec::new();
+    collect_caller_strings(arguments, &mut caller_values);
     let tokens = command_args
         .iter()
         .enumerate()
@@ -2837,6 +2873,15 @@ fn cli_tool_args_at(
         let name = global_flag_name(token);
         if wait_selector_state.is_some() && command_index == wait_selector_state {
             continue;
+        }
+        if command_index.is_some()
+            && caller_values.contains(&token.as_str())
+            && (crate::flags::is_global_flag(token) || crate::flags::is_global_flag(name))
+        {
+            return Err(ProtocolError::invalid_params(format!(
+                "Tool argument value '{token}' would be read as a CLI flag; \
+                 values that look like global flags are not accepted outside literal positions"
+            )));
         }
         if command_index.is_none() && name == "--state" {
             return Err(ProtocolError::invalid_params(
@@ -2875,6 +2920,19 @@ fn cli_tool_args_at(
         args.extend(extra_args);
     }
     Ok(args)
+}
+
+/// Every string a caller supplied, except `extraArgs` (checked on its own).
+fn collect_caller_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+    match value {
+        Value::String(s) => out.push(s),
+        Value::Array(items) => items.iter().for_each(|v| collect_caller_strings(v, out)),
+        Value::Object(map) => map
+            .iter()
+            .filter(|(key, _)| key.as_str() != "extraArgs")
+            .for_each(|(_, v)| collect_caller_strings(v, out)),
+        _ => {}
+    }
 }
 
 fn wait_selector_state_flag_index(command_args: &[String]) -> Option<usize> {
@@ -4773,8 +4831,26 @@ fn run_command(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// When set, `run_cli` records argv here instead of spawning a child.
+    static RECORDED_ARGV: std::cell::RefCell<Option<Vec<Vec<String>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Run tools through the CLI, including its trust restrictions on automatically discovered project config.
 fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Result<CliRun, String> {
+    #[cfg(test)]
+    if let Some(recorded) =
+        RECORDED_ARGV.with(|r| r.borrow_mut().as_mut().map(|runs| runs.push(args.to_vec())))
+    {
+        let _ = (recorded, &stdin_body, timeout_ms);
+        return Ok(CliRun {
+            exit_code: Some(0),
+            stdout: "{\"success\":true,\"data\":{}}".to_string(),
+            stderr: String::new(),
+        });
+    }
     let exe = env::current_exe().map_err(|e| e.to_string())?;
     let mut command = Command::new(exe);
     command.args(args);
@@ -7531,5 +7607,285 @@ mod snapshot_delta_schema_tests {
             crate::commands::parse_command(&args, &flags).unwrap()["delta"],
             true
         );
+    }
+}
+
+#[cfg(test)]
+mod flag_shaped_values {
+    use super::*;
+
+    fn benign(name: &str, schema: &Value) -> Value {
+        if let Some(first) = schema.pointer("/enum/0") {
+            return first.clone();
+        }
+        match schema
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("string")
+        {
+            "integer" | "number" => json!(schema
+                .get("minimum")
+                .and_then(|m| m.as_f64())
+                .map_or(1, |m| m.max(1.0) as i64)),
+            "boolean" => json!(false),
+            "array" => {
+                let item = schema
+                    .get("items")
+                    .cloned()
+                    .unwrap_or(json!({"type": "string"}));
+                json!([benign(name, &item)])
+            }
+            "object" => {
+                let mut map = serde_json::Map::new();
+                if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+                    let required = required_names(schema);
+                    for (key, value) in props.iter().filter(|(k, _)| required.contains(k)) {
+                        map.insert(key.clone(), benign(key, value));
+                    }
+                } else {
+                    map.insert("k".into(), json!("v"));
+                }
+                Value::Object(map)
+            }
+            _ => {
+                let lower = name.to_lowercase();
+                if lower.contains("url") || lower == "origin" {
+                    json!("https://example.com")
+                } else if lower.contains("path")
+                    || lower.contains("file")
+                    || lower == "dir"
+                    || lower.contains("baseline")
+                {
+                    json!("/tmp/a.png")
+                } else if lower.contains("expression") || lower == "script" || lower == "fn" {
+                    json!("1")
+                } else {
+                    json!("a")
+                }
+            }
+        }
+    }
+
+    fn required_names(schema: &Value) -> Vec<String> {
+        schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|r| {
+                r.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// JSON pointers of free-form string and string-array fields.
+    fn slots(prefix: &str, schema: &Value, out: &mut Vec<String>) {
+        if schema.get("enum").is_some() {
+            return;
+        }
+        match schema
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("string")
+        {
+            "string" => out.push(prefix.to_string()),
+            "array" => {
+                let item = schema
+                    .get("items")
+                    .cloned()
+                    .unwrap_or(json!({"type": "string"}));
+                match item.get("type").and_then(|t| t.as_str()) {
+                    Some("string") if item.get("enum").is_none() => out.push(prefix.to_string()),
+                    Some("object") => slots(&format!("{prefix}/0"), &item, out),
+                    _ => {}
+                }
+            }
+            "object" => match schema.get("properties").and_then(|p| p.as_object()) {
+                Some(props) => props
+                    .iter()
+                    .for_each(|(k, v)| slots(&format!("{prefix}/{k}"), v, out)),
+                None => out.push(format!("{prefix}/k")),
+            },
+            _ => {}
+        }
+    }
+
+    fn set(root: &mut Value, pointer: &str, value: Value) {
+        let mut current = root;
+        let parts: Vec<&str> = pointer.trim_start_matches('/').split('/').collect();
+        for (i, part) in parts.iter().enumerate() {
+            let last = i + 1 == parts.len();
+            if let Ok(index) = part.parse::<usize>() {
+                if !current.is_array() {
+                    *current = json!([]);
+                }
+                let items = current.as_array_mut().unwrap();
+                while items.len() <= index {
+                    items.push(json!({}));
+                }
+                current = &mut items[index];
+                if last {
+                    *current = value;
+                    return;
+                }
+            } else {
+                if !current.is_object() {
+                    *current = json!({});
+                }
+                let map = current.as_object_mut().unwrap();
+                if last {
+                    map.insert(part.to_string(), value);
+                    return;
+                }
+                current = map.entry(part.to_string()).or_insert(json!({}));
+            }
+        }
+    }
+
+    fn record(name: &str, arguments: &Value) -> Result<Vec<Vec<String>>, String> {
+        RECORDED_ARGV.with(|r| *r.borrow_mut() = Some(Vec::new()));
+        let params = json!({"name": name, "arguments": arguments});
+        let result = call_tool(Some(&params), &McpConfig::all());
+        let runs = RECORDED_ARGV.with(|r| r.borrow_mut().take().unwrap_or_default());
+        result.map(|_| runs).map_err(|e| e.message)
+    }
+
+    fn violations(argv: &[String], arguments: &Value, base_session: &str) -> Vec<String> {
+        let mut bad = Vec::new();
+        let flags = crate::flags::parse_flags(argv);
+        if flags.session != base_session {
+            bad.push(format!("session={}", flags.session));
+        }
+        if flags.restore.is_some() && arguments.get("restore").is_none() {
+            bad.push("restore".into());
+        }
+        if flags.webgpu || flags.proxy.is_some() {
+            bad.push("launch flag".into());
+        }
+        let cleaned = crate::flags::clean_args(argv);
+        let options = crate::flags::before_end_of_options(&cleaned);
+        if options.iter().any(|o| o == "--help" || o == "-h") {
+            bad.push("help".into());
+        }
+        bad
+    }
+
+    #[test]
+    fn caller_strings_never_become_global_flags() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.remove("AGENT_BROWSER_SESSION");
+        let singles = [
+            "--session",
+            "--session=bar",
+            "--help",
+            "-h",
+            "--restore=evil",
+            "--webgpu",
+            "--proxy",
+            "--",
+        ];
+        let mut failures = Vec::new();
+        let mut calls = 0;
+        for tool in tools() {
+            let name = tool["name"].as_str().unwrap().to_string();
+            let props = tool
+                .pointer("/inputSchema/properties")
+                .and_then(|p| p.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let required = required_names(&tool["inputSchema"]);
+            let mut base = serde_json::Map::new();
+            for (key, schema) in props.iter().filter(|(k, _)| required.contains(k)) {
+                base.insert(key.clone(), benign(key, schema));
+            }
+            let base = Value::Object(base);
+            let base_session = match record(&name, &base) {
+                Ok(runs) if !runs.is_empty() => crate::flags::parse_flags(&runs[0]).session,
+                Ok(_) => "default".into(),
+                Err(_) => continue,
+            };
+            let mut pointers = Vec::new();
+            for (key, schema) in props
+                .iter()
+                .filter(|(k, _)| *k != "session" && *k != "extraArgs")
+            {
+                slots(&format!("/{key}"), schema, &mut pointers);
+            }
+            let mut cases: Vec<Value> = Vec::new();
+            let mut variants: Vec<(Vec<(String, Value)>, String)> = Vec::new();
+            for pointer in &pointers {
+                for single in singles {
+                    variants.push((vec![(pointer.clone(), json!(single))], single.to_string()));
+                    variants.push((
+                        vec![(pointer.clone(), json!([single, "x"]))],
+                        single.to_string(),
+                    ));
+                }
+                for other in pointers.iter().filter(|p| *p != pointer) {
+                    variants.push((
+                        vec![
+                            (pointer.clone(), json!("--session")),
+                            (other.clone(), json!("evil")),
+                        ],
+                        "pair".to_string(),
+                    ));
+                }
+            }
+            for (edits, _) in &variants {
+                let mut arguments = base.clone();
+                for (pointer, value) in edits {
+                    set(&mut arguments, pointer, value.clone());
+                }
+                cases.push(arguments);
+            }
+            for arguments in cases {
+                calls += 1;
+                let Ok(runs) = record(&name, &arguments) else {
+                    continue;
+                };
+                for argv in runs {
+                    let bad = violations(&argv, &arguments, &base_session);
+                    if !bad.is_empty() {
+                        failures.push(format!("{name} {arguments} -> {bad:?} argv={argv:?}"));
+                    }
+                }
+            }
+        }
+        assert!(calls > 500, "only {calls} calls ran");
+        assert!(
+            failures.is_empty(),
+            "{} failures:\n{}",
+            failures.len(),
+            failures
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn schema_enums_are_enforced_before_building_argv() {
+        let err = call_tool(
+            Some(
+                &json!({"name": TOOL_CLICK, "arguments": {"selector": "a", "button": "--session"}}),
+            ),
+            &McpConfig::all(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.starts_with("button expects"), "{}", err.message);
+    }
+
+    #[test]
+    fn operand_marker_reaches_commands_dispatched_before_parsing() {
+        let mut args: Vec<String> = ["skills", "path", "--", "core"].map(String::from).to_vec();
+        crate::commands::strip_operand_marker(&mut args);
+        assert_eq!(args, ["skills", "path", "core"]);
+
+        let mut lone: Vec<String> = ["press", "--"].map(String::from).to_vec();
+        crate::commands::strip_operand_marker(&mut lone);
+        assert_eq!(lone, ["press", "--"]);
     }
 }

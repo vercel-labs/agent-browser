@@ -370,20 +370,44 @@ pub fn parse_batch_command(args: &[String], flags: &Flags) -> Result<Value, Pars
     parse_command_with_batch_scope(args, flags, true)
 }
 
-/// Removes the `--` marker that precedes positional values for commands whose
-/// parsers read their operands directly, so the values after it stay data.
-fn drop_end_of_options<'a>(cmd: &str, mut rest: Vec<&'a str>) -> Vec<&'a str> {
-    let operands_after = match cmd {
+/// Number of words that precede the operands of a command whose parser reads
+/// them directly, or `None` for commands that handle `--` themselves.
+fn operands_after(cmd: &str, rest: &[&str]) -> Option<usize> {
+    match cmd {
         "select" | "upload" | "press" | "key" | "keydown" | "keyup" | "removeinitscript"
-        | "confirm" | "deny" => 0,
-        "keyboard" | "set" | "clipboard" | "auth" | "webmcp" | "plugin" | "skills" | "dialog" => 1,
-        "tab" => usize::from(matches!(rest.first(), Some(&("close" | "keep")))),
-        _ => return rest,
-    };
-    if rest.get(operands_after) == Some(&"--") {
-        rest.remove(operands_after);
+        | "confirm" | "deny" => Some(0),
+        "keyboard" | "set" | "clipboard" | "auth" | "webmcp" | "plugin" | "plugins" | "skills"
+        | "dialog" => Some(1),
+        "tab" => Some(usize::from(matches!(
+            rest.first(),
+            Some(&("close" | "keep"))
+        ))),
+        _ => None,
+    }
+}
+
+/// Removes the `--` marker that precedes operands, so the values after it stay
+/// data. A lone `--` is itself the operand and is kept.
+fn drop_end_of_options<'a>(cmd: &str, mut rest: Vec<&'a str>) -> Vec<&'a str> {
+    if let Some(at) = operands_after(cmd, &rest) {
+        if rest.get(at) == Some(&"--") && rest.len() > at + 1 {
+            rest.remove(at);
+        }
     }
     rest
+}
+
+/// Same as [`drop_end_of_options`] for commands dispatched before parsing.
+pub fn strip_operand_marker(args: &mut Vec<String>) {
+    let Some(cmd) = args.first().cloned() else {
+        return;
+    };
+    let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+    if let Some(at) = operands_after(&cmd, &rest) {
+        if args.get(at + 1).map(String::as_str) == Some("--") && args.len() > at + 2 {
+            args.remove(at + 1);
+        }
+    }
 }
 
 fn parse_command_with_batch_scope(
