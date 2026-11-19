@@ -587,6 +587,10 @@ pub fn run_skills(args: &[String], json_mode: bool) {
             let mut rest = args[2..].iter();
             while let Some(arg) = rest.next() {
                 match arg.as_str() {
+                    "--" => {
+                        names.extend(rest.by_ref().cloned());
+                        break;
+                    }
                     "--full" => full = true,
                     "--all" => get_all = true,
                     "--ref" => match rest.next() {
@@ -608,7 +612,11 @@ pub fn run_skills(args: &[String], json_mode: bool) {
             run_get(&skills_dirs, &names, get_all, full, &refs, json_mode);
         }
         Some("path") => {
-            let name = args.get(2).map(|s| s.as_str());
+            let mut operands = args[2..].iter().map(|s| s.as_str());
+            let mut name = operands.next();
+            if name == Some("--") {
+                name = operands.next().or(name);
+            }
             run_path(&skills_dirs, name, json_mode);
         }
         Some(unknown) => {

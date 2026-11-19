@@ -376,8 +376,9 @@ fn operands_after(cmd: &str, rest: &[&str]) -> Option<usize> {
     match cmd {
         "select" | "upload" | "press" | "key" | "keydown" | "keyup" | "removeinitscript"
         | "confirm" | "deny" => Some(0),
-        "keyboard" | "set" | "clipboard" | "auth" | "webmcp" | "plugin" | "plugins" | "skills"
-        | "dialog" => Some(1),
+        "keyboard" | "set" | "clipboard" | "auth" | "webmcp" | "plugin" | "plugins" | "dialog" => {
+            Some(1)
+        }
         "tab" => Some(usize::from(matches!(
             rest.first(),
             Some(&("close" | "keep"))

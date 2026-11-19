@@ -2,7 +2,7 @@
 
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md. Unknown commands exit with status 1, including when you request command help.
 
-These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`. Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently.
+These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`. Operands of `select`, `upload`, `press`, `keydown`, `keyup`, `keyboard`, `set`, `clipboard`, `auth`, `webmcp`, `dialog`, `tab`, `skills` and `plugin` also follow a leading `--`; a lone `--` stays an operand. Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently.
 
 ## Linux dependencies
 
@@ -108,6 +108,8 @@ agent-browser upload @e1 file.pdf # Upload files
 ```
 
 For `fill` and `type`, put options before the optional `--` marker. Text after the marker is literal, including values that look like flags. For example, `agent-browser fill @e2 -- --json` fills with `--json`, and `agent-browser type @e2 --clear --delay 10 -- --clear` clears the field, then types `--clear`. MCP `agent_browser_fill` and `agent_browser_type` pass typed `text` values literally, so they do not need the marker.
+
+MCP tools pass typed values literally. A value that would be read as a global flag (`--session`, `--help`, `-h`, `--restore=...`, `--webgpu`, and so on) is rejected before argv is built, because the CLI would apply it to the call; values that arrive after the `--` boundary, such as `fill` text and `select` values, are data. Known false rejections: `wait_for_text "--help"`, `find` with `action: "fill"` and text `--json`, and `chat "--help"`. Use `agent_browser_fill` for flag-shaped text.
 
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 

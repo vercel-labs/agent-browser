@@ -1665,8 +1665,6 @@ fn main() {
 
     // Handle skills command (doesn't need daemon)
     if clean.first().map(|s| s.as_str()) == Some("skills") {
-        let mut clean = clean;
-        commands::strip_operand_marker(&mut clean);
         skills::run_skills(&clean, flags.json);
         return;
     }
