@@ -67,9 +67,16 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         "Chrome for Testing CDN",
     );
 
-    if env::var("AI_GATEWAY_API_KEY").is_ok() {
-        let url = env::var("AI_GATEWAY_URL")
-            .unwrap_or_else(|_| "https://ai-gateway.vercel.sh".to_string());
+    let gateway_key = env::var("AI_GATEWAY_API_KEY").is_ok();
+    let atlas_key = env::var("ATLASCLOUD_API_KEY").is_ok();
+    if gateway_key || atlas_key {
+        let url = if gateway_key || !atlas_key {
+            env::var("AI_GATEWAY_URL")
+                .unwrap_or_else(|_| "https://ai-gateway.vercel.sh".to_string())
+        } else {
+            env::var("ATLASCLOUD_API_BASE")
+                .unwrap_or_else(|_| "https://api.atlascloud.ai".to_string())
+        };
         probe_url(
             &rt,
             &client,

@@ -97,13 +97,19 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         }
     }
 
-    let chat_key_present = env::var("AI_GATEWAY_API_KEY").is_ok();
-    if chat_key_present {
+    let gateway_key_present = env::var("AI_GATEWAY_API_KEY").is_ok();
+    let atlas_key_present = env::var("ATLASCLOUD_API_KEY").is_ok();
+    if gateway_key_present || atlas_key_present {
+        let name = if gateway_key_present {
+            "AI_GATEWAY_API_KEY"
+        } else {
+            "ATLASCLOUD_API_KEY"
+        };
         checks.push(Check::new(
             "providers.chat",
             category,
             Status::Info,
-            "AI_GATEWAY_API_KEY present (chat enabled)",
+            format!("{} present (chat enabled)", name),
         ));
     } else {
         checks.push(
@@ -111,7 +117,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                 "providers.chat",
                 category,
                 Status::Info,
-                "AI_GATEWAY_API_KEY not set (chat command disabled)",
+                "AI_GATEWAY_API_KEY or ATLASCLOUD_API_KEY not set (chat command disabled)",
             )
             .with_fix("export AI_GATEWAY_API_KEY=gw_..."),
         );
