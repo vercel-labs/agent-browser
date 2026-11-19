@@ -965,7 +965,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref.",
+            "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref. A capture that fails, such as a selector that matches nothing, leaves the previous refs in place while the document is unchanged.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text." },
@@ -1073,7 +1073,7 @@ fn tools() -> Vec<Value> {
                 "path": { "type": "string", "description": "Optional output path." },
                 "selector": { "type": "string", "description": "Optional @ref or CSS selector to capture." },
                 "fullPage": { "type": "boolean", "default": false },
-                "annotate": { "type": "boolean", "default": false, "description": "Number visible elements in the screenshot." },
+                "annotate": { "type": "boolean", "default": false, "description": "Number visible elements in the screenshot. A failed annotated screenshot keeps the previous refs." },
                 "format": { "type": "string", "enum": ["png", "jpeg"], "description": "Screenshot format." },
                 "quality": { "type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG quality." },
                 "screenshotDir": { "type": "string", "description": "Default output directory when path is omitted." },

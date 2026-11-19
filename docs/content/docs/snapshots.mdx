@@ -100,6 +100,8 @@ agent-browser click @e8      # Use a ref from the new snapshot
 
 A ref keeps pointing at its DOM node while that node exists. If the node was replaced, agent-browser falls back to the one element with the same role and name, but only when the ref was unique in its snapshot. When duplicates make the match ambiguous, the action fails without acting. Run `snapshot` again and use a fresh ref.
 
+If a snapshot fails because its scope matches nothing, you can still use refs from the last successful snapshot as long as the document has not changed.
+
 ## Annotated screenshots
 
 For visual context alongside text snapshots, use `screenshot --annotate` to overlay numbered labels on interactive elements. Each label `[N]` maps to ref `@eN`:
@@ -118,6 +120,8 @@ agent-browser click @e2
 Headless Chromium screenshots hide native scrollbars for consistent image output. Pass `--hide-scrollbars false` when launching to keep native scrollbars visible.
 
 Annotated screenshots also cache refs, so you can interact with elements immediately. This is useful when the text snapshot is insufficient for unlabeled icons, canvas content, or visual layout verification.
+
+If an annotated capture fails, the previous refs stay in place as long as the document has not changed.
 
 ## Iframes
 
