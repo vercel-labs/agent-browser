@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future};
 
 use serde_json::Value;
 
@@ -33,6 +33,19 @@ pub struct PendingRelease {
     pub button: MouseButton,
     pub click_count: u8,
     pub modifiers: Modifiers,
+}
+
+pub struct KeyPressResult {
+    pub dialog_opened: bool,
+    pub pending_release: Option<PendingKeyRelease>,
+}
+
+pub struct PendingKeyRelease {
+    pub session_id: String,
+    pub key: String,
+    pub code: String,
+    pub windows_virtual_key_code: i32,
+    pub modifiers: Option<i32>,
 }
 
 pub async fn click(
@@ -384,6 +397,137 @@ pub async fn press_key_with_modifiers(
         .await?;
 
     Ok(())
+}
+
+/// Press a key while returning as soon as a synchronous page dialog opens.
+/// The matching key-up is deferred until the caller resolves the dialog.
+pub async fn press_key_with_modifiers_or_dialog(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    modifiers: Option<i32>,
+) -> Result<KeyPressResult, String> {
+    let (key_name, code, key_code) = named_key_info(key);
+    let has_command_modifier = modifiers.is_some_and(|m| m & (2 | 4) != 0);
+    let text = if has_command_modifier {
+        None
+    } else {
+        key_text(&key_name)
+    };
+
+    let key_down = DispatchKeyEventParams {
+        event_type: "keyDown".to_string(),
+        key: Some(key_name.clone()),
+        code: Some(code.clone()),
+        text,
+        unmodified_text: if has_command_modifier {
+            None
+        } else {
+            key_text(&key_name)
+        },
+        windows_virtual_key_code: Some(key_code),
+        modifiers,
+    };
+    if dispatch_key_or_dialog(client, session_id, &[session_id], &key_down).await? {
+        return Ok(KeyPressResult {
+            dialog_opened: true,
+            pending_release: Some(PendingKeyRelease {
+                session_id: session_id.to_string(),
+                key: key_name,
+                code,
+                windows_virtual_key_code: key_code,
+                modifiers,
+            }),
+        });
+    }
+
+    let key_up = DispatchKeyEventParams {
+        event_type: "keyUp".to_string(),
+        key: Some(key_name),
+        code: Some(code),
+        text: None,
+        unmodified_text: None,
+        windows_virtual_key_code: Some(key_code),
+        modifiers,
+    };
+    let dialog_opened = dispatch_key_or_dialog(client, session_id, &[session_id], &key_up).await?;
+    Ok(KeyPressResult {
+        dialog_opened,
+        pending_release: None,
+    })
+}
+
+pub async fn dispatch_pending_key_release(
+    client: &CdpClient,
+    release: &PendingKeyRelease,
+) -> Result<(), String> {
+    client
+        .send_command_typed::<_, Value>(
+            "Input.dispatchKeyEvent",
+            &DispatchKeyEventParams {
+                event_type: "keyUp".to_string(),
+                key: Some(release.key.clone()),
+                code: Some(release.code.clone()),
+                text: None,
+                unmodified_text: None,
+                windows_virtual_key_code: Some(release.windows_virtual_key_code),
+                modifiers: release.modifiers,
+            },
+            Some(&release.session_id),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn dispatch_key_or_dialog(
+    client: &CdpClient,
+    session_id: &str,
+    accept_sessions: &[&str],
+    params: &DispatchKeyEventParams,
+) -> Result<bool, String> {
+    let send =
+        client.send_command_typed::<_, Value>("Input.dispatchKeyEvent", params, Some(session_id));
+    wait_for_javascript_dialog(client, accept_sessions, send).await
+}
+
+async fn wait_for_javascript_dialog<F>(
+    client: &CdpClient,
+    accept_sessions: &[&str],
+    send: F,
+) -> Result<bool, String>
+where
+    F: Future<Output = Result<Value, String>>,
+{
+    use tokio::sync::broadcast::error::RecvError;
+
+    let mut events = client.subscribe();
+    tokio::pin!(send);
+    loop {
+        tokio::select! {
+            res = &mut send => {
+                res?;
+                return Ok(false);
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(e) if e.method == "Page.javascriptDialogOpening" => {
+                        let ours = match e.session_id.as_deref() {
+                            Some(sid) => accept_sessions.contains(&sid),
+                            None => true,
+                        };
+                        if ours {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(_) | Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => {
+                        (&mut send).await?;
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub async fn scroll(
@@ -1092,45 +1236,9 @@ async fn dispatch_mouse_or_dialog(
     accept_sessions: &[&str],
     params: &DispatchMouseEventParams,
 ) -> Result<bool, String> {
-    use tokio::sync::broadcast::error::RecvError;
-
-    // Subscribe before sending so the dialog event cannot slip past us.
-    let mut events = client.subscribe();
     let send =
         client.send_command_typed::<_, Value>("Input.dispatchMouseEvent", params, Some(session_id));
-    tokio::pin!(send);
-    loop {
-        tokio::select! {
-            res = &mut send => {
-                res?;
-                return Ok(false);
-            }
-            event = events.recv() => {
-                match event {
-                    Ok(e) if e.method == "Page.javascriptDialogOpening" => {
-                        // Only a dialog on this click's frame/page session
-                        // aborts it; a background-tab dialog must not. A
-                        // session-less event has no flat session and is
-                        // treated as the top-level page (i.e. ours).
-                        let ours = match e.session_id.as_deref() {
-                            Some(sid) => accept_sessions.contains(&sid),
-                            None => true,
-                        };
-                        if ours {
-                            return Ok(true);
-                        }
-                        continue;
-                    }
-                    Ok(_) => continue,
-                    Err(RecvError::Lagged(_)) => continue,
-                    Err(RecvError::Closed) => {
-                        (&mut send).await?;
-                        return Ok(false);
-                    }
-                }
-            }
-        }
-    }
+    wait_for_javascript_dialog(client, accept_sessions, send).await
 }
 
 /// One step of a click: the pointer moves to the target, then each click presses and releases.

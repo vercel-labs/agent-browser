@@ -16464,6 +16464,64 @@ async fn e2e_dialog_blocked_tab_is_not_treated_as_wedged() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_press_returns_when_key_opens_a_confirm_dialog() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "1", "action": "launch", "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "navigate",
+            "url": "data:text/html,<button id=confirm onclick=\"document.body.dataset.result=confirm('Remove?')?'yes':'no'\">confirm</button>"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "focus", "selector": "#confirm" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "press", "key": "Enter" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["dialogOpened"], true, "got: {}", resp);
+    assert!(state.pending_key_release.is_some());
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "dialog", "response": "accept" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.pending_key_release.is_none());
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.body.dataset.result" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "yes");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_slow_finite_script_keeps_its_tab() {
     let mut state = DaemonState::new();
     let resp = execute_command(

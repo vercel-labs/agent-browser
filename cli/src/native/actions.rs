@@ -671,6 +671,7 @@ pub struct DaemonState {
     /// A mouse button left logically down because a dialog opened between
     /// mousePressed and mouseReleased; released when the dialog is resolved.
     pub pending_pointer_release: Option<super::interaction::PendingRelease>,
+    pub pending_key_release: Option<super::interaction::PendingKeyRelease>,
     /// When true, automatically dismiss `beforeunload` dialogs and accept `alert`
     /// dialogs so they never block the agent.  Enabled by default.
     pub auto_dialog: bool,
@@ -851,6 +852,7 @@ impl DaemonState {
             pending_dialog: None,
             undelivered_wedge: None,
             pending_pointer_release: None,
+            pending_key_release: None,
             stream_client: None,
             stream_server: None,
             idle_activity: Arc::new(IdleActivity::new()),
@@ -7376,7 +7378,17 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     // Parse modifier+key chords like "Control+a", "Shift+Enter", "Control+Shift+a"
     let (actual_key, modifiers) = parse_key_chord(key);
 
-    interaction::press_key_with_modifiers(&mgr.client, &session_id, &actual_key, modifiers).await?;
+    let result = interaction::press_key_with_modifiers_or_dialog(
+        &mgr.client,
+        &session_id,
+        &actual_key,
+        modifiers,
+    )
+    .await?;
+    if result.dialog_opened {
+        state.pending_key_release = result.pending_release;
+        return Ok(json!({ "pressed": key, "dialogOpened": true }));
+    }
     Ok(json!({ "pressed": key }))
 }
 
@@ -9606,6 +9618,11 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.mouse_state.buttons = 0;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(state.mouse_state.x, state.mouse_state.y, 0);
+        }
+    }
+    if let Some(release) = state.pending_key_release.take() {
+        if let Some(ref mgr) = state.browser {
+            let _ = interaction::dispatch_pending_key_release(&mgr.client, &release).await;
         }
     }
     Ok(json!({ "handled": true, "accepted": accept }))
