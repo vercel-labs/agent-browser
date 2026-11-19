@@ -55,8 +55,9 @@ Set `DOCS_EXPECT_NOINDEX=1` when testing an existing preview server. The capture
 
 Byte-for-byte MDX reconstruction, full Markdown equality, heading multiplicity and legacy search ranking were migration checks against the pinned commit. They were removed after the migration merged because any later content edit fails them. Remaining checks treat the baseline as a floor: every original line must still render in order, and new lines are allowed anywhere, including inside tables and code blocks. When a change intentionally rewrites original text, add a `from`/`to` entry for that page to `fixtures/docs-edits.json`, or the new size and SHA-256 for a changed public resource. Each `from` must still occur in the baseline, so stale entries fail. Never edit `docs-baseline.json` itself.
 
-- SSR prose/table/code content from the baseline, metadata, canonical URLs and Markdown alternates.
-- Every page's Markdown API, `.md`, negotiated Markdown, legacy query API and HEAD representations.
+- SSR prose/table/code content from the baseline, plus metadata, canonical URLs and Markdown alternates for every public page.
+- Every baseline page's Markdown API, `.md`, negotiated Markdown and legacy query API bodies. Every public page's HEAD responses for all five representations.
+- Pages added after the baseline (`addedPages` in `tests/helpers.mjs`) have no baseline fixture to compare against, so the shared loops give them only the path checks: the metadata group, HEAD representations, locale alias, trailing-slash redirect and OG endpoint. The content parity, Markdown parity, legacy Markdown parity and search breadcrumb checks stay with the baseline pages. A page-specific test may still cover added content, such as the Modern Web Guidance test asserting its three Markdown representations agree and keep every section heading.
 - Link destinations are resolved against the canonical page URL before comparison. Absolute and relative references to the same resource are equivalent; changes to origin, path, query or fragment are not.
 - Images retain original alt text. Direct sources and every responsive `srcset` candidate are resolved through Next's image optimizer to their underlying same-origin resources. Those bytes must match the original resource fixture's length and SHA-256, including when static imports generate hashed filenames. Alt text or filenames alone cannot establish image parity.
 - Accept quality/exclusion, browsers, AI bots, preview/search bots, unmodified Sec-Fetch headers, RSC, both Next prefetch headers, Purpose and Sec-Purpose.
@@ -65,7 +66,7 @@ Byte-for-byte MDX reconstruction, full Markdown equality, heading multiplicity a
 - Alternating HTML/Markdown requests cannot contaminate one another. Tracking queries must not change visible text, metadata, document links or Markdown. Next's Flight hydration scripts may serialize the request URL; their presence is not content or canonical leakage. Mutation tests demonstrate that visible, canonical and OG leakage still fails.
 - Permanent locale and trailing-slash redirects preserve request origin and queries. HTML/Markdown/API misses return real 404s, including HEAD. Raw malformed encoding, encoded separators/control characters, double encoding and unsafe legacy path values are rejected.
 - Legacy search object shape and empty-query behavior; native search arrays containing table text and nested-section fragments that resolve to SSR anchors.
-- Exact canonical sitemap/index inventories, environment-aware robots, original static resource hashes, all 39 OG PNG endpoints with signature and 1200x630 dimensions, and Next CSS/JS/font routing.
+- Exact canonical sitemap/index inventories, environment-aware robots, original static resource hashes, every public page's OG PNG endpoint with signature and 1200x630 dimensions, and Next CSS/JS/font routing.
 
 ## Compatibility contracts
 

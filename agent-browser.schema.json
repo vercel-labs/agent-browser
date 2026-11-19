@@ -181,6 +181,14 @@
       },
       "description": "Allowed domain patterns (e.g., ['example.com', '*.example.com'])."
     },
+    "capture": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["flow"]
+      },
+      "description": "Record the session so `flow save` can turn it into a replayable flow. Applies when the session opens."
+    },
     "actionPolicy": {
       "type": "string",
       "description": "Path to action policy JSON file."

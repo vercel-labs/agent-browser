@@ -58,9 +58,10 @@ Chrome for Testing is the default browser. You can also attach to a running Chro
 The CLI ships skills that match its version:
 
 ```bash
-agent-browser skills get core          # the core loop, refs, waiting, and common workflows
-agent-browser skills get core --full   # adds the full command reference and templates
-agent-browser skills list              # specialized skills: electron, slack, dogfood, and more
+agent-browser skills get core                 # the core loop, refs, waiting, and common workflows
+agent-browser skills get core --ref commands  # one reference, such as the full command list
+agent-browser skills get core --full          # adds the full command reference and templates
+agent-browser skills list                     # specialized skills: electron, slack, dogfood, and more
 ```
 
 Install the discovery skill into an agent harness from [skills.sh](https://skills.sh/vercel-labs/agent-browser):
@@ -92,7 +93,7 @@ Run `agent-browser --help` for the full list, or `agent-browser <command> --help
 | Tabs, frames, and dialogs | `tab`, `frame`, `dialog` | [Tabs and frames](https://agent-browser.dev/commands#tabs-frames) |
 | Debug and performance | `console`, `errors`, `highlight`, `inspect`, `trace`, `profiler`, `vitals`, `react`, `a11y` | [Debugging](https://agent-browser.dev/debugging), [Profiler](https://agent-browser.dev/profiler), [React](https://agent-browser.dev/react) |
 | Sessions and auth | `session`, `state`, `auth`, `profiles`, `confirm`, `deny` | [Sessions](https://agent-browser.dev/sessions), [Security](https://agent-browser.dev/security) |
-| Agents and integrations | `skills`, `mcp`, `webmcp`, `chat`, `batch`, `plugin` | [Skills](https://agent-browser.dev/skills), [WebMCP](https://agent-browser.dev/webmcp), [Plugins](https://agent-browser.dev/plugins) |
+| Agents and integrations | `skills`, `mcp`, `webmcp`, `flow`, `chat`, `batch`, `plugin` | [Skills](https://agent-browser.dev/skills), [WebMCP](https://agent-browser.dev/webmcp), [Plugins](https://agent-browser.dev/plugins) |
 | Observe | `stream`, `dashboard` | [Streaming](https://agent-browser.dev/streaming), [Dashboard](https://agent-browser.dev/dashboard) |
 | Setup | `install`, `upgrade`, `doctor`, `connect`, `close` | [Installation](https://agent-browser.dev/installation) |
 

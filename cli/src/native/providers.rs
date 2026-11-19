@@ -3,6 +3,7 @@
 //! Supports AgentCore, Browserbase, Browserless, Browser Use, and Kernel providers.
 //! Each provider returns a CDP WebSocket URL for connecting via BrowserManager.
 
+use crate::session_settings::Running;
 use serde_json::{json, Value};
 use std::env;
 use std::time::Duration;
@@ -31,7 +32,7 @@ pub struct ProviderConnection {
 /// along with session info for cleanup on failure.
 pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection, String> {
     let plugins = crate::plugins::plugins_from_env();
-    connect_provider_with_plugins(provider_name, &plugins).await
+    connect_provider_with_plugins(provider_name, &plugins, &Running::from_env()).await
 }
 
 /// Connects to a built-in provider or a plugin provider from the supplied
@@ -40,8 +41,9 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
 pub async fn connect_provider_with_plugins(
     provider_name: &str,
     plugins: &[crate::plugins::PluginConfig],
+    settings: &Running,
 ) -> Result<ProviderConnection, String> {
-    connect_provider_with_plugins_and_options(provider_name, plugins, None).await
+    connect_provider_with_plugins_and_options(provider_name, plugins, settings, None).await
 }
 
 /// Connects to a built-in provider or plugin provider with launch options
@@ -51,6 +53,7 @@ pub async fn connect_provider_with_plugins(
 pub async fn connect_provider_with_plugins_and_options(
     provider_name: &str,
     plugins: &[crate::plugins::PluginConfig],
+    settings: &Running,
     launch_options: Option<Value>,
 ) -> Result<ProviderConnection, String> {
     match provider_name.to_lowercase().as_str() {
@@ -100,8 +103,13 @@ pub async fn connect_provider_with_plugins_and_options(
             })
         }
         _ => {
-            connect_plugin_provider_with_plugins_and_options(provider_name, plugins, launch_options)
-                .await
+            connect_plugin_provider_with_plugins_and_options(
+                provider_name,
+                plugins,
+                settings,
+                launch_options,
+            )
+            .await
         }
     }
 }
@@ -181,13 +189,15 @@ pub async fn close_provider_session_with_plugins(
 pub async fn connect_plugin_provider_with_plugins(
     provider_name: &str,
     plugins: &[crate::plugins::PluginConfig],
+    settings: &Running,
 ) -> Result<ProviderConnection, String> {
-    connect_plugin_provider_with_plugins_and_options(provider_name, plugins, None).await
+    connect_plugin_provider_with_plugins_and_options(provider_name, plugins, settings, None).await
 }
 
 pub async fn connect_plugin_provider_with_plugins_and_options(
     provider_name: &str,
     plugins: &[crate::plugins::PluginConfig],
+    settings: &Running,
     launch_options: Option<Value>,
 ) -> Result<ProviderConnection, String> {
     if crate::plugins::find_plugin(plugins, provider_name).is_none() {
@@ -200,20 +210,14 @@ pub async fn connect_plugin_provider_with_plugins_and_options(
     let mut plugin_launch_options = serde_json::Map::new();
     plugin_launch_options.insert(
         "headed".to_string(),
-        json!(env_var_is_truthy("AGENT_BROWSER_HEADED")),
+        json!(settings.plugin_provider_headed()),
     );
     plugin_launch_options.insert(
         "engine".to_string(),
-        json!(env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string())),
+        json!(settings.engine().unwrap_or_else(|| "chrome".to_string())),
     );
-    plugin_launch_options.insert(
-        "userAgent".to_string(),
-        json!(env::var("AGENT_BROWSER_USER_AGENT").ok()),
-    );
-    plugin_launch_options.insert(
-        "colorScheme".to_string(),
-        json!(env::var("AGENT_BROWSER_COLOR_SCHEME").ok()),
-    );
+    plugin_launch_options.insert("userAgent".to_string(), json!(settings.user_agent()));
+    plugin_launch_options.insert("colorScheme".to_string(), json!(settings.color_scheme()));
 
     if let Some(Value::Object(command_options)) = launch_options {
         for (key, value) in command_options {
@@ -239,13 +243,6 @@ pub async fn connect_plugin_provider_with_plugins_and_options(
         direct_page: browser.direct_page,
         metadata: browser.metadata,
     })
-}
-
-fn env_var_is_truthy(name: &str) -> bool {
-    match env::var(name) {
-        Ok(val) => !matches!(val.to_ascii_lowercase().as_str(), "0" | "false" | "no" | ""),
-        Err(_) => false,
-    }
 }
 
 async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), String> {
@@ -1282,7 +1279,11 @@ mod tests {
         );
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(connect_provider_with_plugins("env-cloud", &[]));
+        let result = rt.block_on(connect_provider_with_plugins(
+            "env-cloud",
+            &[],
+            &Running::from_env(),
+        ));
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown provider"));
@@ -1422,12 +1423,66 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             ..crate::plugins::PluginConfig::default()
         }];
 
-        rt.block_on(connect_provider_with_plugins("cloud-browser", &plugins))
-            .unwrap();
+        rt.block_on(connect_provider_with_plugins(
+            "cloud-browser",
+            &plugins,
+            &Running::from_env(),
+        ))
+        .unwrap();
 
         let request: Value =
             serde_json::from_str(&std::fs::read_to_string(request_path).unwrap()).unwrap();
         assert_eq!(request["request"]["launchOptions"]["headed"], false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plugin_provider_loose_truthy_headed_env_is_true() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_ENGINE",
+            "AGENT_BROWSER_SESSION",
+        ]);
+        guard.set("AGENT_BROWSER_HEADED", "yes");
+        guard.set("AGENT_BROWSER_ENGINE", "chrome");
+        guard.set("AGENT_BROWSER_SESSION", "provider-test");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let request_path = dir.path().join("browser-launch-request.json");
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        std::fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat > "$1"
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:9222/devtools/browser/test"}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let plugins = vec![crate::plugins::PluginConfig {
+            name: "cloud-browser".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            args: vec![request_path.to_string_lossy().to_string()],
+            capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
+            ..crate::plugins::PluginConfig::default()
+        }];
+
+        rt.block_on(connect_provider_with_plugins(
+            "cloud-browser",
+            &plugins,
+            &Running::from_env(),
+        ))
+        .unwrap();
+
+        let request: Value =
+            serde_json::from_str(&std::fs::read_to_string(request_path).unwrap()).unwrap();
+        assert_eq!(request["request"]["launchOptions"]["headed"], true);
     }
 
     #[cfg(unix)]
@@ -1475,6 +1530,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         rt.block_on(connect_provider_with_plugins_and_options(
             "cloud-browser",
             &plugins,
+            &Running::from_env(),
             Some(json!({
                 "colorScheme": "dark",
                 "engine": "lightpanda",

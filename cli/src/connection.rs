@@ -1,4 +1,4 @@
-use crate::session_files::{remove_daemon_files, SessionFile};
+use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
 use crate::validation::sanitize_session_component;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -44,6 +44,9 @@ pub struct Response {
     pub code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Step number under which a `--capture flow` session recorded the command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded: Option<Value>,
 }
 
 #[allow(dead_code)]
@@ -513,6 +516,52 @@ pub struct DaemonOptions<'a> {
     pub plugins: Option<&'a str>,
 }
 
+impl DaemonOptions<'static> {
+    /// No option set: what a daemon started only to close its session needs.
+    pub fn bare() -> Self {
+        DaemonOptions {
+            headed: false,
+            debug: false,
+            executable_path: None,
+            extensions: &[],
+            init_scripts: &[],
+            enable: &[],
+            args: None,
+            user_agent: None,
+            proxy: None,
+            proxy_bypass: None,
+            proxy_username: None,
+            proxy_password: None,
+            ignore_https_errors: false,
+            allow_file_access: false,
+            hide_scrollbars: true,
+            webgpu: false,
+            profile: None,
+            state: None,
+            provider: None,
+            device: None,
+            session_name: None,
+            restore_save: None,
+            restore_check_url: None,
+            restore_check_text: None,
+            restore_check_fn: None,
+            download_path: None,
+            allowed_domains: None,
+            action_policy: None,
+            confirm_actions: None,
+            engine: None,
+            auto_connect: false,
+            pin_tab: false,
+            idle_timeout: None,
+            default_timeout: None,
+            cdp: None,
+            cdp_headers: None,
+            no_auto_dialog: false,
+            plugins: None,
+        }
+    }
+}
+
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     cmd.env("AGENT_BROWSER_DAEMON", "1")
         .env("AGENT_BROWSER_SESSION", session);
@@ -645,6 +694,60 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// Daemon-owned options as written to `<session>.config`. The daemon reads
+/// these from env at startup, so changing one requires a restart.
+fn daemon_config_json(opts: &DaemonOptions) -> String {
+    json!({
+        "debug": opts.debug,
+        "action_policy": opts.action_policy,
+        "confirm_actions": opts.confirm_actions,
+        "idle_timeout": opts.idle_timeout,
+        "default_timeout": opts.default_timeout,
+        "no_auto_dialog": opts.no_auto_dialog,
+    })
+    .to_string()
+}
+
+/// Whether the running daemon's stored config satisfies this invocation.
+/// Only `debug` needs a restart: it redirects the daemon's stderr at startup.
+/// Every other option is a session setting the daemon applies in place when
+/// the command carries it.
+fn daemon_config_compatible(stored: &str, opts: &DaemonOptions) -> bool {
+    let Ok(stored) = serde_json::from_str::<Value>(stored) else {
+        // Config from an older CLI is a bare hash: compare it exactly.
+        return stored.trim() == daemon_config_fingerprint(opts);
+    };
+    stored.get("debug") == Some(&Value::Bool(opts.debug))
+}
+
+/// Default timeout the session's running daemon was started with, so a
+/// command that omits it waits on the client as long as the daemon does.
+pub fn running_daemon_default_timeout(session: &str) -> Option<u64> {
+    let stored = fs::read_to_string(get_config_path(session)).ok()?;
+    serde_json::from_str::<Value>(&stored)
+        .ok()?
+        .get("default_timeout")?
+        .as_u64()
+}
+
+/// Records a default timeout changed while the daemon runs, so a command that
+/// omits the flag waits on the client as long as the daemon now does. `None`
+/// removes it. A missing or legacy config is left alone.
+pub fn record_daemon_default_timeout(session: &str, timeout: Option<u64>) {
+    let path = get_config_path(session);
+    let Ok(stored) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(Value::Object(mut config)) = serde_json::from_str::<Value>(&stored) else {
+        return;
+    };
+    match timeout {
+        Some(ms) => config.insert("default_timeout".to_string(), json!(ms)),
+        None => config.remove("default_timeout"),
+    };
+    let _ = fs::write(&path, Value::Object(config).to_string());
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonConfigStatus {
     Matches,
@@ -653,9 +756,8 @@ enum DaemonConfigStatus {
 }
 
 fn daemon_config_status(session: &str, opts: &DaemonOptions) -> DaemonConfigStatus {
-    let expected = daemon_config_fingerprint(opts);
     match fs::read_to_string(get_config_path(session)) {
-        Ok(actual) if actual.trim() == expected => DaemonConfigStatus::Matches,
+        Ok(stored) if daemon_config_compatible(&stored, opts) => DaemonConfigStatus::Matches,
         Ok(_) => DaemonConfigStatus::Different,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DaemonConfigStatus::Missing,
         Err(_) => DaemonConfigStatus::Different,
@@ -667,7 +769,7 @@ fn daemon_config_matches(session: &str, opts: &DaemonOptions) -> bool {
 }
 
 fn write_daemon_config(session: &str, opts: &DaemonOptions) {
-    let _ = fs::write(get_config_path(session), daemon_config_fingerprint(opts));
+    let _ = fs::write(get_config_path(session), daemon_config_json(opts));
 }
 
 fn daemon_pid_matches(session: &str, expected_pid: u32) -> bool {
@@ -839,6 +941,12 @@ fn stop_existing_daemon_for_restart(session: &str) {
     }
 }
 
+/// Stops a session's daemon without a `close`, so the session's stored
+/// settings stay, the same way a restart stops it.
+pub fn stop_daemon(session: &str) {
+    stop_existing_daemon_for_restart(session);
+}
+
 /// Marks this process's stdout and stderr non-inheritable so a detached child cannot hold a reader's pipes open.
 #[cfg(windows)]
 pub(crate) fn prevent_stdio_handle_inheritance() {
@@ -855,7 +963,40 @@ pub(crate) fn prevent_stdio_handle_inheritance() {
     }
 }
 
+/// Exclusive hold on a session's `.lock` file, released when dropped or when
+/// the process exits. The file is opened close-on-exec, so a spawned daemon
+/// does not keep the lock.
+struct SpawnLock {
+    _file: fs::File,
+}
+
+impl SpawnLock {
+    fn acquire(session: &str) -> Result<Self, String> {
+        let socket_dir = get_socket_dir();
+        fs::create_dir_all(&socket_dir)
+            .map_err(|e| format!("Failed to create socket directory: {}", e))?;
+        let path = SessionFile::Lock.path_in(&socket_dir, session);
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| format!("Failed to open session lock {}: {}", path.display(), e))?;
+        file.lock()
+            .map_err(|e| format!("Failed to lock session {}: {}", session, e))?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Returns a ready daemon for the session, starting one if needed. Callers for
+/// the same session take turns, so one that arrives while another is starting
+/// the daemon attaches to it.
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
+    let _lock = SpawnLock::acquire(session)?;
+    ensure_daemon_locked(session, opts)
+}
+
+fn ensure_daemon_locked(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
     let mut restarted = false;
 
     // Socket connectivity is the sole liveness check — no PID check — so
@@ -1048,6 +1189,15 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
         }
 
         thread::sleep(Duration::from_millis(100));
+    }
+
+    // The daemon never became reachable; do not leave it running unattended.
+    if let Some(mut child) = daemon_child {
+        let _ = child.kill();
+        let _ = child.wait();
+        if spawned_pid.is_some_and(|pid| owns_session(&socket_dir, session, pid)) {
+            remove_daemon_files(&socket_dir, session);
+        }
     }
 
     #[cfg(unix)]
@@ -1684,7 +1834,8 @@ mod tests {
 
         let session = "race-config";
         let winner_opts = test_daemon_options(Some("1000"), false, None);
-        let loser_opts = test_daemon_options(Some("2000"), false, None);
+        let mut loser_opts = test_daemon_options(Some("1000"), false, None);
+        loser_opts.debug = true;
 
         fs::create_dir_all(get_socket_dir()).unwrap();
         fs::write(get_pid_path(session), "12345").unwrap();
@@ -1766,6 +1917,68 @@ mod tests {
         assert!(!result.already_running);
         assert!(result.restarted);
         assert!(daemon_config_matches(session, &opts));
+    }
+
+    #[test]
+    fn test_daemon_config_session_settings_never_require_restart() {
+        let mut started = test_daemon_options(Some("0"), false, None);
+        started.default_timeout = Some(90_000);
+        started.action_policy = Some("/tmp/policy.json");
+        let stored = daemon_config_json(&started);
+
+        let mut changed = test_daemon_options(Some("60000"), true, None);
+        changed.default_timeout = Some(5_000);
+        changed.action_policy = Some("/tmp/other.json");
+        changed.confirm_actions = Some("click");
+        assert!(daemon_config_compatible(&stored, &changed));
+        assert!(daemon_config_compatible(
+            &stored,
+            &test_daemon_options(None, false, None)
+        ));
+
+        let bare_daemon = daemon_config_json(&test_daemon_options(None, false, None));
+        assert!(daemon_config_compatible(&bare_daemon, &changed));
+    }
+
+    #[test]
+    fn test_daemon_config_debug_change_requires_restart() {
+        let base = test_daemon_options(None, false, None);
+        let mut debug = test_daemon_options(None, false, None);
+        debug.debug = true;
+        let stored = daemon_config_json(&base);
+
+        assert!(daemon_config_compatible(&stored, &base));
+        assert!(!daemon_config_compatible(&stored, &debug));
+    }
+
+    #[test]
+    fn test_running_daemon_default_timeout_reads_stored_config() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        fs::create_dir_all(get_socket_dir()).unwrap();
+
+        let mut started = test_daemon_options(None, false, None);
+        started.default_timeout = Some(90_000);
+        write_daemon_config("timeout-set", &started);
+        write_daemon_config("timeout-unset", &test_daemon_options(None, false, None));
+
+        assert_eq!(running_daemon_default_timeout("timeout-set"), Some(90_000));
+        assert_eq!(running_daemon_default_timeout("timeout-unset"), None);
+        assert_eq!(running_daemon_default_timeout("missing"), None);
+    }
+
+    #[test]
+    fn test_daemon_config_legacy_hash_compares_exactly() {
+        let opts = test_daemon_options(Some("1000"), false, None);
+        let stored = daemon_config_fingerprint(&opts);
+
+        assert!(daemon_config_compatible(&stored, &opts));
+        assert!(!daemon_config_compatible(
+            &stored,
+            &test_daemon_options(Some("2000"), false, None)
+        ));
     }
 
     // === Transient Error Detection Tests ===
@@ -1972,5 +2185,68 @@ mod tests {
         assert!(!version_path.exists());
 
         let _ = fs::remove_dir(&dir);
+    }
+    #[test]
+    fn test_recorded_default_timeout_is_what_later_commands_inherit() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        fs::create_dir_all(get_socket_dir()).unwrap();
+
+        let mut started = test_daemon_options(None, false, None);
+        started.default_timeout = Some(90_000);
+        started.action_policy = Some("/tmp/policy.json");
+        write_daemon_config("timeout-live", &started);
+
+        record_daemon_default_timeout("timeout-live", Some(5_000));
+        assert_eq!(running_daemon_default_timeout("timeout-live"), Some(5_000));
+        let stored = fs::read_to_string(get_config_path("timeout-live")).unwrap();
+        assert!(
+            stored.contains("policy.json"),
+            "other options are kept: {stored}"
+        );
+
+        record_daemon_default_timeout("timeout-live", None);
+        assert_eq!(running_daemon_default_timeout("timeout-live"), None);
+
+        // No config, no file created.
+        record_daemon_default_timeout("never-started", Some(1));
+        assert!(!get_config_path("never-started").exists());
+    }
+
+    #[test]
+    fn test_spawn_lock_waits_for_the_holder() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let first = SpawnLock::acquire("lock-test").unwrap();
+        let acquired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = acquired.clone();
+        let waiter = thread::spawn(move || {
+            let _second = SpawnLock::acquire("lock-test").unwrap();
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // The waiter is blocked for as long as the first lock is held.
+        thread::sleep(Duration::from_millis(300));
+        assert!(!acquired.load(std::sync::atomic::Ordering::SeqCst));
+
+        drop(first);
+        waiter.join().unwrap();
+        assert!(acquired.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_spawn_lock_is_per_session() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let _a = SpawnLock::acquire("lock-a").unwrap();
+        let _b = SpawnLock::acquire("lock-b").unwrap();
     }
 }

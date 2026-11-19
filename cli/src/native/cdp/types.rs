@@ -96,6 +96,15 @@ pub struct CdpEvent {
     pub session_id: Option<String>,
 }
 
+/// Match direct-page events without allowing an unattached browser to consume them.
+pub fn session_matches(active_session: Option<&str>, event_session: Option<&str>) -> bool {
+    match active_session {
+        Some("") => event_session.is_none_or(str::is_empty),
+        Some(active) => event_session == Some(active),
+        None => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Target domain
 // ---------------------------------------------------------------------------
@@ -406,8 +415,6 @@ pub struct BoxModel {
     pub padding: Vec<f64>,
     pub border: Vec<f64>,
     pub margin: Vec<f64>,
-    pub width: i64,
-    pub height: i64,
 }
 
 #[derive(Debug, Serialize)]

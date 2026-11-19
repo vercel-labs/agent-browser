@@ -33,8 +33,14 @@ pub enum SessionFile {
     Extensions,
     /// Tab binding. Survives daemon restarts on purpose (see `tab_binding`).
     Target,
+    /// Security settings (allowed domains, action policy, confirm actions).
+    /// Survives daemon restarts until `close` (see `session_settings::store`).
+    Settings,
     /// Debug log written when `AGENT_BROWSER_DEBUG` is set.
     Log,
+    /// Held while a command starts, restarts or replaces the session's daemon.
+    /// Never removed: unlinking a lock file lets a second holder in.
+    Lock,
 }
 
 impl SessionFile {
@@ -50,7 +56,9 @@ impl SessionFile {
         SessionFile::Provider,
         SessionFile::Extensions,
         SessionFile::Target,
+        SessionFile::Settings,
         SessionFile::Log,
+        SessionFile::Lock,
     ];
 
     pub fn extension(self) -> &'static str {
@@ -65,7 +73,9 @@ impl SessionFile {
             SessionFile::Provider => "provider",
             SessionFile::Extensions => "extensions",
             SessionFile::Target => "target",
+            SessionFile::Settings => "settings",
             SessionFile::Log => "log",
+            SessionFile::Lock => "lock",
         }
     }
 
@@ -81,7 +91,9 @@ impl SessionFile {
             | SessionFile::Engine
             | SessionFile::Provider
             | SessionFile::Extensions => true,
-            SessionFile::Target | SessionFile::Log => false,
+            SessionFile::Target | SessionFile::Settings | SessionFile::Log | SessionFile::Lock => {
+                false
+            }
         }
     }
 
@@ -139,10 +151,20 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         left.sort();
-        assert_eq!(left, ["s.log", "s.target"]);
+        assert_eq!(left, ["s.lock", "s.log", "s.settings", "s.target"]);
         assert_eq!(
             fs::read_to_string(SessionFile::Target.path_in(dir.path(), "s")).unwrap(),
             "x"
+        );
+    }
+
+    #[test]
+    fn test_settings_file_is_persistent_and_named_after_session() {
+        assert!(!SessionFile::Settings.is_daemon_file());
+        let dir = Path::new("/d");
+        assert_eq!(
+            SessionFile::Settings.path_in(dir, "work"),
+            Path::new("/d/work.settings")
         );
     }
 

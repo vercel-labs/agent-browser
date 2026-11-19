@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
-use super::cdp::client::CdpClient;
+use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::discovery::discover_cdp_url_with_headers;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::obscura::{
@@ -305,6 +305,39 @@ pub struct PageInfo {
     pub target_type: String, // "page" or "webview"
 }
 
+/// How a tab runs while it is in the background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabKeep {
+    /// The browser's own background throttling.
+    #[default]
+    Throttled,
+    /// Focus emulation is held on the tab, so it runs at full speed.
+    Live,
+    /// The page is frozen until the tab becomes active again.
+    Frozen,
+}
+
+impl TabKeep {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "throttled" => Ok(Self::Throttled),
+            "live" => Ok(Self::Live),
+            "frozen" => Ok(Self::Frozen),
+            _ => Err(format!(
+                "Unknown tab keep mode `{s}`; expected live, throttled, or frozen"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Throttled => "throttled",
+            Self::Live => "live",
+            Self::Frozen => "frozen",
+        }
+    }
+}
+
 /// Canonical string form of a stable tab id: `t1`, `t2`, ... The `t` prefix
 /// disambiguates stable ids from positional indices (which the CLI no longer
 /// accepts) and matches the `@e<N>` convention used for element refs.
@@ -492,6 +525,8 @@ pub struct BrowserManager {
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
+    /// Background mode per CDP target id. A tab without an entry is throttled.
+    tab_keep: HashMap<String, TabKeep>,
     active_page_index: usize,
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
@@ -525,6 +560,10 @@ pub struct BrowserManager {
     /// launch rules such as extension-forced headed mode. Meaningless for
     /// attached browsers (browser_process is None).
     headless: bool,
+    /// Whether the outdated-browser check already read this connection's
+    /// product. A reconnect builds a new manager, so even a reused CDP URL
+    /// is checked again.
+    product_checked: bool,
 }
 
 /// Stable machine-readable prefix for "the bound tab no longer exists"
@@ -716,6 +755,7 @@ impl BrowserManager {
                 browser_process: Some(process),
                 ws_url,
                 pages: Vec::new(),
+                tab_keep: HashMap::new(),
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
@@ -728,6 +768,7 @@ impl BrowserManager {
                 bound_target_gone: None,
                 wedge_suspect: None,
                 headless,
+                product_checked: false,
             };
             if let Err(error) = manager.discover_and_attach_targets().await {
                 let _ = manager
@@ -825,6 +866,7 @@ impl BrowserManager {
             browser_process: None,
             ws_url,
             pages: Vec::new(),
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -837,6 +879,7 @@ impl BrowserManager {
             bound_target_gone: None,
             wedge_suspect: None,
             headless: true,
+            product_checked: false,
         };
 
         let initialization = if direct_page {
@@ -1141,6 +1184,7 @@ impl BrowserManager {
             )
             .await;
         let was_bound = self.bound_target_id.as_deref() == Some(target_id.as_str());
+        self.tab_keep.remove(&target_id);
         let page = &mut self.pages[self.active_page_index];
         page.url = "about:blank".to_string();
         page.title.clear();
@@ -1501,7 +1545,7 @@ impl BrowserManager {
                 match rx.recv().await {
                     Ok(event) => {
                         if event.method == event_name
-                            && event.session_id.as_deref() == Some(session_id)
+                            && session_matches(Some(session_id), event.session_id.as_deref())
                         {
                             return Ok(());
                         }
@@ -1647,6 +1691,7 @@ impl BrowserManager {
         &mut self,
         browser_close_timeout: Option<Duration>,
     ) -> Result<(), String> {
+        let _ = self.thaw_frozen_tabs().await;
         if self.browser_process.is_some() {
             // Only send Browser.close when we launched the browser ourselves.
             // For external connections (--auto-connect, --cdp) we just disconnect
@@ -1710,6 +1755,40 @@ impl BrowserManager {
 
     pub fn get_cdp_url(&self) -> &str {
         &self.ws_url
+    }
+
+    /// A manager over an already connected client, for tests that serve CDP
+    /// from a mock socket.
+    #[cfg(test)]
+    pub(crate) fn for_test(client: CdpClient, ws_url: String) -> Self {
+        Self {
+            client: Arc::new(client),
+            browser_process: None,
+            ws_url,
+            pages: Vec::new(),
+            tab_keep: HashMap::new(),
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 1,
+            direct_page: false,
+            pin_tab: false,
+            bound_target_id: None,
+            bound_target_gone: None,
+            wedge_suspect: None,
+            headless: true,
+            product_checked: false,
+        }
+    }
+
+    pub fn product_checked(&self) -> bool {
+        self.product_checked
+    }
+
+    pub fn mark_product_checked(&mut self) {
+        self.product_checked = true;
     }
 
     /// Returns the Chrome debug server address as "host:port".
@@ -1841,9 +1920,181 @@ impl BrowserManager {
                     "url": p.url,
                     "type": p.target_type,
                     "active": i == self.active_page_index && !self.bound_target_is_gone(),
+                    "keep": self.tab_keep_of(&p.target_id).as_str(),
                 })
             })
             .collect()
+    }
+
+    /// Whether `index` is the tab commands act on. No tab is while the bound
+    /// tab is gone.
+    fn is_active_index(&self, index: usize) -> bool {
+        index == self.active_page_index && !self.bound_target_is_gone()
+    }
+
+    /// The background mode of the tab with this CDP target id.
+    fn tab_keep_of(&self, target_id: &str) -> TabKeep {
+        self.tab_keep.get(target_id).copied().unwrap_or_default()
+    }
+
+    /// Sets how a tab runs while it is in the background. `None` targets the
+    /// active tab, which cannot be frozen. A change that fails leaves the tab
+    /// in the mode it had.
+    pub async fn set_tab_keep(
+        &mut self,
+        tab_id: Option<u32>,
+        keep: TabKeep,
+    ) -> Result<Value, String> {
+        let index = match tab_id {
+            Some(id) => self
+                .pages
+                .iter()
+                .position(|p| p.tab_id == id)
+                .ok_or_else(|| format!("Tab ID {} not found", id))?,
+            None => {
+                self.check_bound()?;
+                self.active_page_index
+            }
+        };
+        let page = self.pages.get(index).ok_or("No active page")?;
+        let tab = format_tab_id(page.tab_id);
+        let result = json!({ "tabId": tab, "label": page.label, "keep": keep.as_str() });
+        let (target_id, session_id) = (page.target_id.clone(), page.session_id.clone());
+        let current = self.tab_keep_of(&target_id);
+        if keep == current {
+            return Ok(result);
+        }
+        if keep == TabKeep::Frozen && self.is_active_index(index) {
+            return Err(
+                "Cannot freeze the active tab; switch to another tab first, then run `tab keep frozen <tab>`"
+                    .to_string(),
+            );
+        }
+
+        self.apply_keep(&session_id, current, false).await?;
+        let entered = async {
+            if keep == TabKeep::Frozen && !self.wait_until_hidden(&session_id).await? {
+                return Err(format!(
+                    "Tab {tab} is visible; only a tab hidden behind another tab can be frozen"
+                ));
+            }
+            self.apply_keep(&session_id, keep, true).await
+        }
+        .await;
+        match entered {
+            Ok(()) => {
+                self.tab_keep.insert(target_id, keep);
+                Ok(result)
+            }
+            Err(error) => {
+                if self.apply_keep(&session_id, current, true).await.is_err() {
+                    self.tab_keep.remove(&target_id);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Turns the page state behind a mode on or off. `Throttled` has none.
+    async fn apply_keep(&self, session_id: &str, keep: TabKeep, on: bool) -> Result<(), String> {
+        let (method, params) = match keep {
+            TabKeep::Throttled => return Ok(()),
+            TabKeep::Live => (
+                "Emulation.setFocusEmulationEnabled",
+                json!({ "enabled": on }),
+            ),
+            TabKeep::Frozen => (
+                "Page.setWebLifecycleState",
+                json!({ "state": if on { "frozen" } else { "active" } }),
+            ),
+        };
+        self.client
+            .send_command(method, Some(params), Some(session_id))
+            .await?;
+        Ok(())
+    }
+
+    /// Whether the page reports itself hidden within a second. Freezing a page
+    /// the browser is still showing leaves it reporting hidden for good, and a
+    /// page takes a moment to report hidden after focus emulation is turned off.
+    async fn wait_until_hidden(&self, session_id: &str) -> Result<bool, String> {
+        for _ in 0..20 {
+            let state = self
+                .client
+                .send_command(
+                    "Runtime.evaluate",
+                    Some(
+                        json!({ "expression": "document.visibilityState", "returnByValue": true }),
+                    ),
+                    Some(session_id),
+                )
+                .await?;
+            if state.pointer("/result/value").and_then(Value::as_str) == Some("hidden") {
+                return Ok(true);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(false)
+    }
+
+    /// Unfreezes a page and says whether it is no longer frozen. A page whose
+    /// target is gone counts. One that does not answer in time does not.
+    async fn thaw(&self, session_id: &str) -> bool {
+        let request = self.apply_keep(session_id, TabKeep::Frozen, false);
+        match tokio::time::timeout(Duration::from_millis(RENDERER_PROBE_TIMEOUT_MS), request).await
+        {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => is_session_detached_error(&error),
+            Err(_) => false,
+        }
+    }
+
+    /// Unfreezes the active tab, because a command that awaits a timer or a
+    /// promise never finishes on a frozen page. `may_touch` says whether this
+    /// session may act on the tab with that target id. A tab that could not be
+    /// unfrozen stays recorded as frozen, so the next command tries again.
+    pub async fn thaw_active_tab(&mut self, may_touch: impl FnOnce(&str) -> bool) {
+        let index = self.active_page_index;
+        let Some(page) = self
+            .pages
+            .get(index)
+            .filter(|_| self.is_active_index(index))
+        else {
+            return;
+        };
+        if self.tab_keep_of(&page.target_id) == TabKeep::Frozen
+            && may_touch(&page.target_id)
+            && self.thaw(&page.session_id).await
+        {
+            self.tab_keep.remove(&page.target_id);
+        }
+    }
+
+    /// Unfreezes every frozen tab before the daemon leaves a browser that keeps
+    /// running, because a frozen page stays frozen after the session ends.
+    /// Fails with the tabs that are still frozen.
+    pub async fn thaw_frozen_tabs(&mut self) -> Result<(), String> {
+        if self.browser_process.is_some() {
+            return Ok(());
+        }
+        let mut stuck = Vec::new();
+        for page in &self.pages {
+            if self.tab_keep_of(&page.target_id) != TabKeep::Frozen {
+                continue;
+            }
+            if self.thaw(&page.session_id).await {
+                self.tab_keep.remove(&page.target_id);
+            } else {
+                stuck.push(format_tab_id(page.tab_id));
+            }
+        }
+        if stuck.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "Could not unfreeze {}; bring it to the front in the browser to resume it",
+            stuck.join(", ")
+        ))
     }
 
     /// Resolve a user-supplied `TabRef` (either `t<N>` or a label) to the
@@ -2085,6 +2336,7 @@ impl BrowserManager {
         }
 
         let page = self.pages.remove(target_index);
+        self.tab_keep.remove(&page.target_id);
         self.update_active_page_after_removal(target_index);
         let closed_tab_id = page.tab_id;
         let closed_label = page.label.clone();
@@ -2474,6 +2726,7 @@ impl BrowserManager {
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
             let page = self.pages.remove(pos);
+            self.tab_keep.remove(target_id);
             self.update_active_page_after_removal(pos);
             // If the destroyed target was the bound tab (closed externally,
             // e.g. by another session sharing this browser), fail loudly
@@ -2590,6 +2843,9 @@ impl BrowserManager {
     }
 }
 
+/// How long the network must be quiet to count as idle.
+pub const NETWORK_IDLE_MS: u64 = 500;
+
 /// Core network-idle polling loop, extracted so it can be unit-tested without a
 /// full `BrowserManager` / CDP connection.
 ///
@@ -2610,7 +2866,7 @@ async fn poll_network_idle(
                 tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
 
             match recv_result {
-                Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
+                Ok(Ok(event)) if session_matches(Some(session_id), event.session_id.as_deref()) => {
                     let mut p = pending.lock().await;
                     match event.method.as_str() {
                         "Network.requestWillBeSent" => {
@@ -2652,7 +2908,7 @@ async fn poll_network_idle(
             }
 
             if let Some(start) = idle_start {
-                if start.elapsed() >= tokio::time::Duration::from_millis(500) {
+                if start.elapsed() >= tokio::time::Duration::from_millis(NETWORK_IDLE_MS) {
                     return;
                 }
             }
@@ -2712,6 +2968,7 @@ async fn initialize_lightpanda_manager(
             browser_process: None,
             ws_url: ws_url.clone(),
             pages: Vec::new(),
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -2724,6 +2981,7 @@ async fn initialize_lightpanda_manager(
             bound_target_gone: None,
             wedge_suspect: None,
             headless: true,
+            product_checked: false,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
@@ -2822,6 +3080,7 @@ async fn initialize_obscura_manager(
             browser_process: None,
             ws_url: ws_url.clone(),
             pages: Vec::new(),
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -2834,6 +3093,7 @@ async fn initialize_obscura_manager(
             bound_target_gone: None,
             wedge_suspect: None,
             headless: true,
+            product_checked: false,
         };
 
         match run_with_obscura_deadline(
@@ -3726,6 +3986,7 @@ mod tests {
             browser_process: None,
             ws_url,
             pages,
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -3738,6 +3999,7 @@ mod tests {
             bound_target_gone: None,
             wedge_suspect: None,
             headless: true,
+            product_checked: false,
         }
     }
 
@@ -3787,6 +4049,7 @@ mod tests {
             browser_process: None,
             ws_url: format!("ws://{}", addr),
             pages: Vec::new(),
+            tab_keep: HashMap::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
@@ -3799,6 +4062,7 @@ mod tests {
             bound_target_gone: None,
             wedge_suspect: None,
             headless: true,
+            product_checked: false,
         };
         manager.close().await.unwrap();
 
