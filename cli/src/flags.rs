@@ -577,8 +577,18 @@ pub struct Flags {
     pub cli_no_webmcp: bool,
     /// True when `--auto-connect` was passed on the command line.
     pub cli_auto_connect: bool,
+    /// True when `--cdp`, `--cdp-headers` or `--provider` was passed on the command line.
+    /// Without it the value came from the environment or config and is only a
+    /// session default.
+    pub cli_cdp: bool,
+    pub cli_cdp_headers: bool,
+    /// The endpoint the environment or config names, kept when `--cdp`
+    /// replaces `cdp`. Headers from the same sources belong to it.
+    pub default_cdp: Option<String>,
+    pub cli_provider: bool,
     /// True when `--no-auto-connect` (or `--auto-connect false`) was passed:
-    /// the session returns to a local launch, whatever env or config say.
+    /// the session returns to a local launch, unless an env or config target
+    /// then applies to it as the session default.
     pub no_auto_connect: bool,
     pub cli_restore: bool,
     /// True when --pin-tab / --no-pin-tab was passed on the command line, so
@@ -587,6 +597,27 @@ pub struct Flags {
     pub cli_pin_tab: bool,
     /// True when `--input-mode` was explicitly passed, including `instant`.
     pub cli_input_mode: bool,
+}
+
+impl Flags {
+    /// The endpoint the environment or config names, whether or not `--cdp`
+    /// replaced it.
+    pub fn default_endpoint(&self) -> Option<&str> {
+        let value = if self.cli_cdp {
+            self.default_cdp.as_deref()
+        } else {
+            self.cdp.as_deref()
+        };
+        value.map(str::trim).filter(|v| !v.is_empty())
+    }
+
+    /// Whether `--cdp-headers` values from the environment or config may go to
+    /// `endpoint`. They belong to the endpoint those sources name; with none
+    /// named they go with whichever endpoint the command names.
+    pub fn default_headers_fit(&self, endpoint: &str) -> bool {
+        self.default_endpoint()
+            .is_none_or(|default| default == endpoint.trim())
+    }
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -843,6 +874,10 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         cli_webgpu: false,
         cli_no_webmcp: false,
         cli_auto_connect: false,
+        cli_cdp: false,
+        cli_cdp_headers: false,
+        default_cdp: None,
+        cli_provider: false,
         no_auto_connect: false,
         cli_restore: false,
         cli_pin_tab: false,
@@ -1022,13 +1057,18 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             }
             "--cdp" => {
                 if let Some(s) = args.get(i + 1) {
+                    if !flags.cli_cdp {
+                        flags.default_cdp = flags.cdp.clone();
+                    }
                     flags.cdp = Some(s.clone());
+                    flags.cli_cdp = true;
                     i += 1;
                 }
             }
             "--cdp-headers" => {
                 if let Some(h) = args.get(i + 1) {
                     flags.cdp_headers = Some(h.clone());
+                    flags.cli_cdp_headers = true;
                     i += 1;
                 }
             }
@@ -1079,6 +1119,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             "-p" | "--provider" => {
                 if let Some(p) = args.get(i + 1) {
                     flags.provider = Some(p.clone());
+                    flags.cli_provider = true;
                     i += 1;
                 }
             }
@@ -1345,7 +1386,28 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         }
         i += 1;
     }
+    // The policy is stored with the session and read again by later daemons,
+    // which start in whatever directory their command ran from.
+    if let (Some(path), Ok(cwd)) = (flags.action_policy.as_mut(), env::current_dir()) {
+        *path = absolute_policy_path(path, &cwd).map_err(|e| format!("--action-policy: {}", e))?;
+    }
     Ok(flags)
+}
+
+/// `path` made absolute against `cwd`; a blank value (a reset) is left alone.
+/// A result that is not valid UTF-8 is an error: storing a lossy path would
+/// point nowhere and the policy would deny every action.
+pub(crate) fn absolute_policy_path(path: &str, cwd: &std::path::Path) -> Result<String, String> {
+    if path.trim().is_empty() {
+        return Ok(path.to_string());
+    }
+    let joined = cwd.join(path);
+    joined.to_str().map(str::to_string).ok_or_else(|| {
+        format!(
+            "the policy path {} must be valid UTF-8; pass an absolute path to a file whose directories are valid UTF-8",
+            joined.display()
+        )
+    })
 }
 
 fn looks_like_command(value: &str) -> bool {
@@ -1504,6 +1566,55 @@ pub fn is_global_flag(arg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_policy_path_is_made_absolute_against_the_given_directory() {
+        use std::path::{Path, PathBuf};
+        let (a, b) = (
+            std::env::temp_dir().join("a"),
+            std::env::temp_dir().join("b"),
+        );
+        let abs =
+            |path: &str, cwd: &Path| PathBuf::from(super::absolute_policy_path(path, cwd).unwrap());
+        assert_eq!(abs("policy.json", &a), a.join("policy.json"));
+        assert_eq!(abs("policy.json", &b), b.join("policy.json"));
+        let absolute = std::env::temp_dir().join("abs").join("p.json");
+        assert_eq!(abs(absolute.to_str().unwrap(), &a), absolute);
+        assert_eq!(super::absolute_policy_path("", &a).unwrap(), "");
+        assert_eq!(super::absolute_policy_path("  ", &a).unwrap(), "  ");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_policy_path_in_a_non_utf8_directory_is_an_error() {
+        use std::os::unix::ffi::OsStrExt;
+        let cwd = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfe"));
+
+        let err = super::absolute_policy_path("policy.json", cwd).unwrap_err();
+
+        assert!(err.contains("valid UTF-8"), "{err}");
+        assert!(err.contains("absolute path"), "{err}");
+        // An absolute path needs nothing from the directory.
+        assert_eq!(
+            super::absolute_policy_path("/ok/p.json", cwd).unwrap(),
+            "/ok/p.json"
+        );
+    }
+
+    #[test]
+    fn test_parsed_action_policy_flag_is_absolute() {
+        let args: Vec<String> = ["--action-policy", "rel/policy.json", "open"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let flags = parse_flags(&args);
+        let policy = flags.action_policy.unwrap();
+        assert!(std::path::Path::new(&policy).is_absolute(), "{policy}");
+        assert!(
+            std::path::Path::new(&policy)
+                .ends_with(std::path::Path::new("rel").join("policy.json")),
+            "{policy}"
+        );
+    }
     use super::*;
     use crate::test_utils::EnvGuard;
 

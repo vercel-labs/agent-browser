@@ -73,14 +73,6 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
     }));
 }
 
-fn attach_pin_tab_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
-    if flags.pin_tab {
-        cmd["pinTab"] = json!(true);
-    } else if flags.cli_pin_tab {
-        cmd["pinTab"] = json!(false);
-    }
-}
-
 fn attach_input_mode(cmd: &mut serde_json::Value, flags: &Flags) {
     if flags.cli_input_mode {
         cmd["defaultInputMode"] = json!(flags.input_mode);
@@ -118,16 +110,41 @@ fn command_is_cdp_url_metadata(cmd: &serde_json::Value) -> bool {
     }
 }
 
+/// Whether the command attaches to an endpoint it names itself (`connect`).
+fn command_names_target(cmd: &serde_json::Value) -> bool {
+    cmd.get("action").and_then(|v| v.as_str()) == Some("launch")
+        && (cmd.get("cdpPort").is_some() || cmd.get("cdpUrl").is_some())
+}
+
+/// The endpoint a `connect` envelope names.
+fn named_endpoint(cmd: &serde_json::Value) -> Option<String> {
+    match (cmd.get("cdpUrl"), cmd.get("cdpPort")) {
+        (Some(url), _) => url.as_str().map(str::to_string),
+        (_, Some(port)) => Some(port.to_string()),
+        _ => None,
+    }
+}
+
 /// The settings patch one command carries. A browserless command never
 /// launches a browser, so CA trust does not apply to it.
 fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings::Patch {
-    let patch = session_settings::Patch::from_flags(flags);
+    let mut patch = session_settings::Patch::from_flags(flags);
+    // `connect` names its endpoint in the launch envelope, so an environment
+    // or config target must not ride along and replace it.
+    if command_names_target(cmd) {
+        patch = patch.without_ambient_connection();
+        // Headers from the environment or config belong to the endpoint they
+        // name, so another endpoint never receives them.
+        let fits = named_endpoint(cmd).is_some_and(|e| flags.default_headers_fit(&e));
+        if !flags.cli_cdp_headers && !fits {
+            patch.remove(session_settings::Key::CdpHeaders);
+        }
+    }
     // Asking for a running browser's CDP URL never launches or relaunches one,
     // so launch settings do not apply to it.
     if command_is_cdp_url_metadata(cmd) {
         return patch.without_launch_settings();
     }
-    let mut patch = patch;
     if command_is_browserless(cmd) {
         patch.remove(session_settings::Key::CaCert);
         patch.remove(session_settings::Key::ClearCaCert);
@@ -166,12 +183,36 @@ fn response_applied_relaunch(resp: &connection::Response) -> bool {
     .any(|path| data.pointer(path).and_then(|v| v.as_bool()) == Some(true))
 }
 
-/// Checks a `--cdp` value and its headers. The value is either a port number
-/// or a ws, wss, http or https URL.
-fn validate_cdp_flags(flags: &Flags) -> Result<(), String> {
-    let Some(cdp_value) = flags.cdp.as_deref() else {
-        return Ok(());
-    };
+/// Checks the CDP value and headers this invocation will send. The value is
+/// either a port number or a ws, wss, http or https URL.
+fn validate_cdp_flags(flags: &Flags, cmd: &serde_json::Value) -> Result<(), String> {
+    // A default target is checked only when it will be sent: `connect` names
+    // its own endpoint and drops it, and a target on the command line or a
+    // higher-precedence default replaces it.
+    let targets = session_settings::effective_targets(flags);
+    if let Some(cdp_value) = targets
+        .cdp
+        .as_deref()
+        .filter(|_| flags.cli_cdp || !command_names_target(cmd))
+    {
+        validate_cdp_value(cdp_value)?;
+    }
+    // Headers are checked whenever they can be sent: explicit ones always, and
+    // ones from the environment or config only with a CDP endpoint.
+    let patch = command_settings(flags, cmd);
+    if let Some(session_settings::Requested::Set(serde_json::Value::String(raw))) =
+        patch.get(session_settings::Key::CdpHeaders)
+    {
+        let sent = !patch.is_ambient(session_settings::Key::CdpHeaders)
+            || patch.get(session_settings::Key::Cdp).is_some();
+        if sent {
+            parse_cdp_headers(raw)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_cdp_value(cdp_value: &str) -> Result<(), String> {
     let is_url = ["ws://", "wss://", "http://", "https://"]
         .iter()
         .any(|scheme| cdp_value.starts_with(scheme));
@@ -192,9 +233,6 @@ fn validate_cdp_flags(flags: &Flags) -> Result<(), String> {
                 ))
             }
         }
-    }
-    if let Some(raw) = flags.cdp_headers.as_deref() {
-        parse_cdp_headers(raw)?;
     }
     Ok(())
 }
@@ -237,7 +275,23 @@ fn is_valid_restore_save_policy(policy: &str) -> bool {
 }
 
 fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
-    if flags.cdp.is_some() && flags.provider.is_some() {
+    // Only targets that will apply count: a target on the command line wins
+    // over environment and config defaults, and two defaults resolve by
+    // precedence, so neither is a conflict.
+    let targets = session_settings::effective_targets(flags);
+    let cdp = targets.cdp.is_some();
+    let auto_connect = targets.auto_connect;
+    // `-p ""` resets the session and names no provider, so a default target
+    // can still apply after it.
+    let provider_reset = flags.cli_provider
+        && !flags.cli_cdp
+        && (cdp || auto_connect)
+        && targets
+            .provider
+            .as_deref()
+            .is_some_and(|v| v.trim().is_empty());
+    let provider = targets.provider.is_some() && !provider_reset;
+    if cdp && provider {
         return Some("Cannot use --cdp and -p/--provider together");
     }
 
@@ -245,21 +299,21 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
         return Some("Cannot use --auto-connect and --no-auto-connect together");
     }
 
-    if flags.auto_connect && flags.cdp.is_some() {
+    if auto_connect && cdp {
         return Some("Cannot use --auto-connect and --cdp together");
     }
 
-    if flags.auto_connect && flags.provider.is_some() {
+    if auto_connect && provider {
         return Some("Cannot use --auto-connect and -p/--provider together");
     }
 
-    if flags.provider.is_some() && !flags.extensions.is_empty() {
+    if provider && !flags.extensions.is_empty() {
         return Some(
             "Cannot use --extension with -p/--provider (extensions require local browser)",
         );
     }
 
-    if flags.cdp.is_some() && !flags.extensions.is_empty() {
+    if cdp && !flags.extensions.is_empty() {
         return Some("Cannot use --extension with --cdp (extensions require local browser)");
     }
 
@@ -267,17 +321,17 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     // browser agent-browser did not launch. Rejecting (rather than silently
     // ignoring) matches the --extension handling above. `--webgpu false`
     // overrides an env/config-enabled preset for these modes.
-    if flags.webgpu && flags.cdp.is_some() {
+    if flags.webgpu && cdp {
         return Some(
             "Cannot use --webgpu with --cdp (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
         );
     }
-    if flags.webgpu && flags.provider.is_some() {
+    if flags.webgpu && provider {
         return Some(
             "Cannot use --webgpu with -p/--provider (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
         );
     }
-    if flags.webgpu && flags.auto_connect {
+    if flags.webgpu && auto_connect {
         return Some(
             "Cannot use --webgpu with --auto-connect (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
         );
@@ -289,17 +343,17 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     if flags.ca_cert.is_some() && flags.clear_ca_cert {
         return Some("Cannot use --ca-cert with --no-ca-cert");
     }
-    if flags.ca_cert.is_some() && flags.cdp.is_some() {
+    if flags.ca_cert.is_some() && cdp {
         return Some(
             "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)",
         );
     }
-    if flags.ca_cert.is_some() && flags.auto_connect {
+    if flags.ca_cert.is_some() && auto_connect {
         return Some(
             "Cannot use --ca-cert with --auto-connect (--ca-cert requires a locally launched Chromium browser on Linux)",
         );
     }
-    if flags.ca_cert.is_some() && flags.provider.is_some() {
+    if flags.ca_cert.is_some() && provider {
         return Some(
             "Cannot use --ca-cert with -p/--provider (--ca-cert requires a locally launched Chromium browser on Linux)",
         );
@@ -1240,16 +1294,82 @@ fn run_dashboard_stop(json_mode: bool) {
     }
 }
 
+/// Forgets what a session keeps once it is closed: its saved TLS selection and
+/// its stored security settings. Called only after the daemon confirmed the
+/// close, so a close that policy denied or a confirmation parked leaves the
+/// session contained.
+fn clear_closed_session(session: &str) {
+    tls::clear_session(session);
+    if let Err(e) = session_settings::clear_file(session) {
+        eprintln!("{} {}", color::warning_indicator(), e);
+    }
+}
+
+/// What `close` forgets before it is sent. The stored security settings stay:
+/// the daemon that handles the close (a running one, or one `close` starts)
+/// enforces them, so a policy that denies `close` still applies, and drops
+/// them itself once the close succeeds.
+fn forget_before_close(session: &str) {
+    tls::clear_session(session);
+}
+
+/// Starts or reuses the session's daemon. A `close` whose daemon refuses to
+/// start because of the stored settings file clears that file and tries once
+/// more, so a corrupt file can always be cleared with `close`.
+fn ensure_daemon_for(
+    session: &str,
+    opts: &DaemonOptions,
+    is_close: bool,
+) -> Result<connection::DaemonResult, String> {
+    match ensure_daemon(session, opts) {
+        Err(e) if is_close && session_settings::is_refusal(&e) => {
+            session_settings::clear_file(session)?;
+            ensure_daemon(session, opts)
+        }
+        other => other,
+    }
+}
+
+/// Whether a response says the browser was closed, as opposed to denied,
+/// parked for confirmation or failed.
+fn close_completed(resp: &connection::Response) -> bool {
+    resp.success
+        && resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("closed"))
+            .and_then(|v| v.as_bool())
+            == Some(true)
+}
+
+/// Whether the invocation asks to close every session before the `--` marker.
+fn close_all_requested(args: &[String]) -> bool {
+    matches!(
+        args.first().map(|s| s.as_str()),
+        Some("close") | Some("quit") | Some("exit")
+    ) && flags::before_end_of_options(args)
+        .iter()
+        .any(|arg| arg == "--all")
+}
+
 fn run_close_all(flags: &Flags) {
     // walk_daemons auto-cleans stale .pid / .sock / .stream sidecar files and
     // separates out the standalone dashboard. We only want to send `close` to
     // real session daemons; the dashboard has its own `dashboard stop`.
     let inventory = walk_daemons();
-    let sessions: Vec<(String, u32)> = inventory
+    let mut sessions: Vec<(String, Option<u32>)> = inventory
         .sessions
         .iter()
-        .map(|s| (s.name.clone(), s.pid))
+        .map(|s| (s.name.clone(), Some(s.pid)))
         .collect();
+
+    // Sessions whose daemon is gone still hold stored security settings that
+    // govern them. They are closed like the others: a daemon starts with those
+    // settings, so a policy denying `close` still applies.
+    let orphans = session_settings::orphan_sessions(&get_socket_dir(), |session| {
+        sessions.iter().any(|(name, _)| name == session) || connection::daemon_ready(session)
+    });
+    sessions.extend(orphans.into_iter().map(|name| (name, None)));
 
     if sessions.is_empty() {
         if flags.json {
@@ -1267,6 +1387,12 @@ fn run_close_all(flags: &Flags) {
     let mut failed: Vec<(String, String)> = Vec::new();
 
     for (session, pid) in &sessions {
+        if pid.is_none() {
+            if let Err(e) = ensure_daemon_for(session, &DaemonOptions::bare(), true) {
+                failed.push((session.clone(), e));
+                continue;
+            }
+        }
         let cmd = json!({ "id": gen_id(), "action": "close" });
         // A close whose response was lost leaves the daemon in an unknown
         // state; force-kill it like an unreachable one.
@@ -1278,18 +1404,47 @@ fn run_close_all(flags: &Flags) {
             }
         });
         match result {
-            Ok(resp) if resp.success => {
-                tls::clear_session(session);
+            Ok(resp) if close_completed(&resp) => {
+                clear_closed_session(session);
                 closed.push(session.clone());
             }
             Ok(resp) => {
-                let err = resp.error.unwrap_or_else(|| "Unknown error".to_string());
+                // Denied, waiting for confirmation or failed: still running.
+                let waiting = resp
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("confirmation_required"))
+                    .and_then(|v| v.as_bool())
+                    == Some(true);
+                let mut err = match (resp.error, waiting) {
+                    (Some(err), _) => err,
+                    (None, true) => "close is waiting for confirmation".to_string(),
+                    (None, false) => "Unknown error".to_string(),
+                };
+                if pid.is_none() {
+                    // The daemon was started only to close this session; stop
+                    // it so the session is left as it was found, with its
+                    // stored settings. A parked confirmation goes with it.
+                    connection::stop_daemon(session);
+                    if waiting {
+                        err = format!(
+                            "close needs confirmation; run `agent-browser --session {s} close`, then `agent-browser --session {s} confirm <id>` with the id it prints",
+                            s = session
+                        );
+                    }
+                }
                 failed.push((session.clone(), err));
+            }
+            Err(e) if pid.is_none() => {
+                // A daemon started only to close this session did not answer.
+                connection::stop_daemon(session);
+                failed.push((session.clone(), e));
             }
             Err(_) => {
                 // Daemon is unreachable despite its process existing.
                 // Force-kill the process and clean up stale files so future
                 // sessions are not poisoned.
+                let pid = &pid.unwrap_or_default();
                 if is_agent_browser_process(*pid) {
                     #[cfg(unix)]
                     unsafe {
@@ -1305,6 +1460,7 @@ fn run_close_all(flags: &Flags) {
                     }
                 }
                 cleanup_stale_files(session);
+                clear_closed_session(session);
                 closed.push(session.clone());
             }
         }
@@ -1558,16 +1714,6 @@ fn main() {
         return;
     }
 
-    // Handle close --all: close all active sessions
-    if matches!(
-        clean.first().map(|s| s.as_str()),
-        Some("close") | Some("quit") | Some("exit")
-    ) && clean.iter().any(|a| a == "--all")
-    {
-        run_close_all(&flags);
-        return;
-    }
-
     // Handle chat command
     if clean.first().map(|s| s.as_str()) == Some("chat") {
         let message = if clean.len() > 1 {
@@ -1597,6 +1743,11 @@ fn main() {
             exit(1);
         }
     };
+    // Handle close --all: close all active sessions
+    if close_all_requested(&clean) {
+        run_close_all(&flags);
+        return;
+    }
     attach_input_mode(&mut cmd, &flags);
     // Stdin batches are read before launch decisions so a batch of `read`
     // commands is recognized as browserless, like one given as arguments.
@@ -1606,7 +1757,7 @@ fn main() {
     }
     match cmd.get("action").and_then(|v| v.as_str()) {
         Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
-        Some("close") => tls::clear_session(&flags.session),
+        Some("close") => forget_before_close(&flags.session),
         _ => {}
     }
     // Handle --password-stdin for auth save
@@ -1645,7 +1796,6 @@ fn main() {
     // broadcasts before observers see the command payload.
     attach_plugins_to_command(&mut cmd, &flags.plugins);
 
-    attach_pin_tab_to_command(&mut cmd, &flags);
     attach_restore_config_to_command(&mut cmd, &flags);
 
     // Validate restore/session persistence name before starting daemon
@@ -1793,7 +1943,8 @@ fn main() {
         plugins: Some(plugin_registry_json.as_str()),
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
+    let is_close = cmd.get("action").and_then(|v| v.as_str()) == Some("close");
+    let daemon_result = match ensure_daemon_for(&flags.session, &daemon_opts, is_close) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -1815,7 +1966,7 @@ fn main() {
 
     // Reject a bad CDP target before the command runs, even when the daemon
     // is already up, so the user gets an immediate error.
-    if let Err(msg) = validate_cdp_flags(&flags) {
+    if let Err(msg) = validate_cdp_flags(&flags, &cmd) {
         if flags.json {
             print_json_error(&msg);
         } else {
@@ -1871,6 +2022,9 @@ fn main() {
             let success = resp.success;
             // Extract action for context-specific output handling
             let action = cmd.get("action").and_then(|v| v.as_str());
+            if action == Some("close") && close_completed(&resp) {
+                clear_closed_session(&flags.session);
+            }
             print_response_with_opts(&resp, action, &output_opts);
             if !success {
                 exit(1);
@@ -2020,10 +2174,11 @@ fn run_batch(
             parsed["settings"] = wire;
         }
 
-        attach_pin_tab_to_command(&mut parsed, flags);
-
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
+                if action.as_deref() == Some("close") && close_completed(&resp) {
+                    clear_closed_session(&flags.session);
+                }
                 relaunch_applied |= response_applied_relaunch(&resp);
                 if flags.json {
                     let mut result = batch_result_identity(i, cmd_args, omit_command);
@@ -2122,6 +2277,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn close_all_requested_ignores_marker_after_end_of_options() {
+        let clean = |command: &str| {
+            crate::flags::clean_args(
+                &command
+                    .split_whitespace()
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        assert!(close_all_requested(&clean("close --all")));
+        assert!(close_all_requested(&clean("quit --all")));
+        assert!(close_all_requested(&clean("exit --all")));
+        assert!(!close_all_requested(&clean("close -- --all")));
+        assert!(!close_all_requested(&clean("quit -- --all")));
+        assert!(!close_all_requested(&clean("exit -- --all")));
+        assert!(close_all_requested(&clean("close --all -- --all")));
+    }
+
+    #[test]
     fn dashboard_config_comparison_rejects_unknown_or_changed_settings() {
         let requested = DashboardConfig::new(
             4848,
@@ -2202,6 +2377,50 @@ mod tests {
         (command, wire)
     }
 
+    fn settings_with_env_target(args: &[&str]) -> serde_json::Value {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let mut flags = crate::flags::parse_flags(&args);
+        flags.cdp = Some("ws://env.example/cdp".to_string());
+        flags.cdp_headers = Some(r#"{"A":"env"}"#.to_string());
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        command_settings(&flags, &command)
+            .to_wire()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    #[test]
+    fn connect_does_not_carry_an_environment_target() {
+        for target in ["wss://x.example/cdp", "9222"] {
+            let wire = settings_with_env_target(&["connect", target]);
+            assert!(wire.get("cdp").is_none(), "{target}: {wire}");
+            // The environment headers belong to the environment endpoint.
+            assert!(wire.get("cdp-headers").is_none(), "{target}: {wire}");
+            assert!(wire.get("ambient").is_none(), "{target}: {wire}");
+        }
+        let wire = settings_with_env_target(&["connect", "ws://env.example/cdp"]);
+        assert_eq!(wire["cdp-headers"], r#"{"A":"env"}"#, "{wire}");
+    }
+
+    #[test]
+    fn other_commands_carry_the_environment_target_as_ambient() {
+        let wire = settings_with_env_target(&["snapshot"]);
+        assert_eq!(wire["cdp"], "ws://env.example/cdp");
+        assert_eq!(wire["ambient"], serde_json::json!(["cdp", "cdp-headers"]));
+    }
+
+    #[test]
+    fn batch_items_keep_the_environment_target_ambient() {
+        let args: Vec<String> = vec!["snapshot".to_string()];
+        let mut flags = crate::flags::parse_flags(&args);
+        flags.cdp = Some("ws://env.example/cdp".to_string());
+        let command = serde_json::json!({"id": "1", "action": "launch"});
+        let wire = batch_item_settings(&flags, &command, false)
+            .to_wire()
+            .unwrap();
+        assert_eq!(wire["ambient"], serde_json::json!(["cdp"]));
+    }
+
     #[test]
     fn bare_open_is_a_plain_launch_and_its_settings_ride_in_the_patch() {
         let (command, wire) = settings_of(&[
@@ -2241,34 +2460,245 @@ mod tests {
         assert!(wire.get("clear-ca-cert").is_none(), "{wire}");
     }
 
+    fn flags_of(args: &[&str]) -> (Flags, serde_json::Value) {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let flags = crate::flags::parse_flags(&args);
+        let cmd = crate::commands::parse_command(&crate::flags::clean_args(&args), &flags)
+            .unwrap_or_else(|_| serde_json::json!({"action": "url"}));
+        (flags, cmd)
+    }
+
+    /// Flags as parsed with `AGENT_BROWSER_*` values for the connection
+    /// targets, which are session defaults.
+    fn with_defaults(
+        args: &[&str],
+        cdp: Option<&str>,
+        provider: Option<&str>,
+        auto_connect: bool,
+    ) -> (Flags, serde_json::Value) {
+        // Parsing reads the process environment, which other tests mutate.
+        let _env = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_CDP_HEADERS",
+            "AGENT_BROWSER_PROVIDER",
+            "AGENT_BROWSER_AUTO_CONNECT",
+        ]);
+        let (mut flags, cmd) = flags_of(args);
+        if !flags.cli_cdp {
+            flags.cdp = cdp.map(str::to_string).or(flags.cdp);
+        } else {
+            flags.default_cdp = cdp.map(str::to_string);
+        }
+        if !flags.cli_provider {
+            flags.provider = provider.map(str::to_string).or(flags.provider);
+        }
+        if !flags.cli_auto_connect {
+            flags.auto_connect = auto_connect || flags.auto_connect;
+        }
+        (flags, cmd)
+    }
+
+    #[test]
+    fn a_default_provider_replaced_by_cdp_keeps_the_page_load_wait() {
+        let open = |args: &[&str], provider: Option<&str>| {
+            let (flags, _) = with_defaults(args, None, provider, false);
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap()
+        };
+        let cmd = open(&["--cdp", "9222", "open", "example.com"], Some("ios"));
+        assert!(cmd.get("waitUntil").is_none(), "{cmd}");
+        // A provider that applies still skips it, and `-p ""` names none.
+        let cmd = open(&["open", "example.com"], Some("ios"));
+        assert_eq!(cmd["waitUntil"], "none");
+        let cmd = open(&["-p", "", "open", "example.com"], None);
+        assert!(cmd.get("waitUntil").is_none(), "{cmd}");
+    }
+
+    /// The `cdpHeaders` and `settings` headers one `connect` carries.
+    fn connect_headers_of(
+        args: &[&str],
+        env_cdp: Option<&str>,
+        env_headers: Option<&str>,
+    ) -> (Option<serde_json::Value>, Option<String>) {
+        let (mut flags, _) = with_defaults(args, env_cdp, None, false);
+        if !flags.cli_cdp_headers {
+            flags.cdp_headers = env_headers.map(str::to_string);
+        }
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let cmd = crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        let patch = command_settings(&flags, &cmd);
+        let plan = session_settings::Running::defaults().plan(&patch);
+        (cmd.get("cdpHeaders").cloned(), plan.next.cdp_headers())
+    }
+
+    #[test]
+    fn environment_headers_go_only_to_the_endpoint_they_belong_to() {
+        let env = r#"{"X":"env"}"#;
+        // Another endpoint named by `connect` never receives them.
+        let (envelope, settings) =
+            connect_headers_of(&["connect", "9223"], Some("9222"), Some(env));
+        assert_eq!((envelope, settings), (None, None));
+        let (envelope, settings) = connect_headers_of(
+            &["connect", "https://other.example/cdp"],
+            Some("9222"),
+            Some(env),
+        );
+        assert_eq!((envelope, settings), (None, None));
+        // The same endpoint does.
+        let (envelope, settings) =
+            connect_headers_of(&["connect", "9222"], Some("9222"), Some(env));
+        assert_eq!(envelope, Some(serde_json::json!({"X": "env"})));
+        assert_eq!(settings.as_deref(), Some(env));
+        // With no endpoint in the environment they go with the one named.
+        let (envelope, _) = connect_headers_of(&["connect", "9223"], None, Some(env));
+        assert_eq!(envelope, Some(serde_json::json!({"X": "env"})));
+        // Headers on the command line always go with the endpoint named.
+        let (envelope, _) = connect_headers_of(
+            &["connect", "9223", "--cdp-headers", r#"{"Y":"own"}"#],
+            Some("9222"),
+            Some(env),
+        );
+        assert_eq!(envelope, Some(serde_json::json!({"Y": "own"})));
+    }
+
+    #[test]
+    fn environment_headers_do_not_follow_cdp_to_another_endpoint() {
+        let env = r#"{"X":"env"}"#;
+        let patch_of = |args: &[&str], env_cdp: &str| {
+            let (mut flags, _) = with_defaults(args, Some(env_cdp), None, false);
+            flags.cdp_headers = Some(env.to_string());
+            session_settings::Patch::from_flags(&flags)
+        };
+        let headers = |args: &[&str], env_cdp: &str| {
+            let plan = session_settings::Running::defaults().plan(&patch_of(args, env_cdp));
+            plan.next.cdp_headers()
+        };
+        assert_eq!(headers(&["--cdp", "9223", "get", "url"], "9222"), None);
+        assert_eq!(
+            headers(&["--cdp", "9222", "get", "url"], "9222").as_deref(),
+            Some(env)
+        );
+    }
+
     #[test]
     fn cdp_flags_are_validated_before_the_command_runs() {
-        let flags = |args: &[&str]| {
-            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            crate::flags::parse_flags(&args)
+        let check = |args: &[&str]| {
+            let (flags, cmd) = flags_of(args);
+            validate_cdp_flags(&flags, &cmd)
         };
-        assert!(validate_cdp_flags(&flags(&["--cdp", "9222", "get", "url"])).is_ok());
-        assert!(
-            validate_cdp_flags(&flags(&["--cdp", "ws://127.0.0.1:9222/x", "get", "url"])).is_ok()
-        );
+        assert!(check(&["--cdp", "9222", "get", "url"]).is_ok());
+        assert!(check(&["--cdp", "ws://127.0.0.1:9222/x", "get", "url"]).is_ok());
         for (value, message) in [
             ("0", "greater than 0"),
             ("70000", "out of range"),
             ("nope", "not a valid port number or URL"),
         ] {
-            let error = validate_cdp_flags(&flags(&["--cdp", value, "get", "url"])).unwrap_err();
+            let error = check(&["--cdp", value, "get", "url"]).unwrap_err();
             assert!(error.contains(message), "{value}: {error}");
         }
-        let error = validate_cdp_flags(&flags(&[
-            "--cdp",
-            "9222",
-            "--cdp-headers",
-            "[]",
-            "get",
-            "url",
-        ]))
-        .unwrap_err();
+        let error = check(&["--cdp", "9222", "--cdp-headers", "[]", "get", "url"]).unwrap_err();
         assert!(error.contains("JSON object"), "{error}");
+    }
+
+    #[test]
+    fn a_default_cdp_value_is_validated_only_when_it_is_sent() {
+        let invalid = Some("bogus");
+        // Sent with an ordinary command: still rejected.
+        let (flags, cmd) = with_defaults(&["get", "url"], invalid, None, false);
+        assert!(validate_cdp_flags(&flags, &cmd).is_err());
+        // `connect` names its own endpoint and drops the default.
+        let (flags, cmd) = with_defaults(&["connect", "9222"], invalid, None, false);
+        assert!(validate_cdp_flags(&flags, &cmd).is_ok());
+        // A target on the command line replaces it.
+        let (flags, cmd) = with_defaults(&["-p", "ios", "get", "url"], invalid, None, false);
+        assert!(validate_cdp_flags(&flags, &cmd).is_ok());
+        // An explicit value is always checked, even for `connect`.
+        let (flags, cmd) = with_defaults(&["--cdp", "bogus", "connect", "9222"], None, None, false);
+        assert!(validate_cdp_flags(&flags, &cmd).is_err());
+    }
+
+    #[test]
+    fn headers_are_validated_whenever_they_will_be_sent() {
+        let bad = Some("[]".to_string());
+        // Env headers with an env endpoint, for a single command and a batch.
+        for args in [vec!["get", "url"], vec!["batch", "get url"]] {
+            let (mut flags, cmd) = with_defaults(&args, Some("9222"), None, false);
+            flags.cdp_headers = bad.clone();
+            let error = validate_cdp_flags(&flags, &cmd).unwrap_err();
+            assert!(error.contains("JSON object"), "{args:?}: {error}");
+        }
+        // Env headers with no endpoint are dropped, so they are not checked.
+        let (mut flags, cmd) = with_defaults(&["get", "url"], None, None, false);
+        flags.cdp_headers = bad.clone();
+        assert!(validate_cdp_flags(&flags, &cmd).is_ok());
+        // Explicit headers are always checked.
+        let (flags, cmd) = flags_of(&["--cdp-headers", "[]", "get", "url"]);
+        assert!(validate_cdp_flags(&flags, &cmd).is_err());
+        // Env headers with an explicit --cdp are sent.
+        let (mut flags, cmd) = flags_of(&["--cdp", "9222", "get", "url"]);
+        flags.cdp_headers = bad;
+        assert!(validate_cdp_flags(&flags, &cmd).is_err());
+    }
+
+    #[test]
+    fn default_targets_never_conflict_with_each_other_or_with_a_flag() {
+        let error = |args: &[&str], cdp, provider, auto| {
+            let (flags, _) = with_defaults(args, cdp, provider, auto);
+            incompatible_launch_mode_error(&flags)
+        };
+        // A default cdp plus -p, --auto-connect or a blank -p.
+        assert_eq!(
+            error(&["-p", "nope", "get", "url"], Some("9222"), None, false),
+            None
+        );
+        assert_eq!(
+            error(&["-p", "", "get", "url"], Some("9222"), None, false),
+            None
+        );
+        assert_eq!(
+            error(&["--auto-connect", "get", "url"], Some("9222"), None, false),
+            None
+        );
+        // A default provider plus --cdp.
+        assert_eq!(
+            error(&["--cdp", "9222", "get", "url"], None, Some("ios"), false),
+            None
+        );
+        // Two defaults resolve by precedence.
+        assert_eq!(
+            error(&["get", "url"], Some("9222"), Some("ios"), false),
+            None
+        );
+        assert_eq!(error(&["get", "url"], None, Some("ios"), true), None);
+        assert_eq!(error(&["get", "url"], Some("9222"), None, true), None);
+        // Two flags still conflict.
+        assert_eq!(
+            error(
+                &["--cdp", "9222", "-p", "ios", "get", "url"],
+                None,
+                None,
+                false
+            ),
+            Some("Cannot use --cdp and -p/--provider together")
+        );
+        assert_eq!(
+            error(
+                &["--cdp", "9222", "--auto-connect", "get", "url"],
+                None,
+                None,
+                false
+            ),
+            Some("Cannot use --auto-connect and --cdp together")
+        );
+        assert_eq!(
+            error(
+                &["--auto-connect", "-p", "ios", "get", "url"],
+                None,
+                None,
+                false
+            ),
+            Some("Cannot use --auto-connect and -p/--provider together")
+        );
     }
 
     #[test]
@@ -2504,23 +2934,23 @@ mod tests {
     }
 
     #[test]
-    fn test_attach_pin_tab_to_command_preserves_preference() {
+    fn test_pin_tab_rides_the_settings_patch_for_single_and_batch_commands() {
         let mut flags = neutral_launch_config_flags();
-
-        let mut absent_cmd = json!({ "action": "launch" });
-        attach_pin_tab_to_command(&mut absent_cmd, &flags);
-        assert!(absent_cmd.get("pinTab").is_none());
+        let cmd = json!({ "action": "tab_list" });
+        let pin = |flags: &Flags| {
+            let single = command_settings(flags, &cmd).to_wire();
+            let batch = batch_item_settings(flags, &cmd, false).to_wire();
+            assert_eq!(single, batch);
+            single.and_then(|wire| wire.get("pin-tab").cloned())
+        };
+        assert_eq!(pin(&flags), None);
 
         flags.pin_tab = true;
-        let mut enabled_cmd = json!({ "action": "launch" });
-        attach_pin_tab_to_command(&mut enabled_cmd, &flags);
-        assert_eq!(enabled_cmd["pinTab"], true);
+        flags.cli_pin_tab = true;
+        assert_eq!(pin(&flags), Some(json!(true)));
 
         flags.pin_tab = false;
-        flags.cli_pin_tab = true;
-        let mut disabled_cmd = json!({ "action": "launch" });
-        attach_pin_tab_to_command(&mut disabled_cmd, &flags);
-        assert_eq!(disabled_cmd["pinTab"], false);
+        assert_eq!(pin(&flags), Some(json!(false)));
     }
 
     #[test]
@@ -2678,7 +3108,10 @@ mod tests {
         flags.webgpu = false;
         flags.auto_connect = auto_connect;
         flags.cdp = cdp.then(|| "9222".to_string());
+        flags.cli_cdp = cdp;
         flags.provider = provider.then(|| "ios".to_string());
+        flags.cli_provider = provider;
+        flags.cli_auto_connect = auto_connect;
         flags.extensions = if extensions {
             vec!["/tmp/ext".to_string()]
         } else {

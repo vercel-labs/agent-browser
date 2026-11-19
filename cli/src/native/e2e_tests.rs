@@ -139,6 +139,7 @@ async fn e2e_empty_table_cell_refs_resolve() {
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "click_probe" => include_str!("test_fixtures/click_probe.html"),
         "wheel_probe" => include_str!("test_fixtures/wheel_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
@@ -2145,6 +2146,351 @@ async fn e2e_screenshot() {
 // Form interaction: fill, type, select, check
 // ---------------------------------------------------------------------------
 
+// Regression for #1105: `select` on a custom ARIA combobox (div-based, options
+// hidden until opened) must open it and click the matching option, and must
+// error (not silently succeed) on a value that does not exist.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="false" aria-controls="lb">Choose</div>
+<ul role="listbox" id="lb" style="display:none">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="banana">Banana</li>
+</ul>
+<output id="result">none</output>
+<select id="native"><option value="">--</option><option value="x">Xylophone</option><option value="y">Yak</option></select>
+<script>
+var cb=document.getElementById('cb'),lb=document.getElementById('lb'),r=document.getElementById('result');
+function setOpen(open){lb.style.display=open?'block':'none';cb.setAttribute('aria-expanded',String(open));}
+cb.addEventListener('click',function(){setOpen(lb.style.display==='none');});
+lb.querySelectorAll('[role=option]').forEach(function(o){o.addEventListener('click',function(){cb.textContent=o.textContent;r.textContent=o.getAttribute('data-value');setOpen(false);});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple");
+
+    // Already-open combobox must not be toggled shut before matching.
+    let resp = execute_command(&eval("5", "document.getElementById('cb').click(); document.getElementById('cb').getAttribute('aria-expanded')"), &mut state).await;
+    assert_eq!(get_data(&resp)["result"], "true");
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "select", "selector": "#cb", "values": ["Banana"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("7", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "banana");
+
+    // Unknown option errors and lists what is available.
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "select", "selector": "#cb", "values": ["Dragonfruit"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    assert!(
+        serde_json::to_string(&resp)
+            .unwrap_or_default()
+            .contains("Available options"),
+        "error should list options: {resp}"
+    );
+
+    // Native <select> path is unchanged.
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "select", "selector": "#native", "values": ["Yak"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("10", "document.getElementById('native').value"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "y");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// A combobox whose popup mounts a tick after aria-controls is set must wait for
+// that popup, not pick up options from another listbox that is already visible.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_async_popup() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<ul role="listbox" id="sidebar">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="pro">Pro</li>
+</ul>
+<div role="combobox" id="cb" tabindex="0" aria-expanded="false">Choose</div>
+<div id="host"></div>
+<output id="result">none</output>
+<output id="sidebar-clicks">0</output>
+<script>
+var cb=document.getElementById('cb'),host=document.getElementById('host'),r=document.getElementById('result'),sc=document.getElementById('sidebar-clicks');
+document.querySelectorAll('#sidebar [role=option]').forEach(function(o){o.addEventListener('click',function(){sc.textContent=String(Number(sc.textContent)+1);});});
+function close(){host.innerHTML='';cb.setAttribute('aria-expanded','false');}
+function open(){
+  cb.setAttribute('aria-controls','popup');
+  setTimeout(function(){
+    host.innerHTML='<ul role="listbox" id="popup"><li role="option" data-value="apple">Apple</li><li role="option" data-value="banana">Banana</li></ul>';
+    host.querySelectorAll('[role=option]').forEach(function(o){o.addEventListener('click',function(){r.textContent=o.getAttribute('data-value');close();});});
+    cb.setAttribute('aria-expanded','true');
+  },0);
+}
+cb.addEventListener('click',function(){if(cb.getAttribute('aria-expanded')==='true'){close();}else{open();}});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple");
+    let resp = execute_command(
+        &eval("5", "document.getElementById('sidebar-clicks').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        get_data(&resp)["result"],
+        "0",
+        "the widget's option must be clicked, not the sidebar's"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// An option whose accessible name comes from aria-labelledby must match that
+// name, even when its text content also carries an indicator and a description.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_labelled_option() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="true" aria-controls="popup">Choose</div>
+<ul role="listbox" id="popup">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="car" aria-labelledby="car-label"><span aria-hidden="true">new</span><span id="car-label">Car</span><span class="hint"> compact, +$500</span></li>
+</ul>
+<output id="result">none</output>
+<script>
+var r=document.getElementById('result');
+document.querySelectorAll('#popup [role=option]').forEach(function(o){o.addEventListener('click',function(){r.textContent=o.getAttribute('data-value');});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Car"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('result').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "car");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// A matched option that is aria-disabled must fail the command instead of
+// clicking a dead target and reporting success.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_disabled_option() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="true" aria-controls="popup">Choose</div>
+<ul role="listbox" id="popup">
+<li role="option" data-value="basic">Basic</li>
+<li role="option" data-value="pro" aria-disabled="true">Pro</li>
+</ul>
+<output id="result">none</output>
+<script>
+var r=document.getElementById('result');
+document.querySelectorAll('#popup [role=option]').forEach(function(o){o.addEventListener('click',function(){if(o.getAttribute('aria-disabled')==='true')return;r.textContent=o.getAttribute('data-value');});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Pro"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "disabled option must fail: {resp}");
+    let error = resp["error"].as_str().unwrap_or_default().to_string();
+    assert!(
+        error.contains("disabled"),
+        "error should name the disabled option: {error}"
+    );
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('result').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "none");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// Selecting an option that is already selected in a multi-select listbox is a
+// no-op; the click toggles, so without the guard the option would be cleared.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_listbox_multiselect() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<ul role="listbox" id="multi" aria-multiselectable="true">
+<li role="option" data-value="apple" aria-selected="true">Apple</li>
+<li role="option" data-value="banana" aria-selected="false">Banana</li>
+</ul>
+<output id="state"></output>
+<script>
+var s=document.getElementById('state'),options=document.querySelectorAll('#multi [role=option]');
+function render(){s.textContent=Array.prototype.map.call(options,function(o){return o.getAttribute('data-value')+'='+o.getAttribute('aria-selected');}).join(',');}
+options.forEach(function(o){o.addEventListener('click',function(){o.setAttribute('aria-selected',o.getAttribute('aria-selected')==='true'?'false':'true');render();});});
+render();
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#multi", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('state').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        get_data(&resp)["result"],
+        "apple=true,banana=false",
+        "an already selected option must stay selected"
+    );
+
+    // Selecting a different option still toggles it on.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "select", "selector": "#multi", "values": ["Banana"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("6", "document.getElementById('state').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple=true,banana=true");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_form_interaction() {
@@ -2828,6 +3174,148 @@ async fn e2e_tabs() {
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+/// A live tab keeps its timers running behind another tab, and goes back to
+/// the browser's throttling when asked.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_live() {
+    let mut state = DaemonState::new();
+    let ticker = "data:text/html,<script>var ticks=0;setInterval(()=>ticks++,100)</script>";
+    let mut run = async |action: &str, mut cmd: Value| {
+        cmd["id"] = json!(action);
+        cmd["action"] = json!(action);
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_success(&resp);
+        resp
+    };
+    run("launch", json!({ "headless": true })).await;
+    run("navigate", json!({ "url": ticker })).await;
+
+    let resp = run("tab_keep", json!({ "keep": "live" })).await;
+    assert_eq!(get_data(&resp)["tabId"], "t1");
+    run("evaluate", json!({ "script": "ticks = 0" })).await;
+    run("tab_new", json!({})).await;
+    let resp = run("tab_list", json!({})).await;
+    assert_eq!(get_data(&resp)["tabs"][0]["keep"], "live");
+    assert_eq!(get_data(&resp)["tabs"][1]["keep"], "throttled");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    run("tab_switch", json!({ "tabId": "t1" })).await;
+    let resp = run("evaluate", json!({ "script": "ticks" })).await;
+    let ticks = get_data(&resp)["result"].as_f64().unwrap_or_default();
+    assert!(
+        ticks >= 20.0,
+        "a live tab ticks about 30 times in 3s, got {ticks}"
+    );
+
+    run("tab_keep", json!({ "keep": "throttled" })).await;
+    let resp = run("tab_list", json!({})).await;
+    assert_eq!(get_data(&resp)["tabs"][0]["keep"], "throttled");
+    run("close", json!({})).await;
+}
+
+/// A page that records the longest gap between two 100 ms ticks.
+const GAP_PAGE: &str = "data:text/html,<script>var ticks=0,gap=0,last=performance.now();setInterval(()=>{var n=performance.now();gap=Math.max(gap,n-last);last=n;ticks++},100)</script>";
+
+/// The active tab cannot be frozen. A frozen tab stops, and the daemon
+/// unfreezes it when closing a popup makes it the active tab while Chrome
+/// shows the opener.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_frozen() {
+    let mut state = DaemonState::new();
+    let mut run = async |action: &str, mut cmd: Value| {
+        cmd["id"] = json!(action);
+        cmd["action"] = json!(action);
+        execute_command(&cmd, &mut state).await
+    };
+    let ok = |resp: Value| {
+        assert_success(&resp);
+        resp
+    };
+    ok(run("launch", json!({ "headless": true })).await);
+    ok(run("navigate", json!({ "url": "data:text/html,<p>opener</p>" })).await);
+    ok(run("tab_new", json!({ "url": GAP_PAGE })).await);
+    let resp = run("tab_keep", json!({ "keep": "frozen" })).await;
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(error.contains("Cannot freeze the active tab"), "{resp}");
+
+    ok(run("tab_switch", json!({ "tabId": "t1" })).await);
+    ok(run(
+        "evaluate",
+        json!({ "script": "window.open('about:blank'), 0" }),
+    )
+    .await);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ok(run("tab_keep", json!({ "keep": "frozen", "tabId": "t2" })).await);
+    let resp = ok(run("tab_list", json!({})).await);
+    assert_eq!(get_data(&resp)["tabs"][1]["keep"], "frozen");
+    assert_eq!(get_data(&resp)["tabs"][2]["active"], true, "{resp}");
+
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    ok(run("tab_close", json!({})).await);
+    let script = "new Promise(r => setTimeout(() => r([gap, document.visibilityState]), 50))";
+    let resp = ok(run("evaluate", json!({ "script": script })).await);
+    let result = &get_data(&resp)["result"];
+    assert!(result[0].as_f64().unwrap_or_default() >= 2000.0, "{resp}");
+    assert_eq!(result[1], "hidden", "Chrome should still show the opener");
+    let resp = ok(run("tab_list", json!({})).await);
+    assert_eq!(get_data(&resp)["tabs"][1]["keep"], "throttled");
+    ok(run("close", json!({})).await);
+}
+
+/// A session attached to a running browser unfreezes the tabs it froze when
+/// it closes, because a frozen page stays frozen after the session disconnects.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_frozen_ends_with_an_attached_session() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let mut session = attach_pinned_session(&guard, "e2e-keep-frozen", &ws_url, GAP_PAGE).await;
+    let mut run = async |action: &str, mut cmd: Value| {
+        cmd["id"] = json!(action);
+        cmd["action"] = json!(action);
+        let resp = execute_command(&cmd, &mut session).await;
+        assert_success(&resp);
+        resp
+    };
+    let resp = run("tab_list", json!({})).await;
+    let tabs = get_data(&resp)["tabs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let ticker = tabs
+        .iter()
+        .find(|tab| tab["active"] == true)
+        .expect("an active tab");
+    let ticker = ticker["targetId"].as_str().unwrap_or_default().to_string();
+    run("tab_new", json!({})).await;
+    run("tab_keep", json!({ "keep": "frozen", "tabId": ticker })).await;
+    run("close", json!({})).await;
+
+    assert_success(&execute_command(&json!({ "id": "1", "action": "tab_list" }), &mut host).await);
+    let browser = host.browser.as_ref().expect("host browser");
+    let pages = browser.pages_list();
+    let page = pages
+        .iter()
+        .find(|page| page.target_id == ticker)
+        .expect("the tab left behind");
+    let mut ticks = Vec::new();
+    for _ in 0..2 {
+        let params = json!({ "expression": "ticks", "returnByValue": true });
+        let result =
+            browser
+                .client
+                .send_command("Runtime.evaluate", Some(params), Some(&page.session_id));
+        ticks.push(result.await.expect("the tab should answer")["result"]["value"].as_f64());
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    }
+    assert!(
+        ticks[1] > ticks[0],
+        "the tab should tick again after the session closed: {ticks:?}"
+    );
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut host).await);
 }
 
 #[tokio::test]
@@ -6244,9 +6732,35 @@ async fn e2e_click_rejects_unreachable_elements() {
                 <button id="fieldset-disabled" onclick="document.getElementById('result').textContent = 'fieldset'">Fieldset</button>
             </fieldset>
             <button id="ok" onclick="document.getElementById('result').textContent = 'clicked'">Ok</button>
+            <button id="straddle" style="position:absolute;top:calc(100vh - 10px)" onclick="document.getElementById('result').textContent = 'straddle'">Straddle</button>
+            <button id="moving" style="position:absolute;top:2500px" onclick="document.getElementById('result').textContent = 'moving'">Moving</button>
+            <div style="position:absolute;top:400px;height:120px;width:200px;overflow:auto">
+                <div style="height:300px"></div>
+                <button id="clipped" onclick="document.getElementById('result').textContent = 'clipped'">Clipped</button>
+            </div>
+            <iframe id="scaled" style="position:absolute;top:400px;left:300px;width:400px;height:300px;transform:scale(0.5);transform-origin:0 0"></iframe>
+            <iframe id="padded" style="position:absolute;top:600px;left:450px;width:200px;height:150px;border:0;padding:14px"></iframe>
+            <iframe id="padded-scaled" style="position:absolute;top:800px;left:450px;width:220px;height:180px;border:solid red;border-width:8px 12px 16px 10px;padding:14px 28px 22px 18px;box-sizing:border-box;transform:scale(0.5);transform-origin:0 0"></iframe>
+            <div id="pad-cover" style="position:absolute;left:464px;top:644px;width:16px;height:16px;background:rgba(0,0,0,0.5)"></div>
+            <iframe id="zero-content" style="position:absolute;top:600px;left:720px;width:40px;height:40px;border:0;padding:20px;box-sizing:border-box"></iframe>
+            <button id="outside-parent" style="position:absolute;left:120px;top:600px;width:120px;height:50px" onclick="document.getElementById('result').textContent = 'parent'">Parent</button>
+            <iframe id="wild" style="position:absolute;left:200px;top:600px;width:200px;height:150px;border:0"></iframe>
             <label><input id="hidden-check" type="checkbox" style="display:none"> Accept</label>
             <svg width="300" height="100"><line id="flat-line" x1="20" y1="50" x2="280" y2="50" stroke="black" stroke-width="8" onclick="document.getElementById('result').textContent = 'line'"/></svg>
             <div id="result">idle</div>
+            <script>
+                let moved = false;
+                addEventListener('scroll', () => {
+                    if (moved || window.scrollY < 1000) return;
+                    moved = true;
+                    requestAnimationFrame(() => { document.getElementById('moving').style.top = '2700px'; });
+                });
+                document.getElementById('scaled').srcdoc = "<button id='inner' style='margin:100px' onclick=\"document.getElementById('r').textContent='scaled'\">Inner</button><div id='r'>idle</div>";
+                document.getElementById('padded').srcdoc = "<body style='margin:0'><button id='inner-padded' style='position:absolute;left:0;top:0;width:12px;height:12px;padding:0;border:0' onclick=\"parent.document.getElementById('result').textContent='padded-clicked'\">Padded</button><button id='inner-covered' style='position:absolute;left:2px;top:32px;width:12px;height:12px;padding:0;border:0' onclick=\"parent.document.getElementById('result').textContent='covered-clicked'\">Covered</button></body>";
+                document.getElementById('padded-scaled').srcdoc = "<body style='margin:0'><button id='inner-padded-scaled' style='position:absolute;left:0;top:0;width:16px;height:16px;padding:0;border:0' onclick=\"parent.document.getElementById('result').textContent='padded-scaled-clicked'\">Scaled</button></body>";
+                document.getElementById('zero-content').srcdoc = "<body style='margin:0'><button id='inner-zero' style='width:12px;height:12px'>Zero</button></body>";
+                document.getElementById('wild').srcdoc = "<button id='out' style='position:fixed;left:-100px;top:10px' onclick=\"parent.document.getElementById('result').textContent='child'\">Out</button>";
+            </script>
         </body>
         </html>
     "#;
@@ -6314,6 +6828,32 @@ async fn e2e_click_rejects_unreachable_elements() {
     }
     assert_eq!(result_text(&mut state).await, "idle");
 
+    for (selector, expected) in [("#straddle", "straddle"), ("#moving", "moving")] {
+        let resp = execute_command(
+            &json!({ "id": "6a", "action": "click", "selector": selector }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(result_text(&mut state).await, expected, "{selector}");
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "6c", "action": "click", "selector": "#clipped" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "clipped");
+
+    let resp = execute_command(
+        &json!({ "id": "6b", "action": "click", "selector": format!("@{}", find_ref("Straddle")) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "straddle");
+
     let resp = execute_command(
         &json!({ "id": "7", "action": "click", "selector": "#ok" }),
         &mut state,
@@ -6358,6 +6898,132 @@ async fn e2e_click_rejects_unreachable_elements() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["checked"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "12", "action": "frame", "selector": "#scaled" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "13", "action": "click", "selector": "#inner" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14", "action": "gettext", "selector": "#r" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "scaled");
+
+    let resp = execute_command(
+        &json!({ "id": "14a", "action": "frame", "selector": "#padded" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14b", "action": "click", "selector": "#inner-padded" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14c", "action": "click", "selector": "#inner-covered" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "covered padded target must fail: {resp}"
+    );
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("covered by <div#pad-cover>"),
+        "{resp}"
+    );
+    let resp = execute_command(&json!({ "id": "14d", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "padded-clicked");
+
+    let resp = execute_command(
+        &json!({ "id": "14e", "action": "frame", "selector": "#padded-scaled" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14f", "action": "click", "selector": "#inner-padded-scaled" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "14g", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "padded-scaled-clicked");
+
+    let resp = execute_command(
+        &json!({ "id": "14h", "action": "frame", "selector": "#zero-content" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14i", "action": "click", "selector": "#inner-zero" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "zero-content target must be outside viewport: {resp}"
+    );
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside the viewport"),
+        "{resp}"
+    );
+    let resp = execute_command(&json!({ "id": "14j", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "15", "action": "frame", "selector": "#wild" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snap = execute_command(&json!({ "id": "16", "action": "snapshot" }), &mut state).await;
+    assert_success(&snap);
+    let out_ref = get_data(&snap)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["name"] == "Out")
+        .unwrap()
+        .0
+        .clone();
+    let resp = execute_command(
+        &json!({ "id": "17", "action": "click", "selector": format!("@{out_ref}") }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "a ref outside its frame must not reach the parent page: {resp}"
+    );
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside the viewport"),
+        "{resp}"
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -7189,6 +7855,90 @@ async fn e2e_snapshot_cursor_interactive() {
         "snapshot took {:?}, expected < 5s (Issue #841 regression)",
         elapsed,
     );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Interactive snapshots hint ambiguously named or empty controls after the ref brackets.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_hints_ambiguous_controls() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r##"<!doctype html><title>Hints</title>
+<a href="/cart"><img src="/img/cart.png"></a>
+<ul><li>Blue mug
+<button><svg width="16" height="16"><use href="#icon-trash"/></svg></button>
+<button><i class="fa fa-heart"></i></button>
+<button id="edit-btn"><img src="/img/pencil.png"></button>
+</li></ul>
+<input type="email" name="login-email" placeholder="Email">
+<label>Email <input type="email" name="newsletter-email"></label>
+<button>Save</button>
+<ul><li>Invoice 1 <div onclick="void 0">Edit</div></li><li>Invoice 2 <div onclick="void 0">Edit</div></li></ul>
+<div onclick="void 0">Archive</div>"##;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    for hint in [
+        r#"hint="img:cart""#,
+        r#"hint="icon:icon-trash; in:Blue mug""#,
+        r#"hint="icon:fa-heart; in:Blue mug""#,
+        r#"hint="img:pencil; id:edit-btn; in:Blue mug""#,
+        r#"hint="name:login-email""#,
+        r#"hint="name:newsletter-email""#,
+        r#"hint="in:Invoice 1""#,
+        r#"hint="in:Invoice 2""#,
+    ] {
+        assert!(
+            snapshot.contains(hint),
+            "Expected snapshot to contain {}:\n{}",
+            hint,
+            snapshot,
+        );
+    }
+
+    for unique in ["button \"Save\"", "generic \"Archive\""] {
+        let line = snapshot
+            .lines()
+            .find(|line| line.contains(unique))
+            .expect("uniquely named control should be in the snapshot");
+        assert!(
+            !line.contains("hint="),
+            "Uniquely named control should not get a hint:\n{}",
+            snapshot,
+        );
+    }
+
+    for line in snapshot.lines().filter(|line| line.contains("hint=")) {
+        assert!(
+            line.contains("] hint="),
+            "Hint should follow the closed ref brackets:\n{}",
+            snapshot,
+        );
+    }
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -10725,6 +11475,151 @@ async fn e2e_recording_honors_requested_fps() {
     assert_success(&resp);
 }
 
+/// Verify that a page whose device scale is emulated records at that scale:
+/// Chrome's screencast captures at the window's real scale, so the recorder
+/// switches to full-density screenshots, and every frame keeps the detail.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_emulated_scale_captures_full_density() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 640, "height": 400, "deviceScaleFactor": 2.0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Something always moving, so the screencast sends frames to compare.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "navigate",
+            "url": "data:text/html,<style>@keyframes s{to{transform:rotate(360deg)}}div{width:80px;height:80px;background:%230a72ef;animation:s 1s linear infinite}</style><h1>Density</h1><div></div>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-density-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["capture"], "screenshots", "{data}");
+    assert_eq!(data["deviceScaleFactor"], 2.0);
+    assert!(
+        data.get("warning").is_none(),
+        "frames should be full density: {data}"
+    );
+    let captured = data["capturedFrames"].as_u64().unwrap();
+    assert!(
+        captured >= 10,
+        "an animated page should keep capturing frames, got {captured}"
+    );
+
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&rec_path)
+        .output()
+        .expect("ffprobe should inspect the recording");
+    assert!(probe.status.success());
+    assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "1280,800");
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Verify that a mobile-emulated page without a viewport meta tag reports its
+/// real device scale: its layout viewport is wider than its screen, so the
+/// scale comes from `devicePixelRatio`, not the first frame's width.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_mobile_emulation_uses_device_pixel_ratio() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": "data:text/html,<style>@keyframes s{to{transform:rotate(360deg)}}div{width:80px;height:80px;background:%230a72ef;animation:s 1s linear infinite}</style><h1>No viewport meta</h1><div></div>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "device", "name": "iPhone 14" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-mobile-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["capture"], "screenshots", "{data}");
+    assert_eq!(data["deviceScaleFactor"], 3.0, "{data}");
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verify that an output path without an extension is rejected before the
 /// recording context exists: no new tab, no file, nothing to stop.
 #[tokio::test]
@@ -13373,6 +14268,547 @@ async fn e2e_recording_cursor_uses_page_coordinates_for_oopif() {
     );
 }
 
+struct CrossOriginClickFixture {
+    parent_url: String,
+    child_clicks: Arc<AtomicUsize>,
+    forged_clicks: Arc<AtomicUsize>,
+    parent_server: tokio::task::JoinHandle<()>,
+    child_server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for CrossOriginClickFixture {
+    fn drop(&mut self) {
+        self.parent_server.abort();
+        self.child_server.abort();
+    }
+}
+
+/// A parent page with a same-origin frame and an embedded frame on another
+/// port. Different ports are different origins, but 127.0.0.1 stays one site,
+/// so Chrome keeps the second frame in the parent process and gives it no CDP
+/// session of its own.
+async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
+    let child_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let child_port = child_listener.local_addr().unwrap().port();
+    let child_clicks = Arc::new(AtomicUsize::new(0));
+    let forged_clicks = Arc::new(AtomicUsize::new(0));
+    let child_hits = child_clicks.clone();
+    let forged_hits = forged_clicks.clone();
+    let child_server = tokio::spawn(async move {
+        let plain = r#"<!doctype html><html lang="en"><head><title>Child</title>
+<style>body { margin: 0 } #child-target { position: absolute; left: 16px; top: 16px; width: 200px; height: 80px }</style>
+</head><body><button id="child-target" onclick="window.childClicks = (window.childClicks || 0) + 1; navigator.sendBeacon('/clicked')">Child action</button></body></html>"#;
+        let forged = r#"<!doctype html><html lang="en"><head><title>Forged child</title>
+<style>body { margin: 0 } #child-target { position: absolute; left: 16px; top: 16px; width: 200px; height: 80px }</style>
+</head><body><button id="child-target" onclick="window.childClicks = (window.childClicks || 0) + 1; navigator.sendBeacon('/forged-clicked')">Forged action</button>
+<script>
+  const nativeStyle = window.getComputedStyle.bind(window);
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const fakeTop = {
+    innerWidth: w,
+    innerHeight: h,
+    frameElement: null,
+    document: document,
+    getComputedStyle: () => ({ borderLeftWidth: '0', borderTopWidth: '0', paddingLeft: '0', paddingTop: '0', paddingRight: '0', paddingBottom: '0' }),
+  };
+  const fakeFrame = {
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: w, height: h }),
+    offsetWidth: w,
+    offsetHeight: h,
+    clientWidth: w,
+    clientHeight: h,
+    ownerDocument: { defaultView: fakeTop },
+  };
+  Object.defineProperty(document, 'defaultView', {
+    value: { innerWidth: w, innerHeight: h, frameElement: fakeFrame, parent: fakeTop, getComputedStyle: nativeStyle },
+  });
+</script>
+</body></html>"#;
+        loop {
+            let (mut stream, _) = child_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&request[..read]);
+            let response = if request_line.starts_with("POST /forged-clicked") {
+                forged_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else if request_line.starts_with("POST /clicked") {
+                child_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else {
+                let body = if request_line.starts_with("GET /forge") {
+                    forged
+                } else {
+                    plain
+                };
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let parent_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let parent_port = parent_listener.local_addr().unwrap().port();
+    let parent_url = format!("http://127.0.0.1:{parent_port}/");
+    let parent_body = format!(
+        r#"<!doctype html><html lang="en"><head><title>Parent</title>
+<style>body {{ margin: 0 }} #parent-target {{ position: absolute; left: 16px; top: 16px; width: 240px; height: 120px }} iframe {{ position: absolute; border: 0 }} #frame {{ left: 320px; top: 260px; width: 400px; height: 300px }} #forged {{ left: 760px; top: 236px; width: 320px; height: 300px }}</style>
+</head><body>
+<button id="parent-target" onclick="window.parentClicks = (window.parentClicks || 0) + 1">Parent control</button>
+<iframe id="frame" title="Payment" src="http://127.0.0.1:{child_port}/"></iframe>
+<iframe id="forged" title="Forged" src="http://127.0.0.1:{child_port}/forge"></iframe>
+<div style="height: 2000px"></div>
+</body></html>"#
+    );
+    let parent_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = parent_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                parent_body.len(),
+                parent_body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    CrossOriginClickFixture {
+        parent_url,
+        child_clicks,
+        forged_clicks,
+        parent_server,
+        child_server,
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_ref_in_cross_origin_frame_lands_in_frame() {
+    let fixture = cross_origin_click_fixture().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "action": "navigate", "url": fixture.parent_url }),
+            &mut state,
+        )
+        .await,
+    );
+    let snapshot = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+    assert_success(&snapshot);
+    assert!(
+        state.iframe_sessions.is_empty(),
+        "the fixture must keep the cross-origin frame in the parent process: {:?}",
+        state.iframe_sessions
+    );
+    let reference = |name: &str| {
+        get_data(&snapshot)["refs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, entry)| entry["name"] == name)
+            .map(|(reference, _)| reference.clone())
+            .unwrap_or_else(|| panic!("ref '{}' must be in the snapshot", name))
+    };
+
+    // A scrolled page must still place the point in the frame: input and box
+    // geometry are viewport-relative while the hit test reads document
+    // coordinates.
+    assert_success(
+        &execute_command(
+            &json!({ "action": "evaluate", "script": "window.scrollTo(0, 200); 'ok'" }),
+            &mut state,
+        )
+        .await,
+    );
+    let click = execute_command(
+        &json!({ "action": "click", "selector": format!("@{}", reference("Child action")) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&click);
+    let parent_clicks = execute_command(
+        &json!({ "action": "evaluate", "script": "window.parentClicks || 0" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&parent_clicks);
+    assert_eq!(
+        get_data(&parent_clicks)["result"],
+        json!(0),
+        "the click landed on the parent control: {}",
+        serde_json::to_string(&click).unwrap_or_default()
+    );
+    let mut child_clicks = 0;
+    for _ in 0..50 {
+        child_clicks = fixture.child_clicks.load(Ordering::SeqCst);
+        if child_clicks == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        child_clicks, 1,
+        "the click must land on the ref inside the cross-origin frame: {click}"
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "action": "evaluate", "script": "window.scrollTo(0, 0); 'ok'" }),
+            &mut state,
+        )
+        .await,
+    );
+    let forged = execute_command(
+        &json!({ "action": "click", "selector": format!("@{}", reference("Forged action")) }),
+        &mut state,
+    )
+    .await;
+    let parent_clicks = execute_command(
+        &json!({ "action": "evaluate", "script": "window.parentClicks || 0" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&parent_clicks);
+    assert_eq!(
+        get_data(&parent_clicks)["result"],
+        json!(0),
+        "a forged frame walk landed on the parent control: {}",
+        serde_json::to_string(&forged).unwrap_or_default()
+    );
+    if forged["success"].as_bool() == Some(true) {
+        let mut forged_clicks = 0;
+        for _ in 0..50 {
+            forged_clicks = fixture.forged_clicks.load(Ordering::SeqCst);
+            if forged_clicks == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            forged_clicks, 1,
+            "a successful click must land inside the forged frame: {forged}"
+        );
+    } else {
+        assert!(
+            forged["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("would land outside its frame"),
+            "{forged}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_ref_on_iframe_nested_in_frame_stays_in_frame() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/");
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.starts_with("GET /inner ") {
+                    r#"<!doctype html><html lang="en"><head><title>Inner</title>
+<style>body { margin: 0; height: 180px } #deep { position: absolute; left: 40px; top: 40px; width: 160px; height: 60px }</style>
+</head><body onclick="top.frameClicks.inner++"><button id="deep" onclick="top.frameClicks.deep++">Deep action</button></body></html>"#
+                } else if request.starts_with("GET /frame ") {
+                    r#"<!doctype html><html lang="en"><head><title>Frame</title>
+<style>body { margin: 0 } iframe { position: absolute; border: 0 } #inner { left: 30px; top: 60px; width: 300px; height: 180px }</style>
+</head><body onclick="top.frameClicks.outer++"><iframe id="inner" title="Inner widget" src="/inner"></iframe></body></html>"#
+                } else {
+                    r#"<!doctype html><html lang="en"><head><title>Nested frames</title>
+<script>window.frameClicks = { outer: 0, inner: 0, deep: 0 };</script>
+<style>body { margin: 0 } iframe { position: absolute; border: 0 } #outer { left: 20px; top: 40px; width: 500px; height: 320px }</style>
+</head><body><iframe id="outer" title="Outer widget" src="/frame"></iframe></body></html>"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({"action": "launch", "headless": true}), &mut state).await,
+    );
+    assert_success(&execute_command(&json!({"action": "navigate", "url": url}), &mut state).await);
+    let snapshot = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let reference = |name: &str| {
+        get_data(&snapshot)["refs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, entry)| entry["name"] == name)
+            .map(|(reference, _)| reference.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "ref '{}' must be in the snapshot: {}",
+                    name,
+                    serde_json::to_string(&get_data(&snapshot)["refs"]).unwrap_or_default()
+                )
+            })
+    };
+    let inner = format!("@{}", reference("Inner widget"));
+    let outer = format!("@{}", reference("Outer widget"));
+
+    let hover = execute_command(&json!({"action": "hover", "selector": inner}), &mut state).await;
+    assert_success(&hover);
+
+    let click = execute_command(&json!({"action": "click", "selector": inner}), &mut state).await;
+    assert_success(&click);
+    let clicks = execute_command(
+        &json!({"action": "evaluate", "script": "JSON.stringify(window.frameClicks)"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&clicks);
+    assert_eq!(
+        get_data(&clicks)["result"],
+        json!("{\"outer\":0,\"inner\":1,\"deep\":1}"),
+        "a ref on the nested iframe must reach the frame it embeds: {click}"
+    );
+
+    let click = execute_command(&json!({"action": "click", "selector": outer}), &mut state).await;
+    assert_eq!(
+        click["success"], false,
+        "a ref whose press point falls into a frame it does not own must be refused: {click}"
+    );
+    assert!(
+        click["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not embed"),
+        "unexpected error for a foreign nested frame: {click}"
+    );
+    let clicks = execute_command(
+        &json!({"action": "evaluate", "script": "JSON.stringify(window.frameClicks)"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&clicks);
+    assert_eq!(
+        get_data(&clicks)["result"],
+        json!("{\"outer\":0,\"inner\":1,\"deep\":1}"),
+        "a refused press must not reach any frame: {click}"
+    );
+
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_ref_refuses_a_frame_covering_the_pressed_point() {
+    let victim_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let victim_port = victim_listener.local_addr().unwrap().port();
+    let victim_clicks = Arc::new(AtomicUsize::new(0));
+    let victim_hits = victim_clicks.clone();
+    let victim_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = victim_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&request[..read]);
+            let response = if request_line.starts_with("POST /victim-clicked") {
+                victim_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else {
+                let body = r#"<!doctype html><html lang="en"><head><title>Statements</title>
+</head><body><button id="pay" style="position:absolute;inset:0;width:100%;height:100%" onclick="navigator.sendBeacon('/victim-clicked')">Pay invoice</button></body></html>"#;
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let page_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let page_port = page_listener.local_addr().unwrap().port();
+    let page_url = format!("http://127.0.0.1:{page_port}/");
+    let link_clicks = Arc::new(AtomicUsize::new(0));
+    let plain_clicks = Arc::new(AtomicUsize::new(0));
+    let link_hits = link_clicks.clone();
+    let plain_hits = plain_clicks.clone();
+    let page_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = page_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&request[..read]);
+            let response = if request_line.starts_with("POST /link-clicked") {
+                link_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else if request_line.starts_with("POST /plain-clicked") {
+                plain_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else {
+                let body = if request_line.starts_with("GET /frame ") {
+                    format!(
+                        r##"<!doctype html><html lang="en"><head><title>Frame</title>
+<style>body {{ margin: 0; font: 20px/200px sans-serif }}
+#victim {{ position: absolute; border: 0; left: -9999px; top: -9999px; width: 120px; height: 60px }}
+</style></head><body>
+<div style="position: absolute; left: 20px; top: 0; width: 200px">
+<a id="link" aria-label="Approve payment" href="#" onclick="navigator.sendBeacon('/link-clicked'); return false">Approve the payment authorization for this</a>
+</div>
+<div style="position: absolute; left: 20px; top: 400px; width: 200px">
+<a id="plain" aria-label="Plain link" href="#" onclick="navigator.sendBeacon('/plain-clicked'); return false">Plain link</a>
+</div>
+<iframe id="victim" title="Statements" src="http://127.0.0.1:{victim_port}/"></iframe>
+<script>
+  const link = document.getElementById('link');
+  const widest = [...link.getClientRects()].reduce((a, b) => (a.width * a.height >= b.width * b.height ? a : b));
+  const victim = document.getElementById('victim');
+  victim.style.left = (widest.left + widest.width / 2 - 60) + 'px';
+  victim.style.top = (widest.top + widest.height / 2 - 30) + 'px';
+</script>
+</body></html>"##
+                    )
+                } else {
+                    r#"<!doctype html><html lang="en"><head><title>Attacker</title>
+<style>body { margin: 0 }
+#frame { position: absolute; left: 0; top: 0; width: 600px; height: 240px; border: 0 }
+#covered { position: absolute; left: 20px; top: 320px }
+#cover { position: absolute; left: 0; top: 300px; width: 240px; height: 70px; z-index: 5; background: rgba(0,0,0,0.05) }
+</style></head><body>
+<iframe id="frame" title="Attacker frame" src="/frame"></iframe>
+<button id="covered">Covered action</button>
+<div id="cover"></div>
+</body></html>"#
+                        .to_string()
+                };
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({"action": "launch", "headless": true}), &mut state).await,
+    );
+    assert_success(
+        &execute_command(&json!({"action": "navigate", "url": page_url}), &mut state).await,
+    );
+    let snapshot = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let reference = |name: &str| {
+        get_data(&snapshot)["refs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, entry)| entry["name"] == name)
+            .map(|(reference, _)| reference.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "ref '{}' must be in the snapshot: {}",
+                    name,
+                    serde_json::to_string(&get_data(&snapshot)["refs"]).unwrap_or_default()
+                )
+            })
+    };
+
+    let click = execute_command(
+        &json!({"action": "click", "selector": format!("@{}", reference("Approve payment"))}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        click["success"], false,
+        "a frame covering the pressed point must refuse the click: {click}"
+    );
+    assert!(
+        click["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not embed"),
+        "unexpected error for a frame covering the pressed point: {click}"
+    );
+
+    let click = execute_command(
+        &json!({"action": "click", "selector": format!("@{}", reference("Covered action"))}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        click["success"], false,
+        "a covered ref must be refused: {click}"
+    );
+    assert!(
+        click["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("covered by <div#cover>"),
+        "unexpected covered-ref error: {click}"
+    );
+
+    let click = execute_command(
+        &json!({"action": "click", "selector": format!("@{}", reference("Plain link"))}),
+        &mut state,
+    )
+    .await;
+    assert_success(&click);
+
+    for _ in 0..50 {
+        if link_clicks.load(Ordering::SeqCst) == 0
+            && plain_clicks.load(Ordering::SeqCst) == 1
+            && victim_clicks.load(Ordering::SeqCst) == 0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        victim_clicks.load(Ordering::SeqCst),
+        0,
+        "a refused ref click must never reach the framed victim control"
+    );
+    assert_eq!(
+        link_clicks.load(Ordering::SeqCst),
+        0,
+        "the covered multiline link must not be activated"
+    );
+    assert_eq!(
+        plain_clicks.load(Ordering::SeqCst),
+        1,
+        "a link ref with nothing over its press point must still be clicked"
+    );
+
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+    page_server.abort();
+    victim_server.abort();
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
@@ -13883,7 +15319,7 @@ async fn attach_pinned_session(
             "id": format!("{}-launch", session),
             "action": "launch",
             "cdpUrl": ws_url,
-            "pinTab": true
+            "settings": { "pin-tab": true }
         }),
         &mut state,
     )
@@ -14147,6 +15583,44 @@ async fn e2e_tab_new_still_activates_under_auto_attach() {
 
     let resp = execute_command(&json!({ "id": "host-99", "action": "close" }), &mut host).await;
     assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_pin_tab_setting_off_releases_the_manager_pin() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let url_a = "data:text/html,release-session-a";
+    let url_b = "data:text/html,release-session-b";
+    let mut state_a = attach_pinned_session(&guard, "e2e-release-a", &ws_url, url_a).await;
+    let binding_a = load_binding("e2e-release-a", "session A binding should persist");
+    let mut state_b = attach_pinned_session(&guard, "e2e-release-b", &ws_url, url_b).await;
+
+    let resp = execute_command(
+        &json!({ "id": "b-close-a", "action": "tab_close", "tabId": binding_a.target_id }),
+        &mut state_b,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Turning the pin off must reach the browser manager: a pinned manager
+    // with a gone tab answers tab_gone to every command.
+    let resp = execute_command(
+        &json!({ "id": "a-url", "action": "url", "settings": { "pin-tab": false } }),
+        &mut state_a,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(!state_a.pin_tab);
+    assert!(
+        !load_binding("e2e-release-a", "binding should remain").pinned,
+        "the binding must be unpinned"
+    );
+
+    let _ = execute_command(&json!({ "id": "a-close", "action": "close" }), &mut state_a).await;
+    let _ = execute_command(&json!({ "id": "b-close", "action": "close" }), &mut state_b).await;
+    let _ = execute_command(&json!({ "id": "h-close", "action": "close" }), &mut host).await;
 }
 
 #[tokio::test]
@@ -14519,6 +15993,160 @@ async fn e2e_find_role_document_matches_root() {
     assert_success(&resp);
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+async fn click_probe_reset_log(state: &mut DaemonState) {
+    let resp = execute_command(
+        &json!({ "id": "click-probe-reset", "action": "evaluate", "script": "window.__log = []; 0" }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+}
+
+async fn click_probe_read_log(state: &mut DaemonState) -> Vec<String> {
+    let resp = execute_command(
+        &json!({ "id": "click-probe-read", "action": "evaluate", "script": "window.__log" }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("click log is not an array: {}", resp))
+        .iter()
+        .filter_map(|entry| entry.as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_buttons_modifiers_and_double_click() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": native_test_fixture_url("click_probe")}),
+            &mut state,
+        )
+        .await,
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "click", "selector": "#target", "button": "right"}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry.starts_with("contextmenu:b2")),
+        "right click should open a context menu: {:?}",
+        log
+    );
+    assert!(
+        !log.iter().any(|entry| entry.starts_with("click:")),
+        "right click should not fire a click event: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "4", "action": "click", "selector": "#target", "button": "middle"}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry.starts_with("auxclick:b1")),
+        "middle click should fire auxclick: {:?}",
+        log
+    );
+    assert!(
+        !log.iter().any(|entry| entry.starts_with("click:")),
+        "middle click should not fire a click event: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "5", "action": "click", "selector": "#target", "modifiers": 12}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry == "click:b0:d1:c0s1a0m1"),
+        "meta+shift click should report both modifiers: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "6", "action": "dblclick", "selector": "#target"}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    let double_click_events: Vec<&String> = log
+        .iter()
+        .filter(|entry| entry.starts_with("click:") || entry.starts_with("dblclick:"))
+        .collect();
+    assert_eq!(
+        double_click_events,
+        [
+            "click:b0:d1:c0s0a0m0",
+            "click:b0:d2:c0s0a0m0",
+            "dblclick:b0:d2:c0s0a0m0",
+        ],
+        "double click event sequence: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "7", "action": "dblclick", "selector": "#target", "button": "middle", "modifiers": 8}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry == "auxclick:b1:d2:c0s1a0m0"),
+        "shift middle double click should reach the page: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    let resp = execute_command(
+        &json!({"id": "8", "action": "click", "selector": "#target", "button": "bogus"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "bogus button must fail: {}", resp);
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.is_empty(),
+        "failed click must not reach the page: {:?}",
+        log
+    );
+
+    assert_success(&execute_command(&json!({"id": "99", "action": "close"}), &mut state).await);
 }
 
 #[tokio::test]
@@ -15071,7 +16699,15 @@ const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
 <button id="items" onclick="items()">Items</button>
 <button id="gql" onclick="gql()">Gql</button>
 <button id="add" onclick="add()">Add</button>
+<button id="flaky" onclick="fetch('/api/flaky?_=' + Date.now())">Flaky</button>
 <button id="cartadd" onclick="fetch('/cart/remove?id=7')">CartAdd</button>
+<button id="slow" onclick="fetch('/api/slow?q=stove')">Slow</button>
+<button id="stream" onclick="fetch('/api/stream')">Stream</button>
+<button id="moved" onclick="fetch('/api/moved')">Moved</button>
+<button id="hang" onclick="fetch('/api/hang?q=1')">Hang</button>
+<button id="hold" onclick="fetch('/api/hold')">Hold</button>
+<button id="both" onclick="login(); fetch('/api/hang?q=1')">Both</button>
+<button id="hangs" onclick="fetch('/api/hangs/' + document.getElementById('pw').value)">Hangs</button>
 <script>
 let csrf = ''; let user = '';
 async function login() { await fetch('/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: document.getElementById('email').value, pw: document.getElementById('pw').value }) }); }
@@ -15107,10 +16743,11 @@ const FLOW_FIXTURE_FIRES: &[(&str, &str)] = &[
     ("#gql", "POST /graphql"),
     ("#add", "POST /api/cart"),
     ("#cartadd", "GET /cart/remove"),
+    ("#flaky", "GET /api/flaky"),
 ];
 
 impl FlowFixture {
-    /// Wait until `done` holds, for the page's own requests to reach the server.
+    /// Wait until `done` holds, for as long as a replay waits for a response.
     async fn wait_until(&self, done: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !done() && std::time::Instant::now() < deadline {
@@ -15245,6 +16882,26 @@ async fn flow_fixture() -> FlowFixture {
                     )
                     .await
                 }
+                ("GET", "/api/flaky") if path.contains("_=") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"ok":true}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/flaky") => {
+                    reply(
+                        &mut stream,
+                        "401 Unauthorized",
+                        "application/json",
+                        "",
+                        "{}",
+                    )
+                    .await
+                }
                 ("GET", "/api/session") if signed_in => {
                     reply(
                         &mut stream,
@@ -15262,6 +16919,81 @@ async fn flow_fixture() -> FlowFixture {
                         "application/json",
                         "",
                         r#"{"items":[{"id":1,"name":"kettle"},{"id":2,"name":"toaster"}]}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/moved") => {
+                    reply(
+                        &mut stream,
+                        "302 Found",
+                        "text/plain",
+                        "Location: /api/target\r\n",
+                        "",
+                    )
+                    .await
+                }
+                ("GET", "/api/target") => {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"items":[{"id":1,"name":"stove"}]}"#,
+                    )
+                    .await
+                }
+                ("GET", "/api/old") => {
+                    reply(
+                        &mut stream,
+                        "302 Found",
+                        "text/plain",
+                        "Location: /\r\n",
+                        "",
+                    )
+                    .await
+                }
+                ("GET", r) if r.starts_with("/api/hangs/") => {
+                    tokio::spawn(async move {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n[")
+                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    });
+                }
+                ("GET", "/api/hold") => {
+                    // A long poll: the server holds the request and writes nothing.
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                        drop(stream);
+                    });
+                }
+                ("GET", "/api/hang") => {
+                    // First-party JSON headers, then a body that never ends.
+                    tokio::spawn(async move {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n[")
+                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    });
+                }
+                ("GET", "/api/stream") => {
+                    // Headers go out and the body never ends.
+                    tokio::spawn(async move {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nAccess-Control-Allow-Origin: *\r\n\r\ndata: hi\n\n")
+                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    });
+                }
+                ("GET", "/api/slow") => {
+                    // The request is in flight when the click returns.
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        r#"{"items":[{"id":1,"name":"stove"}]}"#,
                     )
                     .await
                 }
@@ -15537,6 +17269,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
     );
     assert!(cart_text.contains(r#""source": "typed""#));
     assert!(cart_text.contains("{{email}}"));
+    assert!(cart_text.contains("<redacted>"));
     assert!(dir.path().join("127.0.0.1").join("browse.json").exists());
 
     // Runs: a read flow needs no confirmation; a write flow asks first.
@@ -15593,6 +17326,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
             .position(|s| !s["requests"].as_array().unwrap().is_empty())
             .unwrap();
         flow["steps"][at]["requests"][0]["url"] = json!(target);
+        flow["steps"][at]["requests"][0]["tier"] = json!("http");
         std::fs::write(&browse_path, serde_json::to_string(&flow).unwrap()).unwrap();
         let resp = exec(
             &run(
@@ -15625,6 +17359,553 @@ async fn e2e_flow_capture_save_run_and_guards() {
     let closed = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
     assert_success(&closed);
     assert!(closed["data"].get("unsaved").is_none(), "{closed}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_includes_requests_still_in_flight() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    assert_success(
+        &exec(
+            &json!({ "id": "1", "action": "launch", "headless": true, "capture": ["flow"] }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &exec(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/", fx.site) }),
+            &mut state,
+        )
+        .await,
+    );
+    // Save as soon as the server has the request, before its response is read.
+    for i in 0..3 {
+        let before = fx.hits("GET /api/slow");
+        assert_success(
+            &exec(
+                &json!({ "id": format!("c{i}"), "action": "click", "selector": "#slow" }),
+                &mut state,
+            )
+            .await,
+        );
+        fx.wait_until(|| fx.hits("GET /api/slow") > before).await;
+        let saved = exec(
+            &json!({ "id": format!("s{i}"), "action": "flow_save", "name": format!("stoves{i}") }),
+            &mut state,
+        )
+        .await;
+        assert_success(&saved);
+        assert_eq!(
+            saved["data"]["requests"].as_array().unwrap().len(),
+            1,
+            "{saved}"
+        );
+    }
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_does_not_wait_for_streaming_responses() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    assert_success(
+        &exec(
+            &json!({ "id": "1", "action": "launch", "headless": true, "capture": ["flow"] }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &exec(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/", fx.site) }),
+            &mut state,
+        )
+        .await,
+    );
+    for (id, sel) in [("c1", "#stream"), ("c2", "#slow")] {
+        assert_success(
+            &exec(
+                &json!({ "id": id, "action": "click", "selector": sel }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    fx.wait_until(|| fx.hits("GET /api/stream") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "streams" }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+async fn flow_fixture_session(fx: &FlowFixture, state: &mut DaemonState) {
+    assert_success(
+        &exec(
+            &json!({ "id": "1", "action": "launch", "headless": true, "capture": ["flow"] }),
+            state,
+        )
+        .await,
+    );
+    assert_success(
+        &exec(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/", fx.site) }),
+            state,
+        )
+        .await,
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_does_not_wait_on_redirected_requests() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/target") > 0).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "moved", "timeout": 6000 }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(3),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_har_finalizes_a_redirect_hop() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/target") > 0).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    state.drain_cdp_events_background().await.unwrap();
+    let hop = state
+        .har_entries
+        .iter()
+        .find(|e| e.url.ends_with("/api/moved"))
+        .expect("redirect hop recorded");
+    assert_eq!(hop.status, Some(302), "{:?}", hop.status);
+    assert!(hop.loading_finished_timestamp.is_some());
+    assert!(hop
+        .response_headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("location") && v == "/api/target"));
+    let target = state
+        .har_entries
+        .iter()
+        .find(|e| e.url.ends_with("/api/target"))
+        .expect("redirect target recorded");
+    assert_eq!(target.status, Some(200));
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_does_not_wait_on_a_long_poll() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for (id, sel) in [("c1", "#hang"), ("c2", "#slow")] {
+        assert_success(
+            &exec(
+                &json!({ "id": id, "action": "click", "selector": sel }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    fx.wait_until(|| fx.hits("GET /api/hang") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    // The JSON long poll has its headers; only /api/slow is waited on.
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "poll", "timeout": 10000 }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(3),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    assert!(saved["data"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["reason"] == "still loading at save: GET /api/hang"));
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_does_not_wait_on_a_held_request_from_an_earlier_step() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for (id, sel) in [("c1", "#hold"), ("c2", "#slow")] {
+        assert_success(
+            &exec(
+                &json!({ "id": id, "action": "click", "selector": sel }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    fx.wait_until(|| fx.hits("GET /api/hold") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    // The held request has no headers, but a later step ran while it hung.
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "held", "timeout": 10000 }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(3),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    assert!(saved["data"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["reason"] == "still loading at save: GET /api/hold"));
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_failure_names_the_request_still_loading() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#hang" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/hang") > 0).await;
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "only-hang", "timeout": 400 }),
+        &mut state,
+    )
+    .await;
+    let err = saved["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("still loading at save: GET /api/hang"),
+        "{saved}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_reports_requests_still_loading_at_the_deadline() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for (id, sel) in [("c1", "#hang"), ("c2", "#slow")] {
+        assert_success(
+            &exec(
+                &json!({ "id": id, "action": "click", "selector": sel }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    fx.wait_until(|| fx.hits("GET /api/hang") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    let started = std::time::Instant::now();
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "hang", "timeout": 1500 }),
+        &mut state,
+    )
+    .await;
+    let took = started.elapsed();
+    assert_success(&saved);
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "save took {took:?}"
+    );
+    assert_eq!(
+        saved["data"]["requests"].as_array().unwrap().len(),
+        1,
+        "{saved}"
+    );
+    let gaps = saved["data"]["gaps"].as_array().unwrap();
+    // The step that started the request owns the gap, and nothing else is
+    // said about that step.
+    let for_step_2: Vec<&Value> = gaps.iter().filter(|g| g["step"] == 2).collect();
+    assert_eq!(for_step_2.len(), 1, "{saved}");
+    assert_eq!(for_step_2[0]["command"], "click #hang", "{saved}");
+    assert_eq!(
+        for_step_2[0]["reason"], "still loading at save: GET /api/hang",
+        "{saved}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_gap_for_a_loading_request_does_not_print_a_secret() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for cmd in [
+        json!({ "id": "f", "action": "fill", "selector": "#pw", "value": "tk-91ab-77" }),
+        json!({ "id": "c1", "action": "click", "selector": "#hangs" }),
+        json!({ "id": "c2", "action": "click", "selector": "#slow" }),
+    ] {
+        assert_success(&exec(&cmd, &mut state).await);
+    }
+    fx.wait_until(|| fx.hits("GET /api/hangs/") > 0 && fx.hits("GET /api/slow") > 0)
+        .await;
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "secret", "timeout": 1500 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    assert!(!saved.to_string().contains("91ab"), "{saved}");
+    let text = crate::output::format_flow_text(Some("flow_save"), &saved["data"]).unwrap();
+    assert!(!text.contains("91ab"), "{text}");
+    assert!(text.contains("still loading at save"), "{text}");
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_requests_finalizes_a_redirect_hop() {
+    let fx = flow_fixture().await;
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(&exec(&json!({ "id": "r0", "action": "requests" }), &mut state).await);
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/target") > 0).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    state.drain_cdp_events_background().await.unwrap();
+    let listed = exec(&json!({ "id": "r1", "action": "requests" }), &mut state).await;
+    assert_success(&listed);
+    let requests = listed["data"]["requests"].as_array().unwrap();
+    let hop = requests
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().ends_with("/api/moved"))
+        .expect("hop listed");
+    assert_eq!(hop["status"], 302, "{listed}");
+    let target = requests
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().ends_with("/api/target"))
+        .expect("target listed");
+    assert_eq!(target["status"], 200, "{listed}");
+    assert_eq!(target["mimeType"], "application/json", "{listed}");
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_save_keeps_the_secret_gap_next_to_the_loading_gap() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    for cmd in [
+        json!({ "id": "f1", "action": "fill", "selector": "#email", "value": "ana@example.com" }),
+        json!({ "id": "f2", "action": "fill", "selector": "#pw", "value": "tk-91ab-77" }),
+        json!({ "id": "c1", "action": "click", "selector": "#both" }),
+        json!({ "id": "c2", "action": "click", "selector": "#slow" }),
+    ] {
+        assert_success(&exec(&cmd, &mut state).await);
+    }
+    fx.wait_until(|| {
+        fx.hits("POST /login") > 0 && fx.hits("GET /api/hang") > 0 && fx.hits("GET /api/slow") > 0
+    })
+    .await;
+    let saved = exec(
+        &json!({ "id": "s", "action": "flow_save", "name": "both", "timeout": 1500 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let gaps = saved["data"]["gaps"].as_array().unwrap();
+    let on_step: Vec<String> = gaps
+        .iter()
+        .filter(|g| g["command"] == "click #both")
+        .map(|g| g["reason"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        on_step.iter().any(|r| r.contains("secret field")),
+        "{saved}"
+    );
+    assert!(
+        on_step.iter().any(|r| r.contains("still loading at save")),
+        "{saved}"
+    );
+    assert!(!saved.to_string().contains("91ab"), "{saved}");
+    assert!(gaps.iter().all(|g| g.get("kind").is_none()), "{saved}");
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_request_detail_returns_the_final_redirect_hop() {
+    let fx = flow_fixture().await;
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    flow_fixture_session(&fx, &mut state).await;
+    assert_success(&exec(&json!({ "id": "r0", "action": "requests" }), &mut state).await);
+    assert_success(
+        &exec(
+            &json!({ "id": "c1", "action": "click", "selector": "#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+    fx.wait_until(|| fx.hits("GET /api/target") > 0).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    state.drain_cdp_events_background().await.unwrap();
+    let id = state
+        .tracked_requests
+        .iter()
+        .find(|r| r.url.ends_with("/api/moved"))
+        .unwrap()
+        .request_id
+        .clone();
+    let detail = exec(
+        &json!({ "id": "d", "action": "request_detail", "requestId": id }),
+        &mut state,
+    )
+    .await;
+    assert_success(&detail);
+    assert_eq!(detail["data"]["status"], 200, "{detail}");
+    assert!(
+        detail["data"]["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/api/target"),
+        "{detail}"
+    );
+    assert!(
+        detail["data"]["responseBody"].to_string().contains("stove"),
+        "{detail}"
+    );
+    let _ = exec(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 
 #[tokio::test]
@@ -15698,16 +17979,499 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
         !text.contains("key9"),
         "typed password reached the flow file"
     );
-    assert!(
-        saved["data"]["gaps"]
-            .to_string()
-            .contains("typed or pasted into a secret field"),
-        "{saved}"
-    );
+    assert!(text.contains("<redacted>"));
     let _ = exec(
         &run(&mut n, json!({ "action": "auth_delete", "name": profile })),
         &mut state,
     )
     .await;
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_replay_runs_once_per_run() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("c{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#items" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "ci" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let requests = saved["data"]["requests"].as_array().unwrap();
+    let id_of = |suffix: &str| {
+        requests
+            .iter()
+            .find(|r| r["url"].as_str().unwrap().contains(suffix))
+            .and_then(|r| r["id"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    let (session_id, items_id) = (id_of("/api/session"), id_of("/api/items"));
+    let resaved = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_save", "name": "ci", "from": 1, "output": items_id }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resaved);
+
+    // The output reads the session response, and both fall back to the replay.
+    let path = dir.path().join("127.0.0.1").join("ci.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["id"] == items_id.as_str() {
+                req["url"] = json!(format!(
+                    "{}/api/items?u={{{{@{}.user}}}}",
+                    fx.site, session_id
+                ));
+            }
+            if req["id"] == items_id.as_str() || req["id"] == session_id.as_str() {
+                req["tier"] = json!("replay");
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    assert!(
+        dir.path().join("127.0.0.1").join("ci.json").exists()
+            && flow["writes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["url"].as_str().unwrap().ends_with("/api/cart"))
+    );
+
+    let before = fx.hits("POST /api/cart");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert_eq!(
+        fx.hits("POST /api/cart"),
+        before + 1,
+        "an approved write is sent once per run: {sent}"
+    );
+    // The items click follows the session click at once; it must send the
+    // user the session response set, never an empty one.
+    let log_start = fx.log.lock().unwrap().len();
+    for _ in 0..4 {
+        let again = exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+            ),
+            &mut state,
+        )
+        .await;
+        assert_eq!(again["data"]["ok"], true, "{again}");
+    }
+    let log = fx.log.lock().unwrap().clone();
+    let items: Vec<&String> = log[log_start..]
+        .iter()
+        .filter(|l| l.contains("GET /api/items"))
+        .collect();
+    assert!(!items.is_empty(), "{log:#?}");
+    assert!(
+        items.iter().all(|l| l.contains("GET /api/items?u=ana ")),
+        "an items request went out without the session value: {items:#?}"
+    );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_replay_leaves_the_session_capture_untouched() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("c{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#items" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "ci" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let requests = saved["data"]["requests"].as_array().unwrap();
+    let id_of = |suffix: &str| {
+        requests
+            .iter()
+            .find(|r| r["url"].as_str().unwrap().contains(suffix))
+            .and_then(|r| r["id"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    let (session_id, items_id) = (id_of("/api/session"), id_of("/api/items"));
+    let path = dir.path().join("127.0.0.1").join("ci.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["id"] == items_id.as_str() || req["id"] == session_id.as_str() {
+                req["tier"] = json!("replay");
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+
+    let steps_before = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
+    assert_success(&steps_before);
+    let har_before = state.har_entries.len();
+    let ids_before: Vec<String> = state
+        .har_entries
+        .iter()
+        .map(|e| e.request_id.clone())
+        .collect();
+
+    let hits_before = fx.hits("GET /api/items");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "ci", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert!(
+        fx.hits("GET /api/items") > hits_before,
+        "the run did not reach the replay tier"
+    );
+    settle_responses(&mut state).await;
+
+    let steps_after = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
+    assert_success(&steps_after);
+    assert_eq!(
+        steps_after["data"]["steps"], steps_before["data"]["steps"],
+        "a run added steps to the user's recording"
+    );
+    let leaked: Vec<String> = state
+        .har_entries
+        .iter()
+        .filter(|e| !ids_before.contains(&e.request_id))
+        .map(|e| e.url.clone())
+        .collect();
+    assert_eq!(
+        state.har_entries.len(),
+        har_before,
+        "a run left entries in the session capture: {leaked:#?}"
+    );
+
+    // The next save holds only what the user did.
+    assert_success(
+        &fx.run_settled(
+            &mut state,
+            &run(&mut n, json!({ "action": "click", "selector": "#add" })),
+        )
+        .await,
+    );
+    let next = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "next" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&next);
+    let urls: Vec<String> = next["data"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["url"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        urls.iter().filter(|u| u.contains("/api/items")).count() <= 1,
+        "the next save carries a run's requests: {urls:#?}"
+    );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_a_write_the_replay_sent_is_not_sent_again_by_a_later_request() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("w{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "cs" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let requests = saved["data"]["requests"].as_array().unwrap();
+    let id_of = |suffix: &str| {
+        requests
+            .iter()
+            .find(|r| r["url"].as_str().unwrap().contains(suffix))
+            .and_then(|r| r["id"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    let (session_id, add_id) = (id_of("/api/session"), id_of("/api/cart"));
+    assert_success(
+        &exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_save", "name": "cs", "from": 1, "output": add_id }),
+            ),
+            &mut state,
+        )
+        .await,
+    );
+    // The read falls back to the replay, which clicks Add; the write then
+    // comes up on the HTTP tier and must not be sent a second time.
+    let path = dir.path().join("127.0.0.1").join("cs.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["id"] == session_id.as_str() {
+                req["tier"] = json!("replay");
+            }
+        }
+    }
+    assert!(flow["steps"]
+        .to_string()
+        .contains(&format!("{{{{@{}.", session_id)));
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    let before = fx.hits("POST /api/cart");
+    let sent = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "cs", "params": {}, "allowWrite": "all" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(sent["data"]["ok"], true, "{sent}");
+    assert_eq!(
+        fx.hits("POST /api/cart"),
+        before + 1,
+        "one POST per run: {sent}"
+    );
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_the_page_tier_fetch_does_not_answer_for_the_replay() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("p{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#flaky" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    assert_success(
+        &exec(
+            &run(&mut n, json!({ "action": "flow_save", "name": "pf" })),
+            &mut state,
+        )
+        .await,
+    );
+    // The page tier asks the exact URL, which the site rejects; the replay's
+    // own request carries a cache-buster and is answered.
+    let path = dir.path().join("127.0.0.1").join("pf.json");
+    let mut flow: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for step in flow["steps"].as_array_mut().unwrap() {
+        for req in step["requests"].as_array_mut().unwrap() {
+            if req["url"].as_str().unwrap().contains("/api/flaky") {
+                req["url"] = json!(format!("{}/api/flaky", fx.site));
+                req["tier"] = json!("page");
+                req["expect"]["strippedAuth"] = json!(true);
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+    let out = exec(
+        &run(
+            &mut n,
+            json!({ "action": "flow_run", "name": "pf", "params": {} }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_eq!(out["data"]["ok"], true, "{out}");
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_a_route_limited_by_resource_type_applies_the_same_on_both_tiers() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    state.policy = None;
+    state.confirm_actions = None;
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("rt{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#session" }),
+        json!({ "action": "click", "selector": "#add" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "rt" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let add_id = saved["data"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().contains("/api/cart"))
+        .and_then(|r| r["id"].as_str())
+        .unwrap()
+        .to_string();
+    assert_success(
+        &exec(
+            &run(
+                &mut n,
+                json!({ "action": "flow_save", "name": "rt", "from": 1, "output": add_id }),
+            ),
+            &mut state,
+        )
+        .await,
+    );
+    let path = dir.path().join("127.0.0.1").join("rt.json");
+    let original = std::fs::read_to_string(&path).unwrap();
+    for tier in ["http", "page"] {
+        let mut flow: Value = serde_json::from_str(&original).unwrap();
+        for step in flow["steps"].as_array_mut().unwrap() {
+            for req in step["requests"].as_array_mut().unwrap() {
+                if req["id"] == add_id.as_str() {
+                    req["tier"] = json!(tier);
+                }
+            }
+        }
+        std::fs::write(&path, serde_json::to_string(&flow).unwrap()).unwrap();
+        // (route limited to, whether the mock answers the write); Chrome
+        // reports the in-page fetch() as an XHR to request interception
+        for (limit, mocked) in [("fetch", false), ("xhr", true)] {
+            assert_success(
+                &exec(
+                    &run(
+                        &mut n,
+                        json!({
+                            "action": "route",
+                            "url": "*/api/cart",
+                            "resourceType": limit,
+                            "response": { "status": 200, "body": "{\"cart\":[7]}" },
+                        }),
+                    ),
+                    &mut state,
+                )
+                .await,
+            );
+            let before = fx.hits("POST /api/cart");
+            let out = exec(
+                &run(
+                    &mut n,
+                    json!({ "action": "flow_run", "name": "rt", "params": {}, "allowWrite": "all" }),
+                ),
+                &mut state,
+            )
+            .await;
+            assert_eq!(out["data"]["ok"], true, "{tier} {limit}: {out}");
+            assert_eq!(
+                fx.hits("POST /api/cart"),
+                before + usize::from(!mocked),
+                "{tier} tier, route limited to {limit}: {out}"
+            );
+            assert_success(
+                &exec(
+                    &run(&mut n, json!({ "action": "unroute", "url": "*/api/cart" })),
+                    &mut state,
+                )
+                .await,
+            );
+        }
+    }
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }

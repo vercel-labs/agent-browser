@@ -3,6 +3,63 @@ title: "Changelog"
 navTitle: "Changelog"
 ---
 
+## v0.43.0
+
+<p className="text-[#888] text-sm">November 12, 2026</p>
+
+### New Features
+
+- Added **snapshot hints** for controls whose accessible name is empty or shared with another ref in the same snapshot. The hint follows the ref and lists the control's icon, image file, `data-testid`, `name` or `id`, and the text of the nearest row or list item (#2578)
+- Added a **Modern Web Guidance skill** that retrieves Chrome's guidance for a task and checks the built page in agent-browser (#2577)
+
+### Bug Fixes
+
+- Fixed **commands on closed tabs** waiting for the timeout. A command whose tab closes before Chrome answers now fails with `Target closed: CDP session <id> detached` (#2576)
+- Fixed **recordings with an emulated device scale**, which now capture at full density by switching to screenshots when a screencast frame is below the page's scale (#2572)
+
+### Improvements
+
+- Native binaries now ship as **per-platform packages**, so an install downloads only the binary for the host platform, and the global command links to it when install scripts are blocked (#2150)
+- **Snapshots of large pages** parse the accessibility tree once, so they finish sooner (#2509)
+
+### Documentation
+
+- Added a **Modern Web Guidance** guide to the docs (#2546, #2573, #2575)
+
+---
+
+## v0.42.0
+
+<p className="text-[#888] text-sm">November 9, 2026</p>
+
+### New Features
+
+- Added **saved flows** (experimental): record a browser task once, then replay its requests. A run tries direct HTTP first, then the same request from the page, then a replay of the recorded commands, and saves the tier that worked. Runs send requests only to public addresses, and saving waits for in-flight requests and follows redirects to the end (#2236, #2397, #2432, #2433, #2444)
+- **MCP tools** now list only the shared arguments each tool uses (#2311)
+
+### Bug Fixes
+
+- Fixed **session reuse and relaunch**, now decided in one place in the daemon. A connection target is kept only after an attach succeeds, and security settings persist across daemon restarts (#2396, #2418, #2429)
+- Fixed **Safari and iOS WebDriver sessions** being dropped (#2385)
+- Fixed **fill and type** altering literal text, and **mouse and element coordinates** losing fractional values (#2394, #2393)
+- Fixed **percent-encoded proxy credentials** not being decoded (#2389)
+- Fixed **downloads** moving local files from an attached Chrome (#2392)
+- Fixed **MCP tool results** that repeated JSON stdout (#2390)
+- Fixed **unknown commands and cookie operations**, now rejected, and **misplaced global options** in batch commands (#2383, #2386)
+- Fixed **errors output** to print page error text, and labeled `storage clear` as storage rather than the request log (#2427, #2428)
+- Fixed **macOS Chrome discovery** for apps installed in the user's Applications folder (#2388)
+- Fixed **Windows recording** opening ffmpeg console windows (#2382)
+- Skipped a repeat `Browser.getVersion` call after the outdated-browser check (#2420)
+
+### Improvements
+
+- The **core skill** now tells agents to prefer snapshots: screenshot only when asked or for content the DOM cannot represent, and wait and snapshot again when an expected element is missing (#2453, #2461)
+- The package now declares a **Node 22 minimum** and drops `engines.pnpm` (#2404)
+- Docs and dashboard chat use **openai/gpt-6-luna-fast** (#2440)
+- Upgraded the repository to **TypeScript 7**
+
+---
+
 ## v0.41.2
 
 <p className="text-[#888] text-sm">November 3, 2026</p>

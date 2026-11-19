@@ -259,6 +259,8 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 
 ## Environment Variables
 
+A connection target set in the config file (`cdp`, `provider`, `autoConnect`) or in the environment (`AGENT_BROWSER_CDP`, `AGENT_BROWSER_PROVIDER`, `AGENT_BROWSER_AUTO_CONNECT`) is a session default. It applies only to a session that has no target yet. The same target as a command-line flag is explicit and replaces the session target.
+
 These environment variables configure additional daemon and runtime behavior:
 
 <table>
@@ -336,7 +338,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>NO_COLOR</code></td><td>Disable colored output when present.</td><td>(not set)</td></tr>
     <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
     <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the Vercel AI Gateway. Required to enable AI chat.</td><td>(none)</td></tr>
-    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for dashboard chat.</td><td><code>anthropic/claude-sonnet-4.6</code></td></tr>
+    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for dashboard chat.</td><td><code>openai/gpt-6-luna-fast</code></td></tr>
   </tbody>
 </table>
 
