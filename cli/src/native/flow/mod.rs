@@ -8011,6 +8011,12 @@ mod tests {
         tab_hangs: bool,
         /// Why the browser cannot start, if it cannot.
         launch_error: Option<String>,
+        /// A request reported only after this many captures, counted from
+        /// the command with this index, as the browser reports a request a
+        /// moment after the command that started it returns.
+        late: Option<(usize, usize, HarEntry)>,
+        /// How many entries were captured when each command ran.
+        entries_at_run: Vec<usize>,
     }
 
     impl ScriptBrowser {
@@ -8025,7 +8031,14 @@ mod tests {
                 delay: Duration::ZERO,
                 tab_hangs: false,
                 launch_error: None,
+                late: None,
+                entries_at_run: Vec::new(),
             }
+        }
+
+        fn reporting_late(mut self, after_command: usize, captures: usize, e: HarEntry) -> Self {
+            self.late = Some((after_command, captures, e));
+            self
         }
 
         fn failing_launch(mut self, reason: &str) -> ScriptBrowser {
@@ -8085,6 +8098,7 @@ mod tests {
                 .get(self.ran.len())
                 .cloned()
                 .unwrap_or_else(|| json!({ "success": true }));
+            self.entries_at_run.push(self.entries.len());
             self.ran.push(cmd.clone());
             if let Some(url) = &self.poll_each_run {
                 self.entries.push(entry("p", url, "Fetch", "", ""));
@@ -8092,6 +8106,17 @@ mod tests {
             reply
         }
         async fn captured_since(&mut self, _: usize) -> Vec<HarEntry> {
+            let ran = self.ran.len();
+            if let Some((after, captures, _)) = self.late.as_mut() {
+                if ran > *after {
+                    if *captures == 0 {
+                        let (_, _, e) = self.late.take().unwrap();
+                        self.entries.push(e);
+                    } else {
+                        *captures -= 1;
+                    }
+                }
+            }
             self.entries.clone()
         }
         async fn end_capture(&mut self) {}
@@ -8212,6 +8237,63 @@ mod tests {
             assert!(run.failure.is_none(), "{:?}", run.failure);
             assert!(
                 started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+
+        #[test]
+        fn a_replayed_command_waits_for_the_requests_it_sent_when_recorded() {
+            // The session click's request is reported a few captures after
+            // the click returns; the items click must not run before it.
+            let flow = flow_of(json!({ "steps": [
+                { "command": { "action": "click", "selector": "#session" },
+                  "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/api/session" }] },
+                { "command": { "action": "click", "selector": "#items" } }
+            ] }));
+            let session = finished(entry(
+                "s",
+                "https://a.test/api/session",
+                "Fetch",
+                "application/json",
+                "{}",
+            ));
+            // Command 0 opens the start URL; command 1 is the session click.
+            let mut browser =
+                ScriptBrowser::new(Vec::new(), Vec::new()).reporting_late(1, 3, session);
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(5),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            assert_eq!(browser.ran.len(), 3);
+            assert_eq!(browser.entries_at_run, vec![0, 0, 1]);
+        }
+
+        #[test]
+        fn a_replayed_command_that_sent_nothing_when_recorded_does_not_wait() {
+            let flow = click_flow();
+            let started = Instant::now();
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new());
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(5),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
                 "{:?}",
                 started.elapsed()
             );

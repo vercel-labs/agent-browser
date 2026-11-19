@@ -4280,12 +4280,16 @@ async fn setup_auto_attached_session(
                     )
                     .await
                 } else {
+                    // A paused page still has its initial empty document to
+                    // patch; a paused frame has no document yet.
+                    let paused_before_document =
+                        waiting_for_debugger && target.target_type == "iframe";
                     install_network_controls_for_session(
                         client,
                         sid,
                         domain_filter,
                         has_proxy_creds,
-                        waiting_for_debugger,
+                        paused_before_document,
                     )
                     .await
                 }
@@ -16351,11 +16355,7 @@ mod tests {
     #[tokio::test]
     async fn pin_tab_false_disables_a_pin_read_from_disk_on_attach() {
         use super::super::tab_binding::{load, save, TabBinding};
-        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
-        let dir = tempfile::tempdir().unwrap();
-        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
-        guard.remove("XDG_RUNTIME_DIR");
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         assert!(!state.pin_tab);
         let session = state.session_id.clone();
         // A binding written after boot, read back on attach.
@@ -20254,7 +20254,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[tokio::test]
     async fn test_close_clears_attached_target() {
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         state.attached_target = Some(AttachedTarget::CdpPort(9222));
         handle_close(&mut state).await.unwrap();
         assert_eq!(state.attached_target, None);
@@ -21829,7 +21829,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn steps_list_failed_commands_and_close_reports_unsaved() {
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         state.flow.begin_capture(None);
         let seq = state
             .flow
@@ -22059,7 +22059,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_execute_close_without_browser() {
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         let cmd = json!({ "action": "close", "id": "test-3" });
         let result = execute_command(&cmd, &mut state).await;
         assert_eq!(result["success"], true);

@@ -438,6 +438,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "NetworkServiceInProcess".to_string(),
     ];
     if options.webmcp {
+        // Chrome 157 exposes `document.modelContext` behind `WebMCP`;
+        // `WebMCPTesting` alone no longer does. Older versions still need
+        // `WebMCPTesting`, and Chrome ignores feature names it does not know.
+        enable_features.push("WebMCP".to_string());
         enable_features.push("WebMCPTesting".to_string());
         enable_features.push("DevToolsWebMCPSupport".to_string());
     }
@@ -2584,10 +2588,13 @@ exec sleep 60
         let features = result
             .args
             .iter()
-            .find(|arg| arg.starts_with("--enable-features="))
-            .unwrap();
-        assert!(features.contains("WebMCPTesting"));
-        assert!(features.contains("DevToolsWebMCPSupport"));
+            .find_map(|arg| arg.strip_prefix("--enable-features="))
+            .unwrap()
+            .split(',')
+            .collect::<Vec<_>>();
+        for feature in ["WebMCP", "WebMCPTesting", "DevToolsWebMCPSupport"] {
+            assert!(features.contains(&feature), "{feature}: {features:?}");
+        }
     }
 
     #[test]
@@ -2600,10 +2607,13 @@ exec sleep 60
         let features = result
             .args
             .iter()
-            .find(|arg| arg.starts_with("--enable-features="))
-            .unwrap();
-        assert!(!features.contains("WebMCPTesting"));
-        assert!(!features.contains("DevToolsWebMCPSupport"));
+            .find_map(|arg| arg.strip_prefix("--enable-features="))
+            .unwrap()
+            .split(',')
+            .collect::<Vec<_>>();
+        for feature in ["WebMCP", "WebMCPTesting", "DevToolsWebMCPSupport"] {
+            assert!(!features.contains(&feature), "{feature}: {features:?}");
+        }
     }
 
     #[test]

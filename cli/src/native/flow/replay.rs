@@ -599,6 +599,11 @@ pub async fn send(
     }
 }
 
+/// How long a replayed command that sent requests when it was recorded may
+/// take to start them. The browser reports a request a moment after the
+/// command that started it returns.
+const REQUESTS_START_WAIT: Duration = Duration::from_secs(2);
+
 /// A request a later command may depend on: first-party, not telemetry, an
 /// XHR/Fetch or a document, and not a stream (a long poll never finishes).
 fn may_settle(e: &HarEntry, policy: &HostPolicy) -> bool {
@@ -638,6 +643,21 @@ pub(super) async fn capture(
         return Err(Ok(reason));
     }
     let policy = HostPolicy::of(flow);
+    // Whether each command sent requests when it was recorded. The commands
+    // are the recorded ones, after the start URL when the replay opens it.
+    let recorded: Vec<bool> = flow
+        .steps
+        .iter()
+        .filter(|s| s.ok)
+        .map(|s| !s.requests.is_empty())
+        .collect();
+    let offset = commands.len().saturating_sub(recorded.len());
+    let sent_requests = |i: usize| {
+        i.checked_sub(offset)
+            .and_then(|i| recorded.get(i))
+            .copied()
+            .unwrap_or(false)
+    };
     let mut failed = None;
     let mut timed_out = false;
     for (i, c) in commands.into_iter().enumerate() {
@@ -678,14 +698,23 @@ pub(super) async fn capture(
             tokio::time::sleep(Duration::from_millis(250)).await;
         };
         // The next command may depend on what this one fetched (a token the
-        // page keeps), so let its first-party requests finish first.
+        // page keeps), so let its first-party requests finish first. A
+        // command that sent requests when it was recorded is given time to
+        // start them: until they are reported, none is seen to wait on.
+        let start_by = if sent_requests(i) {
+            (Instant::now() + REQUESTS_START_WAIT).min(deadline)
+        } else {
+            Instant::now()
+        };
         loop {
             let seen = browser.captured_since(mark).await;
-            if seen
+            let own: Vec<&HarEntry> = seen
                 .iter()
                 .skip(first_own)
                 .filter(|e| may_settle(e, &policy))
-                .all(|e| e.loading_finished_timestamp.is_some())
+                .collect();
+            let started = !own.is_empty() || Instant::now() >= start_by;
+            if (started && own.iter().all(|e| e.loading_finished_timestamp.is_some()))
                 || Instant::now() >= deadline
             {
                 break;

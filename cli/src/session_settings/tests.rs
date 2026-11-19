@@ -657,18 +657,29 @@ fn timeout_views() {
     );
 }
 
+/// An absolute path on every platform. A leading `/` alone is not enough:
+/// Windows resolves it against the current drive, so the seed rewrites it.
+fn absolute(name: &str) -> String {
+    std::env::temp_dir()
+        .join(name)
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
 #[test]
 fn security_view() {
+    let policy = absolute("policy.json");
     let r = seeded(&[
         ("AGENT_BROWSER_ALLOWED_DOMAINS", " a.test , ,*.b.test "),
         ("AGENT_BROWSER_CONFIRM_ACTIONS", "click,fill"),
-        ("AGENT_BROWSER_ACTION_POLICY", "/policy.json"),
+        ("AGENT_BROWSER_ACTION_POLICY", &policy),
     ]);
     assert_eq!(
         r.security(),
         SecurityView {
             allowed_domains: Some(vec!["a.test".into(), "*.b.test".into()]),
-            action_policy_path: Some("/policy.json".into()),
+            action_policy_path: Some(policy.clone()),
             confirm_actions: Some("click,fill".into()),
         }
     );
@@ -715,19 +726,14 @@ fn provider_view_ignores_connection_precedence() {
 
 #[test]
 fn legacy_policy_variable_applies_only_when_the_current_one_is_unset() {
-    let legacy = seeded(&[("AGENT_BROWSER_POLICY", "/old.json")]);
-    assert_eq!(
-        legacy.security().action_policy_path.as_deref(),
-        Some("/old.json")
-    );
+    let (old, new) = (absolute("old.json"), absolute("new.json"));
+    let legacy = seeded(&[("AGENT_BROWSER_POLICY", &old)]);
+    assert_eq!(legacy.security().action_policy_path, Some(old.clone()));
     let both = seeded(&[
-        ("AGENT_BROWSER_POLICY", "/old.json"),
-        ("AGENT_BROWSER_ACTION_POLICY", "/new.json"),
+        ("AGENT_BROWSER_POLICY", &old),
+        ("AGENT_BROWSER_ACTION_POLICY", &new),
     ]);
-    assert_eq!(
-        both.security().action_policy_path.as_deref(),
-        Some("/new.json")
-    );
+    assert_eq!(both.security().action_policy_path, Some(new));
 }
 
 #[test]

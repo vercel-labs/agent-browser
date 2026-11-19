@@ -199,26 +199,22 @@ async fn install_domain_filter_runtime_script(
         return Ok(());
     }
 
+    // A frame paused before its first document has no context to patch; the
+    // new-document script above covers the document it loads. Chrome 156 and
+    // older reject the evaluation at once, but newer versions hold it until
+    // the target resumes, and the target resumes only after this setup.
+    if paused_before_document {
+        return Ok(());
+    }
+
     let script = domain_filter_script(allowed_domains);
-    let evaluation = match client
+    let evaluation = client
         .send_command(
             "Runtime.evaluate",
             Some(json!({ "expression": &script })),
             Some(session_id),
         )
-        .await
-    {
-        Ok(evaluation) => evaluation,
-        // An auto-attached target is paused before its first document, so it
-        // has no context to patch; the new-document script above covers it.
-        Err(error)
-            if paused_before_document
-                && error.contains("Cannot find default execution context") =>
-        {
-            return Ok(())
-        }
-        Err(error) => return Err(error),
-    };
+        .await?;
     if let Some(details) = evaluation.get("exceptionDetails") {
         let message = details
             .get("exception")
@@ -690,22 +686,33 @@ impl EventTracker {
 mod tests {
     use super::*;
 
-    async fn install_script_with_runtime_error(
-        message: &'static str,
+    /// Installs the domain filter script against a fake browser and returns
+    /// the result with the methods it was sent. `runtime_error` answers
+    /// `Runtime.evaluate`; `None` holds it unanswered, as Chrome 157 and newer
+    /// do for a frame paused before its first document.
+    async fn install_script(
+        runtime_error: Option<&'static str>,
         paused_before_document: bool,
-    ) -> Result<(), String> {
+    ) -> (Result<(), String>, Vec<String>) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
+        let methods = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = methods.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             while let Some(Ok(Message::Text(text))) = ws.next().await {
                 let request: Value = serde_json::from_str(&text).unwrap();
+                let method = request["method"].as_str().unwrap_or("").to_string();
+                seen.lock().unwrap().push(method.clone());
                 let mut response = json!({ "id": request["id"] });
-                if request["method"] == "Runtime.evaluate" {
+                if method == "Runtime.evaluate" {
+                    let Some(message) = runtime_error else {
+                        continue;
+                    };
                     response["error"] = json!({ "code": -32000, "message": message });
                 } else {
                     response["result"] = json!({ "identifier": "1" });
@@ -715,32 +722,35 @@ mod tests {
         });
 
         let client = CdpClient::connect(&url).await.unwrap();
-        let result = install_domain_filter_script(
-            &client,
-            "session",
-            &["example.com".to_string()],
-            paused_before_document,
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            install_domain_filter_script(
+                &client,
+                "session",
+                &["example.com".to_string()],
+                paused_before_document,
+            ),
         )
-        .await;
+        .await
+        .unwrap_or_else(|_| Err("timed out".to_string()));
         drop(client);
         server.abort();
-        result
+        let methods = methods.lock().unwrap().clone();
+        (result, methods)
     }
 
     #[tokio::test]
-    async fn domain_filter_script_skips_targets_without_a_context() {
-        assert_eq!(
-            install_script_with_runtime_error("Cannot find default execution context", true).await,
-            Ok(())
-        );
+    async fn domain_filter_script_covers_a_paused_frame_with_the_new_document_script() {
+        let (result, methods) = install_script(None, true).await;
+        assert_eq!(result, Ok(()));
+        assert_eq!(methods, vec!["Page.addScriptToEvaluateOnNewDocument"]);
     }
 
     #[tokio::test]
     async fn domain_filter_script_fails_closed_without_a_context_on_live_targets() {
-        let error =
-            install_script_with_runtime_error("Cannot find default execution context", false)
-                .await
-                .unwrap_err();
+        let (result, _) =
+            install_script(Some("Cannot find default execution context"), false).await;
+        let error = result.unwrap_err();
         assert!(
             error.contains("Cannot find default execution context"),
             "{}",
@@ -750,9 +760,8 @@ mod tests {
 
     #[tokio::test]
     async fn domain_filter_script_fails_closed_on_other_runtime_errors() {
-        let error = install_script_with_runtime_error("Execution context was destroyed.", true)
-            .await
-            .unwrap_err();
+        let (result, _) = install_script(Some("Execution context was destroyed."), false).await;
+        let error = result.unwrap_err();
         assert!(
             error.contains("Execution context was destroyed"),
             "{}",
