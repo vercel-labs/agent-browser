@@ -155,20 +155,23 @@ async fn client_for(
         .map_err(|e| discovery_failed(format!("Failed to create HTTP client: {}", e)))
 }
 
+fn parse_endpoint(endpoint: &str) -> Result<Url, JoinError> {
+    Url::parse(endpoint)
+        .map_err(|e| discovery_failed(format!("Invalid browser_session_endpoint: {}", e)))
+}
+
 /// The endpoint is a page this browser loads, so it reaches only the addresses
 /// a discovery hop may: public ones unless the join started locally, and never
 /// link-local or cloud metadata.
 async fn check_endpoint(
-    endpoint: &str,
+    url: &Url,
     local: bool,
     deadline: tokio::time::Instant,
 ) -> Result<(), JoinError> {
-    let url = Url::parse(endpoint)
-        .map_err(|e| discovery_failed(format!("Invalid browser_session_endpoint: {}", e)))?;
-    check_scheme(&url, local)?;
+    check_scheme(url, local)?;
     let host = url
         .host_str()
-        .ok_or_else(|| discovery_failed(format!("{} has no host", endpoint)))?;
+        .ok_or_else(|| discovery_failed(format!("{} has no host", url)))?;
     match url.host() {
         Some(url::Host::Ipv4(ip)) => check_address(host, IpAddr::V4(ip), local),
         Some(url::Host::Ipv6(ip)) => check_address(host, IpAddr::V6(ip), local),
@@ -234,8 +237,7 @@ fn interpret(host: &str, status: u16, body: &str, local: bool) -> Result<String,
             code: "no_browser_session_endpoint",
             message: "The Company does not list web.browser_session_endpoint".to_string(),
         })?;
-    let url = Url::parse(endpoint)
-        .map_err(|e| discovery_failed(format!("Invalid browser_session_endpoint: {}", e)))?;
+    let url = parse_endpoint(endpoint)?;
     // A join that started on a public host gets an HTTPS endpoint, so a remote
     // document cannot name a plain-HTTP service on this machine.
     check_scheme(&url, local)?;
@@ -264,14 +266,14 @@ fn is_redirect(status: u16) -> bool {
 
 /// Fetches the Company's `poppy.json`, following redirects one hop at a time.
 ///
-/// `check` runs on every URL before it is requested, so a hop can be refused
-/// before any DNS lookup or connection, and the address check in `client_for`
-/// runs before the connection too. A hop fetches only the well-known path with
-/// no query, so a file uploaded elsewhere on a host cannot speak for it. The
-/// document's `organization.domain` must match the host that finally serves it,
-/// and the endpoint it names is held to the same address rules as a hop, so a
-/// remote document cannot aim the browser at a service on this machine.
-/// Everything stops at `deadline`.
+/// `check` runs on every URL, the endpoint the document names included, before
+/// that URL is requested or resolved, so a refused host is never looked up. The
+/// address checks then run before any connection. A hop fetches only the
+/// well-known path with no query, so a file uploaded elsewhere on a host cannot
+/// speak for it. The document's `organization.domain` must match the host that
+/// finally serves it, and the endpoint it names is held to the same address
+/// rules as a hop, so a remote document cannot aim the browser at a service on
+/// this machine. Everything stops at `deadline`.
 pub async fn fetch(
     target: Target,
     deadline: tokio::time::Instant,
@@ -327,7 +329,10 @@ pub async fn fetch(
     }
     let body = read_body(response, &url, deadline).await?;
     let endpoint = interpret(&host, status, &body, local)?;
-    check_endpoint(&endpoint, local, deadline).await?;
+    let endpoint_url = parse_endpoint(&endpoint)?;
+    // The caller's guard runs before the address check resolves the name.
+    check(&endpoint_url)?;
+    check_endpoint(&endpoint_url, local, deadline).await?;
     Ok(Discovery { origin, endpoint })
 }
 
@@ -461,12 +466,57 @@ mod tests {
             "https://10.0.0.7/",
             "https://169.254.169.254/",
         ] {
-            let err = check_endpoint(endpoint, false, deadline).await.unwrap_err();
+            let url = parse_endpoint(endpoint).unwrap();
+            let err = check_endpoint(&url, false, deadline).await.unwrap_err();
             assert_eq!(err.code, "discovery_failed", "{endpoint}");
         }
-        assert!(check_endpoint("https://127.0.0.1:8080/", true, deadline)
-            .await
-            .is_ok());
+        let local = parse_endpoint("https://127.0.0.1:8080/").unwrap();
+        assert!(check_endpoint(&local, true, deadline).await.is_ok());
+    }
+
+    /// A guard that refuses a host must refuse it before that host is looked
+    /// up, so a document cannot turn a name into a DNS query.
+    #[tokio::test]
+    async fn the_endpoint_passes_the_caller_check_before_it_is_resolved() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let body = json!({
+                "protocol_version": "1.0",
+                "organization": { "domain": format!("127.0.0.1:{}", port) },
+                "web": { "browser_session_endpoint": "https://unresolvable.invalid/join" },
+            })
+            .to_string();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+        });
+
+        let target = target(&format!("http://127.0.0.1:{}/", port)).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let err = fetch(
+            target,
+            deadline,
+            &TrustOptions::default(),
+            |url| match url.host_str() {
+                Some("unresolvable.invalid") => Err(JoinError {
+                    code: "domain_not_allowed",
+                    message: "not in the allowlist".to_string(),
+                }),
+                _ => Ok(()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "domain_not_allowed", "{err:?}");
     }
 
     #[test]
