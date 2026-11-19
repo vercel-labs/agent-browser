@@ -6710,16 +6710,16 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     };
 
     let previous_refs = state.ref_map.ref_ids();
-    state.ref_map.begin_snapshot();
-    let tree = snapshot::take_snapshot(
+    let (tree, refs) = snapshot::stage_snapshot(
         &mgr.client,
         &session_id,
         &options,
-        &mut state.ref_map,
+        &state.ref_map,
         state.active_frame_id.as_deref(),
         &state.iframe_sessions,
     )
     .await?;
+    state.ref_map = refs;
 
     let url = mgr.get_url().await.unwrap_or_default();
 
@@ -7031,7 +7031,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .map(String::from),
     };
 
-    let (session_id, result) = if let Some(wb) = state
+    let (session_id, result, staged_refs) = if let Some(wb) = state
         .webdriver_backend
         .as_ref()
         .filter(|_| state.browser.is_none())
@@ -7057,36 +7057,39 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
                 base64: wb.screenshot().await?,
                 annotations: Vec::new(),
             },
+            None,
         )
     } else {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         let session_id = mgr.active_session_id()?.to_string();
-        if annotate {
-            state.ref_map.begin_snapshot();
-            let _ = snapshot::take_snapshot(
+        let staged_refs = if annotate {
+            let (_, refs) = snapshot::stage_snapshot(
                 &mgr.client,
                 &session_id,
                 &SnapshotOptions {
                     interactive: true,
                     ..SnapshotOptions::default()
                 },
-                &mut state.ref_map,
+                &state.ref_map,
                 state.active_frame_id.as_deref(),
                 &state.iframe_sessions,
             )
             .await?;
-        }
+            Some(refs)
+        } else {
+            None
+        };
 
         let result = screenshot::take_screenshot(
             &mgr.client,
             &session_id,
-            &state.ref_map,
+            staged_refs.as_ref().unwrap_or(&state.ref_map),
             &options,
             &state.iframe_sessions,
         )
         .await?;
 
-        (session_id, result)
+        (session_id, result, staged_refs)
     };
 
     let mut response = if if_changed {
@@ -7104,6 +7107,9 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     if !result.annotations.is_empty() {
         response["annotations"] = serde_json::to_value(&result.annotations)
             .map_err(|e| format!("Failed to serialize annotations: {}", e))?;
+    }
+    if let Some(refs) = staged_refs {
+        state.ref_map = refs;
     }
 
     Ok(response)
@@ -8230,15 +8236,11 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         selector,
         ..SnapshotOptions::default()
     };
-    // Reuse the current document identities without committing a failed capture.
-    // Build the replacement separately so a failed diff leaves the existing refs usable.
-    let mut current_ref_map = state.ref_map.clone();
-    current_ref_map.begin_snapshot();
-    let current = snapshot::take_snapshot(
+    let (current, current_ref_map) = snapshot::stage_snapshot(
         &mgr.client,
         &session_id,
         &options,
-        &mut current_ref_map,
+        &state.ref_map,
         state.active_frame_id.as_deref(),
         &state.iframe_sessions,
     )
@@ -15647,6 +15649,77 @@ mod tests {
             }
         });
         (url, calls)
+    }
+
+    async fn state_with_snapshot_ref() -> DaemonState {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let id = &cmd["id"];
+                let response = match cmd["method"].as_str().unwrap() {
+                    "Runtime.evaluate" => json!({"id": id, "result": {"result": {
+                        "type": "object", "subtype": "null"
+                    }}}),
+                    "Accessibility.getFullAXTree" => json!({"id": id, "result": {"nodes": []}}),
+                    "Page.captureScreenshot" => json!({"id": id, "error": {
+                        "code": -32000, "message": "Unable to capture screenshot"
+                    }}),
+                    _ => json!({"id": id, "result": {}}),
+                };
+                if ws
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut browser = BrowserManager::for_test(client, url);
+        browser.add_page(super::super::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "page".to_string(),
+            session_id: "session".to_string(),
+            url: "about:blank".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let mut state = DaemonState::new();
+        state.browser = Some(browser);
+        state
+            .ref_map
+            .add("e1".to_string(), Some(42), "button", "Save", None);
+        state
+    }
+
+    #[tokio::test]
+    async fn a_failed_scoped_snapshot_keeps_the_previous_refs() {
+        let mut state = state_with_snapshot_ref().await;
+        let error = super::handle_snapshot(&json!({ "selector": "#nope" }), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Selector '#nope' did not match any element");
+        assert_eq!(state.ref_map.get("e1").unwrap().backend_node_id, Some(42));
+    }
+
+    #[tokio::test]
+    async fn a_failed_annotated_screenshot_keeps_the_previous_refs() {
+        let mut state = state_with_snapshot_ref().await;
+        let error = super::handle_screenshot(&json!({ "annotate": true }), &mut state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Unable to capture screenshot"), "{error}");
+        assert_eq!(state.ref_map.get("e1").unwrap().backend_node_id, Some(42));
     }
 
     #[tokio::test]

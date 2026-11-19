@@ -146,6 +146,15 @@ impl RefMap {
         self.map.clear();
     }
 
+    /// Starts a replacement map with the same durable identities and ref counter.
+    pub fn for_snapshot(&self) -> Self {
+        Self {
+            map: HashMap::new(),
+            documents: self.documents.clone(),
+            next_ref: self.next_ref,
+        }
+    }
+
     /// Observe the document behind a page/frame pair. Unknown documents never
     /// retain refs, while a changed session or loader replaces the prior bucket.
     pub fn observe_document(
