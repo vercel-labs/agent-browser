@@ -370,6 +370,22 @@ pub fn parse_batch_command(args: &[String], flags: &Flags) -> Result<Value, Pars
     parse_command_with_batch_scope(args, flags, true)
 }
 
+/// Removes the `--` marker that precedes positional values for commands whose
+/// parsers read their operands directly, so the values after it stay data.
+fn drop_end_of_options<'a>(cmd: &str, mut rest: Vec<&'a str>) -> Vec<&'a str> {
+    let operands_after = match cmd {
+        "select" | "upload" | "press" | "key" | "keydown" | "keyup" | "removeinitscript"
+        | "confirm" | "deny" => 0,
+        "keyboard" | "set" | "clipboard" | "auth" | "webmcp" | "plugin" | "skills" | "dialog" => 1,
+        "tab" => usize::from(matches!(rest.first(), Some(&("close" | "keep")))),
+        _ => return rest,
+    };
+    if rest.get(operands_after) == Some(&"--") {
+        rest.remove(operands_after);
+    }
+    rest
+}
+
 fn parse_command_with_batch_scope(
     args: &[String],
     flags: &Flags,
@@ -694,6 +710,7 @@ fn parse_command_inner(
     reject_batch_global_flag(batch_item, &args[0])?;
     let cmd = args[0].as_str();
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+    let rest = drop_end_of_options(cmd, rest);
     let id = gen_id();
 
     if flags.cli_annotate && cmd != "screenshot" {
