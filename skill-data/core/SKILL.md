@@ -29,7 +29,7 @@ agent-browser click @e3         # 3. Act on refs from the snapshot
 agent-browser snapshot -i       # 4. Re-snapshot after any page change
 ```
 
-Refs stay valid for elements that survive a same-document update. Take a fresh snapshot after navigation or to observe page changes.
+Refs stay valid for elements that survive a same-document update. A ref used after the page navigated to a new document, including a navigation caused by a click, fails with a "from a previous page" error. Take a fresh snapshot after navigation or to observe page changes.
 
 Prefer snapshots. Take a screenshot only when the user asks for one, or for something the DOM cannot represent, such as a canvas. Never screenshot to check whether an element exists or the page finished loading. If the snapshot is missing an element you expect, the page is usually still loading: wait for it (`wait --text "<text you expect>"` or `wait @eN`, see [Waiting](#waiting)) and snapshot again. A snapshot is faster and uses far fewer tokens.
 
