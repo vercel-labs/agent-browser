@@ -22,14 +22,22 @@ use tokio::sync::Notify;
 pub const CLIENT_DISCONNECTED: &str = "the client that issued it disconnected";
 pub const SESSION_CLOSED: &str = "the session was closed";
 pub const DAEMON_SHUTTING_DOWN: &str = "the daemon is shutting down";
+pub const BROWSER_CHANGED: &str = "the browser changed while it waited";
 
 /// The part of a wait that runs without the state lock. It owns what it
 /// needs (a shared CDP client, session ids), so it never borrows the state.
 pub type WaitPoll = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 
+const CANCELLED_PREFIX: &str = "Wait cancelled: ";
+
 /// The error a cancelled wait reports.
 pub fn cancelled_error(reason: &str) -> String {
-    format!("Wait cancelled: {}", reason)
+    format!("{}{}", CANCELLED_PREFIX, reason)
+}
+
+/// Whether an error is a wait's cancellation rather than its own failure.
+pub fn is_cancelled(error: &str) -> bool {
+    error.starts_with(CANCELLED_PREFIX)
 }
 
 /// A one-shot cancellation signal with a reason. Cloning shares the signal.

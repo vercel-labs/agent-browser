@@ -685,6 +685,10 @@ pub struct DaemonState {
     /// may then poll without the state lock. Commands run from inside another
     /// command (batch, confirm, flow replay) wait inline.
     pub defer_wait: bool,
+    /// Changes whenever the session's browser is replaced or closed, so a
+    /// wait that polled without the state lock can tell on resume whether it
+    /// still talks to the browser it started on.
+    browser_generation: u64,
     /// The wait the last command left for the daemon to poll unlocked. In a
     /// mutex only so the state stays `Sync`; always reached through `&mut`.
     deferred: std::sync::Mutex<Option<DeferredCommand>>,
@@ -863,6 +867,7 @@ impl DaemonState {
             stream_server: None,
             idle_activity: Arc::new(IdleActivity::new()),
             defer_wait: false,
+            browser_generation: 0,
             deferred: std::sync::Mutex::new(None),
             launch_identity: None,
             cdp_headers: None,
@@ -941,6 +946,7 @@ impl DaemonState {
     }
 
     fn subscribe_to_browser_events(&mut self) {
+        self.browser_generation += 1;
         self.downloads.clear();
         if let Some(ref browser) = self.browser {
             self.event_rx = Some(browser.client.subscribe());
@@ -2652,6 +2658,9 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
     let browser = state.browser.take();
+    // Downloads and pending waits belong to the browser being closed.
+    state.browser_generation += 1;
+    state.downloads.clear();
     state.launch_identity = None;
     state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
@@ -3069,6 +3078,8 @@ pub struct ResumeCommand {
     finish: WaitFinish,
     post: PostCommand,
     flow_seq: Option<u64>,
+    /// The browser the wait started on. See [`DaemonState::browser_generation`].
+    browser_generation: u64,
 }
 
 /// Finish a command whose wait the daemon polled without the state lock,
@@ -3080,7 +3091,16 @@ pub async fn resume_command(
     state: &mut DaemonState,
 ) -> Value {
     Box::pin(async move {
+        // Another command may have replaced the browser while the wait
+        // polled. The finish step must not act on the new browser with what
+        // the old one reported, such as a download's file path.
+        // A poll the daemon cancelled (`close`, shutdown) keeps that reason.
+        let browser_changed = state.browser_generation != resume.browser_generation;
         let result = match polled {
+            Err(e) if super::pending_wait::is_cancelled(&e) => Err(e),
+            _ if browser_changed => Err(super::pending_wait::cancelled_error(
+                super::pending_wait::BROWSER_CHANGED,
+            )),
             Ok(()) => finish_wait(cmd, resume.finish, state).await,
             Err(e) => Err(e),
         };
@@ -3563,6 +3583,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState, may_defer: 
                     finish: plan.finish,
                     post,
                     flow_seq: None,
+                    browser_generation: state.browser_generation,
                 },
             });
             return Value::Null;
@@ -16366,6 +16387,60 @@ mod tests {
         .await;
         assert_eq!(resp["success"], true, "{resp}");
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "report");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
+    /// A deferred wait polls without the state lock, so another command can
+    /// replace the browser meanwhile. Resuming must not move a download the
+    /// old browser reported, and the new browser starts with no downloads.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_is_cancelled_when_the_browser_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        let saved = start_finished_download(&mut state, &dir.path().join("downloads")).await;
+        let dest = dir.path().join("out").join("report.bin");
+
+        let wait = serde_json::json!({ "id": "4", "action": "waitfordownload",
+            "path": dest.to_string_lossy(), "timeout": 5000 });
+        state.defer_wait = true;
+        let resp = super::execute_command(&wait, &mut state).await;
+        assert_eq!(resp, Value::Null);
+        let deferred = state.take_deferred().expect("the wait deferred its poll");
+
+        // A launch with other options replaces the browser while the wait polls.
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "launch", "headless": true,
+                "downloadPath": dir.path().join("other").to_string_lossy() }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+
+        let polled = crate::native::pending_wait::Cancel::new()
+            .run(deferred.poll)
+            .await;
+        assert!(polled.is_ok(), "{polled:?}");
+        let resp = super::resume_command(&wait, deferred.resume, polled, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(
+            resp["error"],
+            "Wait cancelled: the browser changed while it waited"
+        );
+        assert!(saved.exists(), "the old browser's download stays put");
+        assert!(!dest.exists(), "nothing is moved for a replaced browser");
+
+        // The replaced browser's downloads were dropped, claimed or not.
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "6", "action": "waitfordownload", "timeout": 500 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
         super::execute_command(
             &serde_json::json!({ "id": "9", "action": "close" }),
             &mut state,

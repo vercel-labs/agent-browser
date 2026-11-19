@@ -2692,8 +2692,8 @@ Selector Wait Options:
 A load-state wait uses --timeout (or AGENT_BROWSER_DEFAULT_TIMEOUT) and fails when it expires.
 
 Other commands in the session run while a wait is pending. A wait ends early
-with "Wait cancelled" when its client disconnects, when close runs, or when the
-daemon shuts down.
+with "Wait cancelled" when its client disconnects, when close runs, when another
+command replaces the browser, or when the daemon shuts down.
 
 Download Options (with --download):
   --timeout <ms>       Timeout in milliseconds for download to start
