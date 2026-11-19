@@ -20,18 +20,10 @@ struct DashboardAssets;
 
 pub(super) const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n";
 
-/// Build CORS headers that reflect the request origin only when it passes
-/// `is_allowed_origin`. Used for sensitive endpoints (chat, models) so the
-/// API key is not accessible from arbitrary web pages.
-pub(super) fn cors_headers_for_origin(origin: Option<&str>) -> String {
-    let allowed_origin = match origin {
-        Some(o) if super::is_allowed_origin(Some(o)) => o,
-        _ => "http://localhost",
-    };
-    format!(
-        "Access-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n",
-        allowed_origin
-    )
+/// CORS headers for sensitive endpoints (chat, models). The origin is never
+/// reflected, so these responses are not readable from another origin.
+pub(super) fn cors_headers_for_origin(_origin: Option<&str>) -> String {
+    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n".to_string()
 }
 
 fn request_headers(request: &str) -> &str {

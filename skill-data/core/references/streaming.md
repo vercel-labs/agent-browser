@@ -39,7 +39,7 @@ Read the port from `stream status --json` rather than assuming one; the OS-assig
 
 ## Connecting
 
-Connect a WebSocket client to `ws://127.0.0.1:<port>`. Frame delivery starts automatically once a client attaches, so there is no subscribe message. Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.
+Connect a WebSocket client to `ws://127.0.0.1:<port>`. Frame delivery starts automatically once a client attaches, so there is no subscribe message. Browser clients must be served from the stream port itself (the upgrade `Origin` must match its `Host`, on `localhost`, `127.0.0.1` or `::1`). A page on another port, a `file://` page and any other origin get a 403. A custom viewer is served from the stream port, or connects from a non-browser client, which sends no `Origin`.
 
 ## Messages from the server
 
@@ -100,6 +100,6 @@ The two settings compose: `pacing` bounds how much is in flight, `maxFps` bounds
 
 ## Limitations
 
-- Localhost only. Exposing the stream beyond the machine is the embedder's job (tunnel, proxy, or port forward), and the origin allowlist applies to browser clients.
+- Localhost only. Exposing the stream beyond the machine is the embedder's job (tunnel, proxy, or port forward), and the same-origin rule applies to browser clients.
 - Frames are images, not a video codec. Bandwidth scales with viewport size and page activity; cap the rate for constrained links.
 - In push pacing the server cannot tell a slow renderer from a fast one beyond transport backpressure. Use ack pacing when that distinction matters.
