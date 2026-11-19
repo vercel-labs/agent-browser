@@ -259,6 +259,8 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 
 ## Environment Variables
 
+A connection target set in the config file (`cdp`, `provider`, `autoConnect`) or in the environment (`AGENT_BROWSER_CDP`, `AGENT_BROWSER_PROVIDER`, `AGENT_BROWSER_AUTO_CONNECT`) is a session default. It applies only to a session that has no target yet. The same target as a command-line flag is explicit and replaces the session target.
+
 These environment variables configure additional daemon and runtime behavior:
 
 <table>

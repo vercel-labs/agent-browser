@@ -127,6 +127,13 @@ fn parse_frontmatter(content: &str) -> Option<(String, String, bool)> {
 }
 
 /// Discover all skills across the given directories.
+fn skill_not_found(name: &str) -> String {
+    format!(
+        "Skill not found: {}. Run `agent-browser skills list` to see available skills.",
+        name
+    )
+}
+
 fn discover_skills(dirs: &[PathBuf]) -> Vec<SkillInfo> {
     let mut skills = Vec::new();
 
@@ -389,12 +396,12 @@ fn run_get(
                             "{}",
                             serde_json::to_string(&json!({
                                 "success": false,
-                                "error": format!("Skill not found: {}", name),
+                                "error": skill_not_found(name),
                             }))
                             .unwrap_or_default()
                         );
                     } else {
-                        eprintln!("{} Skill not found: {}", color::error_indicator(), name);
+                        eprintln!("{} {}", color::error_indicator(), skill_not_found(name));
                     }
                     exit(1);
                 }
@@ -513,12 +520,12 @@ fn run_path(skills_dirs: &[PathBuf], name: Option<&str>, json_mode: bool) {
                             "{}",
                             serde_json::to_string(&json!({
                                 "success": false,
-                                "error": format!("Skill not found: {}", name),
+                                "error": skill_not_found(name),
                             }))
                             .unwrap_or_default()
                         );
                     } else {
-                        eprintln!("{} Skill not found: {}", color::error_indicator(), name);
+                        eprintln!("{} {}", color::error_indicator(), skill_not_found(name));
                     }
                     exit(1);
                 }

@@ -223,7 +223,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run multiple commands sequentially. Unknown commands and subcommands return errors. Set global flags on the batch invocation or MCP server. Command arguments can contain flag-like text. A batch containing only get cdp-url commands never launches a browser.",
+      "description": "Run multiple commands sequentially. Unknown commands and subcommands return errors. Only commands that treat -- as the end of options accept it before a dash-leading literal argument inside a command array; other commands may receive -- as data. Set global flags on the batch invocation or MCP server, not inside command arrays. Closing with --all must run outside a batch. A batch containing only get cdp-url commands never launches a browser.",
       "inputSchema": {
         "properties": {
           "bail": {
@@ -329,13 +329,39 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Click an element by @ref or CSS selector.",
+      "description": "Click an element by @ref or CSS selector, optionally with another mouse button or held modifier keys.",
       "inputSchema": {
         "properties": {
+          "button": {
+            "default": "left",
+            "description": "Mouse button. Defaults to left.",
+            "enum": [
+              "left",
+              "right",
+              "middle",
+              "back",
+              "forward"
+            ],
+            "type": "string"
+          },
           "human": {
             "default": false,
             "description": "Approach the target with seeded, curved mouse movement.",
             "type": "boolean"
+          },
+          "modifiers": {
+            "description": "Modifier keys held during the click.",
+            "items": {
+              "enum": [
+                "alt",
+                "control",
+                "meta",
+                "shift"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
           },
           "newTab": {
             "default": false,
@@ -750,9 +776,40 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Double-click an element.",
+      "description": "Double-click an element, optionally with another mouse button or held modifier keys.",
       "inputSchema": {
         "properties": {
+          "button": {
+            "default": "left",
+            "description": "Mouse button. Defaults to left.",
+            "enum": [
+              "left",
+              "right",
+              "middle",
+              "back",
+              "forward"
+            ],
+            "type": "string"
+          },
+          "human": {
+            "default": false,
+            "description": "Approach the target with seeded, curved mouse movement.",
+            "type": "boolean"
+          },
+          "modifiers": {
+            "description": "Modifier keys held during the click.",
+            "items": {
+              "enum": [
+                "alt",
+                "control",
+                "meta",
+                "shift"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
           "selector": {
             "description": "Element @ref from snapshot, or a CSS selector.",
             "type": "string"
@@ -1304,7 +1361,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Experimental. Run a saved task directly over HTTP, without driving the page. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
+      "description": "Experimental. Run a saved task by sending its requests directly, falling back to the page, then to a replay of the recorded commands. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
       "inputSchema": {
         "properties": {
           "allowWrite": {
@@ -1334,6 +1391,11 @@
           "session": {
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
+          },
+          "timeout": {
+            "description": "Milliseconds the whole run may take, across every tier.",
+            "minimum": 1,
+            "type": "integer"
           },
           "where": {
             "additionalProperties": {
@@ -2080,10 +2142,13 @@
         "properties": {
           "button": {
             "default": "left",
+            "description": "Mouse button. Defaults to left.",
             "enum": [
               "left",
               "right",
-              "middle"
+              "middle",
+              "back",
+              "forward"
             ],
             "type": "string"
           },
@@ -2162,10 +2227,13 @@
         "properties": {
           "button": {
             "default": "left",
+            "description": "Mouse button. Defaults to left.",
             "enum": [
               "left",
               "right",
-              "middle"
+              "middle",
+              "back",
+              "forward"
             ],
             "type": "string"
           },
@@ -2398,7 +2466,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Launch the browser and optionally navigate to a URL. On macOS, installed browsers are searched in /Applications, then ~/Applications. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
+      "description": "Launch the browser and optionally navigate to a URL. On macOS, installed browsers are searched in /Applications, then ~/Applications. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. A plugin provider that returns directPage: true connects to a page socket, so console messages, network requests, HAR recording, tracing, and profiling apply to that page. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
       "inputSchema": {
         "properties": {
           "allowedDomains": {
@@ -3154,7 +3222,7 @@
         "properties": {
           "annotate": {
             "default": false,
-            "description": "Number visible elements in the screenshot.",
+            "description": "Number visible elements in the screenshot. A failed annotated screenshot keeps the previous refs.",
             "type": "boolean"
           },
           "format": {
@@ -3720,7 +3788,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
+      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref. A capture that fails, such as a selector that matches nothing, leaves the previous refs in place while the document is unchanged.",
       "inputSchema": {
         "properties": {
           "compact": {
@@ -4189,6 +4257,42 @@
         "tabs"
       ],
       "title": "Tab close"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Set how a tab runs while it is in the background. live keeps it at full speed and makes the page report visible and focused. throttled is the browser default. frozen pauses it until you switch to it. Omit tab for the current tab, which cannot be frozen.",
+      "inputSchema": {
+        "properties": {
+          "keep": {
+            "enum": [
+              "live",
+              "throttled",
+              "frozen"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "tab": {
+            "description": "Tab id (t1), label, or CDP target id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "keep"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_tab_keep",
+      "profiles": [
+        "tabs"
+      ],
+      "title": "Tab keep"
     },
     {
       "annotations": {
