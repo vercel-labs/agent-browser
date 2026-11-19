@@ -333,6 +333,28 @@ impl RoleNameTracker {
     }
 }
 
+/// Builds a replacement snapshot and ref map without changing the live map.
+pub async fn stage_snapshot(
+    client: &CdpClient,
+    session_id: &str,
+    options: &SnapshotOptions,
+    ref_map: &RefMap,
+    frame_id: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(String, RefMap), String> {
+    let mut staged = ref_map.for_snapshot();
+    let tree = take_snapshot(
+        client,
+        session_id,
+        options,
+        &mut staged,
+        frame_id,
+        iframe_sessions,
+    )
+    .await?;
+    Ok((tree, staged))
+}
+
 pub async fn take_snapshot(
     client: &CdpClient,
     session_id: &str,

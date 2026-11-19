@@ -2745,6 +2745,7 @@ Options:
                        Each label [N] corresponds to ref @eN from snapshot.
                        Prints a legend mapping labels to element roles/names.
                        With --json, annotations are included in the response.
+                       A failed annotated capture keeps the previous refs.
                        Supported on Chromium and Lightpanda.
   --screenshot-dir <path>  Default output directory for screenshots
                        (or AGENT_BROWSER_SCREENSHOT_DIR env)
@@ -2804,6 +2805,8 @@ Refs can be reused across snapshots. Take a fresh snapshot after navigation.
 If a ref's element was replaced, the action uses the one element with the same
 role and name. If that is ambiguous, it fails: run snapshot again.
 Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
+A snapshot that fails to capture, such as one scoped to a selector that matches
+nothing, leaves the previous refs in place while the document is unchanged.
 
 Options:
   -i, --interactive    Only include interactive elements

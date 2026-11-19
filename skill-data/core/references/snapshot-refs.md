@@ -101,6 +101,8 @@ Same-document updates preserve refs for surviving DOM elements. Replaced element
 
 A ref keeps pointing at its DOM node while that node exists. If the node was replaced, agent-browser falls back to the one element with the same role and name, but only when the ref was unique in its snapshot. When duplicates make the match ambiguous, the action fails without acting. Run `snapshot` again and use a fresh ref.
 
+If a snapshot fails because its scope matches nothing, you can still use refs from the last successful snapshot as long as the document has not changed.
+
 ```bash
 # Get initial snapshot
 agent-browser snapshot -i
