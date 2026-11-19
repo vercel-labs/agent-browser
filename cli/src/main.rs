@@ -1492,6 +1492,48 @@ fn run_close_all(flags: &Flags) {
     }
 }
 
+/// An allowlist from a flag, env var or config file that holds no domain is an
+/// error; an absent one means no containment was requested. The message names
+/// where the empty list came from.
+fn validate_allowed_domains_flag(flags: &Flags, args: &[String]) -> Result<(), String> {
+    if matches!(
+        env::var("AGENT_BROWSER_ALLOWED_DOMAINS"),
+        Err(env::VarError::NotUnicode(_))
+    ) {
+        return Err("AGENT_BROWSER_ALLOWED_DOMAINS: the value is not valid UTF-8".to_string());
+    }
+    let Some(domains) = flags.allowed_domains.as_deref() else {
+        return Ok(());
+    };
+    native::network::ensure_allowed_domains_not_empty(domains).map_err(|error| {
+        let source = if flags::before_end_of_options(args)
+            .iter()
+            .any(|a| a == "--allowed-domains")
+        {
+            "--allowed-domains"
+        } else if env::var_os("AGENT_BROWSER_ALLOWED_DOMAINS").is_some() {
+            "AGENT_BROWSER_ALLOWED_DOMAINS"
+        } else {
+            "allowedDomains in the config file"
+        };
+        format!("{source}: {error}")
+    })
+}
+
+/// Chat runs each tool call as a child CLI that sees only the environment, so
+/// the security flags given to `chat` are passed on that way.
+fn forward_security_globals(flags: &Flags) {
+    if let Some(domains) = flags.allowed_domains.as_deref() {
+        env::set_var("AGENT_BROWSER_ALLOWED_DOMAINS", domains.join(","));
+    }
+    if let Some(policy) = flags.action_policy.as_deref() {
+        env::set_var("AGENT_BROWSER_ACTION_POLICY", policy);
+    }
+    if let Some(actions) = flags.confirm_actions.as_deref() {
+        env::set_var("AGENT_BROWSER_CONFIRM_ACTIONS", actions);
+    }
+}
+
 fn main() {
     // Rust ignores SIGPIPE by default, causing println! to panic on broken pipes.
     // Reset to SIG_DFL so the OS terminates the process cleanly instead.
@@ -1714,6 +1756,27 @@ fn main() {
         return;
     }
 
+    // Commands that start a browser or apply settings refuse an empty allowlist.
+    // `close` only tears a session down, so it warns and drops the list; that
+    // keeps it usable to recover from a bad value.
+    if let Err(error) = validate_allowed_domains_flag(&flags, &args) {
+        if matches!(
+            clean.first().map(|s| s.as_str()),
+            Some("close" | "quit" | "exit")
+        ) {
+            eprintln!("{} {}", color::warning_indicator(), error);
+            flags.allowed_domains = None;
+            env::remove_var("AGENT_BROWSER_ALLOWED_DOMAINS");
+        } else {
+            if flags.json {
+                print_json_error(error);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), error);
+            }
+            exit(1);
+        }
+    }
+
     // Handle chat command
     if clean.first().map(|s| s.as_str()) == Some("chat") {
         let message = if clean.len() > 1 {
@@ -1721,6 +1784,7 @@ fn main() {
         } else {
             None
         };
+        forward_security_globals(&flags);
         chat::run_chat(&flags, message);
         return;
     }
@@ -2260,6 +2324,75 @@ fn batch_result_identity(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_validate_allowed_domains_flag_absent_or_real_is_ok() {
+        let mut flags = parse_flags(&[]);
+        flags.allowed_domains = None;
+        assert!(validate_allowed_domains_flag(&flags, &[]).is_ok());
+        flags.allowed_domains = Some(vec!["example.com".to_string()]);
+        assert!(validate_allowed_domains_flag(&flags, &[]).is_ok());
+    }
+
+    #[test]
+    fn test_parsed_empty_allowed_domains_flag_is_rejected() {
+        for value in ["", ",", " ", " , "] {
+            let args = [
+                "open".to_string(),
+                "--allowed-domains".to_string(),
+                value.to_string(),
+            ];
+            let flags = parse_flags(&args);
+            assert_eq!(flags.allowed_domains, Some(Vec::new()), "{value:?}");
+            assert_eq!(
+                validate_allowed_domains_flag(&flags, &args).unwrap_err(),
+                format!(
+                    "--allowed-domains: {}",
+                    native::network::EMPTY_ALLOWED_DOMAINS_ERROR
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn test_chat_forwards_security_flags_through_the_environment() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ]);
+        for name in [
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ] {
+            guard.remove(name);
+        }
+        let mut flags = parse_flags(&[]);
+        flags.allowed_domains = Some(vec!["a.example".into(), "*.b.example".into()]);
+        flags.action_policy = Some("/p.json".into());
+        flags.confirm_actions = Some("click".into());
+        forward_security_globals(&flags);
+        assert_eq!(
+            env::var("AGENT_BROWSER_ALLOWED_DOMAINS").unwrap(),
+            "a.example,*.b.example"
+        );
+        assert_eq!(env::var("AGENT_BROWSER_ACTION_POLICY").unwrap(), "/p.json");
+        assert_eq!(env::var("AGENT_BROWSER_CONFIRM_ACTIONS").unwrap(), "click");
+    }
+
+    #[test]
+    fn test_empty_allowed_domains_error_names_the_env_var() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", " ");
+        let args = ["open".to_string()];
+        let flags = parse_flags(&args);
+        let error = validate_allowed_domains_flag(&flags, &args).unwrap_err();
+        assert!(
+            error.starts_with("AGENT_BROWSER_ALLOWED_DOMAINS: "),
+            "{error}"
+        );
+    }
+
     #[test]
     fn input_mode_session_setting_preserves_command_override() {
         let args: Vec<String> = ["--input-mode", "smooth", "click", "#button", "--human"]

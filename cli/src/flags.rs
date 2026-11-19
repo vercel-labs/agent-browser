@@ -22,6 +22,59 @@ pub(crate) const PROJECT_CONFIG_ALLOWED_KEYS: &[&str] = &[
     "idleTimeout",
 ];
 
+const MISSING_ALLOWED_DOMAINS_VALUE: &str = "--allowed-domains needs a value";
+
+/// Config keys that carry containment. A file that sets one must load whole or
+/// fail; dropping the file would run the session without it.
+const SECURITY_CONFIG_KEYS: &[&str] = &["allowedDomains", "actionPolicy", "confirmActions"];
+
+/// Fails when a config file tries to set a security key and cannot: the value
+/// is unusable, or another field makes the whole file unreadable.
+fn check_security_config(path: &Path) -> Result<(), String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot read config {}: {}", path.display(), e)),
+    };
+    let mentions_security = SECURITY_CONFIG_KEYS
+        .iter()
+        .any(|k| bytes.windows(k.len()).any(|w| w == k.as_bytes()));
+    let object = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(serde_json::Value::Object(object)) => object,
+        Ok(_) | Err(_) if mentions_security => {
+            return Err(format!(
+                "invalid config file {}: not a valid JSON object; it mentions security settings, so it is not skipped",
+                path.display()
+            ));
+        }
+        _ => return Ok(()),
+    };
+    if !SECURITY_CONFIG_KEYS.iter().any(|k| object.contains_key(*k)) {
+        return Ok(());
+    }
+    if let Some(value) = object.get("allowedDomains") {
+        let usable = value.as_array().is_some_and(|domains| {
+            let domains: Vec<&str> = domains.iter().filter_map(|d| d.as_str()).collect();
+            crate::native::network::ensure_allowed_domains_not_empty(&domains).is_ok()
+        });
+        if !usable {
+            return Err(format!(
+                "config file {}: allowedDomains must be an array with at least one domain; remove the key to run without containment",
+                path.display()
+            ));
+        }
+    }
+    serde_json::from_slice::<Config>(&bytes)
+        .map(|_| ())
+        .map_err(|e| {
+            format!(
+                "invalid config file {}: {}; it sets security settings, so it is not skipped",
+                path.display(),
+                e
+            )
+        })
+}
+
 /// Split `--args` into launch args. Newlines always separate args; commas separate
 /// only before another `--` flag, so values like `--disable-features=A,B` and
 /// `--window-position=-32000,-32000` stay whole.
@@ -465,12 +518,16 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
         if !path.exists() {
             return Err(format!("config file not found: {}", path_str));
         }
+        check_security_config(&path)?;
         return read_config_file(&path, false)
             .ok_or_else(|| format!("failed to load config from {}", path_str));
     }
 
-    let user_config = std::env::home_dir()
-        .map(|d| d.join(CONFIG_DIR).join(CONFIG_FILENAME))
+    let user_config_path = std::env::home_dir().map(|d| d.join(CONFIG_DIR).join(CONFIG_FILENAME));
+    if let Some(path) = user_config_path.as_deref() {
+        check_security_config(path)?;
+    }
+    let user_config = user_config_path
         .and_then(|p| read_config_file(&p, false))
         .unwrap_or_default();
 
@@ -1260,15 +1317,14 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                 }
             }
             "--allowed-domains" => {
-                if let Some(s) = args.get(i + 1) {
-                    flags.allowed_domains = Some(
-                        s.split(',')
-                            .map(|d| d.trim().to_lowercase())
-                            .filter(|d| !d.is_empty())
-                            .collect(),
-                    );
-                    i += 1;
-                }
+                let s = args.get(i + 1).ok_or(MISSING_ALLOWED_DOMAINS_VALUE)?;
+                flags.allowed_domains = Some(
+                    s.split(',')
+                        .map(|d| d.trim().to_lowercase())
+                        .filter(|d| !d.is_empty())
+                        .collect(),
+                );
+                i += 1;
             }
             "--capture" => {
                 if let Some(s) = args.get(i + 1) {
@@ -1277,16 +1333,14 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                 }
             }
             "--action-policy" => {
-                if let Some(s) = args.get(i + 1) {
-                    flags.action_policy = Some(s.clone());
-                    i += 1;
-                }
+                let s = args.get(i + 1).ok_or("--action-policy needs a value")?;
+                flags.action_policy = Some(s.clone());
+                i += 1;
             }
             "--confirm-actions" => {
-                if let Some(s) = args.get(i + 1) {
-                    flags.confirm_actions = Some(s.clone());
-                    i += 1;
-                }
+                let s = args.get(i + 1).ok_or("--confirm-actions needs a value")?;
+                flags.confirm_actions = Some(s.clone());
+                i += 1;
             }
             "--confirm-interactive" => {
                 let (val, consumed) = parse_bool_arg(args, i);
