@@ -2574,7 +2574,10 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_TAB_LIST => call_literal(arguments, &["tab", "list"]),
         TOOL_TAB_SWITCH => call_one_string(arguments, "tab", "tab"),
         TOOL_TAB_CLOSE => call_optional_one(arguments, &["tab", "close"], "tab"),
-        TOOL_TAB_KEEP => call_cli_tool(arguments, tab_keep_command_args(arguments)?, None),
+        TOOL_TAB_KEEP => {
+            let (args, literal_start) = tab_keep_command_args(arguments)?;
+            call_cli_tool_at(arguments, args, literal_start, None)
+        }
         TOOL_WINDOW_NEW => call_literal(arguments, &["window", "new"]),
         TOOL_FRAME_SWITCH => call_frame_switch(arguments),
         TOOL_FRAME_MAIN => call_literal(arguments, &["frame", "main"]),
@@ -2937,6 +2940,16 @@ fn command_parts(command: &str) -> Vec<String> {
         .collect()
 }
 
+/// Run a command whose typed positionals are always read as data.
+fn call_positionals(
+    arguments: &Value,
+    options: Vec<String>,
+    positionals: Vec<String>,
+) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = literal_positionals(options, positionals);
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
 fn call_literal(arguments: &Value, parts: &[&str]) -> Result<Value, ProtocolError> {
     call_cli_tool(
         arguments,
@@ -2946,9 +2959,17 @@ fn call_literal(arguments: &Value, parts: &[&str]) -> Result<Value, ProtocolErro
 }
 
 fn call_one_string(arguments: &Value, command: &str, key: &str) -> Result<Value, ProtocolError> {
-    let mut args = command_parts(command);
-    args.push(required_string(arguments, key)?);
-    call_cli_tool(arguments, args, None)
+    let (args, literal_start) = one_string_args(arguments, command, key)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn one_string_args(
+    arguments: &Value,
+    command: &str,
+    key: &str,
+) -> Result<LiteralArgs, ProtocolError> {
+    let value = required_string(arguments, key)?;
+    Ok(literal_positionals(command_parts(command), vec![value]))
 }
 
 fn call_connect(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -2963,35 +2984,30 @@ fn call_connect(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_optional_one(arguments: &Value, parts: &[&str], key: &str) -> Result<Value, ProtocolError> {
-    let mut args: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
-    if let Some(value) = optional_string(arguments, key)? {
-        if !value.is_empty() {
-            args.push(value);
-        }
-    }
-    call_cli_tool(arguments, args, None)
+    let options: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
+    let positionals = optional_string(arguments, key)?
+        .filter(|value| !value.is_empty())
+        .into_iter()
+        .collect();
+    call_positionals(arguments, options, positionals)
 }
 
 /// CLI args for the tab keep tool.
-fn tab_keep_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
-    let mut args = command_parts("tab keep");
-    args.push(required_string(arguments, "keep")?);
-    args.extend(optional_string(arguments, "tab")?.filter(|tab| !tab.is_empty()));
-    Ok(args)
+fn tab_keep_command_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let mut positionals = vec![required_string(arguments, "keep")?];
+    positionals.extend(optional_string(arguments, "tab")?.filter(|tab| !tab.is_empty()));
+    Ok(literal_positionals(command_parts("tab keep"), positionals))
 }
 
 fn call_key_command(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
-    let key = required_string(arguments, "key")?;
-    call_cli_tool(arguments, vec![command.to_string(), key], None)
+    let (args, literal_start) = one_string_args(arguments, command, "key")?;
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn call_keyboard(arguments: &Value, subcommand: &str) -> Result<Value, ProtocolError> {
-    let text = required_string(arguments, "text")?;
-    call_cli_tool(
-        arguments,
-        vec!["keyboard".to_string(), subcommand.to_string(), text],
-        None,
-    )
+    let command = format!("keyboard {subcommand}");
+    let (args, literal_start) = one_string_args(arguments, &command, "text")?;
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 /// Build the CLI args for the open tool. Explicit booleans are forwarded as
@@ -3256,8 +3272,8 @@ fn text_command_args(arguments: &Value, command: &str) -> Result<Vec<String>, Pr
 }
 
 fn call_press(arguments: &Value) -> Result<Value, ProtocolError> {
-    let key = required_string(arguments, "key")?;
-    call_cli_tool(arguments, vec!["press".to_string(), key], None)
+    let (args, literal_start) = one_string_args(arguments, "press", "key")?;
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn call_drag(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -3278,9 +3294,9 @@ fn drag_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
 fn call_upload(arguments: &Value) -> Result<Value, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
     let files = required_string_array(arguments, "files")?;
-    let mut args = vec!["upload".to_string(), selector];
-    args.extend(files);
-    call_cli_tool(arguments, args, None)
+    let mut positionals = vec![selector];
+    positionals.extend(files);
+    call_positionals(arguments, vec!["upload".to_string()], positionals)
 }
 
 fn call_download(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -3380,11 +3396,14 @@ fn har_stop_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
 }
 
 fn call_select(arguments: &Value) -> Result<Value, ProtocolError> {
-    let selector = required_string(arguments, "selector")?;
-    let values = required_string_array(arguments, "values")?;
-    let mut args = vec!["select".to_string(), selector];
-    args.extend(values);
-    call_cli_tool(arguments, args, None)
+    let (args, literal_start) = select_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn select_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let mut positionals = vec![required_string(arguments, "selector")?];
+    positionals.extend(required_string_array(arguments, "values")?);
+    Ok(literal_positionals(vec!["select".to_string()], positionals))
 }
 
 fn call_scroll(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -5699,7 +5718,7 @@ mod tests {
 
     #[test]
     fn tab_keep_uses_canonical_cli_command() {
-        let args = tab_keep_command_args(&json!({"keep": "live", "tab": "t2"})).unwrap();
+        let (args, _) = tab_keep_command_args(&json!({"keep": "live", "tab": "t2"})).unwrap();
         let flags = crate::flags::parse_flags(&args);
         let command = crate::commands::parse_command(&args, &flags).unwrap();
         assert_eq!(command["action"], "tab_keep");
@@ -5940,6 +5959,50 @@ mod tests {
             crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
         assert_eq!(parsed["action"], "navigate");
         assert!(parsed["url"].as_str().unwrap().ends_with("--headed"));
+    }
+
+    fn parse_mcp_cli(
+        arguments: &Value,
+        args: Vec<String>,
+        start: Option<usize>,
+    ) -> (Vec<String>, Value) {
+        let cli = cli_tool_args_at(arguments, args, start, None).unwrap();
+        let flags = crate::flags::parse_flags(&cli);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        (cli, parsed)
+    }
+
+    #[test]
+    fn select_values_shaped_like_routing_flags_stay_literal() {
+        let arguments = json!({
+            "selector": "#s",
+            "values": ["--session", "other", "--namespace", "ns", "x"],
+        });
+        let (args, start) = select_args(&arguments).unwrap();
+        let (cli, parsed) = parse_mcp_cli(&arguments, args, start);
+        let flags = crate::flags::parse_flags(&cli);
+        assert_ne!(flags.session, "other");
+        assert_eq!(parsed["action"], "select");
+        assert_eq!(
+            parsed["values"],
+            json!(["--session", "other", "--namespace", "ns", "x"])
+        );
+    }
+
+    #[test]
+    fn single_typed_positionals_shaped_like_flags_reach_the_command() {
+        let press = json!({"key": "--help"});
+        let (args, start) = one_string_args(&press, "press", "key").unwrap();
+        let (_, parsed) = parse_mcp_cli(&press, args, start);
+        assert_eq!(parsed["action"], "press");
+        assert_eq!(parsed["key"], "--help");
+
+        let typed = json!({"text": "--help"});
+        let (args, start) = one_string_args(&typed, "keyboard type", "text").unwrap();
+        let (_, parsed) = parse_mcp_cli(&typed, args, start);
+        assert_eq!(parsed["action"], "keyboard");
+        assert_eq!(parsed["text"], "--help");
     }
 
     #[test]
