@@ -13,7 +13,8 @@
  * (bin/agent-browser.js) then performs the same linking on its first run.
  */
 
-import { existsSync, mkdirSync, chmodSync, createWriteStream, realpathSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, chmodSync, createWriteStream, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'fs';
+import { pipeline } from 'stream/promises';
 import { basename, dirname, isAbsolute, join, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch, tmpdir } from 'os';
@@ -42,34 +43,44 @@ const version = packageJson.version;
 const GITHUB_REPO = 'vercel-labs/agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
+const REDIRECT_STATUSES = new Set([301, 302, 307, 308]);
+
+// Downloads to a temporary file and renames it into place only after a
+// complete 200 response, so a failed download never leaves a file at `dest`.
 async function downloadFile(url, dest) {
+  const staged = `${dest}.download-${process.pid}`;
+  try {
+    await fetchToFile(url, staged);
+    if (statSync(staged).size === 0) {
+      throw new Error('Downloaded file is empty');
+    }
+    renameSync(staged, dest);
+  } finally {
+    rmSync(staged, { force: true });
+  }
+}
+
+function fetchToFile(url, staged) {
   return new Promise((resolve, reject) => {
-    const file = createWriteStream(dest);
-    
-    const request = (url) => {
-      get(url, (response) => {
-        // Handle redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          request(response.headers.location);
+    const request = (target) => {
+      get(target, (response) => {
+        if (REDIRECT_STATUSES.has(response.statusCode) && response.headers.location) {
+          response.resume();
+          request(new URL(response.headers.location, target).href);
           return;
         }
-        
+
         if (response.statusCode !== 200) {
+          response.resume();
           reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
           return;
         }
-        
-        response.pipe(file);
-        file.on('finish', () => {
-          file.close();
-          resolve();
-        });
-      }).on('error', (err) => {
-        unlinkSync(dest);
-        reject(err);
-      });
+
+        const file = createWriteStream(staged);
+        pipeline(response, file).then(resolve, reject);
+      }).on('error', reject);
     };
-    
+
     request(url);
   });
 }
