@@ -965,7 +965,7 @@ pub(crate) fn prevent_stdio_handle_inheritance() {
 
 /// Exclusive hold on a session's `.lock` file, released when dropped or when
 /// the process exits. The file is opened close-on-exec, so a spawned daemon
-/// does not keep the lock.
+/// does not keep the lock. On Unix the file is owner-only (0600).
 struct SpawnLock {
     _file: fs::File,
 }
@@ -976,15 +976,35 @@ impl SpawnLock {
         fs::create_dir_all(&socket_dir)
             .map_err(|e| format!("Failed to create socket directory: {}", e))?;
         let path = SessionFile::Lock.path_in(&socket_dir, session);
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
             .open(&path)
             .map_err(|e| format!("Failed to open session lock {}: {}", path.display(), e))?;
+        #[cfg(unix)]
+        restrict_to_owner(&file);
         file.lock()
             .map_err(|e| format!("Failed to lock session {}: {}", session, e))?;
         Ok(Self { _file: file })
+    }
+}
+
+/// Narrows a lock file that an earlier version created with a wider mode.
+/// Best effort: only the file's owner can change its mode.
+#[cfg(unix)]
+fn restrict_to_owner(file: &fs::File) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = file.metadata() else {
+        return;
+    };
+    if metadata.permissions().mode() & 0o077 != 0 {
+        let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
     }
 }
 
@@ -2248,5 +2268,43 @@ mod tests {
 
         let _a = SpawnLock::acquire("lock-a").unwrap();
         let _b = SpawnLock::acquire("lock-b").unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_spawn_lock_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let _lock = SpawnLock::acquire("lock-mode").unwrap();
+        let mode = fs::metadata(SessionFile::Lock.path("lock-mode"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "mode is {:o}", mode & 0o777);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_spawn_lock_narrows_an_existing_lock_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let path = SessionFile::Lock.path("lock-old");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _lock = SpawnLock::acquire("lock-old").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }
