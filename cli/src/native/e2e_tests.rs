@@ -6327,6 +6327,24 @@ const REF_FIXTURE_ROUTES: &[(&str, &str)] = &[
         "/fb.html",
         "<title>FB</title><button onclick=\"parent.document.title='FB-DANGER'\">Act</button>",
     ),
+    // Cross-site iframe: `localhost` and `127.0.0.1` are different sites.
+    (
+        "/x.html",
+        "<title>X</title><iframe id='f'></iframe>\
+         <script>onmessage = (e) => { document.title = e.data; };\
+         f.src = 'http://localhost:' + location.port + '/xa.html';</script>",
+    ),
+    (
+        "/xa.html",
+        "<button onclick=\"location.href='/xb.html'\">Next</button>\
+         <button onclick=\"parent.postMessage('XA-OK', '*')\">Act</button>\
+         <script>parent.postMessage('xa-loaded', '*');</script>",
+    ),
+    (
+        "/xb.html",
+        "<button onclick=\"parent.postMessage('XB-DANGER', '*')\">Act</button>\
+         <script>parent.postMessage('xb-loaded', '*');</script>",
+    ),
 ];
 
 async fn ref_fixture_server() -> (String, tokio::task::JoinHandle<()>) {
@@ -6335,16 +6353,19 @@ async fn ref_fixture_server() -> (String, tokio::task::JoinHandle<()>) {
     let server = tokio::spawn(async move {
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 4096];
-            let n = stream.read(&mut request).await.unwrap_or(0);
-            let head = String::from_utf8_lossy(&request[..n]);
-            let path = head.split_whitespace().nth(1).unwrap_or("/");
-            let body = REF_FIXTURE_ROUTES
-                .iter()
-                .find(|(route, _)| *route == path)
-                .map_or("", |(_, html)| *html);
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
-            let _ = stream.write_all(response.as_bytes()).await;
+            // One task per connection: the browser opens idle ones.
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                let n = stream.read(&mut request).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&request[..n]);
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let body = REF_FIXTURE_ROUTES
+                    .iter()
+                    .find(|(route, _)| *route == path)
+                    .map_or("", |(_, html)| *html);
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
         }
     });
     (url, server)
@@ -6469,13 +6490,86 @@ async fn e2e_ref_fails_after_click_triggered_navigation() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_find_after_navigation_following_a_snapshot() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    let snap = ref_fixture_open(&mut state, &url).await;
+    let cont = snapshot_ref(&snap, "\"Continue\"");
+    assert_success(&ref_click(&mut state, &cont).await);
+    ref_wait_until(&mut state, "document.title === 'B'").await;
+
+    // `find` makes its own ref for the current document; the snapshot refs of
+    // the previous page must not affect it.
+    let resp = ref_cmd(
+        &mut state,
+        json!({ "id": "f", "action": "getbyrole", "role": "button", "name": "Continue", "subaction": "click" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(ref_title(&mut state).await, "B-CLICKED");
+    // The old snapshot ref still fails.
+    assert_previous_page(&ref_click(&mut state, &cont).await);
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_fails_after_cross_site_iframe_navigation() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/x.html") }),
+        )
+        .await,
+    );
+    ref_wait_until(&mut state, "document.title === 'xa-loaded'").await;
+    let snap = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    assert!(
+        !state.iframe_sessions.is_empty(),
+        "the iframe must be out of process: {snap}"
+    );
+    let next = snapshot_ref(&snap, "\"Next\"");
+    let act = snapshot_ref(&snap, "\"Act\"");
+
+    assert_success(&ref_click(&mut state, &next).await);
+    ref_wait_until(&mut state, "document.title === 'xb-loaded'").await;
+    assert_previous_page(&ref_click(&mut state, &act).await);
+    assert_eq!(ref_title(&mut state).await, "xb-loaded");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_refs_after_undriven_reload() {
     let (url, server) = ref_fixture_server().await;
     let mut state = DaemonState::new();
     let snap = ref_fixture_open(&mut state, &url).await;
     let reload = snapshot_ref(&snap, "\"Reload\"");
+    let iframe = snapshot_ref(&snap, "Iframe");
     assert_success(&ref_click(&mut state, &reload).await);
     ref_wait_until(&mut state, RELOADED_WITH_FRAME).await;
+
+    // `frame @ref` names the iframe of the replaced document.
+    assert_previous_page(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "fo", "action": "frame", "selector": iframe }),
+        )
+        .await,
+    );
 
     // "e1" is text for these commands, not a ref.
     assert_success(

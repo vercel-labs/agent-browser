@@ -15,6 +15,8 @@ pub struct RefEntry {
     pub selector: Option<String>,
     pub frame_id: Option<String>,
     allow_role_fallback: bool,
+    /// Session and loader of the document the ref was issued in, when known.
+    document: Option<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -70,6 +72,7 @@ impl RefMap {
                 selector: None,
                 frame_id: frame_id.map(|s| s.to_string()),
                 allow_role_fallback: true,
+                document: None,
             },
         );
     }
@@ -88,6 +91,7 @@ impl RefMap {
                 selector: None,
                 frame_id: None,
                 allow_role_fallback: false,
+                document: None,
             },
         );
     }
@@ -110,8 +114,31 @@ impl RefMap {
                 selector: Some(selector),
                 frame_id: None,
                 allow_role_fallback: true,
+                document: None,
             },
         );
+    }
+
+    /// Bind a ref to the document currently recorded for its page and frame.
+    pub fn bind_recorded_document(
+        &mut self,
+        ref_id: &str,
+        page_session: &str,
+        frame: Option<&str>,
+    ) {
+        let document = self
+            .document_identity(page_session, frame)
+            .map(|(session, loader)| (session.to_string(), loader.to_string()));
+        if let Some(entry) = self.map.get_mut(ref_id) {
+            entry.document = document;
+        }
+    }
+
+    /// Bind a ref to a document observed when the ref was created.
+    pub fn bind_document(&mut self, ref_id: &str, session: &str, loader: &str) {
+        if let Some(entry) = self.map.get_mut(ref_id) {
+            entry.document = Some((session.to_string(), loader.to_string()));
+        }
     }
 
     pub fn get(&self, ref_id: &str) -> Option<&RefEntry> {
@@ -440,13 +467,12 @@ async fn resolve_object_in_same_process_frame(
 pub(super) async fn ensure_ref_document_current(
     client: &CdpClient,
     session_id: &str,
-    ref_map: &RefMap,
     ref_id: &str,
     entry: &RefEntry,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
     let frame = entry.frame_id.as_deref();
-    let Some((issued_session, issued_loader)) = ref_map.document_identity(session_id, frame) else {
+    let Some((issued_session, issued_loader)) = entry.document.as_ref() else {
         return Ok(());
     };
     let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
@@ -467,9 +493,25 @@ pub(super) async fn ensure_ref_document_current(
     // A document was recorded, so one that can no longer be read (frame gone,
     // loader missing) is not the document the ref was issued in.
     match super::snapshot::frame_loader(&tree["frameTree"], frame) {
-        Some(current) if current == issued_loader => Ok(()),
+        Some(current) if current == issued_loader.as_str() => Ok(()),
         _ => Err(stale()),
     }
+}
+
+/// Session and loader of the document currently shown in a frame.
+pub(super) async fn current_document(
+    client: &CdpClient,
+    session_id: &str,
+    frame: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
+    let tree = client
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .await
+        .ok()?;
+    let loader = super::snapshot::frame_loader(&tree["frameTree"], frame)?;
+    Some((effective_session_id.to_string(), loader.to_string()))
 }
 
 async fn resolve_ref_center(
@@ -563,8 +605,7 @@ pub async fn resolve_element_center(
         let entry = ref_map
             .get(&ref_id)
             .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
-        ensure_ref_document_current(client, session_id, ref_map, &ref_id, entry, iframe_sessions)
-            .await?;
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
         let point = resolve_ref_center(
             client,
             session_id,
@@ -574,11 +615,11 @@ pub async fn resolve_element_center(
             iframe_sessions,
             require_actionable,
         )
-        .await?;
-        // A navigation during resolution would have re-queried the new document.
-        ensure_ref_document_current(client, session_id, ref_map, &ref_id, entry, iframe_sessions)
-            .await?;
-        return Ok(point);
+        .await;
+        // A document replaced during resolution explains a failure here and
+        // would have been re-queried by the fallback on success.
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
+        return point;
     }
 
     // CSS selector: honor an active `frame <sel>` selection.
@@ -828,13 +869,11 @@ pub async fn resolve_element_object_id(
         let entry = ref_map
             .get(&ref_id)
             .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
-        ensure_ref_document_current(client, session_id, ref_map, &ref_id, entry, iframe_sessions)
-            .await?;
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
         let object =
-            resolve_ref_object_id(client, session_id, entry, &ref_id, iframe_sessions).await?;
-        ensure_ref_document_current(client, session_id, ref_map, &ref_id, entry, iframe_sessions)
-            .await?;
-        return Ok(object);
+            resolve_ref_object_id(client, session_id, entry, &ref_id, iframe_sessions).await;
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
+        return object;
     }
 
     // Selector fallback (CSS or XPath): honor an active `frame <sel>` selection.
@@ -1957,6 +1996,29 @@ mod tests {
 
         assert!(map.get("e1").is_none());
         assert_eq!(map.next_ref_num(), 2);
+    }
+
+    #[test]
+    fn refs_carry_the_document_they_were_issued_in() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-1")));
+        map.add("e1".to_string(), Some(1), "button", "Go", None);
+        map.bind_recorded_document("e1", "page-a", None);
+        // A later temp ref for another document does not rebind the first.
+        map.add("e2".to_string(), Some(2), "button", "Go", None);
+        map.bind_document("e2", "page-a", "loader-2");
+        assert_eq!(
+            map.get("e1").unwrap().document,
+            Some(("page-a".to_string(), "loader-1".to_string()))
+        );
+        assert_eq!(
+            map.get("e2").unwrap().document,
+            Some(("page-a".to_string(), "loader-2".to_string()))
+        );
+        // Without a recorded document a ref carries none.
+        map.add("e3".to_string(), Some(3), "button", "Go", None);
+        map.bind_recorded_document("e3", "page-b", None);
+        assert_eq!(map.get("e3").unwrap().document, None);
     }
 
     #[test]

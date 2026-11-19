@@ -10898,7 +10898,6 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             super::element::ensure_ref_document_current(
                 &mgr.client,
                 &session_id,
-                &state.ref_map,
                 &ref_id,
                 entry,
                 &state.iframe_sessions,
@@ -11400,6 +11399,16 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
         state.active_frame_id.as_deref(),
     );
+    if let Some((session, loader)) = super::element::current_document(
+        &mgr.client,
+        &session_id,
+        state.active_frame_id.as_deref(),
+        &state.iframe_sessions,
+    )
+    .await
+    {
+        state.ref_map.bind_document(&temp_ref, &session, &loader);
+    }
     state.ref_map.set_next_ref_num(ref_num + 1);
 
     let result = execute_subaction(cmd, state, &format!("@{}", temp_ref)).await;

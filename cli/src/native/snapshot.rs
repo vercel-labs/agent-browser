@@ -590,6 +590,10 @@ pub async fn take_snapshot(
             frame_id,
         );
 
+        if document_is_known {
+            ref_map.bind_recorded_document(&ref_id, session_id, frame_id);
+        }
+
         tree_nodes[*idx].has_ref = true;
         tree_nodes[*idx].ref_id = Some(ref_id);
     }
