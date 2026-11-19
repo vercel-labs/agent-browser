@@ -6,6 +6,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "modern-web-guidance": "Modern Web Guidance",
   commands: "Commands",
   webmcp: "WebMCP",
+  poppy: "Personal Agent Protocol",
   configuration: "Configuration",
   plugins: "Plugins",
   selectors: "Selectors",

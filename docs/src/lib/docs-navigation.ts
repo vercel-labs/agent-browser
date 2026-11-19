@@ -41,6 +41,7 @@ export const navigation: NavSection[] = [
       { name: "Network", href: "/network" },
       { name: "CDP Mode", href: "/cdp-mode" },
       { name: "WebMCP", href: "/webmcp" },
+      { name: "Personal Agent Protocol", href: "/poppy" },
       { name: "Streaming", href: "/streaming" },
       { name: "Video Recording", href: "/recording" },
       { name: "WebGPU", href: "/webgpu" },

@@ -80,6 +80,16 @@ export const addedPages = [
     ogAlt: "Modern Web Guidance - agent-browser",
     twitterTitle: "Modern Web Guidance | agent-browser",
   },
+  {
+    path: "/poppy",
+    markdownTitle: "Personal Agent Protocol",
+    title: "Personal Agent Protocol | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Personal Agent Protocol | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Personal Agent Protocol - agent-browser",
+    twitterTitle: "Personal Agent Protocol | agent-browser",
+  },
 ];
 
 /** Every public page: the baseline floor plus pages added since. */
