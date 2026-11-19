@@ -703,21 +703,7 @@ fn parse_command_inner(
                 "navigate" => ("navigate", "navigate <url>"),
                 _ => ("open", "open [url]"),
             };
-            let mut scanner =
-                ArgScanner::new(&rest, &[], command, usage, batch_item, DashPolicy::Reject);
-            let mut url = None;
-            while let Some(arg) = scanner.next()? {
-                match arg {
-                    ScannedArg::Data(value) => {
-                        if url.is_none() {
-                            url = Some(value);
-                        }
-                    }
-                    ScannedArg::BoolFlag(_) | ScannedArg::ValueFlag { .. } => {
-                        unreachable!("{command} has no flags")
-                    }
-                }
-            }
+            let url = scan_single(&rest, command, usage, batch_item)?;
             // `open` without a URL launches the browser but stays on
             // about:blank. Lets agents set up routes, cookies, or init
             // scripts before the first real navigation (see `batch`).
@@ -1485,7 +1471,31 @@ fn parse_command_inner(
                 aliases: &[],
                 takes_value: false,
             }];
-            parse_bare_command(&rest, &id, "close", FLAGS, "close [--all]", batch_item)
+            let mut scanner = ArgScanner::new(
+                &rest,
+                FLAGS,
+                "close",
+                "close [--all]",
+                batch_item,
+                DashPolicy::Reject,
+            );
+            while let Some(arg) = scanner.next()? {
+                match arg {
+                    ScannedArg::BoolFlag("--all") => {
+                        if batch_item {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("{cmd} --all is only supported outside a batch"),
+                                usage: "close [--all]",
+                            });
+                        }
+                    }
+                    ScannedArg::Data(_) => {}
+                    ScannedArg::BoolFlag(name) | ScannedArg::ValueFlag { name, .. } => {
+                        unreachable!("close flag {name} has no handler")
+                    }
+                }
+            }
+            Ok(json!({ "id": id, "action": "close" }))
         }
 
         // === Inspect ===
@@ -5494,6 +5504,31 @@ mod tests {
     }
 
     #[test]
+    fn test_navigation_aliases_share_single_positional_validation() {
+        for command in ["open", "goto", "navigate"] {
+            let err = parse_command(&args(&format!("{command} --bogus")), &default_flags())
+                .unwrap_err()
+                .format();
+            let expected = format!("unknown flag '--bogus' for {command}");
+            assert!(err.contains(expected.as_str()), "{command}: {err}");
+
+            let cmd =
+                parse_command(&args(&format!("{command} -- --bogus")), &default_flags()).unwrap();
+            assert_eq!(cmd["action"], "navigate", "{command}");
+            assert!(
+                cmd["url"].as_str().unwrap().ends_with("--bogus"),
+                "{command}: {}",
+                cmd["url"]
+            );
+        }
+
+        assert_eq!(
+            parse_command(&args("open"), &default_flags()).unwrap()["action"],
+            "launch"
+        );
+    }
+
+    #[test]
     fn test_goto_still_requires_url() {
         assert!(parse_command(&args("goto"), &default_flags()).is_err());
         assert!(parse_command(&args("navigate"), &default_flags()).is_err());
@@ -6654,6 +6689,38 @@ mod tests {
         .unwrap_err()
         .format();
         assert!(err.contains("outer batch invocation"), "{err}");
+    }
+
+    #[test]
+    fn test_batch_rejects_close_all_but_honors_literal_marker() {
+        for command in [
+            "close --all",
+            "quit --all",
+            "exit --all",
+            "close --all -- --all",
+        ] {
+            let err = parse_batch_command(&args(command), &default_flags())
+                .unwrap_err()
+                .format();
+            let action = command.split_whitespace().next().unwrap();
+            let expected = format!("{action} --all is only supported outside a batch");
+            assert!(err.contains(expected.as_str()), "{command}: {err}");
+        }
+
+        for command in [
+            "close -- --all",
+            "close -- --all --all",
+            "quit -- --all",
+            "exit -- --all",
+        ] {
+            let cmd = parse_batch_command(&args(command), &default_flags()).unwrap();
+            assert_eq!(cmd["action"], "close", "{command}");
+        }
+
+        for command in ["close --all", "quit --all", "exit --all"] {
+            let cmd = parse_command(&args(command), &default_flags()).unwrap();
+            assert_eq!(cmd["action"], "close", "{command}");
+        }
     }
 
     #[test]

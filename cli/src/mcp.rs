@@ -1796,7 +1796,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_BATCH,
             "Batch",
-            "Run multiple commands sequentially. Unknown commands and subcommands return errors. Put -- before a dash-leading literal argument inside a command array; set global flags on the batch invocation or MCP server, not inside command arrays. A batch containing only get cdp-url commands never launches a browser.",
+            "Run multiple commands sequentially. Unknown commands and subcommands return errors. Only commands that treat -- as the end of options accept it before a dash-leading literal argument inside a command array; other commands may receive -- as data. Set global flags on the batch invocation or MCP server, not inside command arrays. Closing with --all must run outside a batch. A batch containing only get cdp-url commands never launches a browser.",
             json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" }, "omitCommand": { "type": "boolean", "description": "Replace only command arrays with a stable zero-based input index. Does not make output safe for secrets: errors and response data are unchanged; type echoes typed text, and get value/eval may return input values." } }),
             &["commands"],
         ),
@@ -3341,9 +3341,13 @@ fn stop_path_args(
 }
 
 fn call_frame_switch(arguments: &Value) -> Result<Value, ProtocolError> {
-    let frame = required_string(arguments, "frame")?;
-    let (args, literal_start) = literal_positionals(vec!["frame".to_string()], vec![frame]);
+    let (args, literal_start) = frame_args(arguments)?;
     call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn frame_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let frame = required_string(arguments, "frame")?;
+    Ok(literal_positionals(vec!["frame".to_string()], vec![frame]))
 }
 
 fn call_pushstate(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -5931,7 +5935,7 @@ mod tests {
 
         let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
         let flags = crate::flags::parse_flags(&cli);
-        assert!(!flags.headed);
+        assert!(!flags.cli_headed);
         let parsed =
             crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
         assert_eq!(parsed["action"], "navigate");
@@ -6346,6 +6350,28 @@ mod tests {
         let parsed = round_trip(&arguments, (args, literal_start));
         assert_eq!(parsed["action"], "request_detail");
         assert_eq!(parsed["requestId"], "--3");
+    }
+
+    #[test]
+    fn frame_switch_marker_parity_with_cli_parser() {
+        let arguments = json!({ "frame": "--frame-id" });
+        let (args, literal_start) = frame_args(&arguments).unwrap();
+        assert_eq!(args, ["frame", "--", "--frame-id"]);
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&cli);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        assert_eq!(parsed["action"], "frame");
+        assert_eq!(parsed["selector"], "--frame-id");
+
+        let arguments = json!({ "frame": "main" });
+        let (args, literal_start) = frame_args(&arguments).unwrap();
+        assert_eq!(args, ["frame", "main"]);
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&cli);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        assert_eq!(parsed["action"], "mainframe");
     }
 
     #[test]

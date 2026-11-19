@@ -49,9 +49,9 @@ agent-browser batch \
   "navigate http://localhost:3000/target"
 ```
 
-Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Keep command-specific options and literal command arguments inside each item.
+Put global flags such as `--init-script` and `--enable` only on the outer batch invocation, never inside an item. Inside an item, `--` separates command flags from literal values only for commands that support `--` as an end-of-options marker. For those commands, put command flags before `--`; a path or selector after `--` is literal. Other commands may treat `--` as data. For example, the item `screenshot body -- --draft.png` passes `--draft.png` as the path.
 
-Global flags belong only on the outer invocation, never inside an item. Inside an item, put command flags before `--`; a path or selector after `--` is literal. For example, the item `screenshot body -- --draft.png` passes `--draft.png` as the path.
+Batch items cannot run `close --all`, `quit --all`, or `exit --all`; run the command outside the batch instead.
 
 ```bash
 agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"

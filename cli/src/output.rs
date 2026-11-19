@@ -4150,6 +4150,8 @@ separated by blank lines (or as a JSON array with --json).
 Put global flags such as `--init-script` and `--enable` on the outer batch
 invocation. Keep command-specific options and literal command arguments inside
 each item.
+`close --all`, `quit --all`, and `exit --all` cannot run inside a batch;
+run the command outside the batch instead.
 
 Options:
   --bail               Stop on first error (default: continue all commands)

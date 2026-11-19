@@ -1652,12 +1652,6 @@ fn main() {
         return;
     }
 
-    // Handle close --all: close all active sessions
-    if close_all_requested(&clean) {
-        run_close_all(&flags);
-        return;
-    }
-
     // Handle chat command
     if clean.first().map(|s| s.as_str()) == Some("chat") {
         let message = if clean.len() > 1 {
@@ -1687,6 +1681,11 @@ fn main() {
             exit(1);
         }
     };
+    // Handle close --all: close all active sessions
+    if close_all_requested(&clean) {
+        run_close_all(&flags);
+        return;
+    }
     attach_input_mode(&mut cmd, &flags);
     // Stdin batches are read before launch decisions so a batch of `read`
     // commands is recognized as browserless, like one given as arguments.
