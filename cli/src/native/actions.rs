@@ -2717,7 +2717,19 @@ fn is_auth_login_no_navigate(cmd: &Value) -> bool {
 /// relaunch wait for the next command that can.
 pub(crate) fn command_launches_browser(cmd: &Value) -> bool {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
-    (!skip_launch_action(action) || action == "launch") && !is_auth_login_no_navigate(cmd)
+    (!skips_launch(cmd) || action == "launch") && !is_auth_login_no_navigate(cmd)
+}
+
+/// Whether the command runs without a browser launch. `get cdp-url` never
+/// launches one, but it attaches to the external browser its own settings
+/// name with `--cdp` or `--auto-connect`, as `connect` does.
+fn skips_launch(cmd: &Value) -> bool {
+    let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
+    skip_launch_action(action) && !(action == "cdp_url" && cdp_url_attaches(cmd))
+}
+
+fn cdp_url_attaches(cmd: &Value) -> bool {
+    Patch::from_wire(cmd.get("settings")).is_ok_and(|patch| patch.names_attach_target())
 }
 
 fn skip_launch_action(action: &str) -> bool {
@@ -2918,7 +2930,7 @@ fn policy_actions_for_command(
             }
         }
         append_launch_policy_actions(&mut actions, &launch, &plugins);
-    } else if !skip_launch_action(action) && needs_implicit_launch {
+    } else if !skips_launch(cmd) && needs_implicit_launch {
         let plugins = plugins_from_command_or_env(cmd);
         if let Some((field, value)) = settings_launch_target(settings) {
             append_launch_policy_actions(&mut actions, &json!({ field: value }), &plugins);
@@ -3169,7 +3181,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .map(|patch| state.settings.plan(patch))
         .filter(|plan| plan.relaunch);
 
-    let skip_launch = skip_launch_action(action);
+    let skip_launch = skips_launch(cmd);
     let restore_key_change_needs_launch = !skip_launch
         && command_changes_restore_key(cmd, state)
         && has_active_browser_session(state);
@@ -23194,6 +23206,26 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             .find(|c| c["option"] == "profile")
             .expect("the pending change is reported");
         assert_eq!(profile["applied"], false);
+    }
+
+    #[test]
+    fn test_get_cdp_url_attaches_only_to_a_browser_it_names() {
+        assert!(!command_launches_browser(&json!({ "action": "cdp_url" })));
+        for settings in [json!({ "cdp": "9222" }), json!({ "auto-connect": true })] {
+            let cmd = json!({ "action": "cdp_url", "settings": settings });
+            assert!(command_launches_browser(&cmd), "{cmd}");
+        }
+        for settings in [
+            json!({ "auto-connect": false }),
+            json!({ "provider": "browserbase" }),
+            json!({ "profile": "/tmp/p" }),
+        ] {
+            let cmd = json!({ "action": "cdp_url", "settings": settings });
+            assert!(!command_launches_browser(&cmd), "{cmd}");
+        }
+        // Other commands that skip the launch still skip it.
+        let cmd = json!({ "action": "session_info", "settings": { "cdp": "9222" } });
+        assert!(!command_launches_browser(&cmd));
     }
 
     #[tokio::test]

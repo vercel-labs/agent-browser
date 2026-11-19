@@ -141,9 +141,10 @@ fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings:
         }
     }
     // Asking for a running browser's CDP URL never launches or relaunches one,
-    // so launch settings do not apply to it.
+    // so launch settings do not apply to it. It still attaches to the browser
+    // that `--cdp` or `--auto-connect` names, as `connect` does.
     if command_is_cdp_url_metadata(cmd) {
-        return patch.without_launch_settings();
+        return patch.attach_settings_only();
     }
     if command_is_browserless(cmd) {
         patch.remove(session_settings::Key::CaCert);
@@ -2722,6 +2723,20 @@ mod tests {
         let (command, wire) = settings_of(&["--profile", "/tmp/p", "snapshot"]);
         assert!(!command_is_cdp_url_metadata(&command));
         assert_eq!(wire["profile"], "/tmp/p");
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_keeps_the_browser_it_attaches_to() {
+        let (_, wire) = settings_of(&["--cdp", "9222", "--profile", "/tmp/p", "get", "cdp-url"]);
+        assert_eq!(wire["cdp"], "9222", "{wire}");
+        assert!(wire.get("profile").is_none(), "{wire}");
+
+        let (_, wire) = settings_of(&["--auto-connect", "get", "cdp-url"]);
+        assert_eq!(wire["auto-connect"], true, "{wire}");
+
+        // Headers go with an endpoint; without one there is nothing to attach.
+        let (_, wire) = settings_of(&["--cdp-headers", r#"{"A":"b"}"#, "get", "cdp-url"]);
+        assert!(wire.get("cdp-headers").is_none(), "{wire}");
     }
 
     #[test]
