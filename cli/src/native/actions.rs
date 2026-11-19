@@ -3127,6 +3127,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return error_response(&id, &super::browser::to_ai_friendly_error(&e));
     }
 
+    if let Err(e) = reject_ref_from_replaced_document(state, cmd).await {
+        return error_response(&id, &e);
+    }
+
     // After the drain, so late requests from the previous command keep its tag.
     begin_flow_step(action, cmd, state).await;
 
@@ -6361,6 +6365,54 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     }
 
     navigate_active_page(state, url, wait_until).await
+}
+
+/// Fail a command that names a ref issued for a main-frame document the page
+/// no longer shows (a click, script or redirect navigated it). Same-document
+/// changes keep the loader, so their refs stay valid.
+async fn reject_ref_from_replaced_document(
+    state: &mut DaemonState,
+    cmd: &Value,
+) -> Result<(), String> {
+    let Some(stale_ref) = cmd.as_object().and_then(|fields| {
+        fields
+            .values()
+            .filter_map(Value::as_str)
+            .filter_map(super::element::parse_ref)
+            .find(|ref_id| state.ref_map.get(ref_id).is_some())
+    }) else {
+        return Ok(());
+    };
+    let Some(mgr) = state.browser.as_ref() else {
+        return Ok(());
+    };
+    let Ok(session_id) = mgr.active_session_id() else {
+        return Ok(());
+    };
+    let Some(issued_for) = state.ref_map.main_document_loader(session_id) else {
+        return Ok(());
+    };
+    let Ok(tree) = mgr
+        .client
+        .send_command_no_params("Page.getFrameTree", Some(session_id))
+        .await
+    else {
+        return Ok(());
+    };
+    let Some(current) = tree["frameTree"]["frame"]["loaderId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(());
+    };
+    if current == issued_for {
+        return Ok(());
+    }
+    let session_id = session_id.to_string();
+    state.ref_map.invalidate_page(&session_id);
+    Err(format!(
+        "Ref @{stale_ref} is from a previous page. The page has navigated since the snapshot; take a new snapshot and use a fresh ref."
+    ))
 }
 
 /// Navigate the active page and drop element refs and frame scope. Every

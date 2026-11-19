@@ -235,6 +235,13 @@ impl RefMap {
         self.map.clear();
     }
 
+    /// Loader of the main-frame document the page's refs were issued for.
+    pub fn main_document_loader(&self, page_session: &str) -> Option<&str> {
+        self.documents
+            .get(&(page_session.to_string(), None))
+            .map(|document| document.loader.as_str())
+    }
+
     /// Drop all document identities while preserving the monotonic ref counter.
     pub fn invalidate_all_documents(&mut self) {
         self.documents.clear();
@@ -1867,6 +1874,19 @@ mod tests {
 
         assert!(map.get("e1").is_none());
         assert_eq!(map.next_ref_num(), 2);
+    }
+
+    #[test]
+    fn main_document_loader_tracks_the_issuing_document() {
+        let mut map = RefMap::new();
+        assert_eq!(map.main_document_loader("page-a"), None);
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-1")));
+        assert_eq!(map.main_document_loader("page-a"), Some("loader-1"));
+        assert_eq!(map.main_document_loader("page-b"), None);
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-2")));
+        assert_eq!(map.main_document_loader("page-a"), Some("loader-2"));
+        map.invalidate_page("page-a");
+        assert_eq!(map.main_document_loader("page-a"), None);
     }
 
     #[test]

@@ -6303,6 +6303,81 @@ async fn e2e_diff_snapshot() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_ref_fails_after_click_triggered_navigation() {
+    let html = "<button id='go' onclick='location.reload()'>Go</button>\
+        <button id='push' onclick=\"history.pushState({}, '', '#p')\">Push</button>";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", html.len(), html);
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap().to_string();
+    let ref_of = |label: &str| -> String {
+        let line = snapshot.lines().find(|l| l.contains(label)).unwrap();
+        let start = line.find("ref=").unwrap() + 4;
+        line[start..]
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect()
+    };
+    let go = format!("@{}", ref_of("\"Go\""));
+    let push = format!("@{}", ref_of("\"Push\""));
+
+    // A same-document change keeps refs usable.
+    for id in ["4", "5"] {
+        let resp = execute_command(
+            &json!({ "id": id, "action": "click", "selector": push }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+    }
+
+    // The click replaces the document; the old ref must fail, not hit the new copy.
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "click", "selector": go }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "click", "selector": go }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    assert!(resp["error"].as_str().unwrap().contains("previous page"));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_diff_url_aligns_refs_after_snapshot() {
     let mut state = DaemonState::new();
 
