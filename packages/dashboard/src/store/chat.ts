@@ -7,10 +7,6 @@ import { useCallback } from "react";
 import { Chat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 
-function getChatStatusUrl(): string {
-  return "/api/chat/status";
-}
-
 export function getChatApiUrl(): string {
   return "/api/chat";
 }
@@ -91,23 +87,11 @@ export interface ModelInfo {
   context_window?: number;
 }
 
-export const chatEnabledAtom = atom(false);
-export const chatModelAtom = atom<string | undefined>(undefined);
 export const availableModelsAtom = atom<ModelInfo[]>([]);
 
-export function useChatStatusSync() {
-  const fetchStatus = useAtomCallback(
+export function useChatModelsSync(chatEnabled: boolean) {
+  const fetchModels = useAtomCallback(
     useCallback(async (_get, set) => {
-      try {
-        const resp = await fetch(getChatStatusUrl());
-        if (resp.ok) {
-          const data = await resp.json();
-          set(chatEnabledAtom, !!data.enabled);
-          if (data.model) set(chatModelAtom, data.model);
-        }
-      } catch {
-        set(chatEnabledAtom, false);
-      }
       try {
         const resp = await fetch(getModelsApiUrl());
         if (resp.ok) {
@@ -130,6 +114,6 @@ export function useChatStatusSync() {
   );
 
   useEffect(() => {
-    fetchStatus();
-  }, [fetchStatus]);
+    if (chatEnabled) fetchModels();
+  }, [chatEnabled, fetchModels]);
 }

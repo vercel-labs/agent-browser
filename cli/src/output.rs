@@ -3880,6 +3880,7 @@ The dashboard is bundled into the binary and requires no separate install.
 
 Subcommands:
   start [--port <n>] [--allowed-origins <origins>]
+        [--engines <list>] [--providers <list|none>]
                         Start the dashboard server (default port: 4848)
   stop                 Stop the dashboard server
 
@@ -3896,7 +3897,7 @@ For reverse-proxied origins, start prints private external access URLs
 containing an unguessable fragment token. Open the matching URL to establish
 the browser session and do not share it. Loopback URLs do not require or
 receive this token. Configure a reverse proxy to redact cookies from logs.
-Stop the dashboard before changing its port or allowed origins.
+Stop the dashboard before changing its settings.
 
 Options:
   --port <n>           Port for the dashboard server (default: 4848)
@@ -3905,10 +3906,21 @@ Options:
                        dashboard is exposed through a reverse proxy. Loopback
                        origins are allowed by default. Can also be set with
                        AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS.
+  --engines <list>     Comma-separated engines the New Session dialog offers:
+                       chrome, lightpanda (default: all). Can also be set with
+                       AGENT_BROWSER_DASHBOARD_ENGINES.
+  --providers <list|none>
+                       Comma-separated providers the New Session dialog
+                       offers: agentcore, browserbase, browserless,
+                       browseruse, kernel, or none (default: all). Can also be
+                       set with AGENT_BROWSER_DASHBOARD_PROVIDERS.
 
 Ports must be integers from 1 to 65535. Every allowed origin must be valid.
-Unknown options, missing values, and malformed origins fail without starting
-the dashboard server.
+Unknown options, missing values, malformed origins, and unknown engine or
+provider names fail without starting the dashboard server. The engine and
+provider lists only change what the dashboard UI offers.
+
+The Chat tab appears only when AI_GATEWAY_API_KEY is set.
 
 Global Options:
   --json               Output as JSON
@@ -3917,6 +3929,7 @@ Examples:
   agent-browser dashboard start
   agent-browser dashboard start --port 8080
   agent-browser dashboard start --allowed-origins https://dashboard.example.com
+  agent-browser dashboard start --engines chrome --providers none
   agent-browser dashboard stop
 "##
         }
@@ -4917,6 +4930,10 @@ Environment:
   AGENT_BROWSER_STREAM_MAX_HEIGHT Cap frame height in pixels (default: the viewport)
   AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS
                                  Comma-separated exact HTTPS origins allowed for a reverse-proxied dashboard
+  AGENT_BROWSER_DASHBOARD_ENGINES
+                                 Engines the dashboard's New Session dialog offers (default: all)
+  AGENT_BROWSER_DASHBOARD_PROVIDERS
+                                 Providers the dashboard's New Session dialog offers, or none (default: all)
   AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (default: 3600000 = 1h; 0 disables)
                                  Dashboard input resets the timer; headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default
                                  Provider-owned cloud browsers remain eligible for default cleanup
