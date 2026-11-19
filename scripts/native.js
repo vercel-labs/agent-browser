@@ -89,6 +89,25 @@ function isUsableFile(path) {
   }
 }
 
+// Returns the platform package binary path whether or not it exists, or null.
+function platformPackageBinaryPath(packageRoot, target) {
+  try {
+    const require = createRequire(join(packageRoot, 'package.json'));
+    const manifest = require.resolve(`${target.packageName}/package.json`);
+    return join(dirname(manifest), 'bin', target.file);
+  } catch {
+    return null;
+  }
+}
+
+// Returns existing zero-byte candidates, so callers can name them.
+export function emptyNativeBinaries(packageRoot, target) {
+  const paths = target.candidates.map((name) => join(packageRoot, 'bin', name));
+  const packaged = platformPackageBinaryPath(packageRoot, target);
+  if (packaged) paths.push(packaged);
+  return paths.filter((path) => existsSync(path) && !isUsableFile(path));
+}
+
 // Returns the binary inside the installed platform package, or null.
 export function platformPackageBinary(packageRoot, target) {
   try {

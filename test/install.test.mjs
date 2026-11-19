@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -40,6 +40,36 @@ test('bin entry link survives the install directory being renamed', { skip: proc
   assert.equal(resolved, join(final, 'lib', 'node_modules', 'agent-browser', 'bin', 'agent-browser-darwin-arm64'));
 });
 
+test('an empty platform package binary is skipped and named by the launcher', { skip: process.platform === 'win32' }, async (t) => {
+  const packageRoot = await tempDir(t, 'agent-browser-empty-pkg-');
+  const { nativeTarget } = await import(pathToFileURL(join(scriptsDir, 'native.js')).href);
+  const target = nativeTarget();
+  await mkdir(join(packageRoot, 'bin'));
+  await copyFile(join(repositoryRoot, 'bin', 'agent-browser.js'), join(packageRoot, 'bin', 'agent-browser.js'));
+  await mkdir(join(packageRoot, 'scripts'));
+  for (const name of ['native.js', 'link-native.js']) {
+    await copyFile(join(scriptsDir, name), join(packageRoot, 'scripts', name));
+  }
+  await writeFile(join(packageRoot, 'package.json'), '{"type":"module"}\n');
+  const platformDir = join(packageRoot, 'node_modules', ...target.packageName.split('/'));
+  await mkdir(join(platformDir, 'bin'), { recursive: true });
+  await writeFile(join(platformDir, 'package.json'), JSON.stringify({ name: target.packageName }));
+  const emptyBinary = join(platformDir, 'bin', target.file);
+  await writeFile(emptyBinary, '');
+
+  const { findNativeBinary, emptyNativeBinaries } = await import(pathToFileURL(join(packageRoot, 'scripts', 'native.js')).href);
+  assert.equal(findNativeBinary(packageRoot, target), null);
+  assert.deepEqual(emptyNativeBinaries(packageRoot, target), [await realpath(emptyBinary)]);
+
+  const result = spawnSync(process.execPath, [join(packageRoot, 'bin', 'agent-browser.js')], {
+    encoding: 'utf8',
+    env: { ...process.env },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /0 bytes/);
+  assert.match(result.stderr, new RegExp(target.file.replace('.', '\\.')));
+});
+
 test('findNativeBinary skips empty candidates', async (t) => {
   const { findNativeBinary } = await import(pathToFileURL(join(scriptsDir, 'native.js')).href);
   const packageRoot = await tempDir(t, 'agent-browser-native-');
@@ -52,6 +82,10 @@ test('findNativeBinary skips empty candidates', async (t) => {
   await writeFile(join(packageRoot, 'bin', 'valid'), payload);
   assert.equal(findNativeBinary(packageRoot, target), join(packageRoot, 'bin', 'valid'));
 });
+
+// A regression must fail red, not hang CI.
+const POSTINSTALL_TIMEOUT_MS = 30_000;
+test.postinstall = (name, fn) => test(name, { timeout: POSTINSTALL_TIMEOUT_MS }, fn);
 
 // Runs postinstall in a temp package with the GitHub download pointed at a
 // local server. `respond` handles every request the installer makes.
@@ -104,26 +138,28 @@ await import('./scripts/postinstall.js');
   let stdout = '';
   child.stdout.on('data', (data) => (stdout += data));
   child.stderr.on('data', (data) => (stdout += data));
-  await new Promise((resolve, reject) => {
+  t.after(() => child.kill());
+  const status = await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('close', resolve);
   });
+  assert.equal(status, 0, stdout);
   const binDir = join(packageRoot, 'bin');
   return { stdout, binDir, files: await readdir(binDir), binary: join(binDir, 'agent-browser-darwin-arm64') };
 }
 
-test('a 404 download leaves no file in bin/', async (t) => {
+test.postinstall('a 404 download leaves no file in bin/', async (t) => {
   const result = await runPostinstall(t, (_req, res) => res.writeHead(404).end('missing'));
   assert.match(result.stdout, /Could not download native binary/);
   assert.deepEqual(result.files, []);
 });
 
-test('an empty 200 download leaves no file in bin/', async (t) => {
+test.postinstall('an empty 200 download leaves no file in bin/', async (t) => {
   const result = await runPostinstall(t, (_req, res) => res.writeHead(200).end());
   assert.deepEqual(result.files, []);
 });
 
-test('a truncated download leaves no file in bin/', async (t) => {
+test.postinstall('a truncated download leaves no file in bin/', async (t) => {
   const result = await runPostinstall(t, (_req, res) => {
     res.writeHead(200, { 'Content-Length': 1000 });
     res.write('partial');
@@ -148,26 +184,26 @@ async function assertInstalled(result) {
 
 for (const status of [301, 302, 307, 308]) {
   for (const location of ['/final', 'https://github.com/final']) {
-    test(`download follows a ${status} redirect to ${location}`, async (t) => {
+    test.postinstall(`download follows a ${status} redirect to ${location}`, async (t) => {
       const result = await runPostinstall(t, serveFinal((_req, res) => res.writeHead(status, { Location: location }).end()));
       await assertInstalled(result);
     });
   }
 }
 
-test('a redirect to a non-https URL fails cleanly and leaves no file', async (t) => {
+test.postinstall('a redirect to a non-https URL fails cleanly and leaves no file', async (t) => {
   const result = await runPostinstall(t, (_req, res) => res.writeHead(302, { Location: 'http://127.0.0.1:1/final' }).end());
   assert.match(result.stdout, /Could not download native binary/);
   assert.deepEqual(result.files, []);
 });
 
-test('an invalid redirect Location fails cleanly and leaves no file', async (t) => {
+test.postinstall('an invalid redirect Location fails cleanly and leaves no file', async (t) => {
   const result = await runPostinstall(t, (_req, res) => res.writeHead(302, { Location: 'http://' }).end());
   assert.match(result.stdout, /Could not download native binary/);
   assert.deepEqual(result.files, []);
 });
 
-test('20 redirects are followed and a 21st fails', async (t) => {
+test.postinstall('20 redirects are followed and a 21st fails', async (t) => {
   let hops = 0;
   const ok = await runPostinstall(t, (req, res) => {
     if (req.url === '/final') return res.writeHead(200).end(payload);
