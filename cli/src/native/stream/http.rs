@@ -60,12 +60,8 @@ fn parse_origin(peeked: &[u8]) -> Option<String> {
 
 fn normalize_origin_authority(origin: &str) -> Option<String> {
     let url = url::Url::parse(origin).ok()?;
+    // `host_str` already brackets IPv6 literals.
     let host = url.host_str()?.to_ascii_lowercase();
-    let host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host
-    };
     let default_port = (url.scheme() == "http" && url.port() == Some(80))
         || (url.scheme() == "https" && url.port() == Some(443));
     Some(match url.port() {
@@ -899,5 +895,17 @@ mod tests {
         let request = "GET /index.html HTTP/1.1\r\nHost: localhost:7777\r\nOrigin: https://evil.example\r\n\r\n";
         let response = send_request_to_handler(request, "x").await;
         assert!(!response.starts_with("HTTP/1.1 403"), "{response}");
+    }
+
+    #[test]
+    fn ipv6_loopback_origin_matches_host_authority() {
+        assert_eq!(
+            normalize_origin_authority("http://[::1]:7777").as_deref(),
+            Some("[::1]:7777")
+        );
+        let request =
+            "GET /api/tabs HTTP/1.1\r\nHost: [::1]:7777\r\nOrigin: http://[::1]:7777\r\n\r\n";
+        assert!(is_authorized_api_request("GET", request));
+        assert!(is_authorized_api_request("POST", request));
     }
 }
