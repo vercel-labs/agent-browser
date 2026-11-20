@@ -482,6 +482,7 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
     })
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub struct Flags {
     pub json: bool,
     pub headed: bool,

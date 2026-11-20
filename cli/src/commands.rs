@@ -2150,6 +2150,7 @@ fn parse_command_inner(
                     //   tab new [url]
                     //   tab new --label <name> [url]
                     //   tab new [url] --label <name>
+                    //   tab new [--label <name>] -- <url>
                     let mut cmd = json!({ "id": id, "action": "tab_new" });
                     let mut i = 1;
                     while i < rest.len() {
@@ -2160,6 +2161,14 @@ fn parse_command_inner(
                                     usage: "tab new --label <name> [url]",
                                 })?;
                                 cmd["label"] = json!(name);
+                                i += 2;
+                            }
+                            "--" => {
+                                if let Some(url) =
+                                    rest.get(i + 1).filter(|_| cmd.get("url").is_none())
+                                {
+                                    cmd["url"] = json!(url);
+                                }
                                 i += 2;
                             }
                             other if !other.starts_with("--") && cmd.get("url").is_none() => {
@@ -4846,6 +4855,59 @@ pub fn shell_words_split(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operand_marker_is_accepted_by_every_documented_command() {
+        // (command without the marker, index to insert it at)
+        let cases: &[(&[&str], usize)] = &[
+            (&["select", "#a", "v"], 1),
+            (&["upload", "#f", "/tmp/a"], 1),
+            (&["press", "Enter"], 1),
+            (&["keydown", "Shift"], 1),
+            (&["keyup", "Shift"], 1),
+            (&["keyboard", "type", "hi"], 2),
+            (&["keyboard", "inserttext", "hi"], 2),
+            (&["set", "device", "iPhone 15"], 2),
+            (&["clipboard", "write", "hi"], 2),
+            (&["auth", "show", "name"], 2),
+            (&["auth", "delete", "name"], 2),
+            (&["webmcp", "cancel", "id"], 2),
+            (&["dialog", "accept", "text"], 2),
+            (&["tab", "t1"], 1),
+            (&["tab", "close", "t1"], 2),
+            (&["tab", "keep", "live", "t1"], 2),
+            (&["tab", "new", "https://example.com"], 2),
+        ];
+        let flags = default_flags();
+        for (words, at) in cases {
+            let plain: Vec<String> = words.iter().map(|s| s.to_string()).collect();
+            let mut marked = plain.clone();
+            marked.insert(*at, "--".to_string());
+            let mut a = parse_command(&plain, &flags).unwrap();
+            let mut b = parse_command(&marked, &flags)
+                .unwrap_or_else(|e| panic!("{words:?} with marker: {e:?}"));
+            a["id"] = json!(null);
+            b["id"] = json!(null);
+            assert_eq!(a, b, "{words:?}");
+        }
+        let mut plugin: Vec<String> = ["plugin", "show", "--", "x"].map(String::from).to_vec();
+        strip_operand_marker(&mut plugin);
+        assert_eq!(plugin, ["plugin", "show", "x"]);
+        let mut add: Vec<String> = ["plugin", "add", "--", "ref"].map(String::from).to_vec();
+        strip_operand_marker(&mut add);
+        assert_eq!(add, ["plugin", "add", "ref"]);
+    }
+
+    #[test]
+    fn tab_new_marker_makes_the_url_literal() {
+        let flags = default_flags();
+        let args: Vec<String> = ["tab", "new", "--label", "a", "--", "--x"]
+            .map(String::from)
+            .to_vec();
+        let parsed = parse_command(&args, &flags).unwrap();
+        assert_eq!(parsed["url"], "--x");
+        assert_eq!(parsed["label"], "a");
+    }
 
     fn default_flags() -> Flags {
         Flags {

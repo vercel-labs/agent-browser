@@ -2097,12 +2097,9 @@ fn mouse_button_schema() -> Value {
 fn click_modifiers_schema() -> Value {
     json!({
         "type": "array",
-        "items": {
-            "type": "string",
-            "enum": Modifiers::NAMES,
-        },
+        "items": { "type": "string" },
         "minItems": 1,
-        "description": "Modifier keys held during the click.",
+        "description": "Modifier keys held during the click: alt, control, meta, shift. Aliases ctrl, cmd and command, any case, and lists such as ctrl+shift are accepted.",
     })
 }
 
@@ -2363,7 +2360,6 @@ fn find_tool(name: &str) -> Option<Value> {
         .find(|tool| tool.get("name").and_then(|v| v.as_str()) == Some(name))
 }
 
-/// Returns an error naming any argument keys the tool's input schema does not declare.
 /// Rejects values outside a property's schema `enum`, so a closed set never
 /// reaches the CLI as free text.
 fn reject_invalid_enum_values(definition: &Value, arguments: &Value) -> Result<(), ProtocolError> {
@@ -2412,6 +2408,7 @@ fn check_enum_value(key: &str, allowed: &[Value], given: &str) -> Result<(), Pro
     )))
 }
 
+/// Returns an error naming any argument keys the tool's input schema does not declare.
 fn reject_unknown_arguments(
     name: &str,
     definition: &Value,
@@ -3337,6 +3334,9 @@ fn click_command_args(arguments: &Value, command: &str) -> Result<LiteralArgs, P
         options.push(button);
     }
     if let Some(modifiers) = optional_string_array(arguments, "modifiers")? {
+        for modifier in &modifiers {
+            Modifiers::parse_list(modifier).map_err(ProtocolError::invalid_params)?;
+        }
         options.push("--modifiers".to_string());
         options.push(modifiers.join(","));
     }
@@ -3994,15 +3994,14 @@ fn call_cookies_set_curl(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_tab_new(arguments: &Value) -> Result<Value, ProtocolError> {
-    let mut args = vec!["tab".to_string(), "new".to_string()];
-    if let Some(url) = optional_string(arguments, "url")? {
-        args.push(url);
-    }
+    let mut options = vec!["tab".to_string(), "new".to_string()];
     if let Some(label) = optional_string(arguments, "label")? {
-        args.push("--label".to_string());
-        args.push(label);
+        options.push("--label".to_string());
+        options.push(label);
     }
-    call_cli_tool(arguments, args, None)
+    let url = optional_string(arguments, "url")?;
+    let (args, literal_start) = literal_positionals(options, url.into_iter().collect());
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn call_profiler_start(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4707,6 +4706,11 @@ fn append_common_global_args(
                 args.push("--restore".to_string());
             }
         } else if let Some(key) = restore.as_str() {
+            if key.starts_with('-') {
+                return Err(ProtocolError::invalid_params(
+                    "restore keys may not start with '-'",
+                ));
+            }
             args.push(format!("--restore={}", key));
         } else {
             return Err(ProtocolError::invalid_params(
@@ -7804,17 +7808,56 @@ mod flag_shaped_values {
         result.map(|_| runs).map_err(|e| e.message)
     }
 
-    fn violations(argv: &[String], arguments: &Value, base_session: &str) -> Vec<String> {
+    /// Splits a pretty-printed struct into one block per top-level field.
+    fn field_blocks(pretty: &str) -> Vec<String> {
+        let mut blocks: Vec<String> = Vec::new();
+        for line in pretty.lines().skip(1) {
+            let top_level =
+                line.starts_with("    ") && !line[4..].starts_with([' ', ')', ']', '}']);
+            match blocks.last_mut() {
+                Some(last) if !top_level => {
+                    last.push('\n');
+                    last.push_str(line.trim());
+                }
+                _ => blocks.push(line.trim().to_string()),
+            }
+        }
+        blocks
+    }
+
+    /// The same edit with the injected text replaced by a plain value of the
+    /// same shape; flags the tool's own option sets from it are expected.
+    fn neutral(value: &Value) -> Value {
+        match value {
+            Value::Array(items) => json!(items.iter().map(|_| "x").collect::<Vec<_>>()),
+            Value::Object(map) => json!({"k": map.values().next().cloned().unwrap_or(json!("v"))}),
+            _ => json!("x"),
+        }
+    }
+
+    /// Every parsed global flag must match the neutral reference call, except
+    /// fields whose value is the injected text itself (the tool's own option).
+    fn violations(
+        argv: &[String],
+        base_flags: &str,
+        base_session: &str,
+        payloads: &[String],
+    ) -> Vec<String> {
         let mut bad = Vec::new();
         let flags = crate::flags::parse_flags(argv);
         if flags.session != base_session {
             bad.push(format!("session={}", flags.session));
         }
-        if flags.restore.is_some() && arguments.get("restore").is_none() {
-            bad.push("restore".into());
-        }
-        if flags.webgpu || flags.proxy.is_some() {
-            bad.push("launch flag".into());
+        let mut remaining = field_blocks(base_flags);
+        for block in field_blocks(&format!("{flags:#?}")) {
+            if let Some(at) = remaining.iter().position(|b| *b == block) {
+                remaining.swap_remove(at);
+            } else if !payloads
+                .iter()
+                .any(|p| block.to_lowercase().contains(&p.to_lowercase()))
+            {
+                bad.push(format!("flag changed: {}", block.replace('\n', " ")));
+            }
         }
         let cleaned = crate::flags::clean_args(argv);
         let options = crate::flags::before_end_of_options(&cleaned);
@@ -7844,6 +7887,8 @@ mod flag_shaped_values {
             "--restore",
             "--restore=",
             "--state",
+            "--namespace",
+            "--allowed-domains",
         ]
         .iter()
         .flat_map(|flag| [flag.to_string(), format!("{flag}=evil")])
@@ -7866,9 +7911,12 @@ mod flag_shaped_values {
                 base.insert(key.clone(), benign(key, schema));
             }
             let base = Value::Object(base);
-            let base_session = match record(&name, &base) {
-                Ok(runs) if !runs.is_empty() => crate::flags::parse_flags(&runs[0]).session,
-                Ok(_) => "default".to_string(),
+            let (base_session, base_flags) = match record(&name, &base) {
+                Ok(runs) if !runs.is_empty() => {
+                    let flags = crate::flags::parse_flags(&runs[0]);
+                    (flags.session.clone(), format!("{flags:#?}"))
+                }
+                Ok(_) => ("default".to_string(), String::new()),
                 Err(error) => {
                     skipped.push(format!("{name}: {error}"));
                     continue;
@@ -7881,27 +7929,47 @@ mod flag_shaped_values {
             {
                 slots(&format!("/{key}"), schema, &mut pointers);
             }
+            // Shared arguments share one code path for every tool, so three tools
+            // stand in for all of them.
+            let shared_slots: Vec<String> = SHARED_ARGUMENTS
+                .iter()
+                .filter(|k| {
+                    !props.contains_key(**k)
+                        && !matches!(**k, "session" | "extraArgs" | "timeoutMs")
+                        && [TOOL_OPEN, TOOL_CLICK, TOOL_TAB_NEW].contains(&name.as_str())
+                })
+                .map(|shared| format!("/{shared}"))
+                .collect();
             let mut maps = Vec::new();
             for (key, schema) in props.iter().filter(|(k, _)| *k != "extraArgs") {
                 map_slots(&format!("/{key}"), schema, &mut maps);
             }
-            let mut cases: Vec<Value> = Vec::new();
-            let mut variants: Vec<(Vec<(String, Value)>, String)> = Vec::new();
-            for pointer in &pointers {
+            let mut cases: Vec<(Value, Vec<String>, Value)> = Vec::new();
+            let mut variants: Vec<(Vec<(String, Value)>, Vec<String>)> = Vec::new();
+            for pointer in pointers.iter().chain(&shared_slots) {
                 for single in &singles {
-                    variants.push((vec![(pointer.clone(), json!(single))], single.to_string()));
+                    variants.push((
+                        vec![(pointer.clone(), json!(single))],
+                        vec![single.to_string()],
+                    ));
                     variants.push((
                         vec![(pointer.clone(), json!([single, "x"]))],
-                        single.to_string(),
+                        vec![single.to_string()],
                     ));
                 }
-                for other in pointers.iter().filter(|p| *p != pointer) {
+            }
+            for pointer in &pointers {
+                for other in pointers
+                    .iter()
+                    .chain(&shared_slots)
+                    .filter(|p| *p != pointer)
+                {
                     variants.push((
                         vec![
                             (pointer.clone(), json!("--session")),
                             (other.clone(), json!("evil")),
                         ],
-                        "pair".to_string(),
+                        vec!["--session".to_string(), "evil".to_string()],
                     ));
                 }
             }
@@ -7909,24 +7977,34 @@ mod flag_shaped_values {
                 for single in &singles {
                     variants.push((
                         vec![(pointer.clone(), json!({ single.as_str(): "victim" }))],
-                        single.to_string(),
+                        vec![single.to_string(), "victim".to_string()],
                     ));
                 }
             }
-            for (edits, _) in &variants {
+            for (edits, payloads) in &variants {
                 let mut arguments = base.clone();
                 for (pointer, value) in edits {
                     set(&mut arguments, pointer, value.clone());
                 }
-                cases.push(arguments);
+                let mut reference = base.clone();
+                for (pointer, value) in edits {
+                    set(&mut reference, pointer, neutral(value));
+                }
+                cases.push((arguments, payloads.clone(), reference));
             }
-            for arguments in cases {
+            for (arguments, payloads, reference) in cases {
                 calls += 1;
                 let Ok(runs) = record(&name, &arguments) else {
                     continue;
                 };
+                let expected = match record(&name, &reference) {
+                    Ok(runs) if !runs.is_empty() => {
+                        format!("{:#?}", crate::flags::parse_flags(&runs[0]))
+                    }
+                    _ => base_flags.clone(),
+                };
                 for argv in runs {
-                    let bad = violations(&argv, &arguments, &base_session);
+                    let bad = violations(&argv, &expected, &base_session, &payloads);
                     if !bad.is_empty() {
                         failures.push(format!("{name} {arguments} -> {bad:?} argv={argv:?}"));
                     }
@@ -8030,17 +8108,50 @@ mod flag_shaped_values {
         );
         let error = result.unwrap_err();
         assert!(
-            error.message.starts_with("modifiers expects"),
+            error.message.starts_with("Unknown modifier"),
             "{}",
             error.message
         );
         assert!(runs.is_empty());
+        let definition = json!({"inputSchema": {"properties": {
+            "kinds": {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}}
+        }}});
+        let error =
+            reject_invalid_enum_values(&definition, &json!({"kinds": ["a", "--x"]})).unwrap_err();
+        assert!(
+            error.message.starts_with("kinds expects a or b"),
+            "{}",
+            error.message
+        );
         let allowed = [json!("local"), json!("session")];
         let error = check_enum_value("storageType", &allowed, "x").unwrap_err();
         assert_eq!(
             error.message,
             "storageType expects local or session, got 'x'"
         );
+    }
+
+    #[test]
+    fn click_modifier_aliases_match_the_cli_parser() {
+        for tool in [TOOL_CLICK, TOOL_DBLCLICK] {
+            for modifiers in [
+                json!(["ctrl"]),
+                json!(["cmd"]),
+                json!(["command"]),
+                json!(["Shift"]),
+                json!(["ctrl+shift"]),
+                json!(["alt", "Meta"]),
+            ] {
+                let (result, runs) =
+                    record_call(tool, json!({"selector": "a", "modifiers": modifiers}));
+                assert!(result.is_ok(), "{tool} {modifiers}");
+                assert_eq!(runs.len(), 1);
+                let cleaned = crate::flags::clean_args(&runs[0]);
+                let flags = crate::flags::parse_flags(&runs[0]);
+                let parsed = crate::commands::parse_command(&cleaned, &flags).unwrap();
+                assert!(parsed["modifiers"].as_i64().unwrap() > 0, "{modifiers}");
+            }
+        }
     }
 
     #[test]
