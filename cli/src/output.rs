@@ -3087,8 +3087,9 @@ Configures various browser settings and emulation options.
 
 Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina;
-                             scale must be finite)
-  device <name>              Emulate device (e.g., "iPhone 12")
+                             scale must be finite); kept across relaunches and new tabs
+  device <name>              Emulate device (e.g., "iPhone 12"): viewport, user agent and
+                             touch input; touch events exist after the next navigation
   geo <lat> <lng>            Set geolocation (coordinates must be finite)
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs

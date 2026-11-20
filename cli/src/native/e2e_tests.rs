@@ -4175,6 +4175,180 @@ async fn e2e_viewport_scale_factor() {
 // Viewport and emulation
 // ---------------------------------------------------------------------------
 
+/// Runtime session settings survive an implicit relaunch and reach the new
+/// browser's page, and a window-sizing launch argument drops the viewport.
+#[tokio::test]
+#[ignore]
+async fn e2e_relaunch_keeps_session_setup() {
+    let mut state = DaemonState::new();
+    let run = |id: &str, cmd: Value| {
+        let mut cmd = cmd;
+        cmd["id"] = json!(id);
+        cmd
+    };
+
+    let resp = execute_command(
+        &run("1", json!({ "action": "launch", "headless": true })),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    for cmd in [
+        json!({ "action": "device", "name": "iPhone 14" }),
+        json!({ "action": "timezone", "timezoneId": "Asia/Tokyo" }),
+    ] {
+        let resp = execute_command(&run("2", cmd), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // A launch setting that is not part of the session setup relaunches.
+    let resp = execute_command(
+        &run(
+            "3",
+            json!({ "action": "launch", "headless": true, "allowFileAccess": true }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["relaunchedBrowser"], true);
+
+    let resp = execute_command(
+        &run(
+            "4",
+            json!({ "action": "navigate", "url": "data:text/html,<h1>x</h1>" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &run(
+            "5",
+            json!({
+                "action": "evaluate",
+                "script": "[innerWidth, navigator.maxTouchPoints, 'ontouchstart' in window, /iPhone/.test(navigator.userAgent), Intl.DateTimeFormat().resolvedOptions().timeZone]",
+            }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!([980, 5, true, true, "Asia/Tokyo"])
+    );
+
+    // Explicit window sizing in the launch arguments wins over the viewport.
+    let resp = execute_command(
+        &run(
+            "6",
+            json!({ "action": "launch", "headless": true, "args": ["--window-size=1100,700"] }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.session_setup.viewport, None);
+    assert_eq!(state.session_setup.timezone.as_deref(), Some("Asia/Tokyo"));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// An attached browser starts without the session setup of the browser it
+/// replaces.
+#[tokio::test]
+#[ignore]
+async fn e2e_attach_starts_without_the_local_session_setup() {
+    let mut external = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut external,
+    )
+    .await;
+    assert_success(&resp);
+    let port: u64 = external
+        .browser
+        .as_ref()
+        .unwrap()
+        .chrome_host_port()
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "device", "name": "iPhone 14" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.session_setup.viewport.is_some());
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "launch", "cdpPort": port }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.session_setup.viewport.is_none());
+    assert!(state.session_setup.user_agent.is_none());
+
+    let resp = execute_command(&json!({ "id": "98", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut external).await;
+    assert_success(&resp);
+}
+
+/// A relaunch that fails after the browser started keeps the previous session
+/// setup, including a viewport the relaunch's window sizing would have dropped.
+#[tokio::test]
+#[ignore]
+async fn e2e_failed_relaunch_keeps_the_remembered_viewport() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 800, "height": 600 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let before = format!("{:?}", state.session_setup);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "launch",
+            "headless": true,
+            "args": ["--window-size=1100,700"],
+            "storageState": "/nonexistent/state.json",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+
+    assert_eq!(format!("{:?}", state.session_setup), before);
+    assert!(state.session_setup.viewport.is_some());
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_viewport_emulation() {
