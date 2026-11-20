@@ -1086,6 +1086,15 @@ impl DaemonState {
                             .get("waitingForDebugger")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
+                        // The daemon's own session on its temporary storage
+                        // page: setting it up here would wait on a request
+                        // only this handler answers.
+                        let is_storage_session = target_info.as_ref().is_some_and(|target| {
+                            state::owns_storage_attachment(&target.target_id, waiting_for_debugger)
+                        });
+                        if is_storage_session {
+                            continue;
+                        }
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();

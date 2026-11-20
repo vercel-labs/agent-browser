@@ -19603,3 +19603,112 @@ async fn e2e_flow_a_route_limited_by_resource_type_applies_the_same_on_both_tier
     }
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
+
+/// Serves a small HTML page on a local port for `connections` requests.
+async fn spawn_html_page(connections: usize) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        for _ in 0..connections {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let _ = stream.read(&mut buf).await;
+                let body = "<!doctype html><title>page</title>page";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    port
+}
+
+/// Closing a named session saves every visited origin's storage through a
+/// temporary page. With proxy credentials, the network-control handler used
+/// to set that page's own session up as a new page and wait on it until its
+/// 10 s limit, while the page's navigation waited on a request only that
+/// handler answers. Loopback pages never go through the proxy, so the proxy
+/// address here is never contacted; its credentials are what turn the
+/// handler's setup on.
+#[tokio::test]
+#[ignore]
+async fn e2e_close_of_a_named_session_behind_a_proxy_saves_other_origins_promptly() {
+    let restore_key = format!("e2e-proxy-save-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+    ]);
+    env.remove("AGENT_BROWSER_SESSION_NAME");
+    env.remove("AGENT_BROWSER_RESTORE_SAVE");
+    env.remove("AGENT_BROWSER_STATE");
+    env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+    let first = spawn_html_page(20).await;
+    let second = spawn_html_page(20).await;
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "restoreKey": restore_key,
+            "proxy": { "server": "http://127.0.0.1:9", "username": "u", "password": "pw" }
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for (id, port, value) in [("2", first, "first"), ("4", second, "second")] {
+        let resp = execute_command(
+            &json!({ "id": id, "action": "navigate", "url": format!("http://127.0.0.1:{}/", port) }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_evaluate(
+            &mut state,
+            &format!("{}-set", id),
+            &format!(
+                "localStorage.setItem('k', '{}'); localStorage.getItem('k')",
+                value
+            ),
+            json!(value),
+        )
+        .await;
+    }
+
+    let started = std::time::Instant::now();
+    let resp = execute_command(&json!({ "id": "9", "action": "close" }), &mut state).await;
+    let took = started.elapsed();
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["saveStatus"], "saved");
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "close took {:?}; the storage page's setup waited out its limit",
+        took
+    );
+
+    let path = super::state::find_auto_state_file(&restore_key).expect("state file");
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for (port, value) in [(first, "first"), (second, "second")] {
+        let origin = format!("http://127.0.0.1:{}", port);
+        let entry = saved["origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["origin"] == origin.as_str())
+            .unwrap_or_else(|| panic!("no storage saved for {}", origin));
+        assert_eq!(entry["localStorage"][0]["value"], value);
+    }
+    cleanup_restore_state_files(&restore_key);
+}
