@@ -1,5 +1,5 @@
 //! Check the Chrome install: binary path, version, cache dirs, user-data
-//! dir, and the optional lightpanda and obscura engines.
+//! dir, and the optional lightpanda, obscura and moli engines.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -108,6 +108,25 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                         "AGENT_BROWSER_ENGINE=lightpanda but no lightpanda binary on PATH",
                     )
                     .with_fix("install lightpanda or unset AGENT_BROWSER_ENGINE"),
+                );
+            }
+        } else if engine == "moli" {
+            if crate::native::cdp::moli::find_moli().is_some() {
+                checks.push(Check::new(
+                    "chrome.engine_moli",
+                    category,
+                    Status::Pass,
+                    "Moli binary found",
+                ));
+            } else {
+                checks.push(
+                    Check::new(
+                        "chrome.engine_moli",
+                        category,
+                        Status::Fail,
+                        "AGENT_BROWSER_ENGINE=moli but no moli binary found",
+                    )
+                    .with_fix("install moli from https://github.com/lexmount/moli or unset AGENT_BROWSER_ENGINE"),
                 );
             }
         } else if engine == "obscura" {

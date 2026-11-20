@@ -215,9 +215,9 @@ fn read_proxy(f: &Flags) -> Option<Requested> {
 fn read_proxy_bypass(f: &Flags) -> Option<Requested> {
     match f.proxy_bypass.as_deref() {
         Some(bypass) => set(Value::from(bypass)),
-        // Obscura takes the bypass from every launch, so absent is an
+        // Obscura and Moli take the bypass from every launch, so absent is an
         // explicit clear.
-        None if f.engine.as_deref() == Some("obscura") => Some(Requested::Default),
+        None if matches!(f.engine.as_deref(), Some("obscura" | "moli")) => Some(Requested::Default),
         None => None,
     }
 }

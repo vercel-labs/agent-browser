@@ -71,6 +71,16 @@ export const currentPages = pages.map(applyEdits);
  */
 export const addedPages = [
   {
+    path: "/engines/moli",
+    markdownTitle: "Moli (experimental)",
+    title: "Moli | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Moli | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Moli - agent-browser",
+    twitterTitle: "Moli | agent-browser",
+  },
+  {
     path: "/modern-web-guidance",
     markdownTitle: "Modern Web Guidance",
     title: "Modern Web Guidance | agent-browser",
