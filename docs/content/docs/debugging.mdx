@@ -11,9 +11,11 @@ Use debugging commands to inspect browser logs, page errors, JavaScript dialogs,
 agent-browser console
 agent-browser console --json
 agent-browser console --clear
+agent-browser console --follow
 
 agent-browser errors
 agent-browser errors --clear
+agent-browser errors --follow
 ```
 
 <table>
@@ -24,8 +26,10 @@ agent-browser errors --clear
     <tr><td><code>console</code></td><td>Show browser console messages</td></tr>
     <tr><td><code>console --json</code></td><td>Show structured console output with raw CDP arguments</td></tr>
     <tr><td><code>console --clear</code></td><td>Clear the console log captured by agent-browser</td></tr>
+    <tr><td><code>console --follow</code>, <code>console -f</code></td><td>Stream new console messages until Ctrl+C. Add <code>--json</code> for one JSON object per line</td></tr>
     <tr><td><code>errors</code></td><td>Show captured page errors and uncaught JavaScript exceptions</td></tr>
     <tr><td><code>errors --clear</code></td><td>Clear the captured page error log</td></tr>
+    <tr><td><code>errors --follow</code>, <code>errors -f</code></td><td>Stream new page errors until Ctrl+C</td></tr>
   </tbody>
 </table>
 
