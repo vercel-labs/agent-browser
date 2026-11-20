@@ -3919,7 +3919,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Load cookies and storage state. Origins whose page does not stay on the saved origin are skipped and listed in skippedOrigins.",
+      "description": "Load cookies and storage state. Origins whose page does not stay on the saved origin are skipped and listed in skippedOrigins. Cookies owned by the browser's device bound sessions are not overwritten and are listed in skippedDeviceBoundCookies.",
       "inputSchema": {
         "properties": {
           "path": {
@@ -3977,7 +3977,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Save cookies and storage state.",
+      "description": "Save cookies and storage state. Device-bound (DBSC) cookies are left out and listed in skippedDeviceBoundCookies.",
       "inputSchema": {
         "properties": {
           "path": {

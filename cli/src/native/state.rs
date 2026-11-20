@@ -245,6 +245,41 @@ async fn collect_storage_in_target(
     Ok(results)
 }
 
+/// Result of [`save_state`].
+#[derive(Debug)]
+pub struct SavedState {
+    pub path: String,
+    /// Device-bound cookies left out of the file, as `name (domain)`.
+    pub skipped_bound_cookies: Vec<String>,
+}
+
+/// Result of [`load_state`].
+#[derive(Debug, Default)]
+pub struct LoadedState {
+    /// Origins whose storage could not be restored.
+    pub skipped_origins: Vec<String>,
+    /// Cookies from the file that the browser's device bound sessions own,
+    /// as `name (domain)`. They were not written.
+    pub skipped_bound_cookies: Vec<String>,
+}
+
+fn warn_skipped_bound_cookies(action: &str, skipped: &[String]) {
+    if !skipped.is_empty() {
+        eprintln!(
+            "Warning: {} skipped {} device-bound cookie(s): {}. Replaying them in another browser can make the site end the session in the browser that owns it.",
+            action,
+            skipped.len(),
+            skipped.join(", ")
+        );
+    }
+}
+
+/// Saves cookies and storage to a state file.
+///
+/// Cookies listed by the browser's Device Bound Session Credentials (DBSC)
+/// sessions are left out: they are refreshed with a device key that stays in
+/// this browser, and a copy replayed elsewhere lets the site see the session
+/// in two places and end it, signing the user out here too.
 pub async fn save_state(
     client: &CdpClient,
     session_id: &str,
@@ -252,8 +287,12 @@ pub async fn save_state(
     session_name: Option<&str>,
     session_id_str: &str,
     visited_origins: &HashSet<String>,
-) -> Result<String, String> {
-    let cookies = cookies::get_all_cookies(client, session_id).await?;
+) -> Result<SavedState, String> {
+    let all_cookies = cookies::get_all_cookies(client, session_id).await?;
+    let bound = cookies::get_device_bound_cookies(client, session_id).await;
+    let (cookies, skipped) = cookies::partition_bound_cookies(all_cookies, &bound);
+    let skipped_bound_cookies = cookies::describe_cookies(&skipped);
+    warn_skipped_bound_cookies("state save", &skipped_bound_cookies);
 
     let origin_js = r#"(() => {
         const result = { origin: location.origin, localStorage: [], sessionStorage: [] };
@@ -334,7 +373,10 @@ pub async fn save_state(
             .map_err(|e| format!("Failed to write state to {}: {}", save_path, e))?;
     }
 
-    Ok(save_path)
+    Ok(SavedState {
+        path: save_path,
+        skipped_bound_cookies,
+    })
 }
 
 pub async fn save_auto_state_transactional(
@@ -383,7 +425,8 @@ pub async fn save_auto_state_transactional(
         session_id_str,
         visited_origins,
     )
-    .await?;
+    .await?
+    .path;
 
     if let Err(err) = validate_state_file(&candidate_path) {
         let _ = fs::remove_file(&candidate_path);
@@ -463,26 +506,38 @@ pub fn validate_state_file(path: &str) -> Result<(), String> {
 /// Restore cookies and per-origin storage from a state file.
 ///
 /// Storage is written through CDP DOMStorage, so no page script sees the values and Chrome only accepts the write when a frame is at the saved origin. Origins that redirect elsewhere or fail to load are skipped and returned.
+///
+/// Cookies that one of the browser's device bound sessions owns are not
+/// written: overwriting them with an older copy makes the site see a
+/// superseded bound cookie and end the session. They are returned instead.
 pub async fn load_state(
     client: &CdpClient,
     session_id: &str,
     path: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<LoadedState, String> {
     let json_str = read_state_json(path)?;
 
     let state: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {}", e))?;
 
-    if !state.cookies.is_empty() {
-        let cookie_values: Vec<Value> = state
-            .cookies
+    let mut outcome = LoadedState::default();
+    let mut file_cookies = state.cookies;
+    if !file_cookies.is_empty() {
+        let bound = cookies::get_device_bound_cookies(client, session_id).await;
+        let (kept, skipped) = cookies::partition_bound_cookies(file_cookies, &bound);
+        outcome.skipped_bound_cookies = cookies::describe_cookies(&skipped);
+        warn_skipped_bound_cookies("state load", &outcome.skipped_bound_cookies);
+        file_cookies = kept;
+    }
+
+    if !file_cookies.is_empty() {
+        let cookie_values: Vec<Value> = file_cookies
             .iter()
             .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
             .collect();
         cookies::set_cookies(client, session_id, cookie_values, None).await?;
     }
 
-    let mut skipped = Vec::new();
     for origin in &state.origins {
         if origin.local_storage.is_empty() && origin.session_storage.is_empty() {
             continue;
@@ -491,11 +546,11 @@ pub async fn load_state(
             .await
             .is_err()
         {
-            skipped.push(origin.origin.clone());
+            outcome.skipped_origins.push(origin.origin.clone());
         }
     }
 
-    Ok(skipped)
+    Ok(outcome)
 }
 
 async fn restore_origin_storage(
