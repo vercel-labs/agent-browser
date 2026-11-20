@@ -169,7 +169,7 @@ const PRECHECK_JS: &str = r#"function(mode) {
         /*RETARGET*/
         const describe = (n) => '<' + n.localName + (n.id ? '#' + n.id : '') + (n.localName === 'input' && n.type ? ' type="' + n.type + '"' : '') + '>';
         const valueTypes = ['color', 'date', 'time', 'datetime-local', 'month', 'week', 'range'];
-        const verb = mode === 'fill' ? 'filled' : 'typed into';
+        const verb = mode === 'fill' ? 'filled' : mode === 'type-clear' ? 'cleared and typed into' : 'typed into';
         const fail = (code, message) => ({ error: { code, message } });
         if (el.matches(':disabled')) {
             return fail('disabled', 'Element ' + describe(el) + ' is disabled and cannot be ' + verb);
@@ -183,13 +183,14 @@ const PRECHECK_JS: &str = r#"function(mode) {
         if (el.localName === 'select') hint = '; use select';
         else if (isInput && (el.type === 'checkbox' || el.type === 'radio')) hint = '; use check or uncheck';
         else if (isInput && neverText.includes(el.type)) hint = '';
-        else if (mode === 'type' && valueInput) hint = '; use fill to set the value of this input';
+        else if (mode !== 'fill' && valueInput) hint = '; use fill to set the value of this input';
         if (hint !== null) {
             return fail('not_editable', 'Element ' + describe(el) + ' cannot be ' + verb + hint);
         }
-        // `type` does not clear, so a readonly field is left to the page (a
-        // trigger may forward focus); `fill` would empty it.
-        if (mode === 'fill' && el.readOnly) {
+        // Any step that destroys the value is refused on a readonly field:
+        // `fill` and `type --clear`. A plain `type` does not clear, so it is
+        // left to the page (a trigger may forward focus).
+        if (mode !== 'type' && el.readOnly) {
             return fail('read_only', 'Element ' + describe(el) + ' is readonly and cannot be ' + verb);
         }
         return { ok: true };
@@ -640,7 +641,11 @@ pub async fn type_text(
     // Control characters alone are key events, which any focused target can
     // receive; any text needs a target that takes it.
     let keys_only = !text.is_empty() && text.chars().all(|c| matches!(c, '\n' | '\r' | '\t'));
-    if !keys_only {
+    // Clearing destroys the value, so `--clear` is checked like `fill`, even
+    // for key-only text.
+    if clear {
+        precheck(client, &effective_session_id, &object_id, "type-clear").await?;
+    } else if !keys_only {
         precheck(client, &effective_session_id, &object_id, "type").await?;
     }
     let before = probe_object(client, &effective_session_id, &object_id)

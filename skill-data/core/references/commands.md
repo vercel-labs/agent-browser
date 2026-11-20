@@ -88,7 +88,7 @@ agent-browser dblclick @e1        # Double-click
 agent-browser dblclick @e1 --modifiers shift  # Double-click with Shift held
 agent-browser focus @e1           # Focus element
 agent-browser fill @e2 "text"     # Clear and fill (date/time/color/range set directly; errors if readonly, disabled or not text)
-agent-browser type @e2 "text"     # Type without clearing
+agent-browser type @e2 "text"     # Type without clearing (--clear on a readonly field is an error)
 agent-browser press Enter         # Press key (alias: key)
 agent-browser press Control+a     # Key combination
 agent-browser keydown Shift       # Hold key down

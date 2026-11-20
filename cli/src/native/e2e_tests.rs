@@ -2633,6 +2633,7 @@ async fn e2e_form_actions_refuse_before_acting() {
         "data:text/html,<html><body><form id='frm'><div id='grp'><input id='prev' value='kept'></div></form>",
         "<input id='ro' value='READONLY' readonly><input id='dis' value='DISABLED' disabled>",
         "<input id='trigger' readonly><input id='real'>",
+        "<input id='dro' type='date' readonly value='2024-01-01'>",
         "<input id='card'>",
         "<select id='s'><option value='one'>one</option><option value='two'>two</option></select>",
         "<select id='sdis' disabled><option value='one'>one</option></select>",
@@ -2693,10 +2694,17 @@ async fn e2e_form_actions_refuse_before_acting() {
     async fn run(state: &mut DaemonState, action: &str, selector: &str, arg: &Value) -> Value {
         let key = match action {
             "fill" => "value",
-            "type" => "text",
+            "type" | "type-clear" => "text",
             "select" | "multiselect" => "values",
             _ => "unused",
         };
+        if action == "type-clear" {
+            return execute_command(
+                &json!({ "id": "x", "action": "type", "selector": selector, "text": arg, "clear": true }),
+                state,
+            )
+            .await;
+        }
         execute_command(
             &json!({ "id": "x", "action": action, "selector": selector, key: arg }),
             state,
@@ -2718,6 +2726,11 @@ async fn e2e_form_actions_refuse_before_acting() {
         ("fill", "#range", json!("150"), "malformed_value"),
         ("fill", "#color", json!("red"), "malformed_value"),
         ("type", "#dis", json!("x"), "disabled"),
+        ("type-clear", "#dis", json!("x"), "disabled"),
+        ("type-clear", "#ro", json!("x"), "read_only"),
+        ("type-clear", "#ro", json!("\n"), "read_only"),
+        ("type-clear", "#trigger", json!("x"), "read_only"),
+        ("fill", "#dro", json!("2025-02-02"), "read_only"),
         ("type", "#s", json!("x"), "not_editable"),
         ("type", "#cb", json!("x"), "not_editable"),
         ("type", "#color", json!("x"), "not_editable"),
@@ -2843,6 +2856,7 @@ async fn e2e_form_actions_refuse_before_acting() {
             Some(json!("docs")),
         ),
         ("type", "#ro", json!("x"), "'x'", None),
+        ("type-clear", "#a0", json!("fresh"), "'x'", None),
         (
             "select",
             "#dup",
