@@ -72,6 +72,14 @@
       {
         "from": "agent-browser select <sel> <val>      # Select dropdown by value or visible label",
         "to": "agent-browser select <sel> <val> [--by value|label]  # Select dropdown by value or visible label"
+      },
+      {
+        "from": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)",
+        "to": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2); kept across relaunches and new tabs"
+      },
+      {
+        "from": "agent-browser set device <name>       # Emulate device (\"iPhone 14\")",
+        "to": "agent-browser set device <name>       # Emulate a device (\"iPhone 14\"): viewport, user agent and touch input (touch events exist after the next navigation)"
       }
     ],
     "/configuration": [
@@ -397,6 +405,10 @@
       }
     ],
     "/snapshots": [
+      {
+        "from": "<td>Scope to CSS selector</td>",
+        "to": "<td>Scope to CSS selector (every match)</td>"
+      },
       {
         "from": "Re-snapshot after interactions to observe changes, and always after navigation:",
         "to": "Using a ref issued for a document that has since been replaced, in the page or in its iframe (for example by a click that loads a new page), fails with \"Ref @eN is from a document that is no longer loaded\". A snapshot taken while the document is being replaced fails with \"The document changed while the snapshot was being captured\"; run it again. Re-snapshot after interactions to observe changes, and always after navigation:"
