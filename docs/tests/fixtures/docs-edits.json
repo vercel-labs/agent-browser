@@ -379,6 +379,12 @@
         "from": "See the main [documentation](/) for current architecture and usage.",
         "to": "See the main [documentation](/introduction) for current architecture and usage."
       }
+    ],
+    "/snapshots": [
+      {
+        "from": "<td>Scope to CSS selector</td>",
+        "to": "<td>Scope to CSS selector (every match)</td>"
+      }
     ]
   },
   "resources": {

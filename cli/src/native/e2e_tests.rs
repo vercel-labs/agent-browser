@@ -8305,6 +8305,8 @@ async fn e2e_snapshot_cursor_scan_covers_native_and_shadow_elements() {
         <button type='button' role='menu' tabindex='0' style='cursor:pointer'>Menu button</button>\
         <a href='x' role='menu' tabindex='0' style='cursor:pointer'>Menu link</a>\
         <button type='button' style='cursor:pointer'>Plain button</button>\
+        <details role='group' style='cursor:pointer'><summary>Grouped</summary></details>\
+        <input type='color' aria-label='Pick colour'>\
         <my-el></my-el><script>\
         customElements.define('my-el', class extends HTMLElement { constructor() { \
         super(); this.attachShadow({ mode: 'open' }).innerHTML = \
@@ -8333,12 +8335,17 @@ async fn e2e_snapshot_cursor_scan_covers_native_and_shadow_elements() {
         "Menu link",
         "Plain button",
         "Shadow clickable",
+        "Grouped",
+        "Pick colour",
     ] {
         assert!(
             snapshot_line_has_ref(snapshot, label),
             "Expected {label:?} to get a ref:\n{snapshot}"
         );
     }
+    // One ref per control: no extra refs for the details container or others.
+    let ref_count = snapshot.lines().filter(|l| l.contains("ref=e")).count();
+    assert_eq!(ref_count, 7, "unexpected ref count:\n{snapshot}");
 
     // Natively interactive elements are ref'd by the AX pass and carry no
     // cursor-interactive hints.
@@ -8351,6 +8358,150 @@ async fn e2e_snapshot_cursor_scan_covers_native_and_shadow_elements() {
     // Let queued mutation records flush, then check the scan left the DOM alone.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_evaluate(&mut state, "4", "window.__mutations", json!(0)).await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Children of a shadow root that only inherit cursor:pointer from their host,
+/// and a clickable body, get no extra refs.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_scan_ignores_inherited_pointer_and_body() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<body onclick='void 0'>\
+        <host-ptr style='cursor:pointer;display:block'></host-ptr>\
+        <host-slot><span>Slotted text</span></host-slot>\
+        <button>Real button</button><script>\
+        customElements.define('host-ptr', class extends HTMLElement { constructor() { \
+        super(); this.attachShadow({ mode: 'open' }).innerHTML = \
+        '<div>Inherited pointer inner</div>'; } });\
+        customElements.define('host-slot', class extends HTMLElement { constructor() { \
+        super(); this.attachShadow({ mode: 'open' }).innerHTML = \
+        '<div style=\"cursor:pointer\"><slot></slot></div>'; } });\
+        </script></body>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    assert!(
+        !snapshot.contains("Inherited pointer inner"),
+        "shadow child inheriting the host pointer got a ref:\n{snapshot}"
+    );
+    assert!(
+        !snapshot.contains("Slotted text"),
+        "slotted child inheriting the slot pointer got a ref:\n{snapshot}"
+    );
+    assert!(snapshot_line_has_ref(snapshot, "Real button"), "{snapshot}");
+    let ref_count = snapshot.lines().filter(|l| l.contains("ref=e")).count();
+    // The pointer host and the button; nothing from the host's shadow or slot.
+    assert_eq!(ref_count, 2, "unexpected ref count:\n{snapshot}");
+    // The body onclick must not turn the whole page into a clickable ref.
+    let page_wide = snapshot
+        .lines()
+        .filter(|l| l.contains("onclick") && !l.contains("Real button"))
+        .count();
+    assert_eq!(page_wide, 0, "body got a ref:\n{snapshot}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// A link without href that wraps a control is covered by the control's ref.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_scan_skips_hrefless_link_wrapping_control() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<a style='cursor:pointer;display:block'>\
+        <button>Wrapped</button></a><a style='cursor:pointer;display:block'>Bare anchor</a>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    let refs = snapshot.lines().filter(|l| l.contains("ref=e")).count();
+    assert_eq!(
+        refs, 2,
+        "expected the button and the bare anchor:\n{snapshot}"
+    );
+    assert!(snapshot_line_has_ref(snapshot, "Bare anchor"), "{snapshot}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// The `snapshot -s` match list leaves out matches nested in another match.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_matches_skip_nested() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<div class='n'><div class='n'><div class='n'>\
+        <button>Deep</button></div></div></div><div class='n'><button>Sibling</button></div>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let script = format!(
+        "{}.length",
+        super::snapshot::outermost_matches_expression(".n")
+    );
+    assert_evaluate(&mut state, "3", &script, json!(2)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "snapshot", "selector": ".n" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(snapshot_line_has_ref(snapshot, "Deep"), "{snapshot}");
+    assert!(snapshot_line_has_ref(snapshot, "Sibling"), "{snapshot}");
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

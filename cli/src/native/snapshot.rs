@@ -3,9 +3,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::cdp::client::CdpClient;
-use super::cdp::types::{
-    AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
-};
+use super::cdp::types::{AXNode, AXProperty, AXValue, GetFullAXTreeResult};
 use super::element::{normalize_ax_role, resolve_ax_session, RefMap};
 
 #[cfg(test)]
@@ -123,6 +121,7 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "tab",
     "treeitem",
     "DisclosureTriangle",
+    "ColorWell",
     "Iframe",
 ];
 
@@ -378,77 +377,15 @@ pub async fn take_snapshot(
     // AX nodes, so they drop out without failing the snapshot.
     let selector_backend_ids: Option<std::collections::HashSet<i64>> =
         if let Some(ref selector) = options.selector {
-            let js = format!(
-                "Array.from(document.querySelectorAll({}))",
-                serde_json::to_string(selector).unwrap_or_default()
-            );
-            let result: EvaluateResult = client
-                .send_command_typed(
-                    "Runtime.evaluate",
-                    &EvaluateParams {
-                        expression: js,
-                        return_by_value: Some(false),
-                        await_promise: Some(false),
-                    },
-                    Some(session_id),
-                )
-                .await?;
-
-            // A throwing evaluation (e.g. an invalid CSS selector like a
-            // snapshot ref "@e1") fails clearly instead of reaching
-            // DOM.describeNode with the exception object.
-            if let Some(exception) = result.exception_details {
-                let detail = exception
-                    .exception
-                    .and_then(|e| e.description)
-                    .unwrap_or(exception.text);
-                return Err(format!("Invalid selector '{}': {}", selector, detail));
-            }
-            let array_id = result
-                .result
-                .object_id
-                .ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
-
-            let matches = array_element_object_ids(client, session_id, &array_id).await?;
-            if matches.is_empty() {
-                return Err(format!("Selector '{}' did not match any element", selector));
-            }
-
-            // Request the full DOM subtree (depth: -1), including shadow roots
-            // (pierce), so we can collect all backendNodeIds that live under
-            // each matched element.
-            let describes = futures_util::future::join_all(matches.iter().map(|object_id| {
-                client.send_command(
-                    "DOM.describeNode",
-                    Some(serde_json::json!({ "objectId": object_id, "depth": -1, "pierce": true })),
-                    Some(session_id),
-                )
-            }))
-            .await;
-
-            let mut ids = std::collections::HashSet::new();
-            for describe in describes {
-                if let Some(root_node) = describe?.get("node") {
-                    collect_backend_node_ids(root_node, &mut ids);
-                }
-            }
-
-            if ids.is_empty() {
-                return Err(format!(
-                    "Could not resolve backendNodeId for selector '{}'",
-                    selector
-                ));
-            }
-
+            let resolved = resolve_selector_backend_ids(client, session_id, selector).await;
             let _ = client
                 .send_command(
-                    "Runtime.releaseObject",
-                    Some(serde_json::json!({ "objectId": array_id })),
+                    "Runtime.releaseObjectGroup",
+                    Some(serde_json::json!({ "objectGroup": SELECTOR_SCOPE_GROUP })),
                     Some(session_id),
                 )
                 .await;
-
-            Some(ids)
+            Some(resolved?)
         } else {
             None
         };
@@ -858,6 +795,84 @@ async fn resolve_iframe_frame_id(
         .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
 }
 
+/// JS array of the elements matching `selector`, without matches nested in an earlier match.
+pub(super) fn outermost_matches_expression(selector: &str) -> String {
+    format!(
+        "(function(){{ var last = null; \
+         return Array.from(document.querySelectorAll({})).filter(function(el){{ \
+         if (last && last.contains(el)) return false; last = el; return true; }}); }})()",
+        serde_json::to_string(selector).unwrap_or_default()
+    )
+}
+
+const SELECTOR_SCOPE_GROUP: &str = "ab-snapshot-scope";
+
+/// backendNodeIds of the DOM subtrees under every element matching `selector`.
+/// A match nested inside an earlier match is skipped: its subtree is covered.
+async fn resolve_selector_backend_ids(
+    client: &CdpClient,
+    session_id: &str,
+    selector: &str,
+) -> Result<std::collections::HashSet<i64>, String> {
+    let js = outermost_matches_expression(selector);
+    let evaluated: Value = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": js,
+                "returnByValue": false,
+                "awaitPromise": false,
+                "objectGroup": SELECTOR_SCOPE_GROUP,
+            })),
+            Some(session_id),
+        )
+        .await?;
+
+    // A throwing evaluation (e.g. an invalid CSS selector like a snapshot ref
+    // "@e1") fails clearly instead of reaching DOM.describeNode with the
+    // exception object.
+    if let Some(exception) = evaluated.get("exceptionDetails") {
+        let detail = exception["exception"]["description"]
+            .as_str()
+            .or_else(|| exception["text"].as_str())
+            .unwrap_or("");
+        return Err(format!("Invalid selector '{}': {}", selector, detail));
+    }
+    let array_id = evaluated["result"]["objectId"]
+        .as_str()
+        .ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
+
+    let matches = array_element_object_ids(client, session_id, array_id).await?;
+    if matches.is_empty() {
+        return Err(format!("Selector '{}' did not match any element", selector));
+    }
+
+    // Request the full DOM subtree (depth: -1), including shadow roots
+    // (pierce), so we can collect all backendNodeIds that live under each match.
+    let describes = futures_util::future::join_all(matches.iter().map(|object_id| {
+        client.send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "objectId": object_id, "depth": -1, "pierce": true })),
+            Some(session_id),
+        )
+    }))
+    .await;
+
+    let mut ids = std::collections::HashSet::new();
+    for describe in describes {
+        if let Some(root_node) = describe?.get("node") {
+            collect_backend_node_ids(root_node, &mut ids);
+        }
+    }
+    if ids.is_empty() {
+        return Err(format!(
+            "Could not resolve backendNodeId for selector '{}'",
+            selector
+        ));
+    }
+    Ok(ids)
+}
+
 /// Object ids of the elements held by a remote JS array, in index order.
 async fn array_element_object_ids(
     client: &CdpClient,
@@ -1022,6 +1037,11 @@ async fn scan_cursor_interactive_elements(
         return tagName === 'button' || tagName === 'select' || tagName === 'textarea';
     }
 
+    var interactiveDescendant =
+        'a[href], button, input:not([type="hidden"]), select, textarea, summary, ' +
+        '[role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], ' +
+        '[role="menuitem"], [role="switch"], [role="textbox"], [role="combobox"]';
+
     function scan(root) {
         var all = root.querySelectorAll('*');
         for (var i = 0; i < all.length; i++) {
@@ -1035,9 +1055,14 @@ async fn scan_cursor_interactive_elements(
             var explicitRole = role ? role.trim().toLowerCase() : '';
             if (explicitRole && interactiveRoles[explicitRole]) continue;
 
+            // <details> is a container; its <summary> carries the control.
+            if (tagName === 'details') continue;
+
             var isNative = !!interactiveTags[tagName];
-            if (isNative && !explicitRole &&
-                (tagName === 'details' || hasInteractiveImplicitRole(el, tagName))) continue;
+            if (isNative && !explicitRole && hasInteractiveImplicitRole(el, tagName)) continue;
+
+            // A link without href that wraps a control is covered by that control.
+            if (tagName === 'a' && !explicitRole && el.querySelector(interactiveDescendant)) continue;
 
             var computedStyle = getComputedStyle(el);
             var hasCursorPointer = computedStyle.cursor === 'pointer';
@@ -1051,7 +1076,8 @@ async fn scan_cursor_interactive_elements(
 
             // Skip elements that only inherit cursor:pointer from an ancestor
             if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
-                var parent = el.parentElement;
+                var parent = el.assignedSlot || el.parentElement ||
+                    (el.parentNode && el.parentNode.host);
                 if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
             }
 
@@ -1092,7 +1118,7 @@ async fn scan_cursor_interactive_elements(
         }
     }
 
-    scan(document);
+    scan(document.body);
     return result;
 })()
 "#;
@@ -1698,6 +1724,7 @@ mod tests {
         assert!(INTERACTIVE_ROLES.contains(&"button"));
         assert!(INTERACTIVE_ROLES.contains(&"textbox"));
         assert!(INTERACTIVE_ROLES.contains(&"DisclosureTriangle"));
+        assert!(INTERACTIVE_ROLES.contains(&"ColorWell"));
         assert!(!INTERACTIVE_ROLES.contains(&"heading"));
     }
 
