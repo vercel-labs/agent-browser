@@ -2394,26 +2394,6 @@ impl BrowserManager {
     // Emulation
     // -----------------------------------------------------------------------
 
-    /// Enables or disables touch emulation on the active page. Disabling is
-    /// only meaningful after it was enabled: it also resets the hover and
-    /// pointer types the browser was launched with.
-    pub async fn set_touch_emulation(&self, enabled: bool) -> Result<(), String> {
-        let session_id = self.active_session_id()?;
-        let params = if enabled {
-            json!({ "enabled": true, "maxTouchPoints": TOUCH_POINTS })
-        } else {
-            json!({ "enabled": false })
-        };
-        self.client
-            .send_command(
-                "Emulation.setTouchEmulationEnabled",
-                Some(params),
-                Some(session_id),
-            )
-            .await?;
-        Ok(())
-    }
-
     pub async fn set_viewport(
         &self,
         width: i32,
@@ -2435,8 +2415,13 @@ impl BrowserManager {
             )
             .await?;
 
-        // Screencast captures the actual content area, not the emulated CSS
-        // viewport, so resize the content area to match.
+        self.sync_contents_size(width, height).await;
+        Ok(())
+    }
+
+    /// Screencast captures the actual content area, not the emulated CSS
+    /// viewport, so resize the content area to match.
+    pub async fn sync_contents_size(&self, width: i32, height: i32) {
         if let Ok(target_id) = self.active_target_id() {
             if let Ok(window_info) = self
                 .client
@@ -2466,8 +2451,6 @@ impl BrowserManager {
                 }
             }
         }
-
-        Ok(())
     }
 
     pub async fn set_user_agent(&self, user_agent: &str) -> Result<(), String> {

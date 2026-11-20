@@ -463,7 +463,7 @@ fn apply_effective_ca_cert(
 
 /// Arguments of the last `Emulation.setEmulatedMedia` call, kept so the same
 /// emulation can be replayed onto a new page session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EmulatedMedia {
     pub media: Option<String>,
     /// `(name, value)` media features, e.g. `("prefers-color-scheme", "dark")`.
@@ -482,6 +482,17 @@ pub struct InitScriptSetup {
     pub identifier: String,
     pub source: String,
     pub session_identifiers: HashMap<String, String>,
+    /// Registered from launch settings (`--init-script`, `--enable`, plugins),
+    /// which a relaunch registers again itself.
+    pub launch_owned: bool,
+}
+
+/// The launch settings [`SessionSetup::from_launch_options`] seeds from, kept
+/// to tell a relaunch that changes them from one that does not.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct LaunchSeed {
+    user_agent: Option<String>,
+    emulated_media: Option<EmulatedMedia>,
 }
 
 /// Viewport emulation installed by `viewport`, `device` or a launch viewport.
@@ -501,8 +512,9 @@ pub struct ViewportSetup {
 /// CDP scopes all of these to a single target session, so a tab the daemon
 /// creates itself starts without them. This record lets
 /// [`apply_session_setup`] replay them onto the new tab before its first
-/// navigation. Reset whenever a browser is (re)launched, except the viewport,
-/// which is re-applied to the relaunched browser. Permissions are not
+/// navigation. A browser agent-browser launches itself keeps this record across
+/// implicit relaunches and gets it replayed; `close` and attached or provider
+/// connections start empty. Permissions are not
 /// tracked: `Browser.grantPermissions` is context-scoped and already covers
 /// new tabs in the default context.
 #[derive(Debug, Default, Clone)]
@@ -523,6 +535,7 @@ pub struct SessionSetup {
     pub offline: Option<bool>,
     /// Viewport size, scale factor and mobile (touch) emulation.
     pub viewport: Option<ViewportSetup>,
+    launch_seed: LaunchSeed,
     /// Init scripts registered with `Page.addScriptToEvaluateOnNewDocument`:
     /// `--enable`, `--init-script`, plugin init scripts, and `addinitscript`.
     pub init_scripts: Vec<InitScriptSetup>,
@@ -534,14 +547,35 @@ pub struct SessionSetup {
 
 impl SessionSetup {
     fn from_launch_options(options: &LaunchOptions) -> Self {
+        let user_agent = options.user_agent.clone();
+        let emulated_media = options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
+            media: None,
+            features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
+        });
         Self {
-            user_agent: options.user_agent.clone(),
-            emulated_media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
-                media: None,
-                features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
-            }),
+            launch_seed: LaunchSeed {
+                user_agent: user_agent.clone(),
+                emulated_media: emulated_media.clone(),
+            },
+            user_agent,
+            emulated_media,
             ..Self::default()
         }
+    }
+
+    /// The setup for a relaunched browser: what was set at runtime, with the
+    /// new launch's own settings taking over where they changed.
+    fn carried_into_relaunch(mut self, launch: SessionSetup) -> Self {
+        if self.launch_seed != launch.launch_seed {
+            self.user_agent = launch.user_agent;
+            self.emulated_media = launch.emulated_media;
+            self.launch_seed = launch.launch_seed;
+        }
+        self.init_scripts.retain(|script| !script.launch_owned);
+        for script in &mut self.init_scripts {
+            script.session_identifiers.clear();
+        }
+        self
     }
 
     /// True when nothing has been configured, so there is nothing to replay.
@@ -571,6 +605,7 @@ impl SessionSetup {
             identifier: identifier.clone(),
             source,
             session_identifiers,
+            launch_owned: false,
         });
         identifier
     }
@@ -714,6 +749,10 @@ pub struct DaemonState {
     /// Session-scoped setup applied to the active page, re-applied to tabs the
     /// daemon creates. See [`SessionSetup`].
     pub session_setup: SessionSetup,
+    /// Target sessions that touch emulation was enabled on. Disabling it is
+    /// only sent to these: on any other target it also resets the hover and
+    /// pointer types the browser was launched with.
+    touch_sessions: HashSet<String>,
     /// Init script sources returned by launch mutator plugins for this launch.
     pub plugin_init_scripts: Vec<String>,
     /// Provider cleanup metadata for the active external browser session.
@@ -873,6 +912,7 @@ impl DaemonState {
             effective_ca_cert: None,
             network_auto_attach_installed: false,
             session_setup: SessionSetup::default(),
+            touch_sessions: HashSet::new(),
             plugin_init_scripts: Vec::new(),
             active_provider_session: None,
             active_provider_connection: false,
@@ -3202,6 +3242,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
     let mut lifecycle_relaunched_browser = false;
+    let mut launch_warning: Option<String> = None;
     // The flow is read once per command: policy, confirmation and the run all
     // see the same file.
     let mut run_flow = match load_run_flow(cmd, action, state) {
@@ -3363,7 +3404,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             )
             .await;
             let launched = match launched {
-                Ok(_) => Box::pin(start_flow_capture(state)).await,
+                Ok(extras) => {
+                    launch_warning = extras
+                        .get(SESSION_SETUP_WARNING)
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    Box::pin(start_flow_capture(state)).await
+                }
                 Err(e) => Err(e),
             };
             if let Err(e) = launched {
@@ -3756,6 +3803,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 err, hint
             ),
         );
+    }
+    hoist_session_setup_warning(&mut resp);
+    if let Some(warning) = launch_warning {
+        append_warning(&mut resp, &warning);
     }
     inject_lifecycle(
         &mut resp,
@@ -4623,6 +4674,18 @@ async fn session_setup_pending(state: &DaemonState) -> bool {
 /// document. Emulation failures are ignored: a call the engine rejects
 /// should not abort creating the tab.
 async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Result<(), String> {
+    apply_session_setup_reporting(state, session_id)
+        .await
+        .map(|_| ())
+}
+
+/// [`apply_session_setup`], returning the emulation settings the browser
+/// rejected instead of dropping them.
+async fn apply_session_setup_reporting(
+    state: &mut DaemonState,
+    session_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut failed: Vec<String> = Vec::new();
     let client = state
         .browser
         .as_ref()
@@ -4632,17 +4695,20 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
     let setup = state.session_setup.clone();
 
     if let Some(ref ua) = setup.user_agent {
-        let _ = client
+        let result = client
             .send_command(
                 "Emulation.setUserAgentOverride",
                 Some(json!({ "userAgent": ua })),
                 Some(session_id),
             )
             .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setUserAgentOverride: {e}"));
+        }
     }
 
     if let Some(viewport) = setup.viewport {
-        let _ = client
+        let result = client
             .send_command(
                 "Emulation.setDeviceMetricsOverride",
                 Some(json!({
@@ -4654,17 +4720,11 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
                 Some(session_id),
             )
             .await;
-        if viewport.mobile {
-            let _ = client
-                .send_command(
-                    "Emulation.setTouchEmulationEnabled",
-                    Some(json!({
-                        "enabled": true,
-                        "maxTouchPoints": super::browser::TOUCH_POINTS,
-                    })),
-                    Some(session_id),
-                )
-                .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setDeviceMetricsOverride: {e}"));
+        }
+        if let Err(e) = set_touch_emulation(state, session_id, viewport.mobile).await {
+            failed.push(format!("Emulation.setTouchEmulationEnabled: {e}"));
         }
     }
 
@@ -4682,33 +4742,42 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
                     .collect(),
             );
         }
-        let _ = client
+        let result = client
             .send_command("Emulation.setEmulatedMedia", Some(params), Some(session_id))
             .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setEmulatedMedia: {e}"));
+        }
     }
 
     if let Some(ref tz) = setup.timezone {
-        let _ = client
+        let result = client
             .send_command(
                 "Emulation.setTimezoneOverride",
                 Some(json!({ "timezoneId": tz })),
                 Some(session_id),
             )
             .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setTimezoneOverride: {e}"));
+        }
     }
 
     if let Some(ref locale) = setup.locale {
-        let _ = client
+        let result = client
             .send_command(
                 "Emulation.setLocaleOverride",
                 Some(json!({ "locale": locale })),
                 Some(session_id),
             )
             .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setLocaleOverride: {e}"));
+        }
     }
 
     if let Some((lat, lon, accuracy)) = setup.geolocation {
-        let _ = client
+        let result = client
             .send_command(
                 "Emulation.setGeolocationOverride",
                 Some(json!({
@@ -4719,6 +4788,9 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
                 Some(session_id),
             )
             .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setGeolocationOverride: {e}"));
+        }
     }
 
     if let Some(ref headers) = setup.extra_headers {
@@ -4765,7 +4837,7 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
             .await?;
     }
 
-    Ok(())
+    Ok(failed)
 }
 
 async fn auto_launch(
@@ -4831,8 +4903,6 @@ async fn auto_launch_inner(
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
     state.plugin_init_scripts.clear();
-    let carried_viewport = state.session_setup.viewport;
-    state.session_setup = SessionSetup::default();
 
     // Use the stream server's viewport dimensions for --window-size so the
     // content area matches the desired viewport from the start.
@@ -4846,6 +4916,12 @@ async fn auto_launch_inner(
         _ => None,
     };
     let auto_connect = matches!(connection, Connection::AutoConnect);
+    // Only a browser agent-browser launches itself keeps its session setup
+    // across a relaunch; an attached or provider browser starts without one.
+    if !matches!(connection, Connection::Local) {
+        state.session_setup = SessionSetup::default();
+        state.touch_sessions.clear();
+    }
     let provider = match &connection {
         Connection::Provider(provider) => Some(provider.clone()),
         _ => None,
@@ -5080,7 +5156,13 @@ async fn auto_launch_inner(
     if let Some(ref ca) = effective_ca_cert {
         options.prepared_nss_home = Some(prepare_nss_home(&ca.bundle)?);
     }
-    state.session_setup = SessionSetup::from_launch_options(&options);
+    let mut previous_setup = std::mem::take(&mut state.session_setup);
+    if sets_window_size(&options.args) {
+        previous_setup.viewport = None;
+    }
+    state.session_setup =
+        previous_setup.carried_into_relaunch(SessionSetup::from_launch_options(&options));
+    state.touch_sessions.clear();
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.reset_input_state();
     state.browser = Some(mgr);
@@ -5092,16 +5174,49 @@ async fn auto_launch_inner(
     state.update_stream_client().await;
     install_network_controls_or_close(state, has_proxy_auth).await?;
 
-    if let Some(viewport) = carried_viewport {
-        if let Err(e) = apply_viewport(state, viewport).await {
-            eprintln!("Failed to re-apply the viewport after launch: {e}");
-        }
-    }
+    let replay_warning = replay_session_setup_after_launch(state).await;
 
     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
     try_auto_restore_state(state).await;
     load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
-    Ok(json!({}))
+    Ok(with_session_setup_warning(json!({}), replay_warning))
+}
+
+/// Replays the carried session setup onto the relaunched browser's page, as
+/// for any new tab, and returns what could not be applied.
+async fn replay_session_setup_after_launch(state: &mut DaemonState) -> Option<String> {
+    if !session_setup_pending(state).await {
+        return None;
+    }
+    let session_id = state
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.active_session_id().ok().map(str::to_string))?;
+    let mut failed = match apply_session_setup_reporting(state, &session_id).await {
+        Ok(failed) => failed,
+        Err(e) => vec![e],
+    };
+    if let (Some(viewport), Some(mgr)) = (state.session_setup.viewport, state.browser.as_ref()) {
+        mgr.sync_contents_size(viewport.width, viewport.height)
+            .await;
+    }
+    if failed.is_empty() {
+        return None;
+    }
+    failed.dedup();
+    Some(format!(
+        "Session settings were not fully re-applied to the relaunched browser: {}",
+        failed.join("; ")
+    ))
+}
+
+/// True when the launch arguments size the window themselves.
+fn sets_window_size(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg.starts_with("--window-size=")
+            || arg.starts_with("--start-maximized")
+            || arg.starts_with("--start-fullscreen")
+    })
 }
 
 fn string_array_from_command(cmd: &Value, key: &str) -> Option<Vec<String>> {
@@ -5173,9 +5288,19 @@ async fn apply_launch_init_scripts(
         registered.push((source, session_identifier));
     }
     for (source, session_identifier) in registered {
-        state
+        let identifier = state.session_setup.register_init_script(
+            source,
+            session_id.clone(),
+            session_identifier,
+        );
+        if let Some(script) = state
             .session_setup
-            .register_init_script(source, session_id.clone(), session_identifier);
+            .init_scripts
+            .iter_mut()
+            .find(|script| script.identifier == identifier)
+        {
+            script.launch_owned = true;
+        }
     }
 }
 
@@ -6663,6 +6788,7 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
         map.clear();
     }
     state.session_setup = SessionSetup::default();
+    state.touch_sessions.clear();
 
     if let Some(server) = state.inspect_server.take() {
         server.shutdown();
@@ -8720,11 +8846,54 @@ async fn handle_tab_keep(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     mgr.set_tab_keep(tab_id, keep).await
 }
 
-/// Installs `viewport` on the active page, records it in the session setup
-/// so relaunches and new tabs get it, and syncs the stream server.
-async fn apply_viewport(state: &mut DaemonState, viewport: ViewportSetup) -> Result<(), String> {
-    let touch_was_enabled = state.session_setup.viewport.is_some_and(|v| v.mobile);
+/// Enables touch emulation on a target session, or disables it where it was
+/// enabled. A target that never had it is left alone, since disabling also
+/// resets the hover and pointer types the browser was launched with.
+async fn set_touch_emulation(
+    state: &mut DaemonState,
+    session_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    if !enabled && !state.touch_sessions.contains(session_id) {
+        return Ok(());
+    }
+    let client = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .client
+        .clone();
+    let params = if enabled {
+        json!({ "enabled": true, "maxTouchPoints": super::browser::TOUCH_POINTS })
+    } else {
+        json!({ "enabled": false })
+    };
+    client
+        .send_command(
+            "Emulation.setTouchEmulationEnabled",
+            Some(params),
+            Some(session_id),
+        )
+        .await?;
+    if enabled {
+        state.touch_sessions.insert(session_id.to_string());
+    } else {
+        state.touch_sessions.remove(session_id);
+    }
+    Ok(())
+}
+
+/// Installs `viewport` on the active page and syncs the stream server. With
+/// `record`, it is also kept in the session setup for relaunches and new tabs.
+/// Touch emulation is best effort: an engine that rejects it keeps the
+/// viewport, and the rejection is returned as a warning.
+async fn apply_viewport(
+    state: &mut DaemonState,
+    viewport: ViewportSetup,
+    record: bool,
+) -> Result<Option<String>, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
     mgr.set_viewport(
         viewport.width,
         viewport.height,
@@ -8732,11 +8901,14 @@ async fn apply_viewport(state: &mut DaemonState, viewport: ViewportSetup) -> Res
         viewport.mobile,
     )
     .await?;
-    if viewport.mobile || touch_was_enabled {
-        mgr.set_touch_emulation(viewport.mobile).await?;
-    }
+    let warning = set_touch_emulation(state, &session_id, viewport.mobile)
+        .await
+        .err()
+        .map(|e| format!("Touch emulation was not applied: {e}"));
 
-    state.session_setup.viewport = Some(viewport);
+    if record {
+        state.session_setup.viewport = Some(viewport);
+    }
 
     // Update stream server viewport so status messages and screencast use the new dimensions
     if let Some(ref server) = state.stream_server {
@@ -8744,7 +8916,28 @@ async fn apply_viewport(state: &mut DaemonState, viewport: ViewportSetup) -> Res
             .set_viewport(viewport.width as u32, viewport.height as u32)
             .await;
     }
-    Ok(())
+    Ok(warning)
+}
+
+/// Response data key for a warning about session setup that could not be
+/// fully applied; the command response reports it as `warning`.
+const SESSION_SETUP_WARNING: &str = "sessionSetupWarning";
+
+fn with_session_setup_warning(mut data: Value, warning: Option<String>) -> Value {
+    if let (Some(warning), Some(map)) = (warning, data.as_object_mut()) {
+        map.insert(SESSION_SETUP_WARNING.to_string(), json!(warning));
+    }
+    data
+}
+
+fn hoist_session_setup_warning(resp: &mut Value) {
+    let warning = resp
+        .get_mut("data")
+        .and_then(Value::as_object_mut)
+        .and_then(|data| data.remove(SESSION_SETUP_WARNING));
+    if let Some(warning) = warning.as_ref().and_then(Value::as_str) {
+        append_warning(resp, warning);
+    }
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -8756,7 +8949,7 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .unwrap_or(1.0);
     let mobile = cmd.get("mobile").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    apply_viewport(
+    let warning = apply_viewport(
         state,
         ViewportSetup {
             width,
@@ -8764,10 +8957,14 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             device_scale_factor: scale,
             mobile,
         },
+        true,
     )
     .await?;
 
-    Ok(json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }))
+    Ok(with_session_setup_warning(
+        json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }),
+        warning,
+    ))
 }
 
 async fn handle_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -10239,7 +10436,7 @@ async fn handle_wheel(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 }
 
 async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    state.browser.as_ref().ok_or("Browser not launched")?;
     let name = cmd
         .get("name")
         .or_else(|| cmd.get("device"))
@@ -10264,8 +10461,7 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         _ => return Err(format!("Unknown device: {}. Supported: iPhone 15, iPhone 16, iPhone 16 Pro, iPhone 17, iPad, iPad Pro, Pixel 9, Galaxy S25", name)),
     };
 
-    mgr.set_user_agent(ua).await?;
-    apply_viewport(
+    let warning = apply_viewport(
         state,
         ViewportSetup {
             width,
@@ -10273,17 +10469,23 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             device_scale_factor: scale,
             mobile,
         },
+        true,
     )
     .await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    mgr.set_user_agent(ua).await?;
     state.session_setup.user_agent = Some(ua.to_string());
 
-    Ok(json!({
-        "device": name,
-        "width": width,
-        "height": height,
-        "deviceScaleFactor": scale,
-        "mobile": mobile,
-    }))
+    Ok(with_session_setup_warning(
+        json!({
+            "device": name,
+            "width": width,
+            "height": height,
+            "deviceScaleFactor": scale,
+            "mobile": mobile,
+        }),
+        warning,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -12331,6 +12533,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     };
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+    apply_session_setup(state, &session_id).await?;
     install_network_controls_or_resume_prepared_session(state, has_proxy_creds, &session_id)
         .await?;
     state.drain_cdp_events_background().await?;
@@ -12344,6 +12547,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .get("height")
             .and_then(|v| v.as_i64())
             .unwrap_or(720) as i32;
+        // This window only: the size is not part of the session setup.
         apply_viewport(
             state,
             ViewportSetup {
@@ -12352,6 +12556,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
                 device_scale_factor: 1.0,
                 mobile: false,
             },
+            false,
         )
         .await?;
     }
@@ -17484,7 +17689,9 @@ mod tests {
 
     /// Fake CDP endpoint that answers every command and records
     /// `(method, sessionId, params)`.
-    async fn spawn_recording_cdp_server() -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+    async fn spawn_recording_cdp_server(
+        reject: &'static [&'static str],
+    ) -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
 
@@ -17505,7 +17712,12 @@ mod tests {
                     ),
                     command["params"].clone(),
                 ));
-                let reply = json!({ "id": command["id"], "result": {} });
+                let method = command["method"].as_str().unwrap_or_default();
+                let reply = if reject.contains(&method) {
+                    json!({ "id": command["id"], "error": { "code": -32000, "message": "rejected" } })
+                } else {
+                    json!({ "id": command["id"], "result": {} })
+                };
                 if ws.send(Message::Text(reply.to_string())).await.is_err() {
                     return;
                 }
@@ -17514,15 +17726,62 @@ mod tests {
         (url, seen)
     }
 
+    type Recorded = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+    /// A daemon state over the recording server with one page per session id;
+    /// the last one is active.
+    async fn recording_state(
+        reject: &'static [&'static str],
+        sessions: &[&str],
+    ) -> (DaemonState, Recorded) {
+        let (url, seen) = spawn_recording_cdp_server(reject).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut browser = BrowserManager::for_test(client, url);
+        for (index, session) in sessions.iter().enumerate() {
+            browser.add_page(super::super::browser::PageInfo {
+                tab_id: index as u32 + 1,
+                label: None,
+                target_id: format!("T-{session}"),
+                session_id: session.to_string(),
+                url: "about:blank".to_string(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            });
+        }
+        let mut state = DaemonState::new();
+        state.browser = Some(browser);
+        (state, seen)
+    }
+
+    fn sent(seen: &Recorded, method: &str) -> Vec<(String, Value)> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(entry, params)| {
+                let (name, session) = entry.split_once('@')?;
+                (name == method).then(|| (session.to_string(), params.clone()))
+            })
+            .collect()
+    }
+
+    fn viewport(width: i32, height: i32, mobile: bool) -> ViewportSetup {
+        ViewportSetup {
+            width,
+            height,
+            device_scale_factor: 2.0,
+            mobile,
+        }
+    }
+
+    const TOUCH: &str = "Emulation.setTouchEmulationEnabled";
+    const METRICS: &str = "Emulation.setDeviceMetricsOverride";
+
     /// The viewport and touch state in the session setup reaches a new
     /// target session, so new tabs and replacement tabs keep it.
     #[tokio::test]
     async fn session_setup_replays_viewport_and_touch_onto_a_new_session() {
         for (mobile, expect_touch) in [(true, true), (false, false)] {
-            let (url, seen) = spawn_recording_cdp_server().await;
-            let mut state = DaemonState::new();
-            let client = CdpClient::connect(&url).await.unwrap();
-            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            let (mut state, seen) = recording_state(&[], &[]).await;
             state.session_setup.viewport = Some(ViewportSetup {
                 width: 390,
                 height: 844,
@@ -17547,6 +17806,255 @@ mod tests {
                 .any(|(method, _)| method == "Emulation.setTouchEmulationEnabled@S-NEW");
             assert_eq!(touch, expect_touch);
         }
+    }
+
+    #[tokio::test]
+    async fn apply_viewport_installs_records_and_enables_touch_for_mobile() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+
+        let warning = apply_viewport(&mut state, viewport(390, 844, true), true)
+            .await
+            .unwrap();
+
+        assert_eq!(warning, None);
+        assert_eq!(state.session_setup.viewport, Some(viewport(390, 844, true)));
+        assert_eq!(
+            sent(&seen, METRICS),
+            vec![(
+                "S-A".to_string(),
+                json!({ "width": 390, "height": 844, "deviceScaleFactor": 2.0, "mobile": true })
+            )]
+        );
+        assert_eq!(
+            sent(&seen, TOUCH),
+            vec![(
+                "S-A".to_string(),
+                json!({ "enabled": true, "maxTouchPoints": 5 })
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_viewport_without_record_leaves_the_session_setup_alone() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+
+        apply_viewport(&mut state, viewport(1000, 700, false), false)
+            .await
+            .unwrap();
+
+        assert_eq!(state.session_setup.viewport, None);
+        assert_eq!(sent(&seen, METRICS).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_desktop_viewport_never_sends_touch_to_a_target_that_never_had_it() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+
+        apply_viewport(&mut state, viewport(1280, 720, false), true)
+            .await
+            .unwrap();
+
+        assert!(sent(&seen, TOUCH).is_empty());
+    }
+
+    /// Touch state is per target: a desktop viewport on one tab neither
+    /// clears touch on another nor is skipped for the tab that has it.
+    #[tokio::test]
+    async fn touch_is_cleared_on_the_targets_that_have_it() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+        apply_viewport(&mut state, viewport(390, 844, true), true)
+            .await
+            .unwrap();
+
+        // A second tab gets the mobile setup replayed, then goes desktop.
+        state
+            .browser
+            .as_mut()
+            .unwrap()
+            .add_page(super::super::browser::PageInfo {
+                tab_id: 2,
+                label: None,
+                target_id: "T-S-B".to_string(),
+                session_id: "S-B".to_string(),
+                url: "about:blank".to_string(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            });
+        apply_session_setup(&mut state, "S-B").await.unwrap();
+        apply_viewport(&mut state, viewport(1280, 720, false), true)
+            .await
+            .unwrap();
+
+        let disables: Vec<String> = sent(&seen, TOUCH)
+            .into_iter()
+            .filter(|(_, params)| params["enabled"] == false)
+            .map(|(session, _)| session)
+            .collect();
+        assert_eq!(disables, vec!["S-B".to_string()]);
+
+        set_touch_emulation(&mut state, "S-A", false).await.unwrap();
+        let disables: Vec<String> = sent(&seen, TOUCH)
+            .into_iter()
+            .filter(|(_, params)| params["enabled"] == false)
+            .map(|(session, _)| session)
+            .collect();
+        assert_eq!(disables, vec!["S-B".to_string(), "S-A".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_rejects_touch_keeps_the_viewport_and_warns() {
+        let (mut state, _seen) = recording_state(&[TOUCH], &["S-A"]).await;
+
+        let warning = apply_viewport(&mut state, viewport(390, 844, true), true)
+            .await
+            .unwrap();
+
+        assert!(warning.is_some_and(|w| w.contains("Touch emulation")));
+        assert_eq!(state.session_setup.viewport, Some(viewport(390, 844, true)));
+    }
+
+    #[tokio::test]
+    async fn the_viewport_command_records_the_viewport_and_its_mobile_flag() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+
+        let data = handle_viewport(
+            &json!({ "width": 500, "height": 600, "deviceScaleFactor": 2.0, "mobile": true }),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(data["mobile"], true);
+        assert_eq!(state.session_setup.viewport, Some(viewport(500, 600, true)));
+        assert_eq!(sent(&seen, TOUCH).len(), 1);
+
+        handle_viewport(&json!({ "width": 900, "height": 600 }), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.session_setup.viewport,
+            Some(ViewportSetup {
+                width: 900,
+                height: 600,
+                device_scale_factor: 1.0,
+                mobile: false
+            })
+        );
+        let last = sent(&seen, TOUCH).pop().unwrap();
+        assert_eq!(last.1, json!({ "enabled": false }));
+    }
+
+    #[tokio::test]
+    async fn a_device_preset_records_viewport_user_agent_and_touch() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+
+        handle_device(&json!({ "name": "iPhone 14" }), &mut state)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.session_setup.viewport,
+            Some(ViewportSetup {
+                width: 390,
+                height: 844,
+                device_scale_factor: 3.0,
+                mobile: true
+            })
+        );
+        assert!(state
+            .session_setup
+            .user_agent
+            .as_deref()
+            .is_some_and(|ua| ua.contains("iPhone")));
+        assert_eq!(sent(&seen, TOUCH).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_device_viewport_leaves_the_session_setup_unchanged() {
+        let (mut state, _seen) = recording_state(&[METRICS], &["S-A"]).await;
+
+        assert!(handle_device(&json!({ "name": "iPhone 14" }), &mut state)
+            .await
+            .is_err());
+
+        assert_eq!(state.session_setup.viewport, None);
+        assert_eq!(state.session_setup.user_agent, None);
+    }
+
+    fn setup_with(user_agent: &str, color_scheme: Option<&str>) -> SessionSetup {
+        SessionSetup::from_launch_options(&LaunchOptions {
+            user_agent: Some(user_agent.to_string()),
+            color_scheme: color_scheme.map(str::to_string),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_relaunch_carries_runtime_settings_and_drops_launch_owned_scripts() {
+        let mut previous = setup_with("launch-ua", None);
+        previous.user_agent = Some("device-ua".to_string());
+        previous.timezone = Some("Asia/Tokyo".to_string());
+        previous.offline = Some(true);
+        previous.viewport = Some(viewport(390, 844, true));
+        previous.register_init_script(
+            "runtime()".to_string(),
+            "S-OLD".to_string(),
+            "1".to_string(),
+        );
+        previous.register_init_script("launch()".to_string(), "S-OLD".to_string(), "2".to_string());
+        previous.init_scripts[1].launch_owned = true;
+
+        let next = previous.carried_into_relaunch(setup_with("launch-ua", None));
+
+        assert_eq!(next.user_agent.as_deref(), Some("device-ua"));
+        assert_eq!(next.timezone.as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(next.offline, Some(true));
+        assert_eq!(next.viewport, Some(viewport(390, 844, true)));
+        assert_eq!(next.init_scripts.len(), 1);
+        assert_eq!(next.init_scripts[0].source, "runtime()");
+        assert!(next.init_scripts[0].session_identifiers.is_empty());
+    }
+
+    #[test]
+    fn a_relaunch_that_changes_a_launch_setting_takes_the_new_value() {
+        let mut previous = setup_with("old-ua", Some("dark"));
+        previous.user_agent = Some("device-ua".to_string());
+
+        let next = previous.carried_into_relaunch(setup_with("new-ua", Some("light")));
+
+        assert_eq!(next.user_agent.as_deref(), Some("new-ua"));
+        let media = next.emulated_media.unwrap();
+        assert_eq!(
+            media.features,
+            vec![("prefers-color-scheme".to_string(), "light".to_string())]
+        );
+    }
+
+    #[test]
+    fn launch_sizing_arguments_are_recognized() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert!(sets_window_size(&args(&["--window-size=1400,900"])));
+        assert!(sets_window_size(&args(&["--lang=en", "--start-maximized"])));
+        assert!(sets_window_size(&args(&["--start-fullscreen"])));
+        assert!(!sets_window_size(&args(&["--lang=en"])));
+        assert!(!sets_window_size(&[]));
+    }
+
+    #[tokio::test]
+    async fn the_replay_after_launch_reports_what_the_browser_rejected() {
+        let (mut state, seen) = recording_state(&["Emulation.setTimezoneOverride"], &["S-A"]).await;
+        assert_eq!(replay_session_setup_after_launch(&mut state).await, None);
+
+        state.session_setup.timezone = Some("Asia/Tokyo".to_string());
+        state.session_setup.locale = Some("ja-JP".to_string());
+        state.session_setup.viewport = Some(viewport(390, 844, true));
+
+        let warning = replay_session_setup_after_launch(&mut state).await.unwrap();
+
+        assert!(warning.contains("Emulation.setTimezoneOverride"));
+        assert_eq!(sent(&seen, "Emulation.setLocaleOverride").len(), 1);
+        assert_eq!(sent(&seen, METRICS).len(), 1);
+        assert_eq!(sent(&seen, TOUCH).len(), 1);
     }
 
     #[test]

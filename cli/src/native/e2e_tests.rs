@@ -4175,6 +4175,87 @@ async fn e2e_viewport_scale_factor() {
 // Viewport and emulation
 // ---------------------------------------------------------------------------
 
+/// Runtime session settings survive an implicit relaunch and reach the new
+/// browser's page, and a window-sizing launch argument drops the viewport.
+#[tokio::test]
+#[ignore]
+async fn e2e_relaunch_keeps_session_setup() {
+    let mut state = DaemonState::new();
+    let run = |id: &str, cmd: Value| {
+        let mut cmd = cmd;
+        cmd["id"] = json!(id);
+        cmd
+    };
+
+    let resp = execute_command(
+        &run("1", json!({ "action": "launch", "headless": true })),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    for cmd in [
+        json!({ "action": "device", "name": "iPhone 14" }),
+        json!({ "action": "timezone", "timezoneId": "Asia/Tokyo" }),
+    ] {
+        let resp = execute_command(&run("2", cmd), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // A launch setting that is not part of the session setup relaunches.
+    let resp = execute_command(
+        &run(
+            "3",
+            json!({ "action": "launch", "headless": true, "allowFileAccess": true }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["relaunchedBrowser"], true);
+
+    let resp = execute_command(
+        &run(
+            "4",
+            json!({ "action": "navigate", "url": "data:text/html,<h1>x</h1>" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &run(
+            "5",
+            json!({
+                "action": "evaluate",
+                "script": "[innerWidth, navigator.maxTouchPoints, 'ontouchstart' in window, /iPhone/.test(navigator.userAgent), Intl.DateTimeFormat().resolvedOptions().timeZone]",
+            }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!([980, 5, true, true, "Asia/Tokyo"])
+    );
+
+    // Explicit window sizing in the launch arguments wins over the viewport.
+    let resp = execute_command(
+        &run(
+            "6",
+            json!({ "action": "launch", "headless": true, "args": ["--window-size=1100,700"] }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.session_setup.viewport, None);
+    assert_eq!(state.session_setup.timezone.as_deref(), Some("Asia/Tokyo"));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_viewport_emulation() {
