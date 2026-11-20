@@ -1002,6 +1002,9 @@
           "depth": {
             "type": "integer"
           },
+          "interactive": {
+            "type": "boolean"
+          },
           "selector": {
             "type": "string"
           },

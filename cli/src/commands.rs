@@ -3598,6 +3598,9 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                             });
                         }
                     }
+                    "-i" | "--interactive" => {
+                        obj.insert("interactive".to_string(), json!(true));
+                    }
                     "-c" | "--compact" => {
                         obj.insert("compact".to_string(), json!(true));
                     }
@@ -3628,13 +3631,13 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     other if other.starts_with('-') => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unknown flag: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--interactive] [--compact] [--depth <n>]",
                         });
                     }
                     other => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unexpected argument: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--interactive] [--compact] [--depth <n>]",
                         });
                     }
                 }
@@ -8298,6 +8301,22 @@ mod tests {
         assert_eq!(cmd["selector"], "#main");
         assert_eq!(cmd["compact"], true);
         assert_eq!(cmd["maxDepth"], 3);
+    }
+
+    #[test]
+    fn test_diff_snapshot_interactive() {
+        for flag in ["-i", "--interactive"] {
+            let cmd = parse_command(
+                &args(&format!("diff snapshot {flag} --baseline before.txt")),
+                &default_flags(),
+            )
+            .unwrap();
+            assert_eq!(cmd["action"], "diff_snapshot");
+            assert_eq!(cmd["interactive"], true);
+            assert_eq!(cmd["baseline"], "before.txt");
+        }
+        let cmd = parse_command(&args("diff snapshot"), &default_flags()).unwrap();
+        assert!(cmd.get("interactive").is_none());
     }
 
     #[test]
