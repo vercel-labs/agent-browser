@@ -13,9 +13,10 @@ use tokio::sync::{Notify, RwLock};
 
 use super::actions::{
     auto_save_restore_state, close_all_browser_backends, close_current_browser, execute_command,
-    maybe_autosave_restore_state, DaemonState,
+    maybe_autosave_restore_state, resume_command, DaemonState, Resumed,
 };
 use super::cdp::client::CdpClient;
+use super::pending_wait::{self, Cancel, PendingWaits};
 use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
@@ -324,6 +325,7 @@ async fn run_socket_server(
             stream_server,
             idle_activity.clone(),
         )));
+    let waits = state.lock().await.waits.clone();
 
     // Lets handle_connection end the daemon loop after a "close" command,
     // instead of calling process::exit() which skips destructors and can
@@ -338,6 +340,10 @@ async fn run_socket_server(
     let mut idle_sleep_pin = idle_sleep.map(Box::pin);
     let mut idle_lock: Option<IdleLock> = None;
 
+    // Installed once, so a signal that arrives while a branch body runs is
+    // still seen on the next iteration.
+    let mut shutdown = std::pin::pin!(shutdown_signal());
+
     loop {
         let idle_timeout = idle_activity.timeout();
         let idle_timeout_ms = idle_timeout.map(|t| t.ms);
@@ -347,9 +353,10 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let idle_activity = idle_activity.clone();
+                        let waits = waits.clone();
                         let close = close.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, close).await;
+                            handle_connection(stream, state, waits, idle_activity, close).await;
                         });
                     }
                     Err(e) => {
@@ -387,6 +394,13 @@ async fn run_socket_server(
                     idle_sleep_pin = Some(Box::pin(tokio::time::sleep(remaining)));
                     continue;
                 }
+                // A wait polling without the state lock is a command still
+                // running, not idleness.
+                if waits.any() {
+                    idle_sleep_pin =
+                        Some(Box::pin(tokio::time::sleep(Duration::from_millis(timeout_ms))));
+                    continue;
+                }
                 // The default timeout is a leak backstop, not a lifecycle
                 // policy: never pull a headed, WebDriver, or attached browser
                 // out from under a human. Re-arm and keep waiting instead.
@@ -419,7 +433,8 @@ async fn run_socket_server(
                 closed_by_command = true;
                 break;
             }
-            _ = shutdown_signal() => {
+            _ = &mut shutdown => {
+                waits.cancel_all(pending_wait::DAEMON_SHUTTING_DOWN);
                 // An armed idle lock already holds a place in the lock queue;
                 // await it rather than queueing behind it.
                 let mut s = match idle_lock.take() {
@@ -477,6 +492,7 @@ async fn run_socket_server(
             stream_server,
             idle_activity.clone(),
         )));
+    let waits = state.lock().await.waits.clone();
 
     let close = Arc::new(CloseHandshake::default());
     let mut closed_by_command = false;
@@ -491,6 +507,10 @@ async fn run_socket_server(
     let mut drain_interval = tokio::time::interval(Duration::from_millis(100));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Installed once, so a signal that arrives while a branch body runs is
+    // still seen on the next iteration.
+    let mut shutdown = std::pin::pin!(shutdown_signal());
+
     loop {
         let idle_timeout = idle_activity.timeout();
         let idle_timeout_ms = idle_timeout.map(|t| t.ms);
@@ -500,9 +520,10 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let idle_activity = idle_activity.clone();
+                        let waits = waits.clone();
                         let close = close.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, close).await;
+                            handle_connection(stream, state, waits, idle_activity, close).await;
                         });
                     }
                     Err(e) => {
@@ -537,6 +558,13 @@ async fn run_socket_server(
                     idle_sleep_pin = Some(Box::pin(tokio::time::sleep(remaining)));
                     continue;
                 }
+                // A wait polling without the state lock is a command still
+                // running, not idleness.
+                if waits.any() {
+                    idle_sleep_pin =
+                        Some(Box::pin(tokio::time::sleep(Duration::from_millis(timeout_ms))));
+                    continue;
+                }
                 // The default timeout is a leak backstop, not a lifecycle
                 // policy: never pull a headed, WebDriver, or attached browser
                 // out from under a human. Re-arm and keep waiting instead.
@@ -566,7 +594,8 @@ async fn run_socket_server(
                 closed_by_command = true;
                 break;
             }
-            _ = shutdown_signal() => {
+            _ = &mut shutdown => {
+                waits.cancel_all(pending_wait::DAEMON_SHUTTING_DOWN);
                 // An armed idle lock already holds a place in the lock queue;
                 // await it rather than queueing behind it.
                 let mut s = match idle_lock.take() {
@@ -646,6 +675,7 @@ impl CloseHandshake {
 async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
+    waits: Arc<PendingWaits>,
     idle_activity: Arc<IdleActivity>,
     close: Arc<CloseHandshake>,
 ) where
@@ -691,18 +721,35 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
+                // `close` ends pending waits instead of queueing behind them.
+                if matches!(action.as_str(), "close" | INTERNAL_DAEMON_SHUTDOWN_ACTION) {
+                    waits.cancel_all(pending_wait::SESSION_CLOSED);
+                }
+
+                let cancel = Cancel::new();
                 let response = {
-                    let mut s = state.lock().await;
-                    let response = execute_command(&cmd, &mut s).await;
-                    // Refresh while the state lock is still held. An idle
-                    // timer waiting on this command will observe the updated
-                    // clock as soon as it acquires the lock.
-                    idle_activity.mark();
-                    response
+                    let run = run_command(&cmd, &state, &waits, &idle_activity, &cancel);
+                    tokio::pin!(run);
+                    let mut watching = true;
+                    loop {
+                        tokio::select! {
+                            response = &mut run => break response,
+                            closed = client_closed(&mut buf_reader), if watching => {
+                                // Stop watching either way: a pipelined request
+                                // stays buffered for the next read_line.
+                                watching = false;
+                                if closed {
+                                    cancel.cancel(pending_wait::CLIENT_DISCONNECTED);
+                                }
+                            }
+                        }
+                    }
                 };
 
                 let closing = close_completed_response(&action, &response);
                 if closing {
+                    // Also covers a `close` approved through `confirm`.
+                    waits.cancel_all(pending_wait::SESSION_CLOSED);
                     close.requested.notify_one();
                     close.listener_closed.notified().await;
                 }
@@ -726,6 +773,59 @@ async fn handle_connection<S>(
             }
             Err(_) => break,
         }
+    }
+}
+
+/// Run one command under the state lock. A wait-family command does its
+/// setup under the lock, then polls with the lock released so the session's
+/// other commands run meanwhile, then takes the lock again to finish.
+async fn run_command(
+    cmd: &Value,
+    state: &tokio::sync::Mutex<DaemonState>,
+    waits: &Arc<PendingWaits>,
+    idle_activity: &IdleActivity,
+    cancel: &Cancel,
+) -> Value {
+    let mut s = state.lock().await;
+    s.defer_wait = true;
+    let response = execute_command(cmd, &mut s).await;
+    s.defer_wait = false;
+    let deferred = s.take_deferred();
+    // Refresh while the state lock is still held. An idle timer waiting on
+    // this command will observe the updated clock as soon as it acquires
+    // the lock.
+    idle_activity.mark();
+    let Some(mut pending) = deferred else {
+        return response;
+    };
+
+    loop {
+        // Register before releasing the lock, so a command that replaces the
+        // browser right after cannot miss this wait.
+        let registration = waits.register(cancel);
+        drop(s);
+        let polled = cancel.run(pending.poll).await;
+        drop(registration);
+
+        s = state.lock().await;
+        let resumed = resume_command(cmd, pending.resume, polled, &mut s).await;
+        idle_activity.mark();
+        match resumed {
+            Resumed::Done(response) => return response,
+            Resumed::Again(again) => pending = *again,
+        }
+    }
+}
+
+/// Resolves true when the client closed its end of the connection. Resolves
+/// false when the client sent more data, which stays buffered.
+async fn client_closed<R>(reader: &mut BufReader<R>) -> bool
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    match reader.fill_buf().await {
+        Ok(buf) => buf.is_empty(),
+        Err(_) => true,
     }
 }
 
@@ -824,6 +924,27 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     use crate::session_settings::{resolve_idle_timeout, IdleTimeout, MemStore};
+
+    #[tokio::test]
+    async fn test_client_closed_reports_eof_and_keeps_pipelined_data() {
+        let (client, server) = tokio::io::duplex(64);
+        let (client_reader, mut client_writer) = tokio::io::split(client);
+        let mut reader = BufReader::new(server);
+
+        // Data from the client is not a disconnect, and stays readable.
+        client_writer
+            .write_all(b"{\"action\":\"url\"}\n")
+            .await
+            .unwrap();
+        assert!(!client_closed(&mut reader).await);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "{\"action\":\"url\"}\n");
+
+        drop(client_writer);
+        drop(client_reader);
+        assert!(client_closed(&mut reader).await);
+    }
 
     #[cfg(unix)]
     #[tokio::test]
