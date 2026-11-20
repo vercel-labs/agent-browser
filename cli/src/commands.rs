@@ -1807,6 +1807,9 @@ fn parse_command_inner(
                             usage: r#"connect <url> --cdp-headers '{"Authorization":"Bearer <token>"}'"#,
                         })?;
                 }
+                if let Some(ref ctx) = flags.context {
+                    cmd["contextName"] = json!(ctx);
+                }
                 Ok(cmd)
             } else {
                 // It's a port number - validate and use cdpPort field
@@ -1844,6 +1847,9 @@ fn parse_command_inner(
                             message,
                             usage: r#"connect <port> --cdp-headers '{"Authorization":"Bearer <token>"}'"#,
                         })?;
+                }
+                if let Some(ref ctx) = flags.context {
+                    cmd["contextName"] = json!(ctx);
                 }
                 Ok(cmd)
             }
@@ -4838,6 +4844,7 @@ mod tests {
             no_xvfb_set: false,
             device: None,
             auto_connect: false,
+            context: None,
             pin_tab: false,
             session_name: None,
             restore: None,
