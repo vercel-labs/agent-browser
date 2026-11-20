@@ -90,7 +90,7 @@ agent-browser get text @e1        # Get heading text
 
 ## Ref lifecycle
 
-Surviving DOM elements retain their refs across snapshots and same-document updates. Replacing an element or navigating its page or iframe invalidates its refs without recycling IDs. Virtual accessibility nodes have snapshot-local refs. Using a ref issued for a document that has since been replaced, in the page or in its iframe (for example by a click that loads a new page), fails with `Ref @eN is from a document that is no longer loaded`. A snapshot taken while the document is being replaced fails with `The document changed while the snapshot was being captured`; run it again. Re-snapshot after interactions to observe changes, and always after navigation:
+Surviving DOM elements retain their refs across snapshots and same-document updates. Replacing an element or navigating its page or iframe invalidates its refs without recycling IDs. Virtual accessibility nodes have snapshot-local refs. Using a ref issued for a document that has since been replaced, in the page or in its iframe (for example by a click that loads a new page), fails with "Ref @eN is from a document that is no longer loaded". A snapshot taken while the document is being replaced fails with "The document changed while the snapshot was being captured"; run it again. Re-snapshot after interactions to observe changes, and always after navigation:
 
 ```bash
 agent-browser click @e4      # Navigates to new page
