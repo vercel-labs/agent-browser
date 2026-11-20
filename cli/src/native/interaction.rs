@@ -491,10 +491,10 @@ fn refusal(kind: &str, verb: &str) -> (&'static str, String) {
     }
 }
 
-/// Focuses the control. With `guard`, a target that cannot take focus (not
-/// natively focusable, no tabindex, not editable, no delegatesFocus) and where
-/// focus did not land is refused: text would go to whatever was focused
-/// before. A focusable target whose handler moves focus elsewhere is allowed.
+/// Focuses the control. With `guard`, a target that neither receives focus nor
+/// gets a focus event (a hidden, inert or non-focusable element) is refused:
+/// text would go to whatever was focused before. A target whose focus handler
+/// moves focus elsewhere is allowed.
 /// Open and closed shadow roots are walked.
 async fn focus_target(
     client: &CdpClient,
@@ -513,21 +513,22 @@ async fn focus_target(
             return a;
         }};
         const before = deep(el.ownerDocument);
+        let focused = false;
+        const seen = () => {{ focused = true; }};
+        el.addEventListener('focus', seen, true);
         el.focus();
+        el.removeEventListener('focus', seen, true);
         const after = deep(el.ownerDocument);
         let landed = after !== before;
         for (let n = after; n && !landed; n = n.parentNode || n.host) if (n === el) landed = true;
-        const focusable = el.tabIndex >= 0 || el.hasAttribute('tabindex') || el.isContentEditable
-            || !!el.editContext || !!(el.shadowRoot && el.shadowRoot.delegatesFocus);
-        return {{ landed, focusable, tag: el.localName, type: el.localName === 'input' ? el.type : '' }};
+        return {{ landed: landed || focused, tag: el.localName, type: el.localName === 'input' ? el.type : '' }};
     }}"#
     );
     let result = call_on(client, session_id, object_id, js, None).await?;
     let Some(value) = result.result.value.as_ref() else {
         return Ok(());
     };
-    let flag = |key: &str| value.get(key).and_then(Value::as_bool);
-    if guard && flag("landed") == Some(false) && flag("focusable") == Some(false) {
+    if guard && value.get("landed").and_then(Value::as_bool) == Some(false) {
         let field = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("");
         return Err(form_error(
             "not_editable",
