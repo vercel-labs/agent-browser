@@ -2939,7 +2939,22 @@ fn cli_tool_args_at(
             )));
         }
     }
-    if let Some(boundary) = literal_boundary {
+    if let Some(boundary) = literal_boundary.filter(|_| operands_follow_subcommand(&command_args)) {
+        // Global extraArgs stay before the marker; per-command options go
+        // after the operands, where these parsers read them.
+        let (global, local) = split_extra_args(&command_args[..boundary], extra_args);
+        args.extend(command_args[..boundary].iter().cloned());
+        args.extend(global);
+        args.push(command_args[boundary].clone());
+        let cleaned = crate::flags::clean_args(&args);
+        if crate::flags::before_end_of_options(&cleaned).len() + 1 != cleaned.len() {
+            return Err(ProtocolError::invalid_params(
+                "Tool extraArgs must preserve the literal boundary",
+            ));
+        }
+        args.extend(command_args[boundary + 1..].iter().cloned());
+        args.extend(local);
+    } else if let Some(boundary) = literal_boundary {
         args.extend(command_args[..boundary].iter().cloned());
         args.extend(extra_args);
         args.push(command_args[boundary].clone());
@@ -2955,6 +2970,37 @@ fn cli_tool_args_at(
         args.extend(extra_args);
     }
     Ok(args)
+}
+
+/// True for the two-word commands built by [`operands_after_subcommand`].
+fn operands_follow_subcommand(command_args: &[String]) -> bool {
+    command_args.get(2).map(String::as_str) == Some("--")
+        && matches!(
+            command_args.first().map(String::as_str),
+            Some("auth" | "webmcp" | "plugin")
+        )
+}
+
+/// Splits extraArgs into global flags (with their values) and the rest.
+fn split_extra_args(
+    command_words: &[String],
+    extra_args: Vec<String>,
+) -> (Vec<String>, Vec<String>) {
+    let base = crate::flags::clean_args(command_words).len();
+    let mut kept = base;
+    let (mut global, mut local) = (Vec::new(), Vec::new());
+    for index in 0..extra_args.len() {
+        let mut prefix = command_words.to_vec();
+        prefix.extend(extra_args[..=index].iter().cloned());
+        let now = crate::flags::clean_args(&prefix).len();
+        if now > kept {
+            local.push(extra_args[index].clone());
+        } else {
+            global.push(extra_args[index].clone());
+        }
+        kept = now;
+    }
+    (global, local)
 }
 
 /// Strings a caller supplied verbatim, except `extraArgs` (checked on its own).
@@ -8313,11 +8359,58 @@ mod flag_shaped_values {
                     command.to_string().contains(&format!("\"{payload}\"")),
                     "{tool} {key}={payload} lost: {command}"
                 );
+                if tool == "agent_browser_plugin_run" {
+                    let slot = if key == "name" { 2 } else { 3 };
+                    assert_eq!(command[slot], payload, "{tool} {key}={payload} slot");
+                }
                 assert_eq!(
                     flags, baseline_flags,
                     "{tool} {key}={payload} changed Flags"
                 );
             }
         }
+    }
+    #[test]
+    fn per_command_extra_args_of_the_five_tools_reach_their_parsers() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.remove("AGENT_BROWSER_SESSION");
+        let (result, runs) = record_call(
+            "agent_browser_auth_login",
+            json!({"name": "gh", "extraArgs": ["--credential-provider", "op", "--item", "x"]}),
+        );
+        assert!(result.is_ok());
+        let (_, command) = parsed_run(&runs[0]);
+        assert_eq!(command["name"], "gh");
+        assert_eq!(command["credentialProvider"], "op");
+        assert_eq!(command["credentialItem"], "x");
+
+        let (result, runs) = record_call(
+            "agent_browser_webmcp_invoke",
+            json!({"tool": "t", "extraArgs": ["--detach"]}),
+        );
+        assert!(result.is_ok());
+        let (_, command) = parsed_run(&runs[0]);
+        assert_eq!(command["tool"], "t");
+        assert_eq!(command["detach"], true);
+
+        let (result, runs) = record_call(
+            "agent_browser_plugin_run",
+            json!({"name": "p", "requestType": "r", "extraArgs": ["--payload", "{\"a\":1}"]}),
+        );
+        assert!(result.is_ok());
+        let (_, command) = parsed_run(&runs[0]);
+        assert_eq!(command[2], "p");
+        assert_eq!(command[3], "r");
+        assert_eq!(command[4], "--payload");
+
+        // Global flags stay global and still apply.
+        let (result, runs) = record_call(
+            "agent_browser_webmcp_result",
+            json!({"invocationId": "i", "extraArgs": ["--headed"]}),
+        );
+        assert!(result.is_ok());
+        let (flags, command) = parsed_run(&runs[0]);
+        assert!(flags.contains("headed: true"));
+        assert_eq!(command["invocationId"], "i");
     }
 }
