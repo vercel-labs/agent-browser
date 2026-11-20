@@ -18917,18 +18917,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         .await;
 
         assert!(result.is_err());
-        let stored = state
-            .settings
-            .security()
-            .allowed_domains
-            .unwrap_or_default();
-        assert_eq!(current_allowed_domains(&state).await, stored);
-        let filter = state.domain_filter.read().await;
         assert_eq!(
-            filter.is_some(),
-            !stored.is_empty(),
-            "a stored allowlist must be enforced"
+            state.settings.security().allowed_domains,
+            Some(vec!["localhost".to_string()])
         );
+        assert_eq!(current_allowed_domains(&state).await, vec!["localhost"]);
     }
 
     #[tokio::test]
@@ -18964,14 +18957,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 auto_launch(&mut state, Vec::new()).await
             };
             assert!(result.is_err());
+            let expected = if explicit {
+                vec!["other.example".to_string()]
+            } else {
+                vec!["example.com".to_string()]
+            };
             assert_eq!(
-                current_allowed_domains(&state).await,
-                state
-                    .settings
-                    .security()
-                    .allowed_domains
-                    .unwrap_or_default()
+                state.settings.security().allowed_domains,
+                Some(expected.clone())
             );
+            assert_eq!(current_allowed_domains(&state).await, expected);
             assert_eq!(*state.proxy_credentials.read().await, credentials);
             assert_eq!(state.plugin_init_scripts, vec!["previous-script"]);
             assert_eq!(
@@ -19061,14 +19056,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                     state.session_setup.user_agent.as_deref(),
                     Some("previous-agent")
                 );
+                let expected = if closing {
+                    vec!["example.com".to_string()]
+                } else {
+                    vec!["other.example".to_string()]
+                };
                 assert_eq!(
-                    current_allowed_domains(&state).await,
-                    state
-                        .settings
-                        .security()
-                        .allowed_domains
-                        .unwrap_or_default()
+                    state.settings.security().allowed_domains,
+                    Some(expected.clone())
                 );
+                assert_eq!(current_allowed_domains(&state).await, expected);
             });
             server.join().unwrap();
         }

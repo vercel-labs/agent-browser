@@ -2202,8 +2202,9 @@ fn shared_property(key: &str) -> Value {
         }),
         "allowedDomains" => json!({
             "type": "array",
+            "minItems": 1,
             "items": { "type": "string" },
-            "description": "Restrict browser and read traffic to these domain patterns."
+            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected."
         }),
         "capture" => json!({
             "type": "array",

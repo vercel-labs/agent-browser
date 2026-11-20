@@ -41,8 +41,39 @@ fn check_security_config(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Set for commands that only close a session: an unusable security config is
-/// reported but does not stop them, so it can be fixed with the session closed.
+/// Whether the command can run a browser or apply settings. Help, version and
+/// commands that only manage files, sessions or the install never do, so a
+/// bad security setting is reported for them but does not stop them.
+pub fn command_runs_browser(args: &[String]) -> bool {
+    let options = before_end_of_options(args);
+    if options
+        .iter()
+        .any(|a| matches!(a.as_str(), "--help" | "-h" | "--version" | "-V"))
+    {
+        return false;
+    }
+    !matches!(
+        clean_args(args).first().map(|s| s.as_str()),
+        None | Some(
+            "close"
+                | "quit"
+                | "exit"
+                | "install"
+                | "upgrade"
+                | "doctor"
+                | "dashboard"
+                | "profiles"
+                | "skills"
+                | "plugin"
+                | "plugins"
+                | "mcp"
+                | "session"
+        )
+    )
+}
+
+/// Set for commands that cannot run a browser: an unusable security config is
+/// reported but does not stop them, so it can be fixed with them still usable.
 static LENIENT_SECURITY_CONFIG: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 

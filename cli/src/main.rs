@@ -1580,10 +1580,8 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
-    if matches!(
-        clean_args(&args).first().map(|s| s.as_str()),
-        Some("close" | "quit" | "exit")
-    ) {
+    let runs_browser = flags::command_runs_browser(&args);
+    if !runs_browser {
         flags::allow_unusable_security_config();
     }
     let mut flags = parse_flags(&args);
@@ -1766,10 +1764,7 @@ fn main() {
     // `close` only tears a session down, so it warns and drops the list; that
     // keeps it usable to recover from a bad value.
     if let Err(error) = validate_allowed_domains_flag(&flags, &args) {
-        if matches!(
-            clean.first().map(|s| s.as_str()),
-            Some("close" | "quit" | "exit")
-        ) {
+        if !runs_browser {
             eprintln!("{} {}", color::warning_indicator(), error);
             flags.allowed_domains = None;
             env::remove_var("AGENT_BROWSER_ALLOWED_DOMAINS");

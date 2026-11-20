@@ -302,3 +302,32 @@ fn the_chat_model_cannot_confirm_or_deny_actions() {
         );
     }
 }
+
+#[test]
+fn a_broken_security_config_stops_only_commands_that_run_a_browser() {
+    let home = TempDir::new().unwrap();
+    let dir = home.path().join(".agent-browser");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("config.json"), r#"{"allowedDomains": []}"#).unwrap();
+
+    for args in [
+        &["--version"][..],
+        &["--help"][..],
+        &["skills", "list"][..],
+        &["session", "list"][..],
+        &["close"][..],
+    ] {
+        let (output, text) = run(&home, &[], args);
+        assert!(output.status.success(), "{args:?}: {text}");
+    }
+
+    let (_, text) = run(&home, &[], &["doctor", "--offline", "--quick"]);
+    assert!(
+        text.contains("allowedDomains"),
+        "doctor should report the config problem and keep running: {text}"
+    );
+
+    let (output, text) = run(&home, &[], &["open", "http://127.0.0.1:1/"]);
+    assert!(!output.status.success(), "open: {text}");
+    assert!(!text.contains("nonexistent"), "open: {text}");
+}

@@ -2470,10 +2470,11 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns.",
+            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected.",
             "items": {
               "type": "string"
             },
+            "minItems": 1,
             "type": "array"
           },
           "capture": {
@@ -2969,10 +2970,11 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns.",
+            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected.",
             "items": {
               "type": "string"
             },
+            "minItems": 1,
             "type": "array"
           },
           "extraArgs": {
@@ -4325,10 +4327,11 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns.",
+            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected.",
             "items": {
               "type": "string"
             },
+            "minItems": 1,
             "type": "array"
           },
           "capture": {
