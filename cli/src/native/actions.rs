@@ -4804,6 +4804,31 @@ async fn auto_launch_with(
     cmd: &Value,
     strict_state: bool,
 ) -> Result<Value, String> {
+    let resumed = state.attached_target.is_some() && cmd.is_null();
+    let result = auto_launch_with_settings(state, plugins, cmd, strict_state).await;
+    if result.is_ok() && !resumed {
+        state.attached_target = attached_target_for(&state.settings.connection());
+    }
+    result
+}
+
+/// The external browser a session's connection setting attaches to, if any.
+fn attached_target_for(connection: &Connection) -> Option<AttachedTarget> {
+    let named = match connection {
+        Connection::Local => return None,
+        Connection::Cdp(cdp) => json!({ "cdpUrl": cdp }),
+        Connection::AutoConnect => json!({ "autoConnect": true }),
+        Connection::Provider(provider) => json!({ "provider": provider }),
+    };
+    AttachedTarget::from_launch_command(&named)
+}
+
+async fn auto_launch_with_settings(
+    state: &mut DaemonState,
+    plugins: Vec<crate::plugins::PluginConfig>,
+    cmd: &Value,
+    strict_state: bool,
+) -> Result<Value, String> {
     if state.attached_target.is_some() && cmd.is_null() {
         // Resume the attached browser; the launch handler resolves the target.
         let launch = json!({ "action": "launch", "plugins": plugins });
@@ -8341,13 +8366,24 @@ fn implicit_baseline_scope(cmd: &Value, stored: &SnapshotScope) -> Result<Snapsh
     let mut differing = Vec::new();
     if let Some(selector) = cmd.get("selector").and_then(Value::as_str) {
         if stored.selector.as_deref() != Some(selector) {
-            differing.push("--selector");
+            differing.push(format!(
+                "--selector {selector:?} (last snapshot: {})",
+                stored
+                    .selector
+                    .as_deref()
+                    .map_or("no selector".to_string(), |s| format!("{s:?}"))
+            ));
         }
         scope.selector = Some(selector.to_string());
     }
     if let Some(depth) = cmd.get("maxDepth").and_then(Value::as_u64) {
         if stored.depth != Some(depth as usize) {
-            differing.push("--depth");
+            differing.push(format!(
+                "--depth {depth} (last snapshot: {})",
+                stored
+                    .depth
+                    .map_or("no depth".to_string(), |d| d.to_string())
+            ));
         }
         scope.depth = Some(depth as usize);
     }
@@ -8363,7 +8399,7 @@ fn implicit_baseline_scope(cmd: &Value, stored: &SnapshotScope) -> Result<Snapsh
     ] {
         if flag(key).is_some() {
             if !stored_set {
-                differing.push(name);
+                differing.push(format!("{name} (last snapshot: without)"));
             }
             *field = true;
         }
@@ -8372,7 +8408,7 @@ fn implicit_baseline_scope(cmd: &Value, stored: &SnapshotScope) -> Result<Snapsh
         Ok(scope)
     } else {
         Err(format!(
-            "baseline_mismatch: the last snapshot was taken without {}; run `snapshot` with the same options or pass --baseline <file>",
+            "baseline_mismatch: the last snapshot used different options: {}; run `snapshot` with the same options or pass --baseline <file>",
             differing.join(", ")
         ))
     }
@@ -21353,7 +21389,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let ghost = dir.path().join("ghost.txt").to_string_lossy().into_owned();
         let folder = dir.path().to_string_lossy().into_owned();
 
-        assert_eq!(check_upload_files(&[real.clone()], false), Ok(None));
+        assert_eq!(
+            check_upload_files(std::slice::from_ref(&real), false),
+            Ok(None)
+        );
         // A directory is a valid `webkitdirectory` upload.
         assert_eq!(check_upload_files(&[folder], false), Ok(None));
         let err = check_upload_files(&[real.clone(), ghost.clone()], false).unwrap_err();
@@ -21365,6 +21404,27 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             .unwrap()
             .unwrap();
         assert!(warning.contains(&ghost));
+    }
+
+    #[test]
+    fn test_connection_setting_maps_to_attached_target() {
+        assert_eq!(attached_target_for(&Connection::Local), None);
+        assert_eq!(
+            attached_target_for(&Connection::AutoConnect),
+            Some(AttachedTarget::AutoConnect)
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Cdp("http://0.0.0.0:9222".to_string())),
+            Some(AttachedTarget::CdpUrl("http://0.0.0.0:9222".to_string()))
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Provider("Browserless".to_string())),
+            Some(AttachedTarget::Provider("browserless".to_string()))
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Provider("ios".to_string())),
+            None
+        );
     }
 
     #[test]

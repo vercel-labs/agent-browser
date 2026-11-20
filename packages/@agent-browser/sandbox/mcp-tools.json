@@ -1011,6 +1011,9 @@
           "session": {
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
+          },
+          "urls": {
+            "type": "boolean"
           }
         },
         "type": "object"

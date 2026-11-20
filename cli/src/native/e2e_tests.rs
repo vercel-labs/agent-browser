@@ -11898,13 +11898,58 @@ async fn e2e_upload_attaches_content_and_directories() {
     .await;
     assert_success(&resp);
     let resp = execute_command(
-        &json!({ "id": "6", "action": "evaluate", "script": "document.querySelector('#d').files.length" }),
+        &json!({ "id": "6", "action": "wait", "function": "document.querySelector('#d').files.length === 1", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "document.querySelector('#d').files.length" }),
         &mut state,
     )
     .await;
     assert_eq!(get_data(&resp)["result"], 1, "{resp}");
 
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+/// A session whose `--cdp` setting names a non-local browser treats it as
+/// remote: a path missing on this host only warns.
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_over_cdp_setting_treats_non_local_browser_as_remote() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let ws_url = ws_url.replacen("127.0.0.1", "0.0.0.0", 1);
+    assert!(ws_url.contains("0.0.0.0"), "{ws_url}");
+
+    guard.set("AGENT_BROWSER_SESSION", "e2e-upload-cdp-client");
+    let mut state = DaemonState::new();
+    let page = "data:text/html,<input type=file id=f>";
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "navigate",
+            "url": page,
+            "settings": { "cdp": ws_url }
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let missing =
+        std::env::temp_dir().join(format!("ab-upload-cdp-ghost-{}.txt", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "upload", "selector": "#f", "files": [missing.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_ne!(resp["code"], "file_not_found", "{resp}");
+    assert!(resp["warning"].is_string(), "{resp}");
+
+    let _ = execute_command(&json!({ "id": "98", "action": "close" }), &mut state).await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut host).await;
 }
 
 #[tokio::test]

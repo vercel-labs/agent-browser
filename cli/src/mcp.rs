@@ -1776,7 +1776,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_DIFF_SNAPSHOT,
             "Diff snapshot",
             "Diff current snapshot against the last snapshot or a baseline file. Without a baseline the last snapshot's options are reused; an option that differs fails with baseline_mismatch, and no earlier snapshot fails with no_baseline. A missing baseline file fails with file_not_found; a relative baseline path resolves against the working directory of the caller.",
-            json!({ "baseline": { "type": "string" }, "selector": { "type": "string" }, "interactive": { "type": "boolean" }, "compact": { "type": "boolean" }, "depth": { "type": "integer" } }),
+            json!({ "baseline": { "type": "string" }, "selector": { "type": "string" }, "interactive": { "type": "boolean" }, "compact": { "type": "boolean" }, "urls": { "type": "boolean" }, "depth": { "type": "integer" } }),
             &[],
         ),
         tool(
@@ -4060,6 +4060,9 @@ fn call_diff_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
     }
     if optional_bool(arguments, "compact")?.unwrap_or(false) {
         args.push("--compact".to_string());
+    }
+    if optional_bool(arguments, "urls")?.unwrap_or(false) {
+        args.push("--urls".to_string());
     }
     if let Some(depth) = optional_u64(arguments, "depth")? {
         args.push("--depth".to_string());
