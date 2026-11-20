@@ -392,6 +392,12 @@
         "to": "See the main [documentation](/introduction) for current architecture and usage."
       }
     ],
+    "/snapshots": [
+      {
+        "from": "Re-snapshot after interactions to observe changes, and always after navigation:",
+        "to": "Using a ref issued for a document that has since been replaced, in the page or in its iframe (for example by a click that loads a new page), fails with \"Ref @eN is from a document that is no longer loaded\". A snapshot taken while the document is being replaced fails with \"The document changed while the snapshot was being captured\"; run it again. Re-snapshot after interactions to observe changes, and always after navigation:"
+      }
+    ],
     "/streaming": [
       {
         "from": "Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.",

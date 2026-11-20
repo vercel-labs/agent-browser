@@ -76,6 +76,8 @@ agent-browser snapshot --delta --full # Force full state and refresh baseline
 
 Delta history is per tab and option set. Responses are `full`, `unchanged`, or `delta`; URL changes or large deltas return full state. For a delta, apply `changes` (`add`, `remove`, `replace`) to ref metadata. Split the previous tree on newlines, splice `treeChange.lines` at zero-based `startLine`, replacing `deleteCount` lines, then join with newlines. Apply both parts to `baseRevision` before advancing to `revision`; use `--full` if the baseline is unavailable.
 
+A ref is tied to the document it was issued in. After a page load or an iframe navigation or removal (a click, script or redirect), using that ref fails with `Ref @eN is from a document that is no longer loaded`; snapshot again. A snapshot taken while the document is being replaced fails with `The document changed while the snapshot was being captured`; run it again. Refs survive same-document changes such as `pushState` and DOM updates.
+
 ## Interactions (use @refs from snapshot)
 
 ```bash

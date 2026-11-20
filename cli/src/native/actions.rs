@@ -3720,6 +3720,14 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     };
     attach_tab_gone_data(&mut resp, state);
     attach_flow_stop(&mut resp, state);
+    if let Some(warning) = resp
+        .get_mut("data")
+        .and_then(Value::as_object_mut)
+        .and_then(|data| data.remove("postActionWarning"))
+        .and_then(|w| w.as_str().map(str::to_string))
+    {
+        append_warning(&mut resp, &warning);
+    }
     if resp.get("success").and_then(Value::as_bool) == Some(false) {
         attach_settings_outcome(&mut resp, &settings_outcome);
     }
@@ -7525,6 +7533,15 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "selected": values }))
 }
 
+/// Response of a check or uncheck; an unverified toggle carries a warning.
+fn toggle_response(key: &str, selector: &str, verified: bool) -> Value {
+    let mut data = json!({ key: selector });
+    if !verified {
+        data["postActionWarning"] = json!(super::element::STATE_NOT_VERIFIED);
+    }
+    data
+}
+
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -7533,21 +7550,21 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    if let Some(position) = interaction::check(
+    let outcome = interaction::check(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &state.iframe_sessions,
     )
-    .await?
-    {
+    .await?;
+    if let Some(position) = outcome.position {
         (state.mouse_state.x, state.mouse_state.y) = position;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(json!({ "checked": selector }))
+    Ok(toggle_response("checked", selector, outcome.verified))
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7558,21 +7575,21 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    if let Some(position) = interaction::uncheck(
+    let outcome = interaction::uncheck(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &state.iframe_sessions,
     )
-    .await?
-    {
+    .await?;
+    if let Some(position) = outcome.position {
         (state.mouse_state.x, state.mouse_state.y) = position;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(json!({ "unchecked": selector }))
+    Ok(toggle_response("unchecked", selector, outcome.verified))
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -10912,6 +10929,14 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                 .ref_map
                 .get(&ref_id)
                 .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+            super::element::ensure_ref_document_current(
+                &mgr.client,
+                &session_id,
+                &ref_id,
+                entry,
+                &state.iframe_sessions,
+            )
+            .await?;
             let backend_node_id = entry
                 .backend_node_id
                 .ok_or_else(|| format!("Ref {} has no backend node id", ref_id))?;
@@ -11115,21 +11140,21 @@ async fn execute_subaction(
             Ok(json!({ "filled": selector }))
         }
         "check" => {
-            if let Some(position) = interaction::check(
+            let outcome = interaction::check(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
                 selector,
                 &state.iframe_sessions,
             )
-            .await?
-            {
+            .await?;
+            if let Some(position) = outcome.position {
                 (state.mouse_state.x, state.mouse_state.y) = position;
                 if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
                     cursor.record(position.0, position.1, state.mouse_state.buttons);
                 }
             }
-            Ok(json!({ "checked": selector }))
+            Ok(toggle_response("checked", selector, outcome.verified))
         }
         "hover" => {
             let position = interaction::hover(
@@ -11387,6 +11412,15 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &state.iframe_sessions,
     );
 
+    // Read before the tree: a navigation in between is caught when the ref resolves.
+    let document = super::element::current_document(
+        &mgr.client,
+        &session_id,
+        state.active_frame_id.as_deref(),
+        &state.iframe_sessions,
+    )
+    .await;
+
     let ax_tree: GetFullAXTreeResult = mgr
         .client
         .send_command_typed_raw(
@@ -11408,6 +11442,9 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
         state.active_frame_id.as_deref(),
     );
+    if let Some((session, loader)) = document {
+        state.ref_map.bind_document(&temp_ref, &session, &loader);
+    }
     state.ref_map.set_next_ref_num(ref_num + 1);
 
     let result = execute_subaction(cmd, state, &format!("@{}", temp_ref)).await;
