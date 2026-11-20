@@ -493,6 +493,8 @@ pub struct InitScriptSetup {
 struct LaunchSeed {
     user_agent: Option<String>,
     emulated_media: Option<EmulatedMedia>,
+    /// The window-sizing launch arguments in effect.
+    window_sizing: Vec<String>,
 }
 
 /// Viewport emulation installed by `viewport`, `device` or a launch viewport.
@@ -556,6 +558,7 @@ impl SessionSetup {
             launch_seed: LaunchSeed {
                 user_agent: user_agent.clone(),
                 emulated_media: emulated_media.clone(),
+                window_sizing: window_sizing_args(&options.args),
             },
             user_agent,
             emulated_media,
@@ -566,11 +569,19 @@ impl SessionSetup {
     /// The setup for a relaunched browser: what was set at runtime, with the
     /// new launch's own settings taking over where they changed.
     fn carried_into_relaunch(mut self, launch: SessionSetup) -> Self {
-        if self.launch_seed != launch.launch_seed {
+        if self.launch_seed.user_agent != launch.launch_seed.user_agent {
             self.user_agent = launch.user_agent;
-            self.emulated_media = launch.emulated_media;
-            self.launch_seed = launch.launch_seed;
         }
+        if self.launch_seed.emulated_media != launch.launch_seed.emulated_media {
+            self.emulated_media = launch.emulated_media;
+        }
+        // Window sizing given to this relaunch wins over a remembered viewport.
+        if !launch.launch_seed.window_sizing.is_empty()
+            && self.launch_seed.window_sizing != launch.launch_seed.window_sizing
+        {
+            self.viewport = None;
+        }
+        self.launch_seed = launch.launch_seed;
         self.init_scripts.retain(|script| !script.launch_owned);
         for script in &mut self.init_scripts {
             script.session_identifiers.clear();
@@ -1875,6 +1886,7 @@ impl DaemonState {
                                     browser.session_id_for_target(&te.target_id)
                                 }) {
                                     self.webmcp.observations.remove(session);
+                                    self.touch_sessions.remove(session);
                                 }
                                 new_targets
                                     .retain(|entry| entry.target_info.target_id != te.target_id);
@@ -1945,6 +1957,7 @@ impl DaemonState {
                                         }
                                     }
                                 }
+                                self.touch_sessions.remove(sid);
                                 attached_page_sessions.retain(|(_, known_sid)| known_sid != sid);
                                 attached_worker_sessions.retain(|(_, known_sid)| known_sid != sid);
                                 attached_iframe_sessions.retain(|(_, known_sid)| known_sid != sid);
@@ -4896,6 +4909,29 @@ async fn auto_launch_inner(
     cmd: &Value,
     strict_state: bool,
 ) -> Result<Value, String> {
+    // Only a browser agent-browser launches itself keeps its session setup
+    // across a relaunch; an attached or provider browser starts without one,
+    // and a failed attach leaves the previous setup in place.
+    let saved = (!matches!(state.settings.connection(), Connection::Local)).then(|| {
+        (
+            std::mem::take(&mut state.session_setup),
+            std::mem::take(&mut state.touch_sessions),
+        )
+    });
+    let result = launch_browser_from_settings(state, plugins, cmd, strict_state).await;
+    if let (Err(_), Some((setup, touch))) = (&result, saved) {
+        state.session_setup = setup;
+        state.touch_sessions = touch;
+    }
+    result
+}
+
+async fn launch_browser_from_settings(
+    state: &mut DaemonState,
+    plugins: Vec<crate::plugins::PluginConfig>,
+    cmd: &Value,
+    strict_state: bool,
+) -> Result<Value, String> {
     if has_active_browser_session(state) {
         close_before_implicit_relaunch(state).await?;
     }
@@ -4916,12 +4952,6 @@ async fn auto_launch_inner(
         _ => None,
     };
     let auto_connect = matches!(connection, Connection::AutoConnect);
-    // Only a browser agent-browser launches itself keeps its session setup
-    // across a relaunch; an attached or provider browser starts without one.
-    if !matches!(connection, Connection::Local) {
-        state.session_setup = SessionSetup::default();
-        state.touch_sessions.clear();
-    }
     let provider = match &connection {
         Connection::Provider(provider) => Some(provider.clone()),
         _ => None,
@@ -5156,14 +5186,11 @@ async fn auto_launch_inner(
     if let Some(ref ca) = effective_ca_cert {
         options.prepared_nss_home = Some(prepare_nss_home(&ca.bundle)?);
     }
-    let mut previous_setup = std::mem::take(&mut state.session_setup);
-    if sets_window_size(&options.args) {
-        previous_setup.viewport = None;
-    }
-    state.session_setup =
-        previous_setup.carried_into_relaunch(SessionSetup::from_launch_options(&options));
-    state.touch_sessions.clear();
+    let launch_setup = SessionSetup::from_launch_options(&options);
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
+    let previous_setup = std::mem::take(&mut state.session_setup);
+    state.session_setup = previous_setup.carried_into_relaunch(launch_setup);
+    state.touch_sessions.clear();
     state.reset_input_state();
     state.browser = Some(mgr);
     state.launch_identity = Some(state.settings.launch_identity());
@@ -5210,13 +5237,16 @@ async fn replay_session_setup_after_launch(state: &mut DaemonState) -> Option<St
     ))
 }
 
-/// True when the launch arguments size the window themselves.
-fn sets_window_size(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        arg.starts_with("--window-size=")
-            || arg.starts_with("--start-maximized")
-            || arg.starts_with("--start-fullscreen")
-    })
+/// The launch arguments that size the window themselves.
+fn window_sizing_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .filter(|arg| {
+            arg.starts_with("--window-size=")
+                || arg.starts_with("--start-maximized")
+                || arg.starts_with("--start-fullscreen")
+        })
+        .cloned()
+        .collect()
 }
 
 fn string_array_from_command(cmd: &Value, key: &str) -> Option<Vec<String>> {
@@ -17713,10 +17743,22 @@ mod tests {
                     command["params"].clone(),
                 ));
                 let method = command["method"].as_str().unwrap_or_default();
+                if method == "Test.emit" {
+                    let event = command["params"]["event"].to_string();
+                    if ws.send(Message::Text(event)).await.is_err() {
+                        return;
+                    }
+                }
+                let result = match method {
+                    "Target.createBrowserContext" => json!({ "browserContextId": "C-W" }),
+                    "Target.createTarget" => json!({ "targetId": "T-W" }),
+                    "Target.attachToTarget" => json!({ "sessionId": "S-W" }),
+                    _ => json!({}),
+                };
                 let reply = if reject.contains(&method) {
                     json!({ "id": command["id"], "error": { "code": -32000, "message": "rejected" } })
                 } else {
-                    json!({ "id": command["id"], "result": {} })
+                    json!({ "id": command["id"], "result": result })
                 };
                 if ws.send(Message::Text(reply.to_string())).await.is_err() {
                     return;
@@ -18016,28 +18058,215 @@ mod tests {
     }
 
     #[test]
-    fn a_relaunch_that_changes_a_launch_setting_takes_the_new_value() {
+    fn a_relaunch_that_changes_only_the_user_agent_keeps_the_runtime_media() {
         let mut previous = setup_with("old-ua", Some("dark"));
-        previous.user_agent = Some("device-ua".to_string());
+        previous.emulated_media = Some(EmulatedMedia {
+            media: None,
+            features: vec![("prefers-color-scheme".to_string(), "light".to_string())],
+        });
 
-        let next = previous.carried_into_relaunch(setup_with("new-ua", Some("light")));
+        let next = previous.carried_into_relaunch(setup_with("new-ua", Some("dark")));
 
         assert_eq!(next.user_agent.as_deref(), Some("new-ua"));
-        let media = next.emulated_media.unwrap();
         assert_eq!(
-            media.features,
+            next.emulated_media.unwrap().features,
             vec![("prefers-color-scheme".to_string(), "light".to_string())]
         );
     }
 
     #[test]
+    fn a_relaunch_that_changes_only_the_color_scheme_keeps_the_runtime_user_agent() {
+        let mut previous = setup_with("launch-ua", Some("dark"));
+        previous.user_agent = Some("device-ua".to_string());
+
+        let next = previous.carried_into_relaunch(setup_with("launch-ua", Some("light")));
+
+        assert_eq!(next.user_agent.as_deref(), Some("device-ua"));
+        assert_eq!(
+            next.emulated_media.unwrap().features,
+            vec![("prefers-color-scheme".to_string(), "light".to_string())]
+        );
+    }
+
+    fn setup_sized(args: &[&str]) -> SessionSetup {
+        SessionSetup::from_launch_options(&LaunchOptions {
+            args: args.iter().map(|a| a.to_string()).collect(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn only_window_sizing_that_changed_in_the_relaunch_drops_the_viewport() {
+        let remembered = viewport(800, 600, false);
+
+        // Sizing inherited from an earlier launch, config or env.
+        let mut previous = setup_sized(&["--window-size=1400,900"]);
+        previous.viewport = Some(remembered);
+        let next = previous.carried_into_relaunch(setup_sized(&["--window-size=1400,900"]));
+        assert_eq!(next.viewport, Some(remembered));
+
+        // Sizing given to this relaunch.
+        let mut previous = setup_sized(&["--window-size=1400,900"]);
+        previous.viewport = Some(remembered);
+        let next = previous.carried_into_relaunch(setup_sized(&["--start-maximized"]));
+        assert_eq!(next.viewport, None);
+
+        let mut previous = setup_sized(&[]);
+        previous.viewport = Some(remembered);
+        let next = previous.carried_into_relaunch(setup_sized(&["--start-fullscreen"]));
+        assert_eq!(next.viewport, None);
+
+        // Sizing removed: the remembered viewport stays.
+        let mut previous = setup_sized(&["--window-size=1400,900"]);
+        previous.viewport = Some(remembered);
+        let next = previous.carried_into_relaunch(setup_sized(&[]));
+        assert_eq!(next.viewport, Some(remembered));
+    }
+
+    #[test]
     fn launch_sizing_arguments_are_recognized() {
         let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
-        assert!(sets_window_size(&args(&["--window-size=1400,900"])));
-        assert!(sets_window_size(&args(&["--lang=en", "--start-maximized"])));
-        assert!(sets_window_size(&args(&["--start-fullscreen"])));
-        assert!(!sets_window_size(&args(&["--lang=en"])));
-        assert!(!sets_window_size(&[]));
+        assert_eq!(
+            window_sizing_args(&args(&["--lang=en", "--window-size=1400,900"])),
+            args(&["--window-size=1400,900"])
+        );
+        assert_eq!(
+            window_sizing_args(&args(&["--start-maximized", "--start-fullscreen"])),
+            args(&["--start-maximized", "--start-fullscreen"])
+        );
+        assert!(window_sizing_args(&args(&["--lang=en"])).is_empty());
+        assert!(window_sizing_args(&[]).is_empty());
+    }
+
+    fn seeded_state() -> (IsolatedEnv, DaemonState) {
+        let (env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.session_setup = setup_with("device-ua", None);
+        state.session_setup.viewport = Some(viewport(390, 844, true));
+        state.session_setup.timezone = Some("Asia/Tokyo".to_string());
+        state.touch_sessions.insert("S-OLD".to_string());
+        (env, state)
+    }
+
+    #[tokio::test]
+    async fn a_failed_local_launch_keeps_the_session_setup() {
+        let (_env, mut state) = seeded_state();
+        let before = format!("{:?}", state.session_setup);
+
+        let cmd = json!({
+            "action": "launch",
+            "userAgent": "other-ua",
+            "executablePath": "/nonexistent/chrome"
+        });
+        assert!(handle_launch(&cmd, &mut state).await.is_err());
+
+        assert_eq!(format!("{:?}", state.session_setup), before);
+        assert!(state.touch_sessions.contains("S-OLD"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_attach_keeps_the_session_setup() {
+        let (_env, mut state) = seeded_state();
+        let before = format!("{:?}", state.session_setup);
+
+        let cmd = json!({ "action": "launch", "cdpUrl": "ws://127.0.0.1:1/devtools/browser/x" });
+        assert!(handle_launch(&cmd, &mut state).await.is_err());
+
+        assert_eq!(format!("{:?}", state.session_setup), before);
+        assert!(state.touch_sessions.contains("S-OLD"));
+    }
+
+    #[tokio::test]
+    async fn close_clears_the_session_setup() {
+        let (_env, mut state) = seeded_state();
+        let (url, _seen) = spawn_recording_cdp_server(&[]).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        state.browser = Some(BrowserManager::for_test(client, url));
+
+        close_session(&mut state, false).await.unwrap();
+
+        assert!(state.session_setup.is_empty());
+        assert!(state.touch_sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn launch_scripts_are_tracked_as_launch_owned() {
+        let (mut state, _seen) = recording_state(&[], &["S-A"]).await;
+        state.session_setup.register_init_script(
+            "runtime()".to_string(),
+            "S-A".to_string(),
+            "1".to_string(),
+        );
+
+        apply_launch_init_scripts(&mut state, &["react-devtools".to_string()], &[]).await;
+
+        let owned: Vec<bool> = state
+            .session_setup
+            .init_scripts
+            .iter()
+            .map(|script| script.launch_owned)
+            .collect();
+        assert_eq!(owned, vec![false, true]);
+        let carried =
+            std::mem::take(&mut state.session_setup).carried_into_relaunch(SessionSetup::default());
+        assert_eq!(carried.init_scripts.len(), 1);
+        assert_eq!(carried.init_scripts[0].source, "runtime()");
+    }
+
+    #[tokio::test]
+    async fn window_new_replays_the_setup_and_a_given_viewport_stays_with_the_window() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+        state.session_setup.user_agent = Some("device-ua".to_string());
+        state.session_setup.viewport = Some(viewport(390, 844, true));
+
+        handle_window_new(
+            &json!({ "viewport": { "width": 1000, "height": 700 } }),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        let ua = sent(&seen, "Emulation.setUserAgentOverride");
+        assert_eq!(ua.len(), 1);
+        assert_eq!(ua[0].0, "S-W");
+        let metrics: Vec<(String, i64)> = sent(&seen, METRICS)
+            .into_iter()
+            .map(|(session, params)| (session, params["width"].as_i64().unwrap()))
+            .collect();
+        assert_eq!(
+            metrics,
+            vec![("S-W".to_string(), 390), ("S-W".to_string(), 1000)]
+        );
+        assert_eq!(state.session_setup.viewport, Some(viewport(390, 844, true)));
+    }
+
+    #[tokio::test]
+    async fn touch_sessions_are_pruned_when_a_target_is_destroyed_or_detached() {
+        let (mut state, _seen) = recording_state(&[], &["S-A", "S-B"]).await;
+        state.subscribe_to_browser_events();
+        state.touch_sessions.insert("S-A".to_string());
+        state.touch_sessions.insert("S-B".to_string());
+        let client = state.browser.as_ref().unwrap().client.clone();
+
+        for (event, gone) in [
+            (
+                json!({ "method": "Target.detachedFromTarget", "params": { "sessionId": "S-A" } }),
+                "S-A",
+            ),
+            (
+                json!({ "method": "Target.targetDestroyed", "params": { "targetId": "T-S-B" } }),
+                "S-B",
+            ),
+        ] {
+            client
+                .send_command("Test.emit", Some(json!({ "event": event })), None)
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            state.drain_cdp_events_background().await.unwrap();
+            assert!(!state.touch_sessions.contains(gone), "{gone} pruned");
+        }
+        assert!(state.touch_sessions.is_empty());
     }
 
     #[tokio::test]
