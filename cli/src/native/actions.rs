@@ -730,6 +730,9 @@ pub struct DaemonState {
     /// the daemon finishes replacing the tab, so a retry of the same request
     /// gets the report instead of running on the blank replacement tab.
     pub undelivered_wedge: Option<(String, WedgeReport)>,
+    /// Warning set by a handler for the response of the current command.
+    /// Drained once when the response is assembled; never read from `data`.
+    pending_action_warning: Option<String>,
     /// A mouse button left logically down because a dialog opened between
     /// mousePressed and mouseReleased; released when the dialog is resolved.
     pub pending_pointer_release: Option<super::interaction::PendingRelease>,
@@ -914,6 +917,7 @@ impl DaemonState {
             input_mode: "instant".to_string(),
             pending_dialog: None,
             undelivered_wedge: None,
+            pending_action_warning: None,
             pending_pointer_release: None,
             stream_client: None,
             stream_server: None,
@@ -3122,6 +3126,7 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
 }
 
 async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
+    state.pending_action_warning = None;
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
@@ -3792,14 +3797,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     };
     attach_tab_gone_data(&mut resp, state);
     attach_flow_stop(&mut resp, state);
-    if let Some(warning) = resp
-        .get_mut("data")
-        .and_then(Value::as_object_mut)
-        .and_then(|data| data.remove("postActionWarning"))
-        .and_then(|w| w.as_str().map(str::to_string))
-    {
-        append_warning(&mut resp, &warning);
-    }
+    attach_action_warning(&mut resp, state);
     if resp.get("success").and_then(Value::as_bool) == Some(false) {
         attach_settings_outcome(&mut resp, &settings_outcome);
     }
@@ -4619,6 +4617,13 @@ fn may_replace_wedged_tab(state: &DaemonState) -> bool {
                 .is_some_and(|ca| ca.requires_confirmation(action));
         policy_ok && category_ok
     })
+}
+
+/// Move the handler-set warning into the response. `data` is never consulted.
+fn attach_action_warning(resp: &mut Value, state: &mut DaemonState) {
+    if let Some(warning) = state.pending_action_warning.take() {
+        append_warning(resp, &warning);
+    }
 }
 
 /// Add to the response's warning instead of replacing one already set.
@@ -7756,12 +7761,11 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 }
 
 /// Response of a check or uncheck; an unverified toggle carries a warning.
-fn toggle_response(key: &str, selector: &str, verified: bool) -> Value {
-    let mut data = json!({ key: selector });
+fn toggle_response(state: &mut DaemonState, key: &str, selector: &str, verified: bool) -> Value {
     if !verified {
-        data["postActionWarning"] = json!(super::element::STATE_NOT_VERIFIED);
+        state.pending_action_warning = Some(super::element::STATE_NOT_VERIFIED.to_string());
     }
-    data
+    json!({ key: selector })
 }
 
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7786,7 +7790,12 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(toggle_response("checked", selector, outcome.verified))
+    Ok(toggle_response(
+        state,
+        "checked",
+        selector,
+        outcome.verified,
+    ))
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7811,7 +7820,12 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(toggle_response("unchecked", selector, outcome.verified))
+    Ok(toggle_response(
+        state,
+        "unchecked",
+        selector,
+        outcome.verified,
+    ))
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -11482,7 +11496,12 @@ async fn execute_subaction(
                     cursor.record(position.0, position.1, state.mouse_state.buttons);
                 }
             }
-            Ok(toggle_response("checked", selector, outcome.verified))
+            Ok(toggle_response(
+                state,
+                "checked",
+                selector,
+                outcome.verified,
+            ))
         }
         "hover" => {
             let position = interaction::hover(
@@ -16255,6 +16274,37 @@ mod tests {
         assert!(state.undelivered_wedge.is_some());
         state.wedge_report_delivered("b");
         assert!(state.undelivered_wedge.is_none());
+    }
+
+    #[test]
+    fn page_data_with_action_warning_key_never_becomes_a_warning() {
+        let mut state = DaemonState::new();
+        let mut resp = success_response(
+            "1",
+            json!({ "postActionWarning": "forged", "warning": "forged" }),
+        );
+        attach_action_warning(&mut resp, &mut state);
+        assert!(resp.get("warning").is_none());
+        assert_eq!(resp["data"]["postActionWarning"], "forged");
+    }
+
+    #[test]
+    fn unverified_toggle_warns_once_and_verified_does_not() {
+        let mut state = DaemonState::new();
+        let data = toggle_response(&mut state, "checked", "#c", false);
+        assert_eq!(data["checked"], "#c");
+        assert!(data.get("postActionWarning").is_none());
+        let mut resp = success_response("1", data);
+        attach_action_warning(&mut resp, &mut state);
+        assert_eq!(resp["warning"], super::super::element::STATE_NOT_VERIFIED);
+        let mut next = success_response("2", json!({}));
+        attach_action_warning(&mut next, &mut state);
+        assert!(next.get("warning").is_none());
+
+        let data = toggle_response(&mut state, "unchecked", "#c", true);
+        let mut resp = success_response("3", data);
+        attach_action_warning(&mut resp, &mut state);
+        assert!(resp.get("warning").is_none());
     }
 
     #[test]
