@@ -491,15 +491,18 @@ fn refusal(kind: &str, verb: &str) -> (&'static str, String) {
     }
 }
 
-/// Focuses the control and checks the focus went somewhere: text goes to
-/// whatever is focused, so a target that neither takes focus nor forwards it
-/// is refused. Open and closed shadow roots are walked.
+/// Focuses the control. With `guard`, a target that cannot take focus (not
+/// natively focusable, no tabindex, not editable, no delegatesFocus) and where
+/// focus did not land is refused: text would go to whatever was focused
+/// before. A focusable target whose handler moves focus elsewhere is allowed.
+/// Open and closed shadow roots are walked.
 async fn focus_target(
     client: &CdpClient,
     session_id: &str,
     object_id: &str,
     target: &str,
     verb: &str,
+    guard: bool,
 ) -> Result<(), String> {
     let js = format!(
         r#"function() {{
@@ -514,14 +517,17 @@ async fn focus_target(
         const after = deep(el.ownerDocument);
         let landed = after !== before;
         for (let n = after; n && !landed; n = n.parentNode || n.host) if (n === el) landed = true;
-        return {{ landed, tag: el.localName, type: el.localName === 'input' ? el.type : '' }};
+        const focusable = el.tabIndex >= 0 || el.hasAttribute('tabindex') || el.isContentEditable
+            || !!el.editContext || !!(el.shadowRoot && el.shadowRoot.delegatesFocus);
+        return {{ landed, focusable, tag: el.localName, type: el.localName === 'input' ? el.type : '' }};
     }}"#
     );
     let result = call_on(client, session_id, object_id, js, None).await?;
     let Some(value) = result.result.value.as_ref() else {
         return Ok(());
     };
-    if value.get("landed").and_then(Value::as_bool) == Some(false) {
+    let flag = |key: &str| value.get(key).and_then(Value::as_bool);
+    if guard && flag("landed") == Some(false) && flag("focusable") == Some(false) {
         let field = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("");
         return Err(form_error(
             "not_editable",
@@ -793,6 +799,7 @@ pub async fn fill(
         &object_id,
         selector_or_ref,
         "filled",
+        true,
     )
     .await?;
     clear_control(client, &effective_session_id, &object_id).await?;
@@ -877,6 +884,7 @@ pub async fn type_text(
         } else {
             "typed into"
         },
+        clear || !keys_only,
     )
     .await?;
     if clear {

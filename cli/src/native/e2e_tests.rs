@@ -3101,6 +3101,75 @@ async fn evaluate_value(state: &mut DaemonState, script: &str) -> Value {
     get_data(&resp)["result"].clone()
 }
 
+/// A focusable target whose focus handler forwards to the already-focused
+/// field still types into that field; key-only text goes to the focused control
+/// through any target; a target that cannot take focus is refused for text.
+#[tokio::test]
+#[ignore]
+async fn e2e_form_actions_focus_guard_allows_focusable_targets() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body><input id='real'>",
+        "<div id='fwd' tabindex='0'>x</div><div id='plain'>x</div><canvas id='cv' width='9' height='9'></canvas>",
+        "<script>",
+        "window.keys = [];",
+        "real.addEventListener('keydown', e => keys.push(e.key));",
+        "fwd.addEventListener('focus', () => real.focus());",
+        "real.focus();",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut failures = Vec::new();
+    let resp = execute_command(
+        &json!({ "id": "x", "action": "type", "selector": "#fwd", "text": "ok" }),
+        &mut state,
+    )
+    .await;
+    let got = evaluate_value(&mut state, "real.value").await;
+    if resp["success"] != true || got != json!("ok") {
+        failures.push(format!("type through a forwarding target: {resp} -> {got}"));
+    }
+
+    for selector in ["#plain", "#cv"] {
+        let resp = execute_command(
+            &json!({ "id": "x", "action": "type", "selector": selector, "text": "no" }),
+            &mut state,
+        )
+        .await;
+        let got = evaluate_value(&mut state, "real.value").await;
+        if resp["success"] == true || resp["code"] != "not_editable" || got != json!("ok") {
+            failures.push(format!("text through {selector}: {resp} -> {got}"));
+        }
+        let resp = execute_command(
+            &json!({ "id": "x", "action": "type", "selector": selector, "text": "\n\t" }),
+            &mut state,
+        )
+        .await;
+        if resp["success"] != true {
+            failures.push(format!("keys through {selector}: {resp}"));
+        }
+    }
+    let keys = evaluate_value(&mut state, "keys.join(',')").await;
+    if keys != json!("Enter,Tab,Enter,Tab") {
+        failures.push(format!("keys reached the focused control: {keys}"));
+    }
+
+    let _ = execute_command(&json!({ "id": "z", "action": "close" }), &mut state).await;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A label stands for its control in every step; elements that can never take
 /// text are refused; typing reports a field that holds other than typed; and no
 /// message carries a string the page controls.
