@@ -80,6 +80,8 @@ A ref is tied to the document it was issued in. After a page load or an iframe n
 
 ## Interactions (use @refs from snapshot)
 
+Selector arguments also accept `text=<text>`, which selects the first leaf element whose text content contains `<text>` with case-sensitive matching. It works with selector-based actions and `get count`.
+
 ```bash
 agent-browser click @e1           # Click
 agent-browser click @e1 --new-tab # Click and open in new tab

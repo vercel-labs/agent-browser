@@ -139,9 +139,10 @@ agent-browser find role button click --name "Submit"
 agent-browser find text "Sign In" click
 agent-browser find label "Email" fill "user@test.com"
 agent-browser click "#submit"
+agent-browser click "text=Submit"
 ```
 
-Snapshot refs are the fastest and most reliable option. `find role`, `find text`, and `find label` work without a prior snapshot. Raw CSS is the fallback.
+`text=<text>` selects the first leaf element whose text content contains `<text>`, with case-sensitive matching. It works anywhere a CSS selector is accepted. `find role`, `find text`, and `find label` work without a prior snapshot.
 
 ## Waiting
 

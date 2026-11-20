@@ -2235,8 +2235,9 @@ agent-browser click - Click an element
 
 Usage: agent-browser click <selector> [--button <button>] [--modifiers <keys>] [--new-tab] [--human]
 
-Clicks on the specified element. The selector can be a CSS selector,
-XPath, or an element reference from snapshot (e.g., @e1).
+Clicks on the specified element. The selector can be a CSS selector, a
+text selector (text=<text>), XPath, or an element reference from snapshot
+(e.g., @e1).
 
 Flags can go before or after the selector. Unknown flags are rejected.
 
