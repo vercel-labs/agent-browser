@@ -1,0 +1,155 @@
+/* The camera's zoom as an animatable number: it eases with the kit camera (same
+   curve, same 1100ms), so cursors and the browser's hairline divide by it and
+   keep one on-screen size through the zoom between scopes. */
+@property --ab-zoom { syntax: '<number>'; inherits: true; initial-value: 1; }
+
+/* Local composition. The upstream Stageshow kit stays unchanged. */
+.ab-hero-demo {
+  /* Geist grays for the whole illustration:
+     background-100 (white controls: fields, the address pill, zoom buttons),
+     background-200 (every surface, the page's own color), background-100 (the
+     wallpaper's base), gray-alpha-200 (selection and focus fills),
+     gray-alpha-400 (every hairline), gray-700 (quiet text and icons),
+     gray-1000 (ink, primary buttons). Color is left to
+     the model cursors, the traffic lights, the real app icons and the two
+     tab favicons (Acme's black circle, Vercel's preview favicon, GitHub's mark).
+     The kit's theme roles are pinned to them on the stage itself, since
+     vercel.css sets them at .look-vercel .ss-stage (an ancestor's values would
+     lose to it); the use-case cards keep theirs. Flat: surfaces are one color,
+     shapes are outlined rather than filled. */
+  & .look-vercel .ss-stage {
+    --ss-canvas: var(--ds-background-200);
+    --ss-surface: var(--ds-background-200);
+    --ss-chrome: var(--ds-background-200);
+    --ss-raised: var(--ds-background-200);
+    --ss-well: var(--ds-background-200);
+    --ss-fill: var(--ds-gray-alpha-200);
+    --ss-ink-1: var(--ds-gray-alpha-400);
+    --ss-ink-2: var(--ds-gray-alpha-400);
+    --ss-ink-3: var(--ds-gray-alpha-400);
+    --ss-ink-4: var(--ds-gray-alpha-400);
+    --ss-ink-5: var(--ds-gray-alpha-400);
+    --ss-line: var(--ds-gray-alpha-400);
+    --ss-line-faint: var(--ds-gray-alpha-400);
+    --ss-text-strong: var(--ds-gray-1000);
+    --ss-text: var(--ds-gray-1000);
+    --ss-text-faint: var(--ds-gray-700);
+    --ss-icon: var(--ds-gray-700);
+    --ss-icon-faint: var(--ds-gray-700);
+    --ss-accent: var(--ds-gray-1000);
+    --ss-accent-2: var(--ds-gray-1000);
+    --ss-accent-soft: var(--ds-gray-alpha-200);
+    --ss-accent-text: var(--ds-gray-1000);
+  }
+  /* The wallpapers' six lightness tones (wallpapers.ts), darkest to lightest:
+     pale grays, a little ink in white. Dark mode sets its own below. */
+  --ab-wall-0: color-mix(in oklab, var(--ds-gray-1000) 13%, var(--ds-background-100));
+  --ab-wall-1: color-mix(in oklab, var(--ds-gray-1000) 10%, var(--ds-background-100));
+  --ab-wall-2: color-mix(in oklab, var(--ds-gray-1000) 7.5%, var(--ds-background-100));
+  --ab-wall-3: color-mix(in oklab, var(--ds-gray-1000) 5%, var(--ds-background-100));
+  --ab-wall-4: color-mix(in oklab, var(--ds-gray-1000) 3%, var(--ds-background-100));
+  --ab-wall-5: color-mix(in oklab, var(--ds-gray-1000) 1.5%, var(--ds-background-100));
+  /* The wallpaper's base, shared with the Photos thumbnails that set it */
+  --ab-wall-base: var(--ab-wall-3);
+  /* The wallpapers are gradients of the theme's own grays (wallpapers.ts): no filter */
+  --ab-wall-filter: none;
+  /* Skeleton placeholders are outlined, not filled (Bar paints its fill inline) */
+  & .ss-bar { background: transparent !important; box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)); }
+  /* Fields are the one white control, as Geist's Input: a hairline at rest; a
+     darker edge and a soft gray halo when focused */
+  & .ss-field__box { background: var(--ds-background-100, #fff); }
+  & .look-vercel .ss-field[data-focused] .ss-field__box { box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-700, #8f8f8f), 0 0 0 3px var(--ds-gray-alpha-200, rgba(0, 0, 0, .08)); }
+
+  /* No layout shift on load: the Stage sizes its box in a layout effect (and
+     starts at its full design size), so reserve the final shape in CSS. The
+     container query is the Stage's own rule (compact below 560px of width). */
+  & > div[aria-hidden] { container-type: inline-size; }
+  & .ss-fit { height: auto !important; max-width: none !important; aspect-ratio: 1080 / 750; }
+  @container (max-width: 559.98px) { & .ss-fit { aspect-ratio: 960 / 1050; } }
+  /* The first paint is the opening frame, with no fade. The server renders the
+     wide layout and its camera already placed, but at scale(1): until the
+     client measures (data-ready), CSS supplies the same fit the Stage will set,
+     the container's width (whole pixels, as the Stage reads it) over the
+     design's (tan(atan2()) makes it a plain number), and the hairline and cursor scales that follow from it. The
+     Stage's own inline values then take over unchanged. */
+  &[data-hero-scene]:not([data-ready]) {
+    & .ss-fit { --ab-fit: min(2, tan(atan2(round(100cqw, 1px), 1080px))); --ss-unscale: calc(1 / var(--ab-fit)); --ss-hairline: calc(1px / var(--ab-fit)); }
+    & .ss-stage { transform: scale(var(--ab-fit)) !important; }
+  }
+  /* The server can only render the wide design; a phone column waits for the
+     compact one (a few frames, then it appears at once, never faded in) */
+  /* (opacity, not visibility: the pages set their own visibility) */
+  @container (max-width: 559.98px) { &[data-hero-scene]:not([data-ready]) .ss-stage { opacity: 0; } }
+
+  margin: 0; width: 100%; color: var(--ds-gray-1000, #171717); font-family: var(--font-geist-sans), system-ui, sans-serif;
+  & .ab-scene .ss-stage { overflow: hidden; background: transparent; }
+  & .ab-world, & .ab-wallpaper { position: absolute; inset: 0; }
+  /* Smooth gray gradients (wallpapers.ts), no grain or logo over them. Photos
+     and the desktop use the same artwork. */
+  & .ab-wallpaper { overflow: hidden; background-color: var(--ab-wall-base); }
+  & .ab-wallpaper-layer { position: absolute; inset: 0; background: center / cover no-repeat; filter: var(--ab-wall-filter); }
+  /* The menu bar over a light wallpaper, as macOS draws it: transparent, the
+     Apple logo and menus in dark ink; sized for the 1080-wide canvas (~0.6x) */
+  & .ab-menu { position: absolute; inset: 0 0 auto; height: 36px; display: flex; align-items: center; gap: 22px; padding: 0 24px; color: var(--ds-gray-1000, #171717); font: 500 16px/1 var(--ss-font); }
+  & .ab-menu svg { display: block; margin-top: -3px; }
+  /* Other apps sit outside the browser and its initial camera crop.
+     Desktop reveals the retained world, without opacity transitions. */
+  /* A landscape browser that leads the desktop (560 × 360 of 720 × 500).
+     --ab-visible: how much of its width browser scope's crop shows, less a
+     gutter; pages keep everything that matters inside it, filler runs past. */
+  & .ab-world { --ab-hair: var(--ss-hairline, 1px); transition: --ab-zoom 1100ms cubic-bezier(.45, 0, .1, 1); }
+  @media (prefers-reduced-motion: reduce) { & .ab-world { transition: none; } }
+  /* The browser's strokes ignore the camera: its hairline is divided by the
+     zoom, so the window's edge (and every line inside it) stays one pixel */
+  & .ab-browser { --ss-hairline: calc(var(--ab-hair) / var(--ab-zoom, 1)); position: absolute; left: 24px; top: 72px; width: 560px; height: 360px; z-index: 2; box-shadow: 0 0 0 var(--ss-hairline) var(--ds-gray-alpha-400, rgba(0, 0, 0, .08)), var(--ds-shadow-2xl); --ab-visible: 460px; }
+  & .ab-browser-body { position: relative; background: var(--ss-surface); }
+  /* The capture selection, as the screenshot card draws it (recording-scene.css,
+     .ab-shot-marquee): gray-700 dashes 4 on 3, 1px, turning blue-700 at the
+     capture, then fading. The world is zoomed by the camera, so the stroke and
+     dashes are divided by the zoom to stay those sizes on screen. */
+  & .ab-capture { position: absolute; inset: 0; z-index: 10; pointer-events: none; --ab-px: calc(var(--ab-hair) / var(--ab-zoom, 1)); }
+  & .ab-capture-box { position: absolute; left: 0; top: 0; }
+  & .ab-capture-selection { color: var(--ds-gray-700); transition: color .12s ease-out; }
+  & .ab-capture-selection path { fill: none; stroke: currentColor; stroke-width: var(--ab-px); stroke-dasharray: calc(4 * var(--ab-px)) calc(3 * var(--ab-px)); }
+  & .ab-capture-selection[data-recording] { color: var(--ds-blue-700); }
+  & [data-playing='false'] .ab-capture-selection { transition: none; }
+  /* Sits on the outline's top edge, ringed in the surface so the dashes stop around it */
+  & .ab-rec-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--ds-red-700, #fc0035); box-shadow: 0 0 0 2px var(--ss-surface); opacity: 0; transition: opacity .2s ease-out; }
+  & .ab-rec-dot[data-on] { opacity: 1; }
+  & button { border: 0; cursor: pointer; font: inherit; color: var(--ds-gray-1000, #171717); background: transparent; padding: 7px 10px; border-radius: 6px; white-space: nowrap; }
+  & button[aria-pressed='true'] { background: var(--ds-background-100, #fff); color: var(--ds-gray-1000, #171717); box-shadow: var(--ds-shadow-border-small); }
+  & button:disabled { cursor: default; opacity: .45; }
+  & button:focus-visible, & input:focus-visible { outline: 2px solid var(--ds-blue-700, #0070f3); outline-offset: 3px; }
+  & .ab-scene-description { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  & .ss-stage[data-layout='compact'] {
+    & .ab-browser { left: 16px; top: 72px; width: 440px; height: 400px; --ab-visible: 280px; }
+  }
+  @media (width < 450px) {
+  }
+  @media (prefers-reduced-motion: reduce) { & *, & *::before, & *::after { animation: none !important; transition: none !important; } }
+}
+
+/* Dark wallpapers: charcoal and graphite, lifted well off black so the dock,
+   the windows and their edges separate (gray-1000 is the light ink in dark mode) */
+:is(.dark, .dark-theme) .ab-hero-demo {
+  /* Near-black with quiet lifts (mixed in oklab: about sRGB 9 up to 65), so
+     the deep areas read as black and the soft pools only part the dock and
+     windows from the ground */
+  --ab-wall-0: color-mix(in oklab, var(--ds-gray-1000) 15%, var(--ds-background-100));
+  --ab-wall-1: color-mix(in oklab, var(--ds-gray-1000) 19%, var(--ds-background-100));
+  --ab-wall-2: color-mix(in oklab, var(--ds-gray-1000) 24%, var(--ds-background-100));
+  --ab-wall-3: color-mix(in oklab, var(--ds-gray-1000) 29%, var(--ds-background-100));
+  --ab-wall-4: color-mix(in oklab, var(--ds-gray-1000) 34%, var(--ds-background-100));
+  --ab-wall-5: color-mix(in oklab, var(--ds-gray-1000) 40%, var(--ds-background-100));
+}
+
+/* Reduced motion: the still's browser tabs as real buttons (hero-tab-picker.tsx),
+   transparent over the mock tabs they select; the mock draws the active state.
+   The close buttons and + under them stay decorative. */
+.ab-hero-demo {
+  position: relative;
+  & .ab-tab-picker { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+  & .ab-tab-pick { position: absolute; margin: 0; padding: 0; border: 0; border-radius: 8px 8px 0 0; background: transparent; cursor: pointer; pointer-events: auto; }
+  & .ab-tab-pick:not([data-measured]) { display: none; }
+  & .ab-tab-pick:focus-visible { outline: none; box-shadow: var(--ds-focus-ring); }
+}

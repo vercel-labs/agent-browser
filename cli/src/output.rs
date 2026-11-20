@@ -591,7 +591,7 @@ pub(crate) fn format_webmcp_context(
             ..Default::default()
         },
     ));
-    lines.push("For a relevant tool, fetch its schema: agent-browser webmcp list <tool> --frame <frame-id> --json. Invoke only within the user's authorized task. Omitted WebMCP context means no update.".to_string());
+    lines.push("For a relevant tool, fetch its schema: agent-browser webmcp list <tool> --frame <frame-id> --json, then call it: agent-browser webmcp invoke <tool> --frame <frame-id> '<json>'. Invoke only within the user's authorized task. Omitted WebMCP context means no update.".to_string());
     if context["truncated"] == true {
         lines.push("Catalog shortened; webmcp list --json retrieves all metadata.".to_string());
     }
@@ -1305,10 +1305,18 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 } else {
                     " ".to_string()
                 };
+                let keep = match tab.get("keep").and_then(|v| v.as_str()) {
+                    Some("live") => " (live)",
+                    Some("frozen") => " (frozen)",
+                    _ => "",
+                };
                 if let Some(label) = tab_label {
-                    println!("{} [{}] {} {} - {}", marker, tab_id, label, title, url);
+                    println!(
+                        "{} [{}] {} {} - {}{}",
+                        marker, tab_id, label, title, url, keep
+                    );
                 } else {
-                    println!("{} [{}] {} - {}", marker, tab_id, title, url);
+                    println!("{} [{}] {} - {}{}", marker, tab_id, title, url, keep);
                 }
             }
             return;
@@ -1339,6 +1347,17 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                         note
                     );
                 }
+                return;
+            }
+        }
+        if action == Some("tab_keep") {
+            if let Some(tab_id) = data.get("tabId").and_then(|v| v.as_str()) {
+                let state = match data.get("keep").and_then(|v| v.as_str()) {
+                    Some("live") => "stays live in the background",
+                    Some("frozen") => "is frozen until you switch to it",
+                    _ => "is throttled in the background",
+                };
+                println!("{} Tab [{}] {}", color::success_indicator(), tab_id, state);
                 return;
             }
         }
@@ -2086,6 +2105,9 @@ tools and unchanged catalogs add no context or discovery polling.
 
 The `goto` and `navigate` aliases still require a URL.
 
+Unknown flags are rejected. To pass a URL that starts with `-`, put flags
+before `--`; values after `--` are positional.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
@@ -2188,7 +2210,7 @@ Options:
 Global Options:
   --json               Output metadata and content as JSON
   --headers <json>     Additional HTTP headers, such as Authorization
-  --allowed-domains <list>  Restrict read fetches and redirects to allowed domains
+  --allowed-domains <list>  Restrict read fetches and redirects to allowed domains; must list at least one
   --content-boundaries Wrap read output in boundary markers
   --max-output <chars> Truncate read output to N chars
   Invalid --max-output and AGENT_BROWSER_MAX_OUTPUT values warn and leave the
@@ -2211,10 +2233,12 @@ Examples:
             r##"
 agent-browser click - Click an element
 
-Usage: agent-browser click <selector> [--new-tab] [--human]
+Usage: agent-browser click <selector> [--button <button>] [--modifiers <keys>] [--new-tab] [--human]
 
 Clicks on the specified element. The selector can be a CSS selector,
 XPath, or an element reference from snapshot (e.g., @e1).
+
+Flags can go before or after the selector. Unknown flags are rejected.
 
 If another element covers the click point, agent-browser reports the
 covering element instead of dispatching a click to the wrong target.
@@ -2224,9 +2248,18 @@ is hidden, disabled, or outside the viewport. With --new-tab, click opens
 the link's URL directly, so these checks do not apply.
 
 Options:
+  --button <button>    Mouse button to press: left (default), right, middle,
+                       back, forward. A right click fires contextmenu, a middle
+                       click fires auxclick.
+  --modifiers <keys>   Keys held during the click: alt, control (alias ctrl),
+                       meta (aliases cmd, command), shift. Join several with a
+                       comma or a plus, such as control,shift. On macOS,
+                       control-click opens the context menu; use meta to open a
+                       link in a new tab, which is control on Windows and Linux.
   --new-tab            Open link in a new tab instead of navigating current tab.
                        The new tab inherits session setup before its first load.
                        Only works on elements with an href attribute.
+                       Cannot be combined with --button or --modifiers.
   --human              Approach along a reproducible eased curve
                        Starts at the last pointer or element interaction
 
@@ -2241,19 +2274,32 @@ Examples:
   agent-browser click "//button[@type='submit']"
   agent-browser click @e3 --new-tab
   agent-browser click @e3 --human
+  agent-browser click @e3 --button right
+  agent-browser click @e4 --button middle
+  agent-browser click @e5 --modifiers control,shift
 "##
         }
         "dblclick" => {
             r##"
 agent-browser dblclick - Double-click an element
 
-Usage: agent-browser dblclick <selector>
+Usage: agent-browser dblclick <selector> [--button <button>] [--modifiers <keys>] [--human]
 
 Double-clicks on the specified element. Useful for text selection
 or triggering double-click handlers.
 
 Double-click fails, instead of reporting success, when the element is
 hidden, disabled, or outside the viewport.
+
+Options:
+  --button <button>    Mouse button: left (default), right, middle, back, forward
+  --modifiers <keys>   Keys held during the click: alt, control (alias ctrl),
+                       meta (aliases cmd, command), shift. Join several with a
+                       comma or a plus, such as control,shift. On macOS,
+                       control-click opens the context menu; use meta to open a
+                       link in a new tab, which is control on Windows and Linux.
+  --human              Approach along a reproducible eased curve
+                       Starts at the last pointer or element interaction
 
 Global Options:
   --json               Output as JSON
@@ -2262,6 +2308,7 @@ Global Options:
 Examples:
   agent-browser dblclick "#editable-text"
   agent-browser dblclick @e5
+  agent-browser dblclick @e2 --modifiers shift
 "##
         }
         "fill" => {
@@ -2388,6 +2435,12 @@ Usage: agent-browser select <selector> <value...>
 Selects one or more options in a <select> dropdown by value or visible label.
 Label matching normalizes whitespace such as non-breaking spaces.
 
+On a custom ARIA widget (role=combobox or role=listbox, as in Radix or Headless UI),
+select opens it when collapsed, waits for the visible role=option items, and clicks
+the ones whose accessible name or value matches. If none match, the error lists the
+available options, and a matched option marked aria-disabled is an error instead of
+a click. An option that is already selected in a multi-select listbox is left alone.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
@@ -2442,6 +2495,8 @@ Usage: agent-browser download <selector> <path>
 Clicks an element that triggers a download and saves the file to the specified path.
 Only works with a browser agent-browser launched; rejected over --cdp,
 --auto-connect, or a provider because the remote endpoint names the saved file.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Arguments:
   selector             Element to click (CSS selector or @ref)
@@ -2678,6 +2733,9 @@ saves to a temporary directory with a generated filename.
 Headless Chromium screenshots hide native scrollbars for consistent image output.
 Pass --hide-scrollbars false when launching to keep native scrollbars visible.
 
+Unknown flags are rejected. To pass a selector or path that starts with `-`,
+put flags before `--`; values after `--` are positional.
+
 Options:
   --full, -f           Capture full page (not just viewport)
   --if-changed         Recommended: skip unchanged images to save tokens
@@ -2687,6 +2745,7 @@ Options:
                        Each label [N] corresponds to ref @eN from snapshot.
                        Prints a legend mapping labels to element roles/names.
                        With --json, annotations are included in the response.
+                       A failed annotated capture keeps the previous refs.
                        Supported on Chromium and Lightpanda.
   --screenshot-dir <path>  Default output directory for screenshots
                        (or AGENT_BROWSER_SCREENSHOT_DIR env)
@@ -2710,6 +2769,7 @@ Examples:
   agent-browser screenshot --annotate --json       # JSON output with annotations
   agent-browser screenshot --screenshot-dir ./shots # Save to custom directory
   agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
+  agent-browser screenshot body -- --draft.png   # Literal path starting with -
 "##
         }
         "pdf" => {
@@ -2719,6 +2779,8 @@ agent-browser pdf - Save page as PDF
 Usage: agent-browser pdf <path>
 
 Saves the current page as a PDF file.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Global Options:
   --json               Output as JSON
@@ -2743,6 +2805,8 @@ Refs can be reused across snapshots. Take a fresh snapshot after navigation.
 If a ref's element was replaced, the action uses the one element with the same
 role and name. If that is ambiguous, it fails: run snapshot again.
 Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
+A snapshot that fails to capture, such as one scoped to a selector that matches
+nothing, leaves the previous refs in place while the document is unchanged.
 
 Options:
   -i, --interactive    Only include interactive elements
@@ -2757,6 +2821,10 @@ Options:
 Compact snapshots keep visible text, status text, and their direct ancestors.
 Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
 interactive to false to retain visible text and status text.
+
+Hints:
+Controls with an empty or duplicated accessible name print hint="..." after
+the ref, read from the icon, image file, data-testid/name/id, and nearest row.
 
 Global Options:
   --json               Output as JSON
@@ -3049,6 +3117,8 @@ agent-browser network - Network interception and monitoring
 Usage: agent-browser network <subcommand> [args]
 
 Intercept, mock, or monitor network requests.
+Unknown flags are rejected. To pass a path or URL that starts with `-`, put
+flags before `--`; values after `--` are positional.
 
 Subcommands:
   route <url> [options]      Intercept requests matching URL pattern
@@ -3196,6 +3266,14 @@ or `T<N>` tab-id form. CDP target ids (from `tab list --json`) are also accepted
 as tab refs; unlike `t<N>` ids they stay stable across daemon restarts.
 Rejected labels preserve the current tab's refs and selected frame.
 
+Chrome throttles every tab that is not in front: timers slow to about one per
+second and animation frames stop. `tab keep live` keeps a tab running at full
+speed in the background and makes the page report visible and focused; it costs
+CPU, so set it only on tabs that need it. `tab keep frozen` pauses a background
+tab completely until you switch to it, and the active tab cannot be frozen.
+`tab keep throttled` returns a tab to the default. Without a tab ref the command
+applies to the active tab, and `tab list` shows the setting.
+
 Tabs opened with `tab new` or `click --new-tab` inherit the session's user
 agent, headers, HTTP credentials, init scripts, routes, and emulation
 overrides before their first document loads.
@@ -3213,6 +3291,8 @@ Operations:
   new [url]                  Open a new tab
   new --label <name> [url]   Open a new tab with a label like `docs` or `app`
   close [t<N>|label|target]  Close a tab (current if no ref given)
+  keep <live|throttled|frozen> [t<N>|label|target]
+                             Set how a tab runs while it is in the background
   <t<N>|label|target>        Switch to a tab by id, label, or CDP target id
 
 Global Options:
@@ -3230,6 +3310,9 @@ Examples:
   agent-browser tab close
   agent-browser tab close t1
   agent-browser tab close docs
+  agent-browser tab keep live
+  agent-browser tab keep throttled t2
+  agent-browser tab keep frozen t2
   agent-browser tab list --json                        # Includes CDP target ids
   agent-browser tab close 4A0B7C4E1F2D3A4B5C6D7E8F90A1B2C3  # Close by target id
 "##
@@ -3394,6 +3477,8 @@ Usage: agent-browser trace start
        agent-browser trace stop [path]
 
 Record a Chrome DevTools trace for debugging.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Operations:
   start                Start recording trace
@@ -3420,6 +3505,8 @@ Usage: agent-browser profiler <operation> [options]
 Record a performance profile using Chrome DevTools Protocol (CDP) Tracing.
 The output JSON file can be loaded into Chrome DevTools Performance panel,
 Perfetto UI (https://ui.perfetto.dev/), or other trace analysis tools.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Operations:
   start                Start profiling
@@ -3467,6 +3554,8 @@ navigation unless you pass a URL. Capture starts on the page you already
 have open, so hydration and initial animations are not re-run cold.
 If a URL is provided, the active tab navigates there first.
 To record in a separate tab, run `tab new [url]` before `record start`.
+Unknown flags are rejected. To pass a path or URL that starts with `-`, put
+flags before `--`; values after `--` are positional.
 
 Requires ffmpeg on PATH with the libvpx and libx264 encoders (brew install
 ffmpeg, or apt install ffmpeg). Run `agent-browser doctor` to check.
@@ -3478,6 +3567,12 @@ work); lower it for long sessions where file size matters more than motion.
 With --cursor, an inert overlay renders the pointer and page together so
 drags stay synchronized. It is hidden from accessibility snapshots and
 removed on stop. Screenshots taken while recording include the overlay.
+
+Frames come from Chrome's screencast, which captures at the window's real
+device scale. When the page's scale is emulated (`set viewport <w> <h> 2`),
+recording switches to full-density screenshots, which can capture fewer frames
+on busy pages; `record stop` reports "capture": "screenshots". Launching with
+--args "--force-device-scale-factor=2" keeps the screencast at full density.
 
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)
@@ -3619,6 +3714,8 @@ agent-browser state - Manage browser state
 Usage: agent-browser state <operation> [args]
 
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
+Unknown flags are rejected. To pass a path or filename that starts with `-`,
+put flags before `--`; values after `--` are positional.
 
 Operations:
   save <path>                        Save current state to file
@@ -4056,6 +4153,8 @@ separated by blank lines (or as a JSON array with --json).
 Put global flags such as `--init-script` and `--enable` on the outer batch
 invocation. Keep command-specific options and literal command arguments inside
 each item.
+`close --all`, `quit --all`, and `exit --all` cannot run inside a batch;
+run the command outside the batch instead.
 
 Options:
   --bail               Stop on first error (default: continue all commands)
@@ -4304,7 +4403,7 @@ Examples:
   agent-browser skills get core --full
   agent-browser skills get core --ref commands
   agent-browser skills get core --ref references/authentication.md
-  agent-browser skills get protected-vercel-deployments
+  agent-browser skills get vercel
   agent-browser skills get electron --full
   agent-browser skills get --all
   agent-browser skills path core
@@ -4399,6 +4498,17 @@ Usage: agent-browser <command> [args] [options]
 
 Unknown commands exit with status 1, including when help is requested.
 
+These commands reject unknown flags and use the same -- boundary.
+Navigation: open/goto/navigate, back/forward/reload, pushstate.
+Interaction: click/dblclick, hover/focus/check/uncheck, drag, scroll,
+scrollintoview, tap. Capture and files: screenshot, pdf, download,
+record start/restart. Inspection and state: snapshot, frame, highlight,
+console, errors, trace start/stop, profiler start/stop,
+state save/load/list/clear/show/clean, network, flow steps/list, react,
+vitals, close, inspect. Put flags before --; values after -- are positional.
+Commands that accept negative numbers take them directly. Other commands
+may validate options differently.
+
 Start here (for AI agents):
   agent-browser skills get core
 
@@ -4479,6 +4589,7 @@ Storage:
 
 Tabs:
   tab [new|list|close|<n>]   Manage tabs
+  tab keep <mode> [<n>]      Keep a background tab live, throttled, or frozen
 
 Diff:
   diff snapshot              Compare current vs last snapshot
@@ -4504,8 +4615,9 @@ Streaming:
 
 WebMCP (experimental):
   webmcp list [tool]         Full metadata; optional --frame <frame-id>
-  webmcp invoke <tool>       Invoke a page tool; accepts --params <json|@file>,
-                             --frame <frame-id>, --detach, and --timeout <ms>
+  webmcp invoke <tool>       Invoke a page tool; input as <json|@file> after the
+                             tool name or with --params; also --frame <frame-id>,
+                             --detach, and --timeout <ms>
   webmcp result <id>         Wait for a detached invocation result
   webmcp cancel <id>         Cancel an active invocation
   Brief untrusted summaries appear only on discovery or change; no schemas
@@ -4660,6 +4772,8 @@ Options:
   --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
                              Use --hide-scrollbars false to keep scrollbars visible
   -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name
+                             A plugin provider that returns directPage: true connects to a page socket;
+                             console messages, network requests, HAR recording, tracing, and profiling apply to that page
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --annotate                 Annotated screenshot with numbered labels and legend
@@ -4686,7 +4800,7 @@ Options:
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
                              Invalid values warn and leave the existing output limit unchanged.
-  --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --allowed-domains <list>   Restrict network domains; must list at least one; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --capture <list>           Record the session as it runs; only flow is supported (or AGENT_BROWSER_CAPTURE)
                              On a running session without capture, passing it relaunches with capture on
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
@@ -4810,7 +4924,7 @@ Environment:
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
   AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
-  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
+  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; an empty value is rejected; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
   AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts

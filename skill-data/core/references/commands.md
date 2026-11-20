@@ -2,6 +2,8 @@
 
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md. Unknown commands exit with status 1, including when you request command help.
 
+These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`. Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently.
+
 ## Linux dependencies
 
 On Linux, `agent-browser install --with-deps` installs system dependencies with the detected package manager. It runs that package manager directly as root and uses `sudo` for non-root users. If you are not root and `sudo` is unavailable, it reports that root privileges or `sudo` are required.
@@ -47,10 +49,13 @@ agent-browser batch \
   "navigate http://localhost:3000/target"
 ```
 
-Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Keep command-specific options and literal command arguments inside each item:
+Put global flags such as `--init-script` and `--enable` only on the outer batch invocation, never inside an item. Inside an item, `--` separates command flags from literal values only for commands that support `--` as an end-of-options marker. For those commands, put command flags before `--`; a path or selector after `--` is literal. Other commands may treat `--` as data. For example, the item `screenshot body -- --draft.png` passes `--draft.png` as the path.
+
+Batch items cannot run `close --all`, `quit --all`, or `exit --all`; run the command outside the batch instead.
 
 ```bash
 agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
+agent-browser batch "open https://example.com" "screenshot body -- --draft.png"
 ```
 
 `open` with no URL gives you a clean launch so interception rules and cookies can take effect on the *first* real navigation. Pass `--init-script <path>` at launch to install a script before navigation. Use this flow for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
@@ -76,7 +81,11 @@ Delta history is per tab and option set. Responses are `full`, `unchanged`, or `
 ```bash
 agent-browser click @e1           # Click
 agent-browser click @e1 --new-tab # Click and open in new tab
+agent-browser click @e1 --button right  # Right-click (fires contextmenu)
+agent-browser click @e1 --button middle  # Middle-click (fires auxclick)
+agent-browser click @e1 --modifiers control,shift  # Hold keys during the click
 agent-browser dblclick @e1        # Double-click
+agent-browser dblclick @e1 --modifiers shift  # Double-click with Shift held
 agent-browser focus @e1           # Focus element
 agent-browser fill @e2 "text"     # Clear and fill
 agent-browser type @e2 "text"     # Type without clearing
@@ -89,6 +98,9 @@ agent-browser check @e1           # Check checkbox
 agent-browser uncheck @e1         # Uncheck checkbox
 agent-browser select @e1 "value"  # Select by value or visible label
 agent-browser select @e1 "a" "b"  # Select multiple options
+# On a custom ARIA combobox/listbox (Radix, Headless UI), select opens it and clicks the
+# role=option whose name or value matches; no match errors with the available options,
+# and a matched aria-disabled option errors instead of being clicked.
 agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
@@ -100,6 +112,8 @@ For `fill` and `type`, put options before the optional `--` marker. Text after t
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
+
+`--button` presses `left` (default), `right`, `middle`, `back`, or `forward`; a right click fires the page's `contextmenu` event and a middle click fires `auxclick`. `--modifiers` holds `alt`, `control` (alias `ctrl`), `meta` (aliases `cmd`, `command`), and `shift` during the click, joined by a comma or a plus, such as `control,shift`. Flags go before or after the selector, unknown flags are rejected, and `--new-tab` cannot be combined with `--button` or `--modifiers`. `dblclick` takes `--button`, `--modifiers`, and `--human`, follows the session input mode, and sends two full clicks, so the page receives `click`, `click`, `dblclick`. On macOS, `control` click opens the context menu, so use `meta` for a click that opens a link in a new tab; on Windows and Linux that key is `control`.
 
 ## Get Information
 
@@ -134,6 +148,7 @@ agent-browser screenshot path.png # Save to specific path
 agent-browser screenshot --full   # Full page
 agent-browser screenshot --if-changed # Recommended: skip unchanged images to save tokens
 agent-browser screenshot --threshold 0.01 # Ignore changes affecting at most 1% of pixels
+agent-browser screenshot body -- --draft.png # Literal path starting with -
 agent-browser pdf output.pdf      # Save as PDF
 ```
 
@@ -288,7 +303,7 @@ agent-browser flow list [--origin <host>]             # Saved flows, with params
 
 `flow save` keeps first-party JSON responses and, for pages rendered on the server, JSON the HTML embeds (`__NEXT_DATA__`, JSON-LD, `window.x = {...}` state); a run fetches the page and reads the same block back. `flow save` also finds params on its own: a value the task sent that came from an item of an earlier response (an id picked from a list) becomes a param, and a value copied from a single field (a session key) is filled from that response on every run. The save report lists them, plus the steps it could not turn into requests and why, such as a login the recording stopped at.
 
-Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGENT_BROWSER_FLOWS_DIR`) and are `version: 1`; a file with an unknown field fails to load. Cookies, `authorization` and token or CSRF headers are never saved. The value of a credential parameter (`token`, `csrf`, `auth`, `apikey`, `signature`, `password`; not pagination cursors like `pageToken`) in a navigation URL, the start URL or a write is saved as `<redacted>`, and that step is not replayed; a saved request's own URL is sent as recorded. A value typed with `fill`, `type`, `keyboard type` or `inserttext` is saved as a param (`{{name}}` in the step, no copy of the value, so a run needs `--param name=value`) or, when the field is a password, `one-time-code`, `cc-*` or otherwise secret, as `<redacted>`. A run tries direct HTTP, then the request from the page, then a replay of the recorded commands, and starts the next run at the tier that worked; a transport error or a skipped tier does not move it. Every tier checks the response shape against the recording; a mismatch on every tier fails the run with `drifted`, naming the missing key, and marks the flow unverified (use the page, then save again). A run that a later tier answered after a mismatch returns the data with `verified: false` and `drift`, and the flow is unverified too. A read also goes on to the next tier after a network error, and after a 5xx once an earlier tier saw the site change; any other non-drift failure of a read, such as a 4xx rejecting the params, ends the request. A 401 or 403 stops the run with `auth_expired`. When the recording sent a credential header the file does not keep, or the request carries a recorded signature or timestamp header with a per-request value (`X-Sig`, `X-Ts`, nonce, hmac), the HTTP and in-page tiers may only lack what the page adds, so the run goes on to the replay, where the page's own scripts send fresh values; a 401 or 403 from the replay is `auth_expired`. If the replay cannot get an answer, the run reports `credential_not_sendable` (use the page UI, signing in again does not help) or `request_signed` (the signature expires, use the page). A 429 stops the run with `rate_limited` (and `retryAfter` when the site sent one) and a bot challenge with `blocked`, and a host that resolves to an address a run does not send to with `address_refused` (nothing is sent); no other tier is tried. A run that stops after a tier saw the shape change also marks the flow unverified. A write with no answer, answered with a 5xx or 408, answered with a redirect, or answered with a 2xx that is not JSON (a login page or a bot challenge, say) returns `outcome_unknown` and is never sent again: check the site before rerunning; a write answered with a 2xx JSON body of a different shape was applied, returns `write_applied`, marks the flow unverified and must not be repeated; a write rejected with another 4xx was not applied. Requests, redirects and navigations outside the base domain of the flow's start URL are rejected, regardless of `--allowed-domains`. A direct request goes only to public addresses, checked when each host resolves and on every redirect: a host that resolves to a loopback, private or link-local address fails with `resolved to a non-public address` and nothing is sent (a flow recorded against `localhost` runs only against loopback, one against a local IP or a name the browser reached directly only at local addresses, saved as `"reach": "loopback"` or `"reach": "local"`, only against local addresses and never link-local or cloud metadata; a recording through a proxy or from cache is not marked local and the save report says why in `reachNote`). A proxy from `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` is used at any address and checks the requests that go through it, not agent-browser; a target excluded by `NO_PROXY` is checked like any other. A proxy name that is an `https://` hostname is trusted by the resolver, so a direct target with that same name skips the filter. The replay tier runs only plain interactions and stops when the tab leaves the site. The in-page tier is skipped unless the active tab is on the flow's site. `flow save` lists the flow's writes with ids: explicit ones (non-GET, GraphQL mutations) and suspected ones (a GET whose path has a whole `logout`, `signout`, `unsubscribe`, `delete` or `remove` segment). `flow run <name> --allow-write <all|id,...>` sends the writes it covers; any other write asks for confirmation as policy action `flow_write:<id>`, which `--action-policy` and `--confirm-actions` also see.
+Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGENT_BROWSER_FLOWS_DIR`) and are `version: 1`; a file with an unknown field fails to load. A replay sends only the interaction fields of each recorded command and runs under the current session's settings, plugins and action policy, whatever the flow file carries. Cookies, `authorization` and token or CSRF headers are never saved. The value of a credential parameter (`token`, `csrf`, `auth`, `apikey`, `signature`, `password`; not pagination cursors like `pageToken`) in a navigation URL, the start URL or a write is saved as `<redacted>`, and that step is not replayed; a saved request's own URL is sent as recorded. A value typed with `fill`, `type`, `keyboard type` or `inserttext` is saved as a param (`{{name}}` in the step, no copy of the value, so a run needs `--param name=value`) or, when the field is a password, `one-time-code`, `cc-*` or otherwise secret, as `<redacted>`. A run tries direct HTTP, then the request from the page, then a replay of the recorded commands, and starts the next run at the tier that worked; a transport error or a skipped tier does not move it. Every tier checks the response shape against the recording; a mismatch on every tier fails the run with `drifted`, naming the missing key, and marks the flow unverified (use the page, then save again). A run that a later tier answered after a mismatch returns the data with `verified: false` and `drift`, and the flow is unverified too. A read also goes on to the next tier after a network error, and after a 5xx once an earlier tier saw the site change; any other non-drift failure of a read, such as a 4xx rejecting the params, ends the request. A 401 or 403 stops the run with `auth_expired`. When the recording sent a credential header the file does not keep, or the request carries a recorded signature or timestamp header with a per-request value (`X-Sig`, `X-Ts`, nonce, hmac), the HTTP and in-page tiers may only lack what the page adds, so the run goes on to the replay, where the page's own scripts send fresh values; a 401 or 403 from the replay is `auth_expired`. If the replay cannot get an answer, the run reports `credential_not_sendable` (use the page UI, signing in again does not help) or `request_signed` (the signature expires, use the page). A 429 stops the run with `rate_limited` (and `retryAfter` when the site sent one) and a bot challenge with `blocked`, and a host that resolves to an address a run does not send to with `address_refused` (nothing is sent); no other tier is tried. A run that stops after a tier saw the shape change also marks the flow unverified. A write with no answer, answered with a 5xx or 408, answered with a redirect, or answered with a 2xx that is not JSON (a login page or a bot challenge, say) returns `outcome_unknown` and is never sent again: check the site before rerunning; a write answered with a 2xx JSON body of a different shape was applied, returns `write_applied`, marks the flow unverified and must not be repeated; a write rejected with another 4xx was not applied. Requests, redirects and navigations outside the base domain of the flow's start URL are rejected, regardless of `--allowed-domains`. A direct request goes only to public addresses, checked when each host resolves and on every redirect: a host that resolves to a loopback, private or link-local address fails with `resolved to a non-public address` and nothing is sent (a flow recorded against `localhost` runs only against loopback, one against a local IP or a name the browser reached directly only at local addresses, saved as `"reach": "loopback"` or `"reach": "local"`, only against local addresses and never link-local or cloud metadata; a recording through a proxy or from cache is not marked local and the save report says why in `reachNote`). A proxy from `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` is used at any address and checks the requests that go through it, not agent-browser; a target excluded by `NO_PROXY` is checked like any other. A proxy name that is an `https://` hostname is trusted by the resolver, so a direct target with that same name skips the filter. The replay tier runs only plain interactions and stops when the tab leaves the site. The in-page tier is skipped unless the active tab is on the flow's site. `flow save` lists the flow's writes with ids: explicit ones (non-GET, GraphQL mutations) and suspected ones (a GET whose path has a whole `logout`, `signout`, `unsubscribe`, `delete` or `remove` segment). `flow run <name> --allow-write <all|id,...>` sends the writes it covers; any other write asks for confirmation as policy action `flow_write:<id>`, which `--action-policy` and `--confirm-actions` also see.
 
 ## Tabs and Windows
 
@@ -301,6 +316,9 @@ agent-browser tab docs                         # Switch to tab by label
 agent-browser tab close                        # Close current tab
 agent-browser tab close t2                     # Close tab by id
 agent-browser tab close docs                   # Close tab by label
+agent-browser tab keep live [t<N>|label]       # Keep a tab at full speed in the background
+agent-browser tab keep throttled [t<N>|label]  # Return a tab to the default throttling
+agent-browser tab keep frozen <t<N>|label>     # Pause a background tab until you switch to it
 agent-browser window new                       # New window
 ```
 
@@ -325,6 +343,8 @@ Tabs opened through `tab new` or `click --new-tab` inherit the session's setup b
 `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Target ids stay stable across daemon restarts, unlike `t<N>` ids, which are per-daemon counters. With `--pin-tab` the session is pinned to its bound tab: if that tab is closed, commands fail with a `tab_gone` error instead of falling back to another tab, and `tab new` or `tab list` recover. JSON errors include `code: "tab_gone"` and a recovery object with `data.targetId` plus optional sanitized `data.lastUrl`; batch uses `result` for the same object.
 
 Switching to a tab that the browser discarded to save memory reactivates it, since a discarded tab has no renderer to drive. Reactivation reloads the page and resets its unsaved state, and the switch result adds `"revived": true` so the reload is not silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `"dialogBlocked": true`. Resolve the dialog with `dialog accept`/`dialog dismiss` and its state is preserved. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
+
+Chrome slows every tab that is not in front: timers fire about once per second and animation frames stop, so a page you leave in the background falls behind and you read stale state when you switch back. `tab keep live` keeps one tab running at full speed in the background, and `tab keep throttled` returns it to the default. Without a tab ref both apply to the active tab. The daemon holds focus emulation on a live tab, so the page reports `document.visibilityState === "visible"` and `document.hasFocus() === true` while another tab is in front, and the setting survives reloads and navigation. A live tab uses as much CPU as a front tab (five busy background tabs: 0.05 CPU cores throttled, 0.73 live), so set it only on tabs that have to keep running. `tab keep frozen <tab>` pauses a background tab completely until you switch back to it, which returns it to `throttled`. The active tab can't be frozen, and neither can a tab that is still visible: switch to another tab first, then freeze it by ref. Closing the session unfreezes the tabs it froze. A tab pinned by another session with `--pin-tab` is refused with `tab_locked`. `tab list` shows `(live)` or `(frozen)` in text and `"keep"` in JSON. Chrome only. In a browser attached with `--cdp` or `--auto-connect`, a live tab's timers reach the full rate only if that browser was started with `--disable-renderer-backgrounding`; without it a 100 ms timer fired 6 to 8 times per second instead of 10.
 
 ## Frames
 
@@ -422,6 +442,8 @@ Other capabilities use the same protocol:
 - `launch.mutate`: append local launch args, extensions, or init scripts
 - `command.run`: `agent-browser plugin run <name> <type> --payload <json>`
 
+A `browser.provider` plugin that returns `directPage: true` connects to a page socket, so console messages, network requests, HAR recording, tracing, and profiling apply to that page.
+
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
 
 ## State Management
@@ -449,7 +471,8 @@ Experimental. Browser responses announce brief tool summaries (names, short desc
 ```bash
 agent-browser webmcp list <tool> --frame <frame-id> --json   # One tool's schema
 agent-browser webmcp list --json                             # Full catalog, or recover context after compaction
-agent-browser webmcp invoke <tool> --frame <frame-id> --params '{"key":"value"}'
+agent-browser webmcp invoke <tool> --frame <frame-id> '{"key":"value"}'
+agent-browser webmcp invoke <tool> --params '{"key":"value"}'      # Same as the line above
 agent-browser webmcp invoke <tool> --params @input.json --detach
 agent-browser webmcp result <invocation-id>
 agent-browser webmcp cancel <invocation-id>
@@ -530,7 +553,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`. The typed `relaunch` argument maps to `--relaunch`; `open` and `tab_new` list it in their schema.
+Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`. The typed `relaunch` argument maps to `--relaunch`; `open` and `tab_new` list it in their schema. The typed `button` and `modifiers` arguments on `agent_browser_click` and `agent_browser_dblclick` map to `--button` and `--modifiers`; `agent_browser_dblclick` also accepts `human`.
 
 For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__open`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, backed by agent-browser inside the eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship in `@agent-browser/eve/sandbox`.
 

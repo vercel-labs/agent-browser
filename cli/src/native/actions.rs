@@ -19,13 +19,14 @@ use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
 use super::auth;
-use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport};
+use super::browser::{should_track_target, BrowserManager, TabKeep, WaitUntil, WedgeReport};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
-use super::cdp::client::CdpClient;
+use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
-    ExceptionThrownEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent, TargetCreatedEvent,
-    TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
+    session_matches, AttachToTargetParams, AttachToTargetResult, CdpEvent,
+    DispatchMouseEventParams, ExceptionThrownEvent, GetFullAXTreeResult,
+    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfo,
+    TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -34,6 +35,7 @@ use super::element::RefMap;
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
+use super::pointer::{ClickPlan, ClickSpec, Modifiers, MouseButton};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
 use super::react;
@@ -753,7 +755,7 @@ impl DaemonState {
 
     /// A session that starts with `settings` and keeps its security settings
     /// in `store`.
-    pub fn with_store(settings: Running, store: Arc<dyn Store>) -> Self {
+    pub fn with_store(mut settings: Running, store: Arc<dyn Store>) -> Self {
         let session_id =
             env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
         let security = settings.security();
@@ -765,6 +767,9 @@ impl DaemonState {
                 .ok()
                 .flatten()
                 .is_some_and(|b| b.pinned);
+        if pin_tab {
+            settings.set(Key::PinTab, Value::Bool(true));
+        }
         Self {
             browser: None,
             appium: None,
@@ -775,7 +780,8 @@ impl DaemonState {
             snapshot_revisions: HashMap::new(),
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
-                // An empty list is no filter, as when it is cleared live.
+                // A stored empty list predates rejection and restores as no
+                // filter.
                 security
                     .allowed_domains
                     .as_ref()
@@ -1012,9 +1018,6 @@ impl DaemonState {
                         if is_recorder_session {
                             continue;
                         }
-                        let target_needs_controls = target_info
-                            .as_ref()
-                            .is_some_and(target_supports_network_controls);
                         let waiting_for_debugger = event
                             .params
                             .get("waitingForDebugger")
@@ -1023,56 +1026,15 @@ impl DaemonState {
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
-                        let controls_active = df.is_some() || has_proxy_creds;
-                        let controls_result = if controls_active && target_needs_controls {
-                            async {
-                                if let Some(ref target) = target_info {
-                                    prepare_network_control_target_session(&client, &sid, target)
-                                        .await?;
-                                }
-                                if let Some(ref target) = target_info {
-                                    if target_is_worker_like(target) {
-                                        install_worker_network_controls_for_session(
-                                            &client,
-                                            &sid,
-                                            df.as_ref(),
-                                            has_proxy_creds,
-                                            target,
-                                        )
-                                        .await
-                                    } else {
-                                        install_network_controls_for_session(
-                                            &client,
-                                            &sid,
-                                            df.as_ref(),
-                                            has_proxy_creds,
-                                            waiting_for_debugger,
-                                        )
-                                        .await
-                                    }
-                                } else {
-                                    Ok(())
-                                }
-                            }
-                            .await
-                        } else {
-                            Ok(())
-                        };
-
-                        if controls_result.is_ok() {
-                            let _ = client
-                                .send_command_no_wait(
-                                    "Runtime.runIfWaitingForDebugger",
-                                    None,
-                                    Some(&sid),
-                                )
-                                .await;
-                        } else if let Err(error) = controls_result {
-                            eprintln!(
-                                "Failed to apply browser network controls to auto-attached target: {}",
-                                error
-                            );
-                        }
+                        setup_auto_attached_session(
+                            &client,
+                            &sid,
+                            target_info.as_ref(),
+                            waiting_for_debugger,
+                            df.as_ref(),
+                            has_proxy_creds,
+                        )
+                        .await;
                     }
                     Some(event) if event.method == "Fetch.requestPaused" => {
                         let request_id = event
@@ -1259,6 +1221,8 @@ impl DaemonState {
         let shared_count = Arc::new(AtomicU64::new(0));
         let shared_captured = Arc::new(AtomicU64::new(0));
         let shared_contact_sheet_count = Arc::new(AtomicU64::new(0));
+        let shared_screenshot_capture = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.recording_state.device_scale = initial_frame.device_scale;
         let (cancel_tx, cancel_rx) = oneshot::channel();
         if self.recording_state.cursor {
             self.refresh_active_iframe_sessions().await;
@@ -1281,6 +1245,7 @@ impl DaemonState {
         let handle = recording::spawn_recording_task(
             client,
             capture_session,
+            session_id,
             initial_frame,
             self.recording_state.output_path.clone(),
             self.recording_state.fps,
@@ -1293,12 +1258,14 @@ impl DaemonState {
             self.recording_state.contact_sheet_path.clone(),
             self.recording_state.contact_sheet_threshold,
             shared_contact_sheet_count.clone(),
+            shared_screenshot_capture.clone(),
             cancel_rx,
         );
         self.recording_state.capture_task = Some(handle);
         self.recording_state.shared_frame_count = Some(shared_count);
         self.recording_state.shared_captured_count = Some(shared_captured);
         self.recording_state.shared_contact_sheet_count = Some(shared_contact_sheet_count);
+        self.recording_state.shared_screenshot_capture = Some(shared_screenshot_capture);
         self.recording_state.cancel_tx = Some(cancel_tx);
         Ok(())
     }
@@ -1374,7 +1341,7 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mgr) = self.browser {
-                async {
+                bounded_auto_attached_setup("session", iframe_sid, async {
                     mgr.prepare_domains_pub(iframe_sid).await?;
                     let _ = mgr
                         .client
@@ -1395,19 +1362,33 @@ impl DaemonState {
                         .await?;
                     }
                     mgr.resume_if_waiting_pub(iframe_sid).await
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                // Only this session is dropped; other frames keep theirs.
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("iframe", &error);
+                    self.iframe_sessions.retain(|_, sid| sid != iframe_sid);
+                    self.active_iframe_sessions.remove(iframe_sid);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!(
-                    "Warning: failed to prepare iframe session controls: {}",
-                    error
-                );
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to prepare iframe session controls: {}",
+                        error
+                    );
+                    // No controls depend on the pause, so do not leave the
+                    // frame stopped before its first script.
+                    if let Some(ref mgr) = self.browser {
+                        let _ = mgr.resume_if_waiting_pub(iframe_sid).await;
+                    }
+                }
             }
         }
 
@@ -1418,7 +1399,7 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mut mgr) = self.browser {
-                async {
+                bounded_auto_attached_setup("session", page_sid, async {
                     mgr.prepare_domains_pub(page_sid).await?;
                     if controls_active {
                         install_network_controls_for_session(
@@ -1469,19 +1450,26 @@ impl DaemonState {
                     );
 
                     mgr.resume_if_waiting_pub(page_sid).await
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                // A popup that closed right away; its target is gone.
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("page", &error);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!(
-                    "Warning: failed to prepare attached page session: {}",
-                    error
-                );
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to prepare attached page session: {}",
+                        error
+                    );
+                }
             }
         }
 
@@ -1490,7 +1478,7 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mgr) = self.browser {
-                async {
+                bounded_auto_attached_setup("session", worker_sid, async {
                     prepare_network_control_target_session(&mgr.client, worker_sid, target_info)
                         .await?;
                     if controls_active {
@@ -1512,19 +1500,25 @@ impl DaemonState {
                         )
                         .await;
                     Ok(())
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("worker", &error);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!(
-                    "Warning: failed to prepare worker session controls: {}",
-                    error
-                );
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to prepare worker session controls: {}",
+                        error
+                    );
+                }
             }
         }
 
@@ -1545,7 +1539,8 @@ impl DaemonState {
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mut mgr) = self.browser {
-                async {
+                let target_id = te.target_info.target_id.as_str();
+                bounded_auto_attached_setup("target", target_id, async {
                     let attach: AttachToTargetResult = mgr
                         .client
                         .send_command_typed(
@@ -1600,16 +1595,22 @@ impl DaemonState {
                         te.target_info.target_type.clone(),
                     );
                     mgr.resume_if_waiting_pub(&attach.session_id).await
-                }
+                })
                 .await
             } else {
                 Ok(())
             };
-            if let Err(error) = setup_result {
-                if controls_active {
+            match setup_result {
+                Ok(()) => {}
+                Err(error) if is_session_detached_error(&error) => {
+                    log_detached_during_setup("page", &error);
+                }
+                Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
                 }
-                eprintln!("Warning: failed to prepare new page session: {}", error);
+                Err(error) => {
+                    eprintln!("Warning: failed to prepare new page session: {}", error);
+                }
             }
         }
 
@@ -1904,11 +1905,12 @@ impl DaemonState {
                         _ => {}
                     }
 
-                    let session_matches = if let Some(ref browser) = self.browser {
-                        event.session_id.as_deref() == browser.active_session_id().ok()
-                    } else {
-                        false
-                    };
+                    let session_matches = session_matches(
+                        self.browser
+                            .as_ref()
+                            .and_then(|browser| browser.active_session_id().ok()),
+                        event.session_id.as_deref(),
+                    );
 
                     // Allow Network events from cross-origin iframe sessions
                     // when HAR recording or request tracking is active.
@@ -1943,15 +1945,13 @@ impl DaemonState {
 
                     match event.method.as_str() {
                         "WebMCP.toolsAdded" => {
-                            if let Some(session_id) = event.session_id.as_deref() {
-                                self.webmcp
-                                    .apply_tools_added(session_id, &event.params, "null");
-                            }
+                            let session_id = event.session_id.as_deref().unwrap_or_default();
+                            self.webmcp
+                                .apply_tools_added(session_id, &event.params, "null");
                         }
                         "WebMCP.toolsRemoved" => {
-                            if let Some(session_id) = event.session_id.as_deref() {
-                                self.webmcp.apply_tools_removed(session_id, &event.params);
-                            }
+                            let session_id = event.session_id.as_deref().unwrap_or_default();
+                            self.webmcp.apply_tools_removed(session_id, &event.params);
                         }
                         "WebMCP.toolResponded" => {
                             self.webmcp.apply_response(event.params.clone());
@@ -2640,6 +2640,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.active_iframe_sessions.clear();
     state.webmcp.clear_all();
     state.screencasting = false;
+    state.pending_dialog = None;
     state.reset_input_state();
     state.update_stream_client().await;
 
@@ -2973,6 +2974,19 @@ fn append_launch_policy_actions(
 
 /// The command future is large; boxing it keeps it off the caller's stack,
 /// which a debug-build test thread would otherwise overflow.
+/// Fields the CLI adds to every command to carry session configuration. They
+/// are not part of the action, so stream broadcasts and flow recordings drop them.
+pub(crate) const ENVELOPE_KEYS: &[&str] = &[
+    "plugins",
+    "settings",
+    "pinTab",
+    "restoreKey",
+    "restoreSave",
+    "restoreCheckUrl",
+    "restoreCheckText",
+    "restoreCheckFn",
+];
+
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     Box::pin(execute_command_flow(cmd, state)).await
 }
@@ -3096,25 +3110,11 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if let Some(ref server) = state.stream_server {
         let mut broadcast_cmd;
-        let has_internal_fields = cmd.get("plugins").is_some()
-            || cmd.get("settings").is_some()
-            || cmd.get("pinTab").is_some()
-            || cmd.get("restoreKey").is_some()
-            || cmd.get("restoreSave").is_some()
-            || cmd.get("restoreCheckUrl").is_some()
-            || cmd.get("restoreCheckText").is_some()
-            || cmd.get("restoreCheckFn").is_some();
+        let has_internal_fields = ENVELOPE_KEYS.iter().any(|k| cmd.get(k).is_some());
         let cmd_for_broadcast = if has_internal_fields {
             broadcast_cmd = cmd.clone();
             if let Some(obj) = broadcast_cmd.as_object_mut() {
-                obj.remove("plugins");
-                obj.remove("settings");
-                obj.remove("pinTab");
-                obj.remove("restoreKey");
-                obj.remove("restoreSave");
-                obj.remove("restoreCheckUrl");
-                obj.remove("restoreCheckText");
-                obj.remove("restoreCheckFn");
+                obj.retain(|k, _| !ENVELOPE_KEYS.contains(&k.as_str()));
             }
             &broadcast_cmd
         } else {
@@ -3134,55 +3134,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // Keep element resolution in sync with the `frame` selection (see
     // element::set_active_frame for why this is mirrored).
     super::element::set_active_frame(state.active_frame_id.as_deref());
-
-    // `--pin-tab` from the client enables strict tab binding even when the
-    // daemon was started without the flag, and `--no-pin-tab` (pinTab: false)
-    // disables a sticky pin restored from disk or enabled earlier. Both are
-    // persisted with the binding so the setting survives daemon restarts;
-    // absence of the field leaves the current state untouched.
-    match cmd.get("pinTab").and_then(|v| v.as_bool()) {
-        Some(pin) if pin != state.pin_tab => {
-            // Persist the pinned state before committing it to live state, so a
-            // load/save failure leaves the daemon exactly as it was instead of
-            // reporting an error while the isolation mode already flipped.
-            match tab_binding::load(&state.session_id) {
-                Ok(Some(mut binding)) => {
-                    if binding.pinned != pin {
-                        binding.pinned = pin;
-                        if let Err(e) = tab_binding::save(&state.session_id, &binding) {
-                            return error_response(
-                                &id,
-                                &format!(
-                                    "cannot persist the pin-tab setting: {} — the change was \
-                                     not applied",
-                                    e
-                                ),
-                            );
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    return error_response(
-                        &id,
-                        &format!(
-                            "cannot read the session tab binding to update the pin state: {} \
-                             — delete the binding file to reset the session",
-                            e
-                        ),
-                    );
-                }
-            }
-            // Persistence succeeded (or there was nothing to write): commit the
-            // live state, and force a re-persist from the snapshot next time.
-            state.pin_tab = pin;
-            if let Some(ref mut mgr) = state.browser {
-                mgr.set_pin_tab(pin);
-            }
-            state.last_persisted_binding = None;
-        }
-        _ => {}
-    }
 
     // The settings this invocation set ride on the command. Live settings
     // apply now, before the policy checks, so a changed policy governs this
@@ -3433,6 +3384,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    if let Some(mgr) = state.browser.as_mut() {
+        let session = &state.session_id;
+        let unpinned = |target: &str| tab_binding::pinned_owner(target, session).is_none();
+        mgr.thaw_active_tab(unpinned).await;
+    }
+
     // WebDriver backend: reject unsupported CDP-only actions
     if matches!(state.backend_type, BackendType::WebDriver)
         && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
@@ -3534,8 +3491,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "close" => handle_close(state).await,
         "snapshot" => handle_snapshot(cmd, state).await,
         "screenshot" => handle_screenshot(cmd, state).await,
-        "click" => handle_click(cmd, state).await,
-        "dblclick" => handle_dblclick(cmd, state).await,
+        "click" => handle_click(cmd, state, 1).await,
+        "dblclick" => handle_click(cmd, state, 2).await,
         "fill" => handle_fill(cmd, state).await,
         "type" => handle_type(cmd, state).await,
         "press" => handle_press(cmd, state).await,
@@ -3583,6 +3540,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "tab_new" => handle_tab_new(cmd, state).await,
         "tab_switch" => handle_tab_switch(cmd, state).await,
         "tab_close" => handle_tab_close(cmd, state).await,
+        "tab_keep" => handle_tab_keep(cmd, state).await,
         "viewport" => handle_viewport(cmd, state).await,
         "useragent" | "user_agent" => handle_user_agent(cmd, state).await,
         "set_media" => handle_set_media(cmd, state).await,
@@ -3913,6 +3871,7 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
     })?;
     if binding.as_ref().is_some_and(|b| b.pinned) {
         state.pin_tab = true;
+        state.settings.set(Key::PinTab, Value::Bool(true));
     }
     let pin = state.pin_tab;
     if state.browser.is_none() {
@@ -4092,11 +4051,12 @@ fn should_defer_url_until_network_controls(
     };
 
     check_url_allowed_by_filter(filter, url)?;
-    Ok(filter.is_some_and(|filter| !filter.allowed_domains.is_empty()) || handle_auth_requests)
+    Ok(filter.is_some() || handle_auth_requests)
 }
 
 struct AllowedDomainsLaunchSupport<'a> {
-    allowed_domains: &'a [String],
+    /// A domain filter is installed.
+    contained: bool,
     cdp_url: Option<&'a str>,
     cdp_port: Option<u64>,
     auto_connect: bool,
@@ -4110,7 +4070,7 @@ struct AllowedDomainsLaunchSupport<'a> {
 fn ensure_allowed_domains_supported_for_launch(
     support: AllowedDomainsLaunchSupport<'_>,
 ) -> Result<(), String> {
-    if support.allowed_domains.is_empty() {
+    if !support.contained {
         return Ok(());
     }
 
@@ -4193,16 +4153,23 @@ async fn ensure_state_replay_supported_by_active_domain_filter(
     source: &str,
 ) -> Result<(), String> {
     let filter = state.domain_filter.read().await;
-    if filter
-        .as_ref()
-        .is_some_and(|filter| !filter.allowed_domains.is_empty())
-    {
+    if filter.is_some() {
         return Err(format!(
             "--allowed-domains is not supported with {} because loading state replays saved origins",
             source
         ));
     }
     Ok(())
+}
+
+/// The filter the stored allowlist describes; no list, or a legacy empty one,
+/// is no filter.
+fn filter_from_settings(settings: &Running) -> Option<DomainFilter> {
+    settings
+        .security()
+        .allowed_domains
+        .filter(|domains| !domains.is_empty())
+        .map(|domains| DomainFilter::new(&domains.join(",")))
 }
 
 async fn restore_domain_filter(state: &mut DaemonState, filter: &Option<DomainFilter>) {
@@ -4261,6 +4228,115 @@ fn allowed_domains_disallowed_chrome_arg(args: &[String]) -> Option<&'static str
     }
 
     None
+}
+
+/// Upper bound for preparing an iframe, worker, or page session that the
+/// event drain or auto-attach reported. Every command drains CDP events
+/// first, so this setup runs on the command path: a session that neither
+/// answers nor reports its detach would otherwise hold every queued command
+/// for the 30 s CDP timeout of each command it sends.
+const AUTO_ATTACHED_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `kind` and `id` name what is being prepared in the timeout error, e.g.
+/// `"session"` and a session id, or `"target"` and a target id when the
+/// session does not exist yet.
+async fn bounded_auto_attached_setup(
+    kind: &str,
+    id: &str,
+    setup: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    tokio::time::timeout(AUTO_ATTACHED_SETUP_TIMEOUT, setup)
+        .await
+        .unwrap_or_else(|_| Err(format!("Timed out preparing auto-attached {} {}", kind, id)))
+}
+
+/// What the background handler did with a session that auto-attach reported.
+#[derive(Debug, PartialEq, Eq)]
+enum AutoAttachedSetup {
+    /// Controls (if any) are installed and the target was resumed.
+    Resumed,
+    /// The session detached during setup; its target is gone.
+    Detached,
+    /// Setup failed; the target stays paused so it cannot run uncontrolled.
+    Failed,
+}
+
+/// Installs network controls on a session that browser-level auto-attach
+/// reported, then resumes it. This runs in the background handler that also
+/// answers `Fetch.requestPaused` for the page, so a dead child session must
+/// not stall it.
+async fn setup_auto_attached_session(
+    client: &CdpClient,
+    sid: &str,
+    target_info: Option<&TargetInfo>,
+    waiting_for_debugger: bool,
+    domain_filter: Option<&DomainFilter>,
+    has_proxy_creds: bool,
+) -> AutoAttachedSetup {
+    let target_needs_controls = target_info.is_some_and(target_supports_network_controls);
+    let controls_active = domain_filter.is_some() || has_proxy_creds;
+    let controls_result = match target_info {
+        Some(target) if controls_active && target_needs_controls => {
+            bounded_auto_attached_setup("session", sid, async {
+                prepare_network_control_target_session(client, sid, target).await?;
+                if target_is_worker_like(target) {
+                    install_worker_network_controls_for_session(
+                        client,
+                        sid,
+                        domain_filter,
+                        has_proxy_creds,
+                        target,
+                    )
+                    .await
+                } else {
+                    install_network_controls_for_session(
+                        client,
+                        sid,
+                        domain_filter,
+                        has_proxy_creds,
+                        waiting_for_debugger,
+                    )
+                    .await
+                }
+            })
+            .await
+        }
+        _ => Ok(()),
+    };
+
+    match controls_result {
+        Ok(()) => {
+            let _ = client
+                .send_command_no_wait("Runtime.runIfWaitingForDebugger", None, Some(sid))
+                .await;
+            AutoAttachedSetup::Resumed
+        }
+        Err(error) if is_session_detached_error(&error) => {
+            log_detached_during_setup("auto-attached", &error);
+            AutoAttachedSetup::Detached
+        }
+        Err(error) => {
+            eprintln!(
+                "Failed to apply browser network controls to auto-attached target: {}",
+                error
+            );
+            AutoAttachedSetup::Failed
+        }
+    }
+}
+
+/// An auto-attached session that detached during setup took its target with
+/// it, so there is nothing left to control or resume. Short-lived iframes do
+/// this routinely; it is not worth a warning.
+fn log_detached_during_setup(kind: &str, error: &str) {
+    if env::var_os("AGENT_BROWSER_DEBUG").is_some() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "[cdp] {} session detached during setup: {}",
+            kind,
+            error
+        );
+    }
 }
 
 async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> Result<(), String> {
@@ -4750,8 +4826,8 @@ async fn auto_launch_inner(
     )?;
     let enable_features = state.settings.enable_features();
     let init_script_paths = state.settings.init_scripts();
-    let allowed_domains = current_allowed_domains(state).await;
-    options.restrict_webrtc = !allowed_domains.is_empty();
+    let contained = state.domain_filter.read().await.is_some();
+    options.restrict_webrtc = contained;
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
     let restore_key = state.session_name.clone();
@@ -4787,7 +4863,7 @@ async fn auto_launch_inner(
 
     if let Some(cdp) = cdp {
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            allowed_domains: &allowed_domains,
+            contained,
             cdp_url: Some(cdp.as_str()),
             cdp_port: None,
             auto_connect: false,
@@ -4818,7 +4894,7 @@ async fn auto_launch_inner(
 
     if auto_connect {
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            allowed_domains: &allowed_domains,
+            contained,
             cdp_url: None,
             cdp_port: None,
             auto_connect: true,
@@ -4854,7 +4930,7 @@ async fn auto_launch_inner(
     if let Some(provider) = provider {
         let p = provider.to_lowercase();
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            allowed_domains: &allowed_domains,
+            contained,
             cdp_url: None,
             cdp_port: None,
             auto_connect: false,
@@ -4894,7 +4970,7 @@ async fn auto_launch_inner(
             let conn =
                 providers::connect_provider_with_plugins(&p, &plugins, &state.settings).await?;
             let provider_metadata = conn.metadata.clone();
-            if conn.direct_page && !allowed_domains.is_empty() {
+            if conn.direct_page && contained {
                 if let Some(ref ps) = conn.session {
                     let _ = providers::close_provider_session_with_plugins(ps, &plugins).await;
                 }
@@ -4941,7 +5017,7 @@ async fn auto_launch_inner(
     }
 
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        allowed_domains: &allowed_domains,
+        contained,
         cdp_url: None,
         cdp_port: None,
         auto_connect: false,
@@ -4955,7 +5031,7 @@ async fn auto_launch_inner(
     apply_launch_mutator_plugins(state, &mut options, plugins).await?;
     validate_ca_cert_launch_mode(&options, engine.as_deref(), false)?;
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        allowed_domains: &allowed_domains,
+        contained,
         cdp_url: None,
         cdp_port: None,
         auto_connect: false,
@@ -4999,20 +5075,24 @@ fn string_array_from_command(cmd: &Value, key: &str) -> Option<Vec<String>> {
     })
 }
 
-fn allowed_domains_from_launch_command(cmd: &Value) -> Option<Vec<String>> {
-    let value = cmd.get("allowedDomains")?;
+/// `Ok(None)` means the key is absent. A key that parses to zero domains is
+/// rejected, since an empty list would otherwise disable containment.
+fn allowed_domains_from_launch_command(cmd: &Value) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = cmd.get("allowedDomains") else {
+        return Ok(None);
+    };
     let raw_domains: Vec<&str> = match value {
         Value::String(domains) => domains.split(',').collect(),
         Value::Array(domains) => domains.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
     };
-    Some(
-        raw_domains
-            .into_iter()
-            .map(|domain| domain.trim().to_lowercase())
-            .filter(|domain| !domain.is_empty())
-            .collect(),
-    )
+    let domains: Vec<String> = raw_domains
+        .into_iter()
+        .map(|domain| domain.trim().to_lowercase())
+        .filter(|domain| !domain.is_empty())
+        .collect();
+    network::ensure_allowed_domains_not_empty(&domains)?;
+    Ok(Some(domains))
 }
 
 async fn apply_launch_init_scripts(
@@ -5508,6 +5588,17 @@ fn check_capture_setting(patch: &Patch) -> Result<(), String> {
     }
 }
 
+/// Rejects an allowlist that lists no domain, before it is stored or applied.
+fn check_allowed_domains_setting(patch: &Patch) -> Result<(), String> {
+    match patch.value(Key::AllowedDomains) {
+        Some(Value::Array(domains)) => {
+            let domains: Vec<&str> = domains.iter().filter_map(Value::as_str).collect();
+            network::ensure_allowed_domains_not_empty(&domains)
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn handle_launch_for_target(
     cmd: &Value,
     state: &mut DaemonState,
@@ -5523,7 +5614,6 @@ async fn handle_launch_for_target(
     {
         return handle_launch_inner(cmd, state).await;
     }
-    let filter = state.domain_filter.read().await.clone();
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
@@ -5532,7 +5622,10 @@ async fn handle_launch_for_target(
         Err(_) => Err(browser_use_setup_timeout(state).await),
     };
     if result.is_err() {
-        restore_domain_filter(state, &filter).await;
+        // The stored security settings decide what survives a failed launch, so
+        // the live filter follows them.
+        let stored = filter_from_settings(&state.settings);
+        restore_domain_filter(state, &stored).await;
         *state.proxy_credentials.write().await = credentials;
         state.plugin_init_scripts = scripts;
         state.session_setup = setup;
@@ -5544,7 +5637,7 @@ async fn handle_launch_for_target(
 /// the launch protocol directly (rather than through the CLI) sets session
 /// settings this way; the CLI sends the same settings as a patch on every
 /// command.
-fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
+fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Result<Patch, String> {
     let mut entries: Vec<(Key, Requested)> = Vec::new();
     let mut set = |key: Key, value: Value| entries.push((key, Requested::Set(value)));
     let string = |field: &str| cmd.get(field).and_then(Value::as_str).map(Value::from);
@@ -5648,17 +5741,10 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
             _ => {}
         }
     }
-    if let Some(domains) = allowed_domains_from_launch_command(cmd) {
-        entries.push((
-            Key::AllowedDomains,
-            if domains.is_empty() {
-                Requested::Default
-            } else {
-                Requested::Set(Value::from(domains))
-            },
-        ));
+    if let Some(domains) = allowed_domains_from_launch_command(cmd)? {
+        entries.push((Key::AllowedDomains, Requested::Set(Value::from(domains))));
     }
-    Patch::from_entries(entries)
+    Ok(Patch::from_entries(entries))
 }
 
 /// What applying a settings patch did to the session.
@@ -5801,6 +5887,30 @@ fn adjust_ca_patch(state: &mut DaemonState, patch: &mut Patch) -> Result<(), Str
     Ok(())
 }
 
+/// Writes `pin` into the session's tab binding, when one exists.
+/// Returns whether the binding on disk was changed.
+fn persist_pin_tab(session_id: &str, pin: bool) -> Result<bool, String> {
+    match tab_binding::load(session_id) {
+        Ok(Some(mut binding)) if binding.pinned != pin => {
+            binding.pinned = pin;
+            tab_binding::save(session_id, &binding)
+                .map(|()| true)
+                .map_err(|e| {
+                    format!(
+                        "cannot persist the pin-tab setting: {} — the change was not applied",
+                        e
+                    )
+                })
+        }
+        Ok(_) => Ok(false),
+        Err(e) => Err(format!(
+            "cannot read the session tab binding to update the pin state: {} — delete the \
+             binding file to reset the session",
+            e
+        )),
+    }
+}
+
 /// Plans `patch` against the session's settings and applies the plan. Live
 /// settings change in place. Launch settings close the running browser so the
 /// launch that follows uses them, and they are committed for good only once
@@ -5814,6 +5924,7 @@ async fn apply_settings_patch(
     patch: &Patch,
     launches: bool,
 ) -> Result<SettingsOutcome, String> {
+    check_allowed_domains_setting(patch)?;
     let mut patch = patch.clone();
     if launches {
         adjust_ca_patch(state, &mut patch)?;
@@ -5851,14 +5962,26 @@ async fn apply_settings_patch(
         None
     };
 
-    // Security settings are stored before they are applied, so a failed write
-    // leaves the session as it was and a stored setting never lags the running one.
+    // The pin binding and the security settings are stored before anything is
+    // applied, so a failed write leaves the session as it was and a stored
+    // setting never lags the running one. The two writes are not atomic: when
+    // the second fails, a pin binding this patch changed is put back.
+    let pin_written =
+        changed(Key::PinTab) && persist_pin_tab(&state.session_id, plan.next.pin_tab())?;
     let next_security = plan.next.security();
     if next_security != state.settings.security() {
-        state
-            .store
-            .save(&next_security)
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = state.store.save(&next_security) {
+            let mut message = e.to_string();
+            if pin_written {
+                if let Err(undo) = persist_pin_tab(&state.session_id, !plan.next.pin_tab()) {
+                    message.push_str(&format!(
+                        "; the pin-tab binding could not be restored: {}",
+                        undo
+                    ));
+                }
+            }
+            return Err(message);
+        }
     }
 
     let had_browser = has_active_browser_session(state);
@@ -5946,11 +6069,19 @@ async fn apply_settings_patch(
         *state.domain_filter.write().await = next
             .security()
             .allowed_domains
-            .filter(|domains| !domains.is_empty())
             .map(|domains| DomainFilter::new(&domains.join(",")));
     }
     if let Some(ca_cert) = ca_cert {
         state.effective_ca_cert = ca_cert;
+    }
+    if was(Key::PinTab) {
+        let pin = next.pin_tab();
+        state.pin_tab = pin;
+        if let Some(ref mut mgr) = state.browser {
+            mgr.set_pin_tab(pin);
+        }
+        // Force a re-persist from the snapshot next time.
+        state.last_persisted_binding = None;
     }
     if was(Key::Cdp) || was(Key::CdpHeaders) {
         // The requested headers win over any cached for the endpoint, and
@@ -6045,7 +6176,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .and_then(Value::as_str)
         .map(String::from)
         .or_else(|| state.settings.engine());
-    let patch = launch_envelope_patch(cmd, engine.as_deref());
+    let patch = launch_envelope_patch(cmd, engine.as_deref())?;
     check_capture_setting(&patch)?;
     let had_browser_before_launch = has_active_browser_session(state);
 
@@ -6337,9 +6468,7 @@ async fn handle_read(cmd: &Value, state: &DaemonState) -> Result<Value, String> 
         let df = state.domain_filter.read().await;
         df.as_ref().map(|filter| filter.allowed_domains.clone())
     } {
-        if !allowed_domains.is_empty() {
-            options.enforced_allowed_domains.push(allowed_domains);
-        }
+        options.enforced_allowed_domains.push(allowed_domains);
     }
 
     if let Some(url) = cmd.get("url").and_then(|v| v.as_str()) {
@@ -6489,6 +6618,10 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 /// daemon restarts the CLI asks for (upgrade, changed options) keep them.
 async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
+    let unfreeze_error = match state.browser.as_mut() {
+        Some(mgr) => mgr.thaw_frozen_tabs().await.err(),
+        None => None,
+    };
     close_all_browser_backends(state).await?;
     state.attached_target = None;
 
@@ -6553,6 +6686,9 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
     if unsaved > 0 {
         reply["unsaved"] = json!({ "steps": unsaved });
     }
+    if let Some(err) = unfreeze_error {
+        reply["unfreezeError"] = json!(err);
+    }
     if let Some(err) = pin_release_error {
         reply["pinReleaseError"] = json!(err);
     }
@@ -6591,16 +6727,16 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     };
 
     let previous_refs = state.ref_map.ref_ids();
-    state.ref_map.begin_snapshot();
-    let tree = snapshot::take_snapshot(
+    let (tree, refs) = snapshot::stage_snapshot(
         &mgr.client,
         &session_id,
         &options,
-        &mut state.ref_map,
+        &state.ref_map,
         state.active_frame_id.as_deref(),
         &state.iframe_sessions,
     )
     .await?;
+    state.ref_map = refs;
 
     let url = mgr.get_url().await.unwrap_or_default();
 
@@ -6912,7 +7048,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .map(String::from),
     };
 
-    let (session_id, result) = if let Some(wb) = state
+    let (session_id, result, staged_refs) = if let Some(wb) = state
         .webdriver_backend
         .as_ref()
         .filter(|_| state.browser.is_none())
@@ -6938,36 +7074,39 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
                 base64: wb.screenshot().await?,
                 annotations: Vec::new(),
             },
+            None,
         )
     } else {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         let session_id = mgr.active_session_id()?.to_string();
-        if annotate {
-            state.ref_map.begin_snapshot();
-            let _ = snapshot::take_snapshot(
+        let staged_refs = if annotate {
+            let (_, refs) = snapshot::stage_snapshot(
                 &mgr.client,
                 &session_id,
                 &SnapshotOptions {
                     interactive: true,
                     ..SnapshotOptions::default()
                 },
-                &mut state.ref_map,
+                &state.ref_map,
                 state.active_frame_id.as_deref(),
                 &state.iframe_sessions,
             )
             .await?;
-        }
+            Some(refs)
+        } else {
+            None
+        };
 
         let result = screenshot::take_screenshot(
             &mgr.client,
             &session_id,
-            &state.ref_map,
+            staged_refs.as_ref().unwrap_or(&state.ref_map),
             &options,
             &state.iframe_sessions,
         )
         .await?;
 
-        (session_id, result)
+        (session_id, result, staged_refs)
     };
 
     let mut response = if if_changed {
@@ -6985,6 +7124,9 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     if !result.annotations.is_empty() {
         response["annotations"] = serde_json::to_value(&result.annotations)
             .map_err(|e| format!("Failed to serialize annotations: {}", e))?;
+    }
+    if let Some(refs) = staged_refs {
+        state.ref_map = refs;
     }
 
     Ok(response)
@@ -7009,7 +7151,12 @@ fn record_click_animation(
     }
 }
 
-async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_click(
+    cmd: &Value,
+    state: &mut DaemonState,
+    default_count: u8,
+) -> Result<Value, String> {
+    let plan = ClickPlan::from_command(cmd, default_count)?;
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -7017,89 +7164,103 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
-            wb.click(selector).await?;
-            return Ok(json!({ "clicked": selector }));
+            match plan {
+                ClickPlan::Pointer(spec) if spec.is_plain() => {
+                    wb.click(selector).await?;
+                    return Ok(json!({ "clicked": selector }));
+                }
+                ClickPlan::Pointer(_) => {
+                    return Err(
+                        "The Safari and iOS backends only support a plain left click; --button, --modifiers, and dblclick need a Chrome session"
+                            .to_string(),
+                    )
+                }
+                ClickPlan::NewTab => {
+                    return Err(
+                        "The Safari and iOS backends cannot open a tab from a click; use `tab new <url>`"
+                            .to_string(),
+                    )
+                }
+            }
         }
     }
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    if new_tab {
-        use super::element::resolve_element_object_id;
-        let (object_id, effective_session_id) = resolve_element_object_id(
-            &mgr.client,
-            &session_id,
-            &state.ref_map,
-            selector,
-            &state.iframe_sessions,
-        )
-        .await?;
-        let call_params = json!({
-            "objectId": object_id,
-            "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
-            "returnByValue": true
-        });
-        let call_result = mgr
-            .client
-            .send_command(
-                "Runtime.callFunctionOn",
-                Some(call_params),
-                Some(&effective_session_id),
+    let spec = match plan {
+        ClickPlan::NewTab => {
+            use super::element::resolve_element_object_id;
+            let (object_id, effective_session_id) = resolve_element_object_id(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                &state.iframe_sessions,
             )
             .await?;
-        let href = call_result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                format!(
+            let call_params = json!({
+                "objectId": object_id,
+                "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
+                "returnByValue": true
+            });
+            let call_result = mgr
+                .client
+                .send_command(
+                    "Runtime.callFunctionOn",
+                    Some(call_params),
+                    Some(&effective_session_id),
+                )
+                .await?;
+            let href = call_result
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    format!(
                     "Element '{}' does not have an href attribute. --new-tab only works on links.",
                     selector
                 )
-            })?
-            .to_string();
+                })?
+                .to_string();
 
-        let domain_filter = state.domain_filter.read().await.clone();
-        let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-        let defer_url_until_controls = should_defer_url_until_network_controls(
-            domain_filter.as_ref(),
-            has_proxy_creds,
-            Some(&href),
-        )?;
-        // `click --new-tab` creates the same kind of daemon-owned tab as
-        // `tab new`, so it must use the same pre-navigation setup path.
-        let defer_url = defer_url_until_controls || session_setup_pending(state).await;
+            let domain_filter = state.domain_filter.read().await.clone();
+            let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+            let defer_url_until_controls = should_defer_url_until_network_controls(
+                domain_filter.as_ref(),
+                has_proxy_creds,
+                Some(&href),
+            )?;
+            // `click --new-tab` creates the same kind of daemon-owned tab as
+            // `tab new`, so it must use the same pre-navigation setup path.
+            let defer_url = defer_url_until_controls || session_setup_pending(state).await;
 
-        state.ref_map.begin_snapshot();
-        state.active_iframe_sessions.clear();
-        state.active_frame_id = None;
-        state.webmcp.clear_invocations();
-        let new_session_id = {
-            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-            mgr.tab_new(if defer_url { None } else { Some(&href) }, None)
-                .await?;
-            mgr.active_session_id()?.to_string()
-        };
+            state.ref_map.begin_snapshot();
+            state.active_iframe_sessions.clear();
+            state.active_frame_id = None;
+            state.webmcp.clear_invocations();
+            let new_session_id = {
+                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+                mgr.tab_new(if defer_url { None } else { Some(&href) }, None)
+                    .await?;
+                mgr.active_session_id()?.to_string()
+            };
 
-        apply_session_setup(state, &new_session_id).await?;
-        install_network_controls_or_close(state, has_proxy_creds).await?;
-        state.drain_cdp_events_background().await?;
+            apply_session_setup(state, &new_session_id).await?;
+            install_network_controls_or_close(state, has_proxy_creds).await?;
+            state.drain_cdp_events_background().await?;
 
-        if defer_url {
-            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-            mgr.navigate(&href, WaitUntil::Load).await?;
+            if defer_url {
+                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+                mgr.navigate(&href, WaitUntil::Load).await?;
+            }
+
+            state.refresh_active_iframe_sessions().await;
+
+            return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
         }
-
-        state.refresh_active_iframe_sessions().await;
-
-        return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
-    }
-
-    let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left");
-    let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+        ClickPlan::Pointer(spec) => spec,
+    };
 
     let input_mode = cmd
         .get("inputMode")
@@ -7144,8 +7305,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &session_id,
         &state.ref_map,
         selector,
-        button,
-        click_count,
+        spec,
         &state.iframe_sessions,
     )
     .await?;
@@ -7155,34 +7315,6 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &state.recording_state.shared_cursor,
     );
 
-    if result.dialog_opened {
-        state.pending_pointer_release = result.pending_release;
-        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
-    }
-    Ok(json!({ "clicked": selector }))
-}
-
-async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-    let selector = cmd
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'selector' parameter")?;
-
-    let result = interaction::dblclick(
-        &mgr.client,
-        &session_id,
-        &state.ref_map,
-        selector,
-        &state.iframe_sessions,
-    )
-    .await?;
-    record_click_animation(
-        &result,
-        &mut state.mouse_state,
-        &state.recording_state.shared_cursor,
-    );
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
         return Ok(json!({ "clicked": selector, "dialogOpened": true }));
@@ -7279,12 +7411,10 @@ fn parse_key_chord(input: &str) -> (String, Option<i32>) {
     let mut key_parts: Vec<&str> = Vec::new();
 
     for part in &parts {
-        match part.to_lowercase().as_str() {
-            "alt" => modifiers |= 1,
-            "control" | "ctrl" => modifiers |= 2,
-            "meta" | "cmd" | "command" => modifiers |= 4,
-            "shift" => modifiers |= 8,
-            _ => key_parts.push(part),
+        if let Some(bit) = Modifiers::bit(part) {
+            modifiers |= bit;
+        } else {
+            key_parts.push(part);
         }
     }
 
@@ -7674,7 +7804,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
             match rx.recv().await {
                 Ok(event) => {
                     if event.method == "Page.loadEventFired"
-                        && event.session_id.as_deref() == Some(&session_id)
+                        && session_matches(Some(&session_id), event.session_id.as_deref())
                     {
                         return;
                     }
@@ -8123,15 +8253,11 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         selector,
         ..SnapshotOptions::default()
     };
-    // Reuse the current document identities without committing a failed capture.
-    // Build the replacement separately so a failed diff leaves the existing refs usable.
-    let mut current_ref_map = state.ref_map.clone();
-    current_ref_map.begin_snapshot();
-    let current = snapshot::take_snapshot(
+    let (current, current_ref_map) = snapshot::stage_snapshot(
         &mgr.client,
         &session_id,
         &options,
-        &mut current_ref_map,
+        &state.ref_map,
         state.active_frame_id.as_deref(),
         &state.iframe_sessions,
     )
@@ -8310,8 +8436,12 @@ async fn handle_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     state.mouse_state.x = x;
     state.mouse_state.y = y;
     match event_type {
-        "mousePressed" => state.mouse_state.buttons |= mouse_button_mask(button),
-        "mouseReleased" => state.mouse_state.buttons &= !mouse_button_mask(button),
+        "mousePressed" => {
+            state.mouse_state.buttons |= MouseButton::parse(button).map_or(0, MouseButton::mask)
+        }
+        "mouseReleased" => {
+            state.mouse_state.buttons &= !MouseButton::parse(button).map_or(0, MouseButton::mask)
+        }
         _ => {}
     }
     if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
@@ -8388,6 +8518,25 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "tabs": tabs }))
 }
 
+/// Refuses a tab that another session pinned with `--pin-tab`. `None` checks
+/// the active tab.
+fn check_tab_unlocked(state: &DaemonState, tab_id: Option<u32>) -> Result<(), String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let target_id = match tab_id {
+        Some(id) => mgr.target_id_for_tab(id),
+        None => Some(mgr.active_target_id()?),
+    };
+    if let Some(target_id) = target_id {
+        if let Some(owner) = super::tab_binding::pinned_owner(target_id, &state.session_id) {
+            return Err(format!(
+                "tab_locked: tab {} is pinned by session '{}' (--pin-tab); close that session or use another tab",
+                target_id, owner
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
@@ -8450,18 +8599,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         mgr.resolve_tab_ref(&tab_ref)?
     };
-    if let Some(target_id) = state
-        .browser
-        .as_ref()
-        .and_then(|mgr| mgr.target_id_for_tab(tab_id))
-    {
-        if let Some(owner) = super::tab_binding::pinned_owner(target_id, &state.session_id) {
-            return Err(format!(
-                "tab_locked: tab {} is pinned by session '{}' (--pin-tab); close that session or use another tab",
-                target_id, owner
-            ));
-        }
-    }
+    check_tab_unlocked(state, Some(tab_id))?;
     let dialog_session = state
         .pending_dialog
         .as_ref()
@@ -8537,6 +8675,20 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     state.active_frame_id = None;
     state.refresh_active_iframe_sessions().await;
     Ok(result)
+}
+
+async fn handle_tab_keep(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let keep = TabKeep::parse(cmd.get("keep").and_then(Value::as_str).unwrap_or_default())?;
+    let tab_id = match cmd.get("tabId").and_then(Value::as_str) {
+        Some(tab_ref) => {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            Some(mgr.resolve_tab_ref(&super::browser::TabRef::parse(tab_ref)?)?)
+        }
+        None => None,
+    };
+    check_tab_unlocked(state, tab_id)?;
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    mgr.set_tab_keep(tab_id, keep).await
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -8698,8 +8850,7 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &session_id,
         &state.ref_map,
         selector,
-        "left",
-        1,
+        ClickSpec::default(),
         &state.iframe_sessions,
     )
     .await?;
@@ -8726,7 +8877,8 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                 // or with a different sessionId than the page session, so we
                 // accept them regardless. Page-domain events are matched by
                 // session to avoid cross-tab confusion.
-                let is_page_session = event.session_id.as_deref() == Some(&session_id);
+                let is_page_session =
+                    session_matches(Some(&session_id), event.session_id.as_deref());
                 let is_download_event = |method: &str, browser_method: &str, page_method: &str| {
                     method == browser_method || (method == page_method && is_page_session)
                 };
@@ -10328,7 +10480,7 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event))
                 if event.method == "WebMCP.toolsAdded"
-                    && event.session_id.as_deref() == Some(session_id.as_str()) =>
+                    && session_matches(Some(session_id.as_str()), event.session_id.as_deref()) =>
             {
                 state
                     .webmcp
@@ -10336,7 +10488,7 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
             }
             Ok(Ok(event))
                 if event.method == "WebMCP.toolsRemoved"
-                    && event.session_id.as_deref() == Some(session_id.as_str()) =>
+                    && session_matches(Some(session_id.as_str()), event.session_id.as_deref()) =>
             {
                 state.webmcp.apply_tools_removed(&session_id, &event.params);
             }
@@ -10931,8 +11083,7 @@ async fn execute_subaction(
                 &session_id,
                 &state.ref_map,
                 selector,
-                "left",
-                1,
+                ClickSpec::default(),
                 &state.iframe_sessions,
             )
             .await?;
@@ -11889,7 +12040,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
                 if event.method == "Network.responseReceived"
-                    && event.session_id.as_deref() == Some(&session_id)
+                    && session_matches(Some(&session_id), event.session_id.as_deref())
                 {
                     if let Some(resp_url) = event
                         .params
@@ -14628,8 +14779,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         &session_id,
         &submit_element.ref_map,
         AUTH_LOGIN_ELEMENT_REF,
-        "left",
-        1,
+        ClickSpec::default(),
         &state.iframe_sessions,
     )
     .await?;
@@ -14650,7 +14800,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let result = tokio::time::timeout_at(deadline, rx.recv()).await;
         match result {
             Ok(Ok(event)) => {
-                if event.session_id.as_deref() == Some(&session_id) {
+                if session_matches(Some(&session_id), event.session_id.as_deref()) {
                     match event.method.as_str() {
                         "Page.frameNavigated" | "Page.loadEventFired" => {
                             navigated = true;
@@ -14883,33 +15033,6 @@ async fn handle_device_list() -> Result<Value, String> {
 // Input event handlers
 // ---------------------------------------------------------------------------
 
-fn mouse_button_mask(button: &str) -> i32 {
-    match button {
-        "left" => 1,
-        "right" => 2,
-        "middle" => 4,
-        "back" => 8,
-        "forward" => 16,
-        _ => 0,
-    }
-}
-
-fn primary_button_from_mask(buttons: i32) -> &'static str {
-    if buttons & 1 != 0 {
-        "left"
-    } else if buttons & 2 != 0 {
-        "right"
-    } else if buttons & 4 != 0 {
-        "middle"
-    } else if buttons & 8 != 0 {
-        "back"
-    } else if buttons & 16 != 0 {
-        "forward"
-    } else {
-        "none"
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_mouse_event_params(
     mouse_state: &mut MouseState,
@@ -14932,10 +15055,12 @@ fn build_mouse_event_params(
     if buttons.is_none() {
         match event_type {
             "mousePressed" => {
-                next_buttons |= mouse_button_mask(button.unwrap_or("left"));
+                next_buttons |=
+                    MouseButton::parse(button.unwrap_or("left")).map_or(0, MouseButton::mask);
             }
             "mouseReleased" => {
-                next_buttons &= !mouse_button_mask(button.unwrap_or("left"));
+                next_buttons &=
+                    !MouseButton::parse(button.unwrap_or("left")).map_or(0, MouseButton::mask);
             }
             _ => {}
         }
@@ -14948,7 +15073,7 @@ fn build_mouse_event_params(
         y,
         button: Some(
             button
-                .unwrap_or(primary_button_from_mask(next_buttons))
+                .unwrap_or(MouseButton::primary(next_buttons).map_or("none", MouseButton::name))
                 .to_string(),
         ),
         buttons: Some(next_buttons),
@@ -15541,6 +15666,77 @@ mod tests {
             }
         });
         (url, calls)
+    }
+
+    async fn state_with_snapshot_ref() -> DaemonState {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let id = &cmd["id"];
+                let response = match cmd["method"].as_str().unwrap() {
+                    "Runtime.evaluate" => json!({"id": id, "result": {"result": {
+                        "type": "object", "subtype": "null"
+                    }}}),
+                    "Accessibility.getFullAXTree" => json!({"id": id, "result": {"nodes": []}}),
+                    "Page.captureScreenshot" => json!({"id": id, "error": {
+                        "code": -32000, "message": "Unable to capture screenshot"
+                    }}),
+                    _ => json!({"id": id, "result": {}}),
+                };
+                if ws
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut browser = BrowserManager::for_test(client, url);
+        browser.add_page(super::super::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "page".to_string(),
+            session_id: "session".to_string(),
+            url: "about:blank".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let mut state = DaemonState::new();
+        state.browser = Some(browser);
+        state
+            .ref_map
+            .add("e1".to_string(), Some(42), "button", "Save", None);
+        state
+    }
+
+    #[tokio::test]
+    async fn a_failed_scoped_snapshot_keeps_the_previous_refs() {
+        let mut state = state_with_snapshot_ref().await;
+        let error = super::handle_snapshot(&json!({ "selector": "#nope" }), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Selector '#nope' did not match any element");
+        assert_eq!(state.ref_map.get("e1").unwrap().backend_node_id, Some(42));
+    }
+
+    #[tokio::test]
+    async fn a_failed_annotated_screenshot_keeps_the_previous_refs() {
+        let mut state = state_with_snapshot_ref().await;
+        let error = super::handle_screenshot(&json!({ "annotate": true }), &mut state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Unable to capture screenshot"), "{error}");
+        assert_eq!(state.ref_map.get("e1").unwrap().backend_node_id, Some(42));
     }
 
     #[tokio::test]
@@ -16169,6 +16365,36 @@ mod tests {
         assert_eq!(changed_pixel_ratio(&previous, 2, 1, &[0; 8]), 1.0);
     }
 
+    #[tokio::test]
+    async fn pin_tab_false_disables_a_pin_read_from_disk_on_attach() {
+        use super::super::tab_binding::{load, save, TabBinding};
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("XDG_RUNTIME_DIR");
+        let mut state = DaemonState::new();
+        assert!(!state.pin_tab);
+        let session = state.session_id.clone();
+        // A binding written after boot, read back on attach.
+        save(
+            &session,
+            &TabBinding {
+                target_id: "ABCDEF0123456789".to_string(),
+                url: "https://example.com".to_string(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+        apply_tab_binding_on_attach(&mut state).await.unwrap();
+        assert!(state.pin_tab);
+
+        let off = json!({ "action": "state_list", "id": "off", "settings": { "pin-tab": false } });
+        let resp = execute_command(&off, &mut state).await;
+        assert_eq!(resp["success"], true);
+        assert!(!state.pin_tab);
+        assert!(!load(&session).unwrap().unwrap().pinned);
+    }
+
     /// A binding-recovery failure must tear the connection down: the attach
     /// paths set `state.browser` before calling this, so returning the error
     /// alone would let the next command skip the attach path and act on
@@ -16782,6 +17008,126 @@ mod tests {
         ))
     }
 
+    #[tokio::test]
+    async fn direct_page_events_reach_debug_and_webmcp_consumers() {
+        use super::native_tracing::{
+            profiler_start, profiler_stop, trace_start, trace_stop, TracingState,
+        };
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut stream_mode = false;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let events = match cmd["method"].as_str().unwrap() {
+                    "Runtime.evaluate" if cmd["params"]["expression"].is_string() => vec![
+                        json!({"method":"Page.javascriptDialogOpening", "params":{"url":"https://page.test/", "type":"confirm", "message":"pending"}}),
+                    ],
+                    "Runtime.evaluate" => vec![
+                        json!({"sessionId":"other", "method":"Runtime.consoleAPICalled", "params":{"args":[{"type":"string", "value":"wrong page"}]}}),
+                        json!({"method":"Runtime.consoleAPICalled", "params":{"args":[{"type":"string", "value":"from the page"}]}}),
+                        json!({"method":"Network.requestWillBeSent", "params":{"requestId":"r1", "request":{"url":"https://page.test/"}}}),
+                        json!({"method":"WebMCP.toolsAdded", "params":{"tools":[{"name":"search", "frameId":"frame"}]}}),
+                    ],
+                    "Runtime.releaseObject" => vec![
+                        json!({"method":"WebMCP.toolsRemoved", "params":{"tools":[{"name":"search", "frameId":"frame"}]}}),
+                    ],
+                    "Tracing.start" => {
+                        stream_mode = cmd["params"]["transferMode"] == "ReturnAsStream";
+                        vec![]
+                    }
+                    "Tracing.end" if stream_mode => vec![
+                        json!({"sessionId":"other", "method":"Tracing.tracingComplete", "params":{}}),
+                        json!({"method":"Tracing.tracingComplete", "params":{"stream":"trace"}}),
+                    ],
+                    "Tracing.end" => vec![
+                        json!({"sessionId":"other", "method":"Tracing.tracingComplete", "params":{}}),
+                        json!({"method":"Tracing.dataCollected", "params":{"value":[{"name":"marker"}]}}),
+                        json!({"method":"Tracing.tracingComplete", "params":{}}),
+                    ],
+                    _ => vec![],
+                };
+                let result = if cmd["method"] == "IO.read" {
+                    json!({"data":"{\"traceEvents\":[{\"name\":\"marker\"}]}", "eof":true})
+                } else {
+                    json!({})
+                };
+                let response = json!({"id":cmd["id"], "result":result});
+                for event in events.into_iter().chain([response]) {
+                    ws.send(event.to_string().into()).await.unwrap();
+                }
+            }
+        });
+        let mut state = DaemonState::new();
+        state.browser = Some(BrowserManager::connect_cdp_direct(&url).await.unwrap());
+        let client = state.browser.as_ref().unwrap().client.clone();
+        state.subscribe_to_browser_events();
+        state.har_recording = true;
+        state.request_tracking = true;
+        let (add, remove) = ("Runtime.evaluate", "Runtime.releaseObject");
+        client.send_command_no_params(add, None).await.unwrap();
+        state.drain_cdp_events();
+        assert_eq!(state.event_tracker.console_entries.len(), 1);
+        assert_eq!(state.event_tracker.console_entries[0].text, "from the page");
+        assert_eq!(state.tracked_requests.len(), 1);
+        assert_eq!(state.har_entries.len(), 1);
+        assert_eq!(state.webmcp.tools("").unwrap()[0].name, "search");
+        client.send_command_no_params(remove, None).await.unwrap();
+        state.drain_cdp_events();
+        assert!(state.webmcp.tools("").unwrap().is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.json");
+        let path_str = path.to_str();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut trace = TracingState::new();
+            for profile in [false, true] {
+                if profile {
+                    profiler_start(&client, "", &mut trace, None).await.unwrap();
+                    profiler_stop(&client, "", &mut trace, path_str)
+                        .await
+                        .unwrap();
+                } else {
+                    trace_start(&client, "", &mut trace).await.unwrap();
+                    trace_stop(&client, "", &mut trace, path_str).await.unwrap();
+                }
+                let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                assert_eq!(saved["traceEvents"], json!([{"name":"marker"}]));
+            }
+        })
+        .await
+        .unwrap();
+
+        client
+            .send_command(
+                "Runtime.evaluate",
+                Some(json!({"expression":"setTimeout(() => confirm('pending'), 0)"})),
+                None,
+            )
+            .await
+            .unwrap();
+        state.drain_cdp_events();
+        assert_eq!(
+            handle_dialog(&json!({"response":"status"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"hasDialog":true, "type":"confirm", "message":"pending"})
+        );
+        close_current_browser(&mut state).await.unwrap();
+        assert_eq!(
+            handle_dialog(&json!({"response":"status"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"hasDialog":false})
+        );
+        server.abort();
+    }
+
     #[test]
     fn test_iframe_network_events_are_scoped_to_active_page_sessions() {
         let active_sessions = HashSet::from(["active-iframe".to_string()]);
@@ -16922,6 +17268,402 @@ mod tests {
         assert!(drained.attached_page_sessions.is_empty());
         assert_eq!(drained.new_targets.len(), 1);
         assert_eq!(drained.new_targets[0].target_info.target_id, "p");
+    }
+
+    /// An iframe that detaches while its session is being prepared is
+    /// dropped without waiting out the CDP timeout and without closing the
+    /// browser, even with network controls active (#1991). Frames that were
+    /// already attached, and ones attached in the same batch, are kept.
+    #[tokio::test]
+    async fn iframe_detached_during_setup_is_dropped_without_stalling() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let resumed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let resumed_by_server = resumed.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let session = command["sessionId"].as_str().unwrap_or_default();
+                if command["method"] == "Runtime.runIfWaitingForDebugger" {
+                    resumed_by_server.lock().unwrap().push(session.to_string());
+                    continue;
+                }
+                // The short-lived frame is gone before Chrome answers.
+                let reply = if session == "S-GONE" {
+                    json!({
+                        "method": "Target.detachedFromTarget",
+                        "params": { "sessionId": "S-GONE", "targetId": "F-GONE" }
+                    })
+                } else {
+                    json!({ "id": command["id"], "result": {} })
+                };
+                if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let mut state = DaemonState::new();
+        let client = CdpClient::connect(&url).await.unwrap();
+        state.browser = Some(BrowserManager::for_test(client, url.clone()));
+        *state.proxy_credentials.write().await = Some(("user".into(), "pass".into()));
+        state
+            .iframe_sessions
+            .insert("F-PAY".to_string(), "S-PAY".to_string());
+
+        let drained = DrainedEvents {
+            attached_iframe_sessions: vec![
+                ("F-GONE".to_string(), "S-GONE".to_string()),
+                ("F-NEW".to_string(), "S-NEW".to_string()),
+            ],
+            ..DrainedEvents::default()
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.apply_drained_events(drained),
+        )
+        .await
+        .expect("a detached iframe must not hold up the drain")
+        .unwrap();
+
+        assert!(state.browser.is_some(), "the browser must stay open");
+        assert_eq!(
+            state.iframe_sessions,
+            HashMap::from([
+                ("F-PAY".to_string(), "S-PAY".to_string()),
+                ("F-NEW".to_string(), "S-NEW".to_string()),
+            ])
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !resumed.lock().unwrap().contains(&"S-NEW".to_string()) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the live frame should be resumed");
+        assert!(!resumed.lock().unwrap().contains(&"S-GONE".to_string()));
+    }
+
+    fn setup_test_target(target_id: &str, target_type: &str) -> TargetInfo {
+        TargetInfo {
+            target_id: target_id.to_string(),
+            target_type: target_type.to_string(),
+            title: String::new(),
+            url: "https://example.com/".to_string(),
+            attached: Some(true),
+            browser_context_id: None,
+        }
+    }
+
+    /// Fake CDP endpoint for the session setup tests. `Target.attachToTarget`
+    /// attaches `attach_sid`. Commands to `S-GONE` are answered with that
+    /// session's detach, commands to `S-SILENT` are never answered,
+    /// `Runtime.evaluate` in `S-THROWS` reports an exception whose text names
+    /// a missing session, and everything else succeeds. Returns the URL and
+    /// the sessions resumed.
+    async fn spawn_session_setup_cdp_server(
+        attach_sid: &'static str,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let resumed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let resumed_by_server = resumed.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let session = command["sessionId"].as_str().unwrap_or_default();
+                if command["method"] == "Runtime.runIfWaitingForDebugger" {
+                    resumed_by_server.lock().unwrap().push(session.to_string());
+                    continue;
+                }
+                let reply = match session {
+                    "S-SILENT" => continue,
+                    "S-THROWS" if command["method"] == "Runtime.evaluate" => json!({
+                        "id": command["id"],
+                        "result": {
+                            "result": { "type": "object", "subtype": "error" },
+                            "exceptionDetails": {
+                                "text": "Uncaught",
+                                "exception": {
+                                    "type": "object",
+                                    "subtype": "error",
+                                    "description": "Error: Session with given id not found."
+                                }
+                            }
+                        }
+                    }),
+                    "S-GONE" => json!({
+                        "method": "Target.detachedFromTarget",
+                        "params": { "sessionId": "S-GONE", "targetId": "T-GONE" }
+                    }),
+                    _ if command["method"] == "Target.attachToTarget" => json!({
+                        "id": command["id"],
+                        "result": { "sessionId": attach_sid }
+                    }),
+                    _ => json!({ "id": command["id"], "result": {} }),
+                };
+                if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                    return;
+                }
+            }
+        });
+        (url, resumed)
+    }
+
+    /// A popup page or worker that detaches while the drain prepares it is
+    /// dropped without closing the browser, even though network controls are
+    /// active. Covers every page and worker path of the drain.
+    #[tokio::test]
+    async fn page_or_worker_detached_during_setup_keeps_the_browser_open() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-GONE", "page"),
+                        "S-GONE".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "discovered page",
+                DrainedEvents {
+                    new_targets: vec![TargetCreatedEvent {
+                        target_info: setup_test_target("T-GONE", "page"),
+                    }],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "worker",
+                DrainedEvents {
+                    attached_worker_sessions: vec![(
+                        setup_test_target("T-GONE", "service_worker"),
+                        "S-GONE".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, resumed) = spawn_session_setup_cdp_server("S-GONE").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            *state.proxy_credentials.write().await = Some(("user".into(), "pass".into()));
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: a detached session must not hold up the drain"));
+
+            assert_eq!(result, Ok(()), "{name}");
+            assert!(
+                state.browser.is_some(),
+                "{name}: the browser must stay open"
+            );
+            assert!(
+                !resumed.lock().unwrap().contains(&"S-GONE".to_string()),
+                "{name}: a detached session is not resumed"
+            );
+        }
+    }
+
+    /// Every child session the drain prepares is bounded, so one that never
+    /// answers and never reports a detach holds the drain (and with it every
+    /// queued command) for the setup bound, not the 30 s CDP timeout of each
+    /// command it sends.
+    #[tokio::test]
+    async fn silent_session_setup_is_bounded() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "iframe",
+                DrainedEvents {
+                    attached_iframe_sessions: vec![(
+                        "F-SILENT".to_string(),
+                        "S-SILENT".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-SILENT", "page"),
+                        "S-SILENT".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "discovered page",
+                DrainedEvents {
+                    new_targets: vec![TargetCreatedEvent {
+                        target_info: setup_test_target("T-SILENT", "page"),
+                    }],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, _) = spawn_session_setup_cdp_server("S-SILENT").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+
+            // Virtual time: the clock jumps to the next timer once the
+            // runtime is idle, so the bound fires without a 10 s wait.
+            tokio::time::pause();
+            let started = tokio::time::Instant::now();
+            let result = tokio::time::timeout(
+                AUTO_ATTACHED_SETUP_TIMEOUT * 2,
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: setup must give up at the setup bound"));
+            let elapsed = started.elapsed();
+            tokio::time::resume();
+
+            // Without network controls a failed setup is only a warning.
+            assert_eq!(result, Ok(()), "{name}");
+            assert!(state.browser.is_some(), "{name}");
+            assert!(
+                elapsed >= AUTO_ATTACHED_SETUP_TIMEOUT,
+                "{name}: gave up after {elapsed:?}"
+            );
+        }
+    }
+
+    /// The background handler drops a session that detaches while it
+    /// installs network controls, and resumes the ones that stay attached.
+    #[tokio::test]
+    async fn background_auto_attach_drops_sessions_detached_during_setup() {
+        let (url, resumed) = spawn_session_setup_cdp_server("S-GONE").await;
+        let client = CdpClient::connect(&url).await.unwrap();
+
+        for target_type in ["iframe", "page", "service_worker"] {
+            for (sid, target_id, expected) in [
+                ("S-LIVE", "T-LIVE", AutoAttachedSetup::Resumed),
+                ("S-GONE", "T-GONE", AutoAttachedSetup::Detached),
+            ] {
+                let target = setup_test_target(target_id, target_type);
+                let outcome = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    setup_auto_attached_session(&client, sid, Some(&target), true, None, true),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{target_type} {sid}: setup must not stall"));
+                assert_eq!(outcome, expected, "{target_type} {sid}");
+            }
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while resumed.lock().unwrap().len() < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("each live session should be resumed");
+        let resumed = resumed.lock().unwrap();
+        assert!(resumed.iter().all(|sid| sid == "S-LIVE"), "{resumed:?}");
+    }
+
+    /// A live frame or page can throw from the injected domain filter with
+    /// any message, including Chrome's text for a missing session. That is a
+    /// failure to install the filter, not a detach, so the browser still
+    /// closes instead of leaving the target running without its controls.
+    #[tokio::test]
+    async fn page_thrown_detach_text_still_fails_network_controls_closed() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "iframe",
+                DrainedEvents {
+                    attached_iframe_sessions: vec![(
+                        "F-THROWS".to_string(),
+                        "S-THROWS".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-THROWS", "page"),
+                        "S-THROWS".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, resumed) = spawn_session_setup_cdp_server("S-THROWS").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: setup must not stall"));
+
+            let error = result.expect_err(name);
+            assert!(
+                error.starts_with("Failed to install browser network controls"),
+                "{name}: {error}"
+            );
+            assert!(state.browser.is_none(), "{name}: the browser must close");
+            assert!(
+                !resumed.lock().unwrap().contains(&"S-THROWS".to_string()),
+                "{name}: an uncontrolled target is not resumed"
+            );
+        }
+
+        let (url, resumed) = spawn_session_setup_cdp_server("S-THROWS").await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let filter = DomainFilter::new("example.com");
+        for target_type in ["iframe", "page"] {
+            let target = setup_test_target("T-THROWS", target_type);
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                setup_auto_attached_session(
+                    &client,
+                    "S-THROWS",
+                    Some(&target),
+                    false,
+                    Some(&filter),
+                    false,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("auto-attached {target_type}: setup must not stall"));
+            assert_eq!(
+                outcome,
+                AutoAttachedSetup::Failed,
+                "auto-attached {target_type}"
+            );
+        }
+        assert!(resumed.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -18161,6 +18903,28 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[tokio::test]
+    async fn test_a_failed_provider_launch_leaves_the_filter_matching_the_stored_list() {
+        let guard = EnvGuard::new(&["BROWSER_USE_API_KEY", "AGENT_BROWSER_PROVIDER"]);
+        guard.remove("BROWSER_USE_API_KEY");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+        let mut state = DaemonState::new();
+        assert!(state.domain_filter.read().await.is_none());
+
+        let result = handle_launch(
+            &json!({"provider":"browser-use", "allowedDomains":["localhost"]}),
+            &mut state,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            state.settings.security().allowed_domains,
+            Some(vec!["localhost".to_string()])
+        );
+        assert_eq!(current_allowed_domains(&state).await, vec!["localhost"]);
+    }
+
+    #[tokio::test]
     async fn test_browser_use_failed_launches_restore_configuration() {
         let guard = EnvGuard::new(&[
             "BROWSER_USE_API_KEY",
@@ -18176,13 +18940,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             let mut state = DaemonState::new();
             state.settings.set(Key::Provider, json!("browser-use"));
             let credentials = Some(("old-user".to_string(), "old-password".to_string()));
+            state
+                .settings
+                .set(Key::AllowedDomains, json!(["example.com"]));
             *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
             *state.proxy_credentials.write().await = credentials.clone();
             state.plugin_init_scripts = vec!["previous-script".to_string()];
             state.session_setup.user_agent = Some("previous-agent".to_string());
             let result = if explicit {
                 handle_launch(
-                    &json!({"provider":"browser-use", "allowedDomains":[]}),
+                    &json!({"provider":"browser-use", "allowedDomains":["other.example"]}),
                     &mut state,
                 )
                 .await
@@ -18190,7 +18957,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 auto_launch(&mut state, Vec::new()).await
             };
             assert!(result.is_err());
-            assert_eq!(current_allowed_domains(&state).await, vec!["example.com"]);
+            let expected = if explicit {
+                vec!["other.example".to_string()]
+            } else {
+                vec!["example.com".to_string()]
+            };
+            assert_eq!(
+                state.settings.security().allowed_domains,
+                Some(expected.clone())
+            );
+            assert_eq!(current_allowed_domains(&state).await, expected);
             assert_eq!(*state.proxy_credentials.read().await, credentials);
             assert_eq!(state.plugin_init_scripts, vec!["previous-script"]);
             assert_eq!(
@@ -18239,6 +19015,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             rt.block_on(async {
                 let mut state = DaemonState::new();
                 state.session_setup.user_agent = Some("previous-agent".to_string());
+                state
+                    .settings
+                    .set(Key::AllowedDomains, json!(["example.com"]));
                 *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
                 let deadline = std::time::Duration::from_millis(200);
                 if closing {
@@ -18266,7 +19045,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                     assert!(!state.screencasting && !state.network_auto_attach_installed);
                 } else {
                     let result = handle_launch_with_deadline(
-                        &json!({"provider":"browser-use", "allowedDomains":[]}),
+                        &json!({"provider":"browser-use", "allowedDomains":["other.example"]}),
                         &mut state,
                         deadline,
                     )
@@ -18277,7 +19056,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                     state.session_setup.user_agent.as_deref(),
                     Some("previous-agent")
                 );
-                assert_eq!(current_allowed_domains(&state).await, vec!["example.com"]);
+                let expected = if closing {
+                    vec!["example.com".to_string()]
+                } else {
+                    vec!["other.example".to_string()]
+                };
+                assert_eq!(
+                    state.settings.security().allowed_domains,
+                    Some(expected.clone())
+                );
+                assert_eq!(current_allowed_domains(&state).await, expected);
             });
             server.join().unwrap();
         }
@@ -19210,12 +19998,43 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
-    fn test_separator_only_allowed_domains_allow_every_host() {
+    fn test_separator_only_allowed_domains_env_stops_the_daemon_start() {
+        for raw in [" , ", "", "  "] {
+            let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+            guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", raw);
+            let err = network::check_allowed_domains_env().unwrap_err();
+            assert!(
+                err.contains(network::EMPTY_ALLOWED_DOMAINS_ERROR),
+                "{raw:?}"
+            );
+        }
         let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
-        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", " , ");
-        let state = DaemonState::new();
-        // No filter at all, so direct-page providers are not refused either.
-        assert!(state.domain_filter.try_read().unwrap().is_none());
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        assert!(network::check_allowed_domains_env().is_ok());
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
+        assert!(network::check_allowed_domains_env().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_an_empty_filter_denies_read_and_counts_as_contained() {
+        let (_env, state) = isolated_state();
+        *state.domain_filter.write().await = Some(DomainFilter::new(""));
+        let err = handle_read(
+            &json!({"action":"read","url":"http://127.0.0.1:1/"}),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("not in the allowed domains list") || err.contains("empty"),
+            "{err}"
+        );
+        assert!(should_defer_url_until_network_controls(
+            state.domain_filter.read().await.as_ref(),
+            false,
+            Some("http://example.com/")
+        )
+        .is_err());
     }
 
     #[test]
@@ -19315,17 +20134,25 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[test]
     fn test_allowed_domains_from_launch_command_accepts_cli_array_and_legacy_string() {
+        let expected = Ok(Some(vec![
+            "example.com".to_string(),
+            "*.example.org".to_string(),
+        ]));
         assert_eq!(
             allowed_domains_from_launch_command(&json!({
                 "allowedDomains": ["Example.COM", " *.example.org "]
             })),
-            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+            expected
         );
         assert_eq!(
             allowed_domains_from_launch_command(&json!({
                 "allowedDomains": "Example.COM, *.example.org"
             })),
-            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+            expected
+        );
+        assert_eq!(
+            allowed_domains_from_launch_command(&json!({ "action": "launch" })),
+            Ok(None)
         );
     }
 
@@ -21088,6 +21915,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         .unwrap_err();
         assert!(err.contains("Supported: flow"), "{err}");
         assert!(launch_envelope_patch(&json!({ "capture": ["flow"] }), None)
+            .unwrap()
             .value(Key::Capture)
             .is_some());
 
@@ -22157,7 +22985,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "ignoreHTTPSErrors": true,
             "allowedDomains": ["example.com"],
         });
-        let patch = launch_envelope_patch(&cmd, None);
+        let patch = launch_envelope_patch(&cmd, None).unwrap();
 
         assert_eq!(patch.value(Key::Headed), Some(&json!(true)));
         assert_eq!(patch.value(Key::Profile), Some(&json!("/tmp/p")));
@@ -22181,11 +23009,14 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     #[test]
     fn test_a_plain_launch_names_no_settings() {
         // Bare `open` keeps the profile and args the session runs with (#2287).
-        assert!(launch_envelope_patch(&json!({ "action": "launch" }), None).is_noop());
+        assert!(launch_envelope_patch(&json!({ "action": "launch" }), None)
+            .unwrap()
+            .is_noop());
         assert!(launch_envelope_patch(
             &json!({ "action": "launch", "plugins": [], "id": "1" }),
             Some("obscura")
         )
+        .unwrap()
         .is_noop());
     }
 
@@ -22193,21 +23024,29 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     fn test_launch_envelope_clears_the_obscura_bypass_only_for_obscura() {
         let cmd = json!({ "action": "launch", "proxyBypass": null });
         assert_eq!(
-            launch_envelope_patch(&cmd, Some("obscura")).get(Key::ProxyBypass),
+            launch_envelope_patch(&cmd, Some("obscura"))
+                .unwrap()
+                .get(Key::ProxyBypass),
             Some(&Requested::Default)
         );
-        assert!(launch_envelope_patch(&cmd, Some("chrome")).is_noop());
+        assert!(launch_envelope_patch(&cmd, Some("chrome"))
+            .unwrap()
+            .is_noop());
         assert_eq!(
             launch_envelope_patch(&json!({ "proxyBypass": "localhost" }), Some("obscura"))
+                .unwrap()
                 .value(Key::ProxyBypass),
             Some(&json!("localhost"))
         );
     }
 
     #[test]
-    fn test_empty_allowed_domains_in_a_launch_clear_the_list() {
-        let patch = launch_envelope_patch(&json!({ "allowedDomains": [] }), None);
-        assert_eq!(patch.get(Key::AllowedDomains), Some(&Requested::Default));
+    fn test_empty_allowed_domains_in_a_launch_are_rejected() {
+        for value in [json!([]), json!(["", "  "]), json!(""), json!(",")] {
+            let err = launch_envelope_patch(&json!({ "allowedDomains": value }), None)
+                .expect_err("degenerate allowlist must be rejected");
+            assert_eq!(err, network::EMPTY_ALLOWED_DOMAINS_ERROR);
+        }
     }
 
     #[tokio::test]
@@ -23136,7 +23975,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         ] {
             assert_eq!(AttachedTarget::named_by(&cmd), None, "{cmd}");
             assert_eq!(AttachedTarget::from_launch_command(&cmd), None, "{cmd}");
-            assert!(launch_envelope_patch(&cmd, None).is_noop(), "{cmd}");
+            assert!(
+                launch_envelope_patch(&cmd, None).unwrap().is_noop(),
+                "{cmd}"
+            );
         }
         let mut settings = Running::defaults();
         settings.set(Key::Cdp, json!(" "));
@@ -23639,7 +24481,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
-    async fn test_an_empty_list_clears_the_filter_and_the_clear_persists() {
+    async fn test_an_empty_list_is_rejected_and_the_filter_is_kept() {
         let (_env, _) = isolated_state();
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
@@ -23652,15 +24494,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         .await
         .unwrap();
 
-        apply_settings_patch(&mut first, &patch_with(vec![domains(&[])]), true)
+        let err = apply_settings_patch(&mut first, &patch_with(vec![domains(&[])]), true)
             .await
-            .unwrap();
-        assert!(first.domain_filter.read().await.is_none());
+            .err()
+            .expect("empty allowlist must be rejected");
+        assert_eq!(err, network::EMPTY_ALLOWED_DOMAINS_ERROR);
+        assert_eq!(current_allowed_domains(&first).await, vec!["example.com"]);
         drop(first);
 
         let second = boot_state(store, "s");
-        assert!(current_allowed_domains(&second).await.is_empty());
-        assert_eq!(second.settings.security().allowed_domains, Some(Vec::new()));
+        assert_eq!(current_allowed_domains(&second).await, vec!["example.com"]);
     }
 
     #[tokio::test]
@@ -23681,6 +24524,38 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(state.confirm_actions.is_none());
         assert_eq!(state.settings, before);
         assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_a_failing_store_restores_the_pin_binding_written_before_it() {
+        use super::super::tab_binding::{load, save, TabBinding};
+        let (_env, _) = isolated_state();
+        let mut state = DaemonState::with_store(Running::defaults(), FlakyStore::new(0));
+        let session = state.session_id.clone();
+        save(
+            &session,
+            &TabBinding {
+                target_id: "ABCDEF0123456789".to_string(),
+                url: "https://example.com".to_string(),
+                pinned: false,
+            },
+        )
+        .unwrap();
+        let before = state.settings.clone();
+        let patch = patch_with(vec![
+            set_to(Key::PinTab, json!(true)),
+            set_to(Key::ActionPolicy, json!("/p.json")),
+        ]);
+
+        let err = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .err()
+            .expect("the store write fails");
+
+        assert!(err.contains("disk full"), "{err}");
+        assert!(!load(&session).unwrap().unwrap().pinned, "pin write undone");
+        assert!(!state.pin_tab);
+        assert_eq!(state.settings, before);
     }
 
     #[tokio::test]

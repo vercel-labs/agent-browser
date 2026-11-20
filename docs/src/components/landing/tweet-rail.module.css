@@ -1,0 +1,120 @@
+/* Distance from the page column to the viewport edge; cqw resolves against the page container. */
+.rail {
+  --bleed: calc(50vw - 50cqw);
+  --text: calc(85cqw - 48px);
+  --pitch: calc(var(--text) + 96px);
+  --line-extension: 20px;
+  --edge-fade: clamp(64px, 8vw, 128px);
+  position: relative;
+  margin-inline: calc(var(--bleed) * -1);
+  timeline-scope: --rail;
+}
+.track {
+  position: relative;
+  z-index: 0;
+  display: flex;
+  list-style: none;
+  margin: calc(-1 * var(--line-extension)) 0;
+  padding-block: var(--line-extension);
+  padding-inline: var(--bleed);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-timeline: --rail x;
+  scrollbar-width: none;
+}
+.track::-webkit-scrollbar { display: none; }
+
+.item {
+  --inset-start: 48px;
+  --inset-end: 48px;
+  position: relative;
+  flex: none;
+  width: var(--pitch);
+}
+.item:first-child { --inset-start: 0px; width: calc(var(--text) + 48px); }
+.item:last-child { --inset-end: 0px; width: calc(var(--text) + 48px); }
+.item > article > a {
+  padding-inline: var(--inset-start) var(--inset-end);
+}
+
+/* Base and hover tint share one mask, so the entire rule, including its
+   feathered ends, changes contrast together. */
+.item + .item::before {
+  content: '';
+  position: absolute;
+  inset-block: calc(-1 * var(--line-extension));
+  left: 0;
+  width: 1px;
+  background-color: var(--ds-gray-400);
+  background-image: linear-gradient(var(--rule-highlight, transparent), var(--rule-highlight, transparent));
+  mask-image: linear-gradient(to bottom, transparent,
+      #000 calc(var(--line-extension) + 7px),
+      #000 calc(100% - var(--line-extension) - 4px), transparent);
+  pointer-events: none;
+}
+
+/* Scroll activity cancels hover immediately; focus remains independent. */
+@media (hover: hover) and (pointer: fine) {
+  .track:not([data-scrolling]) .item + .item:has(a:hover)::before {
+    --rule-highlight: var(--ds-gray-alpha-500);
+  }
+}
+.item + .item:has(a:focus-visible)::before {
+  --rule-highlight: var(--ds-gray-alpha-500);
+}
+
+@container (min-width: 601px) {
+  .rail { --text: calc((100cqw + 24px) / 3 - 24px); }
+}
+@container (min-width: 961px) {
+  .rail { --text: calc((100cqw + 24px) / 4 - 24px); }
+}
+
+.scrim {
+  position: absolute;
+  z-index: 1;
+  inset-block: calc(-1 * var(--line-extension));
+  width: var(--edge-fade);
+  pointer-events: none;
+  background: var(--ds-background-200);
+  /* Eased alpha stops, so the fade has no visible start or end edge. */
+  --eased: #000, #000000bc 19%, #0000008a 34%, #00000061 47%, #00000047 56.5%, #00000031 65%,
+    #00000020 73%, #00000013 80.2%, #0000000b 86.1%, #00000005 91%, #00000002 95.2%, transparent;
+}
+.start {
+  left: 0;
+  mask-image: linear-gradient(to right, var(--eased));
+}
+.end {
+  right: 0;
+  /* Fade only at the viewport edge, independent of the page's outer gutter. */
+  mask-image: linear-gradient(to left, var(--eased));
+}
+
+/* Scroll-driven: each scrim fades out as the rail reaches its edge. Without support,
+   the end scrim stays and the start scrim stays hidden. */
+.start {
+  opacity: 0;
+}
+@supports (animation-timeline: scroll()) {
+  .start,
+  .end {
+    animation: scrim-fade linear both;
+    animation-timeline: --rail;
+  }
+  .start {
+    animation-direction: reverse;
+    animation-range: 0 64px;
+  }
+  .end {
+    animation-range: calc(100% - 64px) 100%;
+  }
+}
+@keyframes scrim-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
