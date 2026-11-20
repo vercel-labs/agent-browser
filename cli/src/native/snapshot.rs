@@ -423,6 +423,24 @@ pub async fn take_snapshot(
         )
         .await?;
 
+    // A navigation that committed while the tree was fetched leaves a tree
+    // whose document is unknown, so none of its refs may be handed out.
+    if let Some(recorded) = loader.filter(|_| document_is_known) {
+        let after = client
+            .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+            .await
+            .ok();
+        if after
+            .as_ref()
+            .is_some_and(|tree| loader_replaced(recorded, &tree["frameTree"], frame_id))
+        {
+            return Err(
+                "The document changed while the snapshot was being captured (the page navigated or the frame was removed). Take the snapshot again."
+                    .to_string(),
+            );
+        }
+    }
+
     let (mut tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
 
     // When a selector is given, find AX nodes whose backendDOMNodeId falls
@@ -548,6 +566,10 @@ pub async fn take_snapshot(
             actual_nth,
             frame_id,
         );
+
+        if document_is_known {
+            ref_map.bind_recorded_document(&ref_id, session_id, frame_id);
+        }
 
         tree_nodes[*idx].has_ref = true;
         tree_nodes[*idx].ref_id = Some(ref_id);
@@ -759,8 +781,8 @@ async fn call_on_nodes(
         .collect()
 }
 
-/// Resolve the child frame ID for an iframe element given its backendNodeId.
-fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> {
+/// Loader of the document currently shown in a frame of a `Page.getFrameTree` result.
+pub(super) fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> {
     let frame = &tree["frame"];
     if frame_id.is_none() || frame["id"].as_str() == frame_id {
         return frame["loaderId"].as_str().filter(|id| !id.is_empty());
@@ -771,6 +793,12 @@ fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> 
         .find_map(|child| frame_loader(child, frame_id))
 }
 
+/// Whether the frame now shows a different document than `recorded`.
+fn loader_replaced(recorded: &str, tree: &Value, frame_id: Option<&str>) -> bool {
+    frame_loader(tree, frame_id) != Some(recorded)
+}
+
+/// Resolve the child frame ID for an iframe element given its backendNodeId.
 async fn resolve_iframe_frame_id(
     client: &CdpClient,
     session_id: &str,
@@ -1697,6 +1725,20 @@ fn collect_backend_node_ids(node: &Value, ids: &mut std::collections::HashSet<i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loader_replaced_detects_a_document_swapped_during_capture() {
+        let tree = serde_json::json!({
+            "frame": { "id": "main", "loaderId": "L2" },
+            "childFrames": [{ "frame": { "id": "child", "loaderId": "C1" } }]
+        });
+        assert!(loader_replaced("L1", &tree, None));
+        assert!(!loader_replaced("L2", &tree, None));
+        assert!(!loader_replaced("C1", &tree, Some("child")));
+        assert!(loader_replaced("C0", &tree, Some("child")));
+        // A frame that is gone no longer shows the recorded document.
+        assert!(loader_replaced("C1", &tree, Some("removed")));
+    }
 
     #[test]
     fn test_normalize_snapshot_name_preserves_word_boundaries() {
