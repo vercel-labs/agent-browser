@@ -2321,12 +2321,14 @@ Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
 Date, time, color and range inputs get the value set directly (for example 2024-01-15);
 a value the input would reject fails with malformed_value.
-Readonly, disabled and non-text elements (select, checkbox, button, link, file, canvas)
-are refused before anything changes, with a code of read_only, disabled or not_editable.
+Readonly and disabled fields, and elements that can never take text (select, checkbox,
+radio, button, file, submit, reset), are refused before anything changes, with a code of
+read_only, disabled or not_editable. A label stands for its control.
 A value longer than maxlength is cut by the browser and reported as a value_truncated
 warning. If the page does not hold the value afterwards (it applies it late or rewrites
-it), the command still succeeds and prints a warning. These checks apply to the Chrome
-backend; the WebDriver backend fills without them.
+it, or the page navigated before it could be read), the command still succeeds and
+prints a warning. These checks apply to the Chrome backend; the WebDriver backend fills
+without them.
 Put flags before --. Text after -- is literal, including values that look like flags.
 
 Global Options:
@@ -2347,10 +2349,12 @@ agent-browser type - Type text into an element
 Usage: agent-browser type <selector> [--clear] [--delay <ms>] [--] <text>
 
 Types text into the specified element character by character.
-Disabled and readonly fields, and elements that are not text fields (select, button,
-checkbox, link, file, submit, color, range, date, canvas) are refused before any text is
-typed (disabled, read_only, not_editable); use fill for date, time, color and range
-inputs, and press for key events. Text made only of newline, carriage return and tab is
+Disabled and readonly fields, and elements that can never take text (select, button,
+checkbox, radio, file, submit, reset, and the color, range and date-type inputs) are
+refused before any text is typed (disabled, read_only, not_editable); use fill for date,
+time, color and range inputs. To send text to a focused element use keyboard type, or
+press for a single key. Where the text lands for any other element depends on focus, as
+before. Text made only of newline, carriage return and tab is
 sent as key events to any focused target. If the page does not show the text afterwards,
 the command still succeeds and prints a warning.
 Use --clear to clear existing content first. Use --delay to set the delay between keystrokes in milliseconds.
@@ -2449,17 +2453,18 @@ Examples:
             r##"
 agent-browser select - Select a dropdown option
 
-Usage: agent-browser select <selector> <value...>
+Usage: agent-browser select <selector> [--by value|label] [--] <value...>
 
 Selects one or more options in a <select> dropdown by value or visible label.
 Label matching normalizes whitespace such as non-breaking spaces.
-A unique exact label wins, then a unique exact value; every option stays reachable
-through its visible label. When the string is also another option's value or label, the
-command still selects and prints a warning naming the other option. Labels shared by
-options with different values fail with ambiguous and list each as label (value).
-Options that share a value are one choice. No match fails with option_not_found. Several
-values on a select that is not multiple, and a disabled select, are refused before
-anything changes.
+A string that matches exactly one option, by value or by exact label, selects it. A
+string that matches options with different values (it equals one option's value and
+another's label, or several options share the label) fails with ambiguous and lists each
+as label (value). Pass --by value or --by label to match only that attribute, so every
+option is reachable, for example: select "#idx" 1 --by value. Options that share a value
+are one choice. No match fails with option_not_found. Several values on a select that is
+not multiple (not_multiple), and a disabled select, are refused before anything changes.
+Put flags before --. Text after -- is literal, including values that look like flags.
 
 On a custom ARIA widget (role=combobox or role=listbox, as in Radix or Headless UI),
 select opens it when collapsed, waits for the visible role=option items, and clicks
@@ -2475,6 +2480,7 @@ Examples:
   agent-browser select "#country" "US"
   agent-browser select @e5 "option2"
   agent-browser select "#menu" "opt1" "opt2" "opt3"
+  agent-browser select "#idx" 1 --by value
 "##
         }
         "drag" => {
@@ -4566,7 +4572,7 @@ Core Commands:
   focus <sel>                Focus element
   check <sel>                Check checkbox
   uncheck <sel>              Uncheck checkbox
-  select <sel> <val...>      Select dropdown by value or visible label
+  select <sel> <val...> [--by value|label]  Select dropdown by value or visible label
   drag <src> <dst>           Drag and drop
   upload <sel> <files...>    Upload files
   download <sel> <path>      Download file by clicking element

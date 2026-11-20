@@ -1003,7 +1003,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_TYPE,
             "Type text",
-            "Type text into an element by @ref or CSS selector. Fails for disabled or readonly fields and elements that are not text fields (use fill for date, time, color and range inputs, press for key events); warns if the page does not show the text.",
+            "Type text into an element by @ref or CSS selector. Fails for disabled or readonly fields and elements that can never take text (select, button, checkbox, radio, file, submit, color, range and date-type inputs; use fill for date, time, color and range inputs, keyboard type for a focused element, press for a single key); warns if the page does not show the text.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to type." },
@@ -1028,7 +1028,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SELECT,
             "Select options",
-            "Select one or more options in a select element. A unique exact label wins, then a unique exact value; warns when the string is also another option's value or label. Fails with ambiguous for labels shared by options with different values, and with option_not_found when none match.",
+            "Select one or more options in a select element. A string that matches exactly one option by value or exact label selects it. Fails with ambiguous when it matches options with different values (pass `by`: `value` or `label` to match one attribute), and with option_not_found when none match.",
             json!({
                 "selector": selector_schema(),
                 "values": {
@@ -1036,6 +1036,11 @@ fn tools() -> Vec<Value> {
                     "items": { "type": "string" },
                     "minItems": 1,
                     "description": "Option values or labels to select."
+                },
+                "by": {
+                    "type": "string",
+                    "enum": ["value", "label"],
+                    "description": "Match only option values or only visible labels. Needed when a string matches options with different values."
                 }
             }),
             &["selector", "values"],
@@ -3383,8 +3388,17 @@ fn call_select(arguments: &Value) -> Result<Value, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
     let values = required_string_array(arguments, "values")?;
     let mut args = vec!["select".to_string(), selector];
-    args.extend(values);
-    call_cli_tool(arguments, args, None)
+    if let Some(by) = optional_string(arguments, "by")? {
+        if by != "value" && by != "label" {
+            return Err(ProtocolError::invalid_params(
+                "by must be 'value' or 'label'".to_string(),
+            ));
+        }
+        args.push("--by".to_string());
+        args.push(by);
+    }
+    let (args, literal_start) = literal_positionals(args, values);
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn call_scroll(arguments: &Value) -> Result<Value, ProtocolError> {

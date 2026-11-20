@@ -834,20 +834,64 @@ fn parse_command_inner(
             parse_selector_command(&rest, &id, "uncheck", "uncheck <selector>", batch_item)
         }
         "select" => {
-            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "select".to_string(),
-                usage: "select <selector> <value...>",
-            })?;
-            let _val = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "select".to_string(),
-                usage: "select <selector> <value...>",
-            })?;
-            let values = &rest[1..];
-            if values.len() == 1 {
-                Ok(json!({ "id": id, "action": "select", "selector": sel, "values": values[0] }))
-            } else {
-                Ok(json!({ "id": id, "action": "select", "selector": sel, "values": values }))
+            const USAGE: &str = "select <selector> <value...> [--by value|label]";
+            const FLAGS: &[FlagSpec] = &[FlagSpec {
+                name: "--by",
+                aliases: &[],
+                takes_value: true,
+            }];
+            let mut by = None;
+            let mut positionals = Vec::new();
+            let mut scanner = ArgScanner::new(
+                &rest,
+                FLAGS,
+                "select",
+                USAGE,
+                batch_item,
+                DashPolicy::Numeric,
+            );
+            while let Some(arg) = scanner.next()? {
+                match arg {
+                    ScannedArg::ValueFlag {
+                        name: "--by",
+                        value,
+                    } => {
+                        if value != "value" && value != "label" {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("--by must be 'value' or 'label', got '{value}'"),
+                                usage: USAGE,
+                            });
+                        }
+                        by = Some(value);
+                    }
+                    ScannedArg::Data(value) => positionals.push(value),
+                    ScannedArg::BoolFlag(name) | ScannedArg::ValueFlag { name, .. } => {
+                        unreachable!("select flag {name} has no handler")
+                    }
+                }
             }
+            let sel = positionals
+                .first()
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "select".to_string(),
+                    usage: USAGE,
+                })?;
+            if positionals.len() < 2 {
+                return Err(ParseError::MissingArguments {
+                    context: "select".to_string(),
+                    usage: USAGE,
+                });
+            }
+            let values = &positionals[1..];
+            let mut cmd = if values.len() == 1 {
+                json!({ "id": id, "action": "select", "selector": sel, "values": values[0] })
+            } else {
+                json!({ "id": id, "action": "select", "selector": sel, "values": values })
+            };
+            if let Some(by) = by {
+                cmd["by"] = json!(by);
+            }
+            Ok(cmd)
         }
         "drag" => {
             const USAGE: &str = "drag <source> <target> [--human]";
@@ -6056,6 +6100,39 @@ mod tests {
         assert_eq!(cmd["action"], "select");
         assert_eq!(cmd["selector"], "#menu");
         assert_eq!(cmd["values"], json!(["opt1", "opt2", "opt3"]));
+    }
+
+    #[test]
+    fn test_select_by_flag() {
+        for by in ["value", "label"] {
+            let cmd = parse_command(
+                &args(&format!("select #menu 1 --by {by}")),
+                &default_flags(),
+            )
+            .unwrap();
+            assert_eq!(cmd["values"], "1");
+            assert_eq!(cmd["by"], by);
+        }
+        let cmd = parse_command(&args("select #menu --by value 1 2"), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], json!(["1", "2"]));
+        assert_eq!(cmd["by"], "value");
+        let cmd = parse_command(&args("select #menu 1"), &default_flags()).unwrap();
+        assert!(cmd.get("by").is_none());
+    }
+
+    #[test]
+    fn test_select_by_flag_is_validated() {
+        let err = parse_command(&args("select #menu 1 --by text"), &default_flags()).unwrap_err();
+        assert!(err.format().contains("--by"));
+        let err = parse_command(&args("select #menu 1 --by"), &default_flags()).unwrap_err();
+        assert!(err.format().contains("select"));
+        // A value that looks like the flag is literal after `--`.
+        let cmd = parse_command(&args("select #menu -- --by"), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], "--by");
+        assert!(cmd.get("by").is_none());
+        // Negative numbers are values.
+        let cmd = parse_command(&args("select #menu -1"), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], "-1");
     }
 
     #[test]

@@ -7350,16 +7350,17 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 /// Adds a form action's warning to the response data.
 fn form_outcome_data(mut data: Value, warning: Option<String>) -> Value {
     if let Some(warning) = warning {
-        data["warning"] = json!(warning);
+        data["formWarning"] = json!(warning);
     }
     data
 }
 
-/// Moves a warning from the data to the top level of the response, where
-/// every output mode shows it.
+/// Moves a form action's warning from the data to the top level of the
+/// response, where every output mode shows it. The dedicated key keeps other
+/// commands' own `warning` data untouched.
 fn lift_form_warning(data: &mut Value) -> Option<String> {
     data.as_object_mut()?
-        .remove("warning")
+        .remove("formWarning")
         .and_then(|w| w.as_str().map(String::from))
 }
 
@@ -7501,6 +7502,16 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "scrolled": true }))
 }
 
+/// The optional `by` field restricts `select` matching to option values or
+/// visible labels.
+fn select_by(cmd: &Value) -> Result<Option<&str>, String> {
+    match cmd.get("by") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(by)) if by == "value" || by == "label" => Ok(Some(by.as_str())),
+        Some(_) => Err("'by' must be 'value' or 'label'".to_string()),
+    }
+}
+
 async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -7522,16 +7533,19 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .unwrap_or_default(),
     };
 
-    let warning = interaction::select_option(
+    let by = select_by(cmd)?;
+
+    interaction::select_option(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &values,
+        by,
         &state.iframe_sessions,
     )
     .await?;
-    Ok(form_outcome_data(json!({ "selected": values }), warning))
+    Ok(json!({ "selected": values }))
 }
 
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -12005,7 +12019,9 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
         })
         .unwrap_or_default();
 
+    let by = select_by(cmd)?;
     let values_json = serde_json::to_string(&values).unwrap_or("[]".to_string());
+    let by_json = serde_json::to_string(&by).unwrap_or("null".to_string());
     // A locator miss returns a sentinel instead of throwing, so it is detected in
     // Rust and normalized to the anchored "No element found: ..." shape. A thrown
     // error surfaces as "Evaluation error: ...", which is_locator_miss skips, and
@@ -12022,20 +12038,23 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
                 return {{ code: 'disabled', error: 'Element <select> is disabled and cannot be changed' }};
             }}
             if (vals.length > 1 && !select.multiple) {{
-                return {{ code: 'ambiguous', error: vals.length + ' values requested but <select> does not allow multiple selection' }};
+                return {{ code: 'not_multiple', error: vals.length + ' values requested but <select> does not allow multiple selection' }};
             }}
-            const missing = vals.filter((v) => !Array.from(select.options).some((o) => o.value === v));
+            const by = {by};
+            const keyOf = (o) => (by === 'label' ? o.label.trim() : o.value);
+            const missing = vals.filter((v) => !Array.from(select.options).some((o) => keyOf(o) === v));
             if (missing.length > 0) {{
-                return {{ code: 'option_not_found', error: 'No option matched ' + JSON.stringify(missing) + '. Available options: ' + Array.from(select.options).map((o) => JSON.stringify(o.value)).join(', ') }};
+                return {{ code: 'option_not_found', error: 'No option matched ' + JSON.stringify(missing) + '. Available options: ' + Array.from(select.options).map((o) => JSON.stringify(keyOf(o))).join(', ') }};
             }}
             for (const opt of select.options) {{
-                opt.selected = vals.includes(opt.value);
+                opt.selected = vals.includes(keyOf(opt));
             }}
             select.dispatchEvent(new Event('change', {{ bubbles: true }}));
             return {{ selected: Array.from(select.selectedOptions).map(o => o.value) }};
         }})()"#,
         sel = serde_json::to_string(selector).unwrap_or_default(),
         vals = values_json,
+        by = by_json,
     );
 
     let result = mgr.evaluate(&js, None).await?;

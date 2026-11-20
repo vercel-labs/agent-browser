@@ -2641,6 +2641,7 @@ async fn e2e_form_actions_refuse_before_acting() {
         "<input id='file' type='file'><input id='sub' type='submit'>",
         "<div id='rcb' role='checkbox' aria-checked='false' tabindex='0'>x</div>",
         "<div id='tgl' role='button' aria-pressed='false' tabindex='0'>x</div>",
+        "<div id='mrole' role='switch checkbox' aria-checked='false' tabindex='0' onclick=\"this.setAttribute('aria-checked', 'true')\">x</div>",
         "<div id='adis' role='checkbox' aria-checked='false' aria-disabled='true' tabindex='0'>x</div>",
         "<input id='date' type='date'><input id='color' type='color'><input id='range' type='range' value='50'>",
         "<input id='short' maxlength='5'><input id='pw' type='password' maxlength='5'>",
@@ -2652,6 +2653,8 @@ async fn e2e_form_actions_refuse_before_acting() {
         "<select id='vl'><option value='a'>Alpha</option><option value='Alpha'>Other</option></select>",
         "<select id='cross'><option value='1'>0</option><option value='2'>1</option></select>",
         "<select id='swap'><option value='Alpha'>Beta</option><option value='Beta'>Alpha</option></select>",
+        "<select id='idx'><option value='0'>1</option><option value='1'>2</option><option value='2'>3</option></select>",
+        "<select id='hour'><option value='0'>12</option><option value='1'>1</option><option value='12'>12</option></select>",
         "<input id='a0'><input id='a300'><input id='mask'><input id='blocked' value='old'>",
         "<div id='sw' role='switch' aria-checked='false' tabindex='0'>x</div>",
         "<div id='slow' role='switch' aria-checked='false' tabindex='0'>x</div>",
@@ -2703,12 +2706,8 @@ async fn e2e_form_actions_refuse_before_acting() {
         ("fill", "#dis", json!("HACKED"), "disabled"),
         ("fill", "#s", json!("two"), "not_editable"),
         ("fill", "#cb", json!("yes"), "not_editable"),
-        ("fill", "#plain", json!("x"), "not_editable"),
         ("fill", "#ebtn", json!("x"), "not_editable"),
-        ("fill", "#cv", json!("x"), "not_editable"),
-        ("fill", "#lnk", json!("x"), "not_editable"),
         ("fill", "#file", json!("x"), "not_editable"),
-        ("fill", "#lab", json!("x"), "not_editable"),
         ("fill", "#date", json!("01/15/2024"), "malformed_value"),
         ("fill", "#range", json!("150"), "malformed_value"),
         ("fill", "#color", json!("red"), "malformed_value"),
@@ -2721,9 +2720,6 @@ async fn e2e_form_actions_refuse_before_acting() {
         ("type", "#color", json!("x"), "not_editable"),
         ("type", "#range", json!("x"), "not_editable"),
         ("type", "#date", json!("x"), "not_editable"),
-        ("type", "#rcb", json!("x"), "not_editable"),
-        ("type", "#rcb", json!("x\ny"), "not_editable"),
-        ("type", "#cv", json!("x"), "not_editable"),
         ("check", "#plain", json!(""), "not_checkable"),
         ("check", "#short", json!(""), "not_checkable"),
         ("check", "#btn", json!(""), "not_checkable"),
@@ -2731,10 +2727,17 @@ async fn e2e_form_actions_refuse_before_acting() {
         ("uncheck", "#dcb", json!(""), "disabled"),
         ("uncheck", "#radio", json!(""), "not_checkable"),
         ("select", "#amb", json!(["United States"]), "ambiguous"),
-        ("select", "#s", json!(["one", "two"]), "ambiguous"),
+        ("select", "#vl", json!(["Alpha"]), "ambiguous"),
+        ("select", "#cross", json!(["1"]), "ambiguous"),
+        ("select", "#swap", json!(["Alpha"]), "ambiguous"),
+        ("select", "#swap", json!(["Beta"]), "ambiguous"),
+        ("select", "#idx", json!(["1"]), "ambiguous"),
+        ("select", "#idx", json!(["2"]), "ambiguous"),
+        ("select", "#hour", json!(["12"]), "ambiguous"),
+        ("select", "#s", json!(["one", "two"]), "not_multiple"),
         ("select", "#sdis", json!(["one"]), "disabled"),
         ("select", "#s", json!(["nope"]), "option_not_found"),
-        ("multiselect", "#s", json!(["one", "two"]), "ambiguous"),
+        ("multiselect", "#s", json!(["one", "two"]), "not_multiple"),
         ("multiselect", "#s", json!(["nope"]), "option_not_found"),
     ] {
         evaluate_value(&mut state, "prev.focus()").await;
@@ -2825,6 +2828,9 @@ async fn e2e_form_actions_refuse_before_acting() {
             Some(json!("12345")),
         ),
         ("type", "#rcb", json!("\n"), "'x'", None),
+        ("fill", "#lab", json!("via label"), "'x'", None),
+        ("fill", "#plain", json!("x"), "'x'", None),
+        ("type", "#cv", json!("x"), "'x'", None),
         ("type", "#ebtn", json!("\t"), "'x'", None),
         (
             "select",
@@ -2836,23 +2842,9 @@ async fn e2e_form_actions_refuse_before_acting() {
         (
             "select",
             "#vl",
-            json!(["Alpha"]),
-            "vl.value",
-            Some(json!("a")),
-        ),
-        (
-            "select",
-            "#vl",
             json!(["Other"]),
             "vl.value",
             Some(json!("Alpha")),
-        ),
-        (
-            "select",
-            "#cross",
-            json!(["1"]),
-            "cross.value",
-            Some(json!("2")),
         ),
         (
             "select",
@@ -2863,21 +2855,21 @@ async fn e2e_form_actions_refuse_before_acting() {
         ),
         (
             "select",
-            "#swap",
-            json!(["Alpha"]),
-            "swap.value",
-            Some(json!("Beta")),
-        ),
-        (
-            "select",
-            "#swap",
-            json!(["Beta"]),
-            "swap.value",
-            Some(json!("Alpha")),
+            "#idx",
+            json!(["3"]),
+            "idx.value",
+            Some(json!("2")),
         ),
         ("check", "#sw", json!(""), "clicks.sw", None),
         ("check", "#slow", json!(""), "clicks.slow", Some(json!(1))),
         ("check", "#adis", json!(""), "'x'", None),
+        (
+            "check",
+            "#mrole",
+            json!(""),
+            "mrole.getAttribute('aria-checked')",
+            Some(json!("true")),
+        ),
         (
             "check",
             "#xcheck",
@@ -2902,13 +2894,59 @@ async fn e2e_form_actions_refuse_before_acting() {
         }
     }
 
-    // Truncation, a value the page has not applied, a rewrite, and a select
-    // string that is also another option's value are visible warnings.
+    // `by` restricts matching to one attribute, so every option is reachable.
+    for (selector, string, by, expected) in [
+        ("#vl", "Alpha", "label", "a"),
+        ("#vl", "Alpha", "value", "Alpha"),
+        ("#cross", "1", "value", "1"),
+        ("#cross", "1", "label", "2"),
+        ("#swap", "Alpha", "label", "Beta"),
+        ("#swap", "Alpha", "value", "Alpha"),
+        ("#idx", "1", "value", "1"),
+        ("#idx", "1", "label", "0"),
+        ("#hour", "12", "value", "12"),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": "x", "action": "select", "selector": selector, "values": [string], "by": by }),
+            &mut state,
+        )
+        .await;
+        let got = evaluate_value(
+            &mut state,
+            &format!("document.querySelector('{selector}').value"),
+        )
+        .await;
+        if resp["success"] != true || got != json!(expected) || resp["warning"].as_str().is_some() {
+            failures.push(format!(
+                "select {selector} {string} by {by}: {resp} -> {got}"
+            ));
+        }
+    }
+    // Labels shared by different values stay ambiguous by label and say how to
+    // reach each option; an unknown `by` is refused.
+    for (by, code) in [("label", "ambiguous"), ("nonsense", "")] {
+        let resp = execute_command(
+            &json!({ "id": "x", "action": "select", "selector": "#hour", "values": ["12"], "by": by }),
+            &mut state,
+        )
+        .await;
+        let ok = resp["success"] == false
+            && (code.is_empty() || resp["code"] == code)
+            && (code.is_empty()
+                || resp["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("--by value")));
+        if !ok {
+            failures.push(format!("select #hour 12 by {by}: {resp}"));
+        }
+    }
+
+    // Truncation, a value the page has not applied, and a rewrite are visible
+    // warnings.
     for (action, selector, arg) in [
         ("fill", "#short", json!("0123456789")),
         ("fill", "#a300", json!("later")),
         ("fill", "#mask", json!("555123")),
-        ("select", "#vl", json!(["Alpha"])),
     ] {
         let resp = run(&mut state, action, selector, &arg).await;
         if resp["success"] != true || resp["warning"].as_str().is_none() {
@@ -2920,6 +2958,27 @@ async fn e2e_form_actions_refuse_before_acting() {
         failures.push(format!(
             "maxlength does not apply to a number input: {resp}"
         ));
+    }
+
+    // A page that breaks the inspection helpers must not turn a command that
+    // works without the checks into an error.
+    evaluate_value(
+        &mut state,
+        "Element.prototype.matches = function () { throw new Error('nope') }; 1",
+    )
+    .await;
+    for (action, selector, arg) in [
+        ("fill", "#a0", json!("x1")),
+        ("type", "#a0", json!("x2")),
+        ("check", "#radio", json!("")),
+        ("uncheck", "#cb", json!("")),
+    ] {
+        let resp = run(&mut state, action, selector, &arg).await;
+        if resp["success"] != true {
+            failures.push(format!(
+                "{action} {selector} with a broken inspector: {resp}"
+            ));
+        }
     }
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
@@ -2935,6 +2994,73 @@ async fn evaluate_value(state: &mut DaemonState, script: &str) -> Value {
     .await;
     assert_success(&resp);
     get_data(&resp)["result"].clone()
+}
+
+/// A read that fails after the action must not fail a command whose action
+/// already happened: a form submitted by Enter and a change handler that
+/// navigates both leave the page before the read-back.
+#[tokio::test]
+#[ignore]
+async fn e2e_form_actions_survive_navigation() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body>",
+        "<form onsubmit=\"location.replace('about:blank'); return false\"><input id='q' name='q'></form>",
+        "<input id='d' type='date' onchange=\"location.replace('about:blank')\">",
+        "<input id='c' type='checkbox' onchange=\"location.replace('about:blank')\">",
+        "</body></html>"
+    );
+    let mut failures = Vec::new();
+    for round in 0..5 {
+        for (action, selector, arg) in [
+            ("type", "#q", json!("qN\n")),
+            ("fill", "#d", json!("2024-01-15")),
+            ("check", "#c", json!("")),
+        ] {
+            let resp = execute_command(
+                &json!({ "id": "n", "action": "navigate", "url": html }),
+                &mut state,
+            )
+            .await;
+            if resp["success"] != true {
+                failures.push(format!("round {round} navigate before {action}: {resp}"));
+                continue;
+            }
+            let key = match action {
+                "fill" => "value",
+                "type" => "text",
+                _ => "unused",
+            };
+            let resp = execute_command(
+                &json!({ "id": "x", "action": action, "selector": selector, key: arg }),
+                &mut state,
+            )
+            .await;
+            if resp["success"] != true {
+                failures.push(format!("round {round} {action} {selector}: {resp}"));
+            }
+            // The action navigated the page; wait for that before the next one.
+            let resp = execute_command(
+                &json!({ "id": "w", "action": "wait", "function": "location.href === 'about:blank'" }),
+                &mut state,
+            )
+            .await;
+            if resp["success"] != true {
+                failures.push(format!(
+                    "round {round} {action} {selector} did not navigate: {resp}"
+                ));
+            }
+        }
+    }
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[tokio::test]

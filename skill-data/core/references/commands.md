@@ -96,7 +96,7 @@ agent-browser keyup Shift         # Release key
 agent-browser hover @e1           # Hover
 agent-browser check @e1           # Check checkbox
 agent-browser uncheck @e1         # Uncheck checkbox
-agent-browser select @e1 "value"  # Select by visible label or value (a label shared by different values is an error)
+agent-browser select @e1 "value"  # Select by visible label or value; an ambiguous string is an error, use --by value|label
 agent-browser select @e1 "a" "b"  # Select multiple options
 # On a custom ARIA combobox/listbox (Radix, Headless UI), select opens it and clicks the
 # role=option whose name or value matches; no match errors with the available options,

@@ -3350,9 +3350,17 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Select one or more options in a select element. A unique exact label wins, then a unique exact value; warns when the string is also another option's value or label. Fails with ambiguous for labels shared by options with different values, and with option_not_found when none match.",
+      "description": "Select one or more options in a select element. A string that matches exactly one option by value or exact label selects it. Fails with ambiguous when it matches options with different values (pass `by`: `value` or `label` to match one attribute), and with option_not_found when none match.",
       "inputSchema": {
         "properties": {
+          "by": {
+            "description": "Match only option values or only visible labels. Needed when a string matches options with different values.",
+            "enum": [
+              "value",
+              "label"
+            ],
+            "type": "string"
+          },
           "selector": {
             "description": "Element @ref from snapshot, or a CSS selector.",
             "type": "string"
@@ -4519,7 +4527,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Type text into an element by @ref or CSS selector. Fails for disabled or readonly fields and elements that are not text fields (use fill for date, time, color and range inputs, press for key events); warns if the page does not show the text.",
+      "description": "Type text into an element by @ref or CSS selector. Fails for disabled or readonly fields and elements that can never take text (select, button, checkbox, radio, file, submit, color, range and date-type inputs; use fill for date, time, color and range inputs, keyboard type for a focused element, press for a single key); warns if the page does not show the text.",
       "inputSchema": {
         "properties": {
           "clear": {
