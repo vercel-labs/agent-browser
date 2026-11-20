@@ -56,6 +56,16 @@ Frame encoding is set per daemon with `AGENT_BROWSER_STREAM_QUALITY` (0 to 100),
 
 Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.
 
+### HTTP endpoints
+
+The same port serves the session preview UI and a JSON API under `/api/` (`tabs`, `status`, `sessions`, `models`, `chat`, `command`). Every `/api/` route is restricted to the session's own origin:
+
+- `GET` requests need a same-origin `Origin` or `Referer`, or neither header together with a loopback `Host` (curl, the dashboard session proxy).
+- `POST` and `OPTIONS` requests need a same-origin `Origin` or `Referer` that matches a loopback `Host`.
+- Requests marked `Sec-Fetch-Site: cross-site` or `same-site` are refused.
+
+Anything else gets a 403 with no CORS headers, so a page on another origin cannot read these routes or call them. This does not cover the WebSocket: clients loaded from any `localhost`, `127.0.0.1`, `::1` or `file://` origin can still connect to it, receive frames and send input. A custom tool that posts to `/api/command`, `/api/chat` or `/api/sessions` must send `Origin: http://127.0.0.1:<port>` (or the `localhost` form) with its `Host` header.
+
 ### Frame messages
 
 The server sends frame messages with base64-encoded images:
