@@ -461,6 +461,33 @@ async fn resolve_object_in_same_process_frame(
         .ok_or_else(|| format!("Element not found in the selected frame: {}", selector))
 }
 
+const STALE_DOCUMENT_MARKER: &str = "is from a document that is no longer loaded";
+
+/// Reported when an action ran but the document it acted on was replaced
+/// before its effect could be read back.
+pub const STATE_NOT_VERIFIED: &str = "page navigated after the action; state not verified";
+
+/// Whether an error says the document a ref points into is gone: the stale-ref
+/// guard, or the browser reporting a destroyed context.
+fn document_gone(error: &str) -> bool {
+    error.contains(STALE_DOCUMENT_MARKER)
+        || error.contains("Cannot find context with specified id")
+        || error.contains("Inspected target navigated or closed")
+        || error.contains("Execution context was destroyed")
+}
+
+/// Run a read that confirms an action that already happened. A document that
+/// is gone by then is not a failure of the action: the read yields `None`.
+pub async fn read_after_action<T>(
+    read: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<Option<T>, String> {
+    match read.await {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if document_gone(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Fail a ref whose document has been replaced since it was issued: the page
 /// navigated (a click, script or redirect), or the iframe it lives in did.
 /// Same-document changes keep the loader, so their refs stay valid.
@@ -478,7 +505,7 @@ pub(super) async fn ensure_ref_document_current(
     let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
     let stale = || {
         format!(
-            "Ref @{ref_id} is from a document that is no longer loaded (the page navigated or the frame was removed). Take a new snapshot and use a fresh ref."
+            "Ref @{ref_id} {STALE_DOCUMENT_MARKER} (the page navigated or the frame was removed). Take a new snapshot and use a fresh ref."
         )
     };
     if issued_session != effective_session_id {
@@ -1996,6 +2023,33 @@ mod tests {
 
         assert!(map.get("e1").is_none());
         assert_eq!(map.next_ref_num(), 2);
+    }
+
+    #[tokio::test]
+    async fn read_after_action_tolerates_only_a_gone_document() {
+        let gone = format!("Ref @e1 {STALE_DOCUMENT_MARKER} (x)");
+        assert_eq!(
+            read_after_action(async { Ok::<_, String>(true) }).await,
+            Ok(Some(true))
+        );
+        assert_eq!(
+            read_after_action(async { Err::<bool, _>(gone) }).await,
+            Ok(None)
+        );
+        assert_eq!(
+            read_after_action(async {
+                Err::<bool, _>(
+                    "CDP error (Runtime.callFunctionOn): Cannot find context with specified id"
+                        .to_string(),
+                )
+            })
+            .await,
+            Ok(None)
+        );
+        assert_eq!(
+            read_after_action(async { Err::<bool, _>("Element not found: @e1".to_string()) }).await,
+            Err("Element not found: @e1".to_string())
+        );
     }
 
     #[test]

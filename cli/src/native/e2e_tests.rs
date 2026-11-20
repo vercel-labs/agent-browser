@@ -6357,6 +6357,12 @@ const REF_FIXTURE_ROUTES: &[(&str, &str)] = &[
            window.setTimeout = () => 0; window.requestAnimationFrame = () => 0;\
          };</script>",
     ),
+    // A filter-style checkbox whose change navigates away.
+    (
+        "/filter.html",
+        "<title>Filter</title><label><input type='checkbox' id='f' \
+         onchange=\"location.href = '/b2.html'\"> Only open</label>",
+    ),
     (
         "/spin.html",
         "<title>Spin</title><button>Go</button>\
@@ -6704,6 +6710,42 @@ async fn e2e_ref_reports_navigation_during_click_point_resolution() {
         |r| json!({ "id": "c", "action": "click", "selector": r }),
     )
     .await;
+}
+
+// The toggle is read back after the click; a page the click navigated away
+// from must not turn a successful `check` into a failure.
+#[tokio::test]
+#[ignore]
+async fn e2e_check_succeeds_when_the_change_navigates() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/filter.html") }),
+        )
+        .await,
+    );
+    let snap = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    let checkbox = snapshot_ref(&snap, "checkbox");
+    let resp = ref_cmd(
+        &mut state,
+        json!({ "id": "c", "action": "check", "selector": checkbox }),
+    )
+    .await;
+    assert_success(&resp);
+    ref_wait_until(&mut state, "document.title === 'B2'").await;
+    assert_eq!(ref_title(&mut state).await, "B2");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
 }
 
 #[tokio::test]
