@@ -205,6 +205,14 @@ fn decrypt_profile(data: &[u8]) -> Result<AuthProfile, String> {
         let iv = STANDARD
             .decode(&payload.iv)
             .map_err(|e| format!("Invalid base64 iv: {}", e))?;
+        // The nonce constructor panics for other lengths. A damaged profile
+        // must remain a recoverable read error.
+        if iv.len() != 12 {
+            return Err(format!(
+                "Invalid IV length: expected 12 bytes, got {}",
+                iv.len()
+            ));
+        }
         let auth_tag = STANDARD
             .decode(&payload.auth_tag)
             .map_err(|e| format!("Invalid base64 authTag: {}", e))?;
@@ -405,6 +413,30 @@ mod tests {
             Some(val) => unsafe { std::env::set_var(ENCRYPTION_KEY_ENV, val) },
             None => unsafe { std::env::remove_var(ENCRYPTION_KEY_ENV) },
         }
+    }
+
+    #[test]
+    fn malformed_profile_iv_lengths_return_errors_without_panicking() {
+        with_test_key(|| {
+            for len in [0, 1, 11, 13, 32] {
+                let payload = json!({
+                    "version": 1,
+                    "encrypted": true,
+                    "iv": STANDARD.encode(vec![0u8; len]),
+                    "authTag": STANDARD.encode([0u8; 16]),
+                    "data": STANDARD.encode(b"damaged"),
+                });
+                let result =
+                    std::panic::catch_unwind(|| decrypt_profile(payload.to_string().as_bytes()));
+                let error = result
+                    .expect("a malformed profile must not panic")
+                    .unwrap_err();
+                assert_eq!(
+                    error,
+                    format!("Invalid IV length: expected 12 bytes, got {len}")
+                );
+            }
+        });
     }
 
     #[test]
