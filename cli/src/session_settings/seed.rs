@@ -76,6 +76,12 @@ impl Running {
         if let Some(path) =
             lookup("AGENT_BROWSER_ACTION_POLICY").or_else(|| lookup("AGENT_BROWSER_POLICY"))
         {
+            // Stored with the session, so it must not depend on the directory
+            // a later daemon starts in.
+            let path = match env::current_dir() {
+                Ok(cwd) => crate::flags::absolute_policy_path(&path, &cwd).unwrap_or(path),
+                Err(_) => path,
+            };
             r.set(Key::ActionPolicy, Value::from(path));
         }
 
@@ -146,15 +152,17 @@ impl Running {
             r.set(Key::InitScripts, Value::from(split_lines_and_commas(&v)));
         }
 
-        // A blank list sets nothing. A list with only separators seeds an empty
-        // list; the domain filter built from it is empty and allows every host.
-        if let Some(v) = lookup("AGENT_BROWSER_ALLOWED_DOMAINS").filter(|s| !s.trim().is_empty()) {
+        // The daemon refuses to start on a list that holds no domain, so an
+        // empty one is never stored.
+        if let Some(v) = lookup("AGENT_BROWSER_ALLOWED_DOMAINS") {
             let domains: Vec<String> = v
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            r.set(Key::AllowedDomains, Value::from(domains));
+            if !domains.is_empty() {
+                r.set(Key::AllowedDomains, Value::from(domains));
+            }
         }
 
         r

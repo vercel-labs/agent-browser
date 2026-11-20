@@ -1,4 +1,4 @@
-use crate::session_files::{remove_daemon_files, SessionFile};
+use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
 use crate::validation::sanitize_session_component;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -7,7 +7,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -516,6 +516,52 @@ pub struct DaemonOptions<'a> {
     pub plugins: Option<&'a str>,
 }
 
+impl DaemonOptions<'static> {
+    /// No option set: what a daemon started only to close its session needs.
+    pub fn bare() -> Self {
+        DaemonOptions {
+            headed: false,
+            debug: false,
+            executable_path: None,
+            extensions: &[],
+            init_scripts: &[],
+            enable: &[],
+            args: None,
+            user_agent: None,
+            proxy: None,
+            proxy_bypass: None,
+            proxy_username: None,
+            proxy_password: None,
+            ignore_https_errors: false,
+            allow_file_access: false,
+            hide_scrollbars: true,
+            webgpu: false,
+            profile: None,
+            state: None,
+            provider: None,
+            device: None,
+            session_name: None,
+            restore_save: None,
+            restore_check_url: None,
+            restore_check_text: None,
+            restore_check_fn: None,
+            download_path: None,
+            allowed_domains: None,
+            action_policy: None,
+            confirm_actions: None,
+            engine: None,
+            auto_connect: false,
+            pin_tab: false,
+            idle_timeout: None,
+            default_timeout: None,
+            cdp: None,
+            cdp_headers: None,
+            no_auto_dialog: false,
+            plugins: None,
+        }
+    }
+}
+
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     cmd.env("AGENT_BROWSER_DAEMON", "1")
         .env("AGENT_BROWSER_SESSION", session);
@@ -601,6 +647,11 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(ad) = opts.allowed_domains {
         cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
+    } else if crate::native::network::check_allowed_domains_env().is_err() {
+        // Only a command that cannot run a browser gets this far with an
+        // unusable list (the others stop earlier); the daemon it starts would
+        // refuse to boot on it.
+        cmd.env_remove("AGENT_BROWSER_ALLOWED_DOMAINS");
     }
     if let Some(ap) = opts.action_policy {
         cmd.env("AGENT_BROWSER_ACTION_POLICY", ap);
@@ -895,6 +946,12 @@ fn stop_existing_daemon_for_restart(session: &str) {
     }
 }
 
+/// Stops a session's daemon without a `close`, so the session's stored
+/// settings stay, the same way a restart stops it.
+pub fn stop_daemon(session: &str) {
+    stop_existing_daemon_for_restart(session);
+}
+
 /// Marks this process's stdout and stderr non-inheritable so a detached child cannot hold a reader's pipes open.
 #[cfg(windows)]
 pub(crate) fn prevent_stdio_handle_inheritance() {
@@ -911,7 +968,88 @@ pub(crate) fn prevent_stdio_handle_inheritance() {
     }
 }
 
+/// Exclusive hold on a session's `.lock` file, released when dropped or when
+/// the process exits. The file is opened close-on-exec, so a spawned daemon
+/// does not keep the lock. On Unix the file is owner-only (0600).
+struct SpawnLock {
+    _file: fs::File,
+}
+
+impl SpawnLock {
+    fn acquire(session: &str) -> Result<Self, String> {
+        let socket_dir = get_socket_dir();
+        fs::create_dir_all(&socket_dir)
+            .map_err(|e| format!("Failed to create socket directory: {}", e))?;
+        let path = SessionFile::Lock.path_in(&socket_dir, session);
+        let file = open_lock_file(&path)?;
+        file.lock()
+            .map_err(|e| format!("Failed to lock session {}: {}", session, e))?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Opens the lock file without following a symlink. On Unix the file must be
+/// a regular file owned by the current user; a wider mode left by an earlier
+/// version is narrowed to 0600 through the open descriptor.
+fn open_lock_file(path: &Path) -> Result<fs::File, String> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|e| {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            return format!(
+                "Refusing session lock {}: it is a symbolic link",
+                path.display()
+            );
+        }
+        format!("Failed to open session lock {}: {}", path.display(), e)
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let meta = file
+            .metadata()
+            .map_err(|e| format!("Failed to inspect session lock {}: {}", path.display(), e))?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        if !meta.is_file() {
+            return Err(format!(
+                "Refusing session lock {}: it is not a regular file",
+                path.display()
+            ));
+        }
+        if meta.uid() != euid {
+            return Err(format!(
+                "Refusing session lock {}: it is owned by uid {}, not the current user",
+                path.display(),
+                meta.uid()
+            ));
+        }
+        if meta.mode() & 0o077 != 0 {
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|e| {
+                    format!("Failed to restrict session lock {}: {}", path.display(), e)
+                })?;
+        }
+    }
+    Ok(file)
+}
+
+/// Returns a ready daemon for the session, starting one if needed. Callers for
+/// the same session take turns, so one that arrives while another is starting
+/// the daemon attaches to it.
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
+    let _lock = SpawnLock::acquire(session)?;
+    ensure_daemon_locked(session, opts)
+}
+
+fn ensure_daemon_locked(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
     let mut restarted = false;
 
     // Socket connectivity is the sole liveness check — no PID check — so
@@ -1104,6 +1242,15 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
         }
 
         thread::sleep(Duration::from_millis(100));
+    }
+
+    // The daemon never became reachable; do not leave it running unattended.
+    if let Some(mut child) = daemon_child {
+        let _ = child.kill();
+        let _ = child.wait();
+        if spawned_pid.is_some_and(|pid| owns_session(&socket_dir, session, pid)) {
+            remove_daemon_files(&socket_dir, session);
+        }
     }
 
     #[cfg(unix)]
@@ -2119,5 +2266,116 @@ mod tests {
         // No config, no file created.
         record_daemon_default_timeout("never-started", Some(1));
         assert!(!get_config_path("never-started").exists());
+    }
+
+    #[test]
+    fn test_spawn_lock_waits_for_the_holder() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let first = SpawnLock::acquire("lock-test").unwrap();
+        let acquired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = acquired.clone();
+        let waiter = thread::spawn(move || {
+            let _second = SpawnLock::acquire("lock-test").unwrap();
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // The waiter is blocked for as long as the first lock is held.
+        thread::sleep(Duration::from_millis(300));
+        assert!(!acquired.load(std::sync::atomic::Ordering::SeqCst));
+
+        drop(first);
+        waiter.join().unwrap();
+        assert!(acquired.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_spawn_lock_is_per_session() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let _a = SpawnLock::acquire("lock-a").unwrap();
+        let _b = SpawnLock::acquire("lock-b").unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_spawn_lock_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let _lock = SpawnLock::acquire("lock-mode").unwrap();
+        let mode = fs::metadata(SessionFile::Lock.path("lock-mode"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "mode is {:o}", mode & 0o777);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_spawn_lock_narrows_an_existing_lock_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let path = SessionFile::Lock.path("lock-old");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _lock = SpawnLock::acquire("lock-old").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_spawn_lock_refuses_a_symlink_and_leaves_the_target_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let target = dir.path().join("unrelated");
+        fs::write(&target, "x").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        let link = SessionFile::Lock.path("lock-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = SpawnLock::acquire("lock-link").err().expect("must refuse");
+        assert!(err.contains("symbolic link"), "{}", err);
+        let mode = fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_spawn_lock_refuses_a_dangling_symlink_without_creating_the_target() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let target = dir.path().join("not-yet");
+        let link = SessionFile::Lock.path("lock-dangling");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(SpawnLock::acquire("lock-dangling").is_err());
+        assert!(!target.exists());
     }
 }

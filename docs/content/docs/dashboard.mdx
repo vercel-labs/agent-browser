@@ -148,7 +148,7 @@ Optionally override the gateway URL or model:
 
 ```bash
 export AI_GATEWAY_URL=https://ai-gateway.vercel.sh   # this is the default
-export AI_GATEWAY_MODEL=openai/gpt-4o-mini           # default: anthropic/claude-sonnet-4.6
+export AI_GATEWAY_MODEL=openai/gpt-4o-mini           # default: openai/gpt-6-luna-fast
 ```
 
 ### How it works
@@ -164,6 +164,6 @@ Chat runs one agent-browser command per tool call. A `;` or `&&` inside a quoted
   <tbody>
     <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
     <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the AI Gateway. Required to enable AI chat responses.</td><td>(none)</td></tr>
-    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for chat requests.</td><td><code>anthropic/claude-sonnet-4.6</code></td></tr>
+    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for chat requests.</td><td><code>openai/gpt-6-luna-fast</code></td></tr>
   </tbody>
 </table>
