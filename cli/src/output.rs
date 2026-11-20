@@ -2322,8 +2322,8 @@ This replaces any existing content in the field.
 Date, time, color and range inputs get the value set directly (for example 2024-01-15);
 a value the input would reject fails with malformed_value, and a range value inside
 its bounds is snapped to the step as the browser does, with a warning.
-Readonly and disabled fields, and elements that can never take text (select, checkbox,
-radio, file), are refused before anything changes, with a code of
+Readonly and disabled fields, and elements that can never take text (select, option, checkbox,
+radio, file, hidden, image, button, submit, reset), are refused before anything changes, with a code of
 read_only, disabled or not_editable. A label stands for its control.
 A value longer than maxlength is cut by the browser and reported as a value_truncated
 warning. If the page does not hold the value afterwards (it applies it late or rewrites
@@ -2350,8 +2350,8 @@ agent-browser type - Type text into an element
 Usage: agent-browser type <selector> [--clear] [--delay <ms>] [--] <text>
 
 Types text into the specified element character by character.
-Disabled fields, and elements that can never take text (select, checkbox,
-radio, file, and the color, range and date-type inputs) are
+Disabled fields, and elements that can never take text (select, option, checkbox,
+radio, file, hidden, image, button, submit, reset, and the color, range and date-type inputs) are
 refused before any text is typed (disabled, not_editable); use fill for date, time,
 color and range inputs. With --clear a readonly field is refused too (read_only), as
 fill does, because clearing would empty it; plain type leaves a readonly field to the
@@ -2462,8 +2462,8 @@ Selects one or more options in a <select> dropdown by value or visible label.
 Label matching normalizes whitespace such as non-breaking spaces.
 A string that matches exactly one option, by value or by exact label, selects it. A
 string that matches options with different values (it equals one option's value and
-another's label, or several options share the label) fails with ambiguous and lists each
-as label (value). Pass --by value or --by label to match only that attribute, so every
+another's label, or several options share the label) fails with ambiguous and reports how many
+options matched. Pass --by value or --by label to match only that attribute, so every
 option is reachable, for example: select "#idx" 1 --by value. Options that share a value
 are one choice. No match fails with option_not_found. Several values on a select that is
 not multiple (not_multiple), and a disabled select, are refused before anything changes.
