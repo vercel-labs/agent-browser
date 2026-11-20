@@ -2993,7 +2993,12 @@ fn split_extra_args(
         let mut prefix = command_words.to_vec();
         prefix.extend(extra_args[..=index].iter().cloned());
         let now = crate::flags::clean_args(&prefix).len();
-        if now > kept {
+        // Help and version are read only before `--`, so they stay global.
+        let control = matches!(
+            extra_args[index].as_str(),
+            "--help" | "-h" | "--version" | "-V"
+        );
+        if now > kept && !control {
             local.push(extra_args[index].clone());
         } else {
             global.push(extra_args[index].clone());
@@ -8412,5 +8417,26 @@ mod flag_shaped_values {
         let (flags, command) = parsed_run(&runs[0]);
         assert!(flags.contains("headed: true"));
         assert_eq!(command["invocationId"], "i");
+    }
+
+    #[test]
+    fn help_and_version_in_extra_args_stay_before_the_operand_marker() {
+        for tool in [
+            json!({"name": "agent_browser_auth_login", "args": {"name": "gh"}}),
+            json!({"name": "agent_browser_webmcp_invoke", "args": {"tool": "t"}}),
+            json!({"name": "agent_browser_plugin_run", "args": {"name": "p", "requestType": "r"}}),
+        ] {
+            for control in ["-h", "--help", "--version", "-V"] {
+                let mut arguments = tool["args"].clone();
+                arguments["extraArgs"] = json!([control]);
+                let (_, runs) = record_call(tool["name"].as_str().unwrap(), arguments);
+                let clean = crate::flags::clean_args(&runs[0]);
+                assert!(
+                    crate::flags::before_end_of_options(&clean).contains(&control.to_string()),
+                    "{tool}: {control} must precede `--`, got {:?}",
+                    runs[0]
+                );
+            }
+        }
     }
 }
