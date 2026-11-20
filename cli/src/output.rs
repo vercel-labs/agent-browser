@@ -2319,6 +2319,14 @@ Usage: agent-browser fill <selector> [--] <text>
 
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
+Date, time, color and range inputs get the value set directly (for example 2024-01-15);
+a value the input would reject fails with malformed_value.
+Readonly, disabled and non-text elements (select, checkbox, button, link, file, canvas)
+are refused before anything changes, with a code of read_only, disabled or not_editable.
+A value longer than maxlength is cut by the browser and reported as a value_truncated
+warning. If the page does not hold the value afterwards (it applies it late or rewrites
+it), the command still succeeds and prints a warning. These checks apply to the Chrome
+backend; the WebDriver backend fills without them.
 Put flags before --. Text after -- is literal, including values that look like flags.
 
 Global Options:
@@ -2339,6 +2347,12 @@ agent-browser type - Type text into an element
 Usage: agent-browser type <selector> [--clear] [--delay <ms>] [--] <text>
 
 Types text into the specified element character by character.
+Disabled and readonly fields, and elements that are not text fields (select, button,
+checkbox, link, file, submit, color, range, date, canvas) are refused before any text is
+typed (disabled, read_only, not_editable); use fill for date, time, color and range
+inputs, and press for key events. Text made only of newline, carriage return and tab is
+sent as key events to any focused target. If the page does not show the text afterwards,
+the command still succeeds and prints a warning.
 Use --clear to clear existing content first. Use --delay to set the delay between keystrokes in milliseconds.
 Use -- before text that looks like a flag to pass it literally. Put options before --.
 
@@ -2399,6 +2413,9 @@ agent-browser check - Check a checkbox
 Usage: agent-browser check <selector>
 
 Checks a checkbox element. If already checked, no action is taken.
+Fails with not_checkable on elements that cannot be toggled, and disabled on disabled
+ones. If the state has not changed afterwards (a custom control may apply it late), the
+command still succeeds and prints a warning.
 
 Global Options:
   --json               Output as JSON
@@ -2416,6 +2433,8 @@ agent-browser uncheck - Uncheck a checkbox
 Usage: agent-browser uncheck <selector>
 
 Unchecks a checkbox element. If already unchecked, no action is taken.
+Fails with not_checkable on elements that cannot be toggled, and on a checked radio
+(select another radio in its group instead). Fails with disabled on disabled ones.
 
 Global Options:
   --json               Output as JSON
@@ -2434,6 +2453,13 @@ Usage: agent-browser select <selector> <value...>
 
 Selects one or more options in a <select> dropdown by value or visible label.
 Label matching normalizes whitespace such as non-breaking spaces.
+A unique exact label wins, then a unique exact value; every option stays reachable
+through its visible label. When the string is also another option's value or label, the
+command still selects and prints a warning naming the other option. Labels shared by
+options with different values fail with ambiguous and list each as label (value).
+Options that share a value are one choice. No match fails with option_not_found. Several
+values on a select that is not multiple, and a disabled select, are refused before
+anything changes.
 
 On a custom ARIA widget (role=combobox or role=listbox, as in Radix or Headless UI),
 select opens it when collapsed, waits for the visible role=option items, and clicks

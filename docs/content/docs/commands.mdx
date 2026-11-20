@@ -59,6 +59,15 @@ For `fill` and `type`, put options before the optional `--` marker. Text after t
 
 These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`.
 
+`fill`, `type`, `check`, `uncheck` and `select` check the element before acting and fail with a stable `code` in the JSON response instead of reporting success. No field value is changed when they refuse:
+
+- `not_editable`, `read_only`, `disabled`: the element cannot take text (a select, checkbox, button, link, file input or canvas, a readonly or disabled field). `type` also refuses date, time, color and range inputs (use `fill`) and other non-text targets (use `press`); text made only of newline, carriage return and tab is sent as key events to any focused target.
+- `malformed_value`: a date, time, color or range value the input rejects. `fill` sets these inputs directly.
+- `not_checkable`: the element is not a checkbox, radio or checkbox-role element, or is a checked radio (a radio is cleared by selecting another one in its group).
+- `option_not_found`, `ambiguous`: `select` matched no option, matched labels shared by options with different values, or was given several values on a select that is not multiple. A unique exact label wins, then a unique exact value, so every option stays reachable through its visible label; when the string is also another option's value or label the command selects and returns a `warning` naming the other option. Options that share a value count once.
+
+After acting, the command reads the page back. When the page did not end up as requested, for example an input mask rewrote the text, a value was cut by `maxlength` (`value_truncated`) or a custom control applies the change later, the command still succeeds and returns a `warning`. These checks apply to the Chrome backend; the WebDriver backend (`fill` only) does not run them.
+
 Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently. For example, `agent-browser screenshot body -- --draft.png` saves to a file named `--draft.png`.
 
 `select` works on a native `<select>` and on a custom ARIA combobox or listbox, such as Radix or Headless UI. On a custom widget it opens the widget, then clicks the `role=option` whose name or value matches. A value with no match is an error that lists the available options, a matched option marked `aria-disabled` is an error instead of a click, and an option already selected in a multi-select listbox is left alone.

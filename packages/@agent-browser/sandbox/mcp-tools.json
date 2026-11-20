@@ -301,7 +301,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Check a checkbox or switch.",
+      "description": "Check a checkbox or switch. Fails for elements that cannot be toggled and disabled ones; warns if the state does not change.",
       "inputSchema": {
         "properties": {
           "selector": {
@@ -1240,7 +1240,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Clear and fill an input by @ref or CSS selector.",
+      "description": "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome backend only.",
       "inputSchema": {
         "properties": {
           "selector": {
@@ -3350,7 +3350,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Select one or more options in a select element.",
+      "description": "Select one or more options in a select element. A unique exact label wins, then a unique exact value; warns when the string is also another option's value or label. Fails with ambiguous for labels shared by options with different values, and with option_not_found when none match.",
       "inputSchema": {
         "properties": {
           "selector": {
@@ -4519,7 +4519,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Type text into an element by @ref or CSS selector.",
+      "description": "Type text into an element by @ref or CSS selector. Fails for disabled or readonly fields and elements that are not text fields (use fill for date, time, color and range inputs, press for key events); warns if the page does not show the text.",
       "inputSchema": {
         "properties": {
           "clear": {
@@ -4562,7 +4562,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Uncheck a checkbox or switch.",
+      "description": "Uncheck a checkbox or switch. Fails for elements that cannot be toggled, a checked radio and disabled ones; warns if the state does not change.",
       "inputSchema": {
         "properties": {
           "selector": {

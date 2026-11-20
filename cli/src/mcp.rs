@@ -993,7 +993,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FILL,
             "Fill input",
-            "Clear and fill an input by @ref or CSS selector.",
+            "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome backend only.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to fill." }
@@ -1003,7 +1003,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_TYPE,
             "Type text",
-            "Type text into an element by @ref or CSS selector.",
+            "Type text into an element by @ref or CSS selector. Fails for disabled or readonly fields and elements that are not text fields (use fill for date, time, color and range inputs, press for key events); warns if the page does not show the text.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to type." },
@@ -1023,12 +1023,12 @@ fn tools() -> Vec<Value> {
         ),
         tool(TOOL_HOVER, "Hover element", "Hover an element.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(TOOL_FOCUS, "Focus element", "Focus an element.", json!({ "selector": selector_schema() }), &["selector"]),
-        tool(TOOL_CHECK, "Check element", "Check a checkbox or switch.", json!({ "selector": selector_schema() }), &["selector"]),
-        tool(TOOL_UNCHECK, "Uncheck element", "Uncheck a checkbox or switch.", json!({ "selector": selector_schema() }), &["selector"]),
+        tool(TOOL_CHECK, "Check element", "Check a checkbox or switch. Fails for elements that cannot be toggled and disabled ones; warns if the state does not change.", json!({ "selector": selector_schema() }), &["selector"]),
+        tool(TOOL_UNCHECK, "Uncheck element", "Uncheck a checkbox or switch. Fails for elements that cannot be toggled, a checked radio and disabled ones; warns if the state does not change.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(
             TOOL_SELECT,
             "Select options",
-            "Select one or more options in a select element.",
+            "Select one or more options in a select element. A unique exact label wins, then a unique exact value; warns when the string is also another option's value or label. Fails with ambiguous for labels shared by options with different values, and with option_not_found when none match.",
             json!({
                 "selector": selector_schema(),
                 "values": {

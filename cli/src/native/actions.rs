@@ -3714,7 +3714,14 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             resp["data"] = report.data();
             resp
         }
-        (Ok(data), None) => success_response(&id, data),
+        (Ok(mut data), None) => {
+            let warning = lift_form_warning(&mut data);
+            let mut resp = success_response(&id, data);
+            if let Some(warning) = warning {
+                append_warning(&mut resp, &warning);
+            }
+            resp
+        }
         (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
     attach_tab_gone_data(&mut resp, state);
@@ -7325,7 +7332,7 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::fill(
+    let outcome = interaction::fill(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7334,7 +7341,26 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.iframe_sessions,
     )
     .await?;
-    Ok(json!({ "filled": selector }))
+    Ok(form_outcome_data(
+        json!({ "filled": selector }),
+        outcome.warning,
+    ))
+}
+
+/// Adds a form action's warning to the response data.
+fn form_outcome_data(mut data: Value, warning: Option<String>) -> Value {
+    if let Some(warning) = warning {
+        data["warning"] = json!(warning);
+    }
+    data
+}
+
+/// Moves a warning from the data to the top level of the response, where
+/// every output mode shows it.
+fn lift_form_warning(data: &mut Value) -> Option<String> {
+    data.as_object_mut()?
+        .remove("warning")
+        .and_then(|w| w.as_str().map(String::from))
 }
 
 async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7351,7 +7377,7 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     let delay = cmd.get("delay").and_then(|v| v.as_u64());
 
-    interaction::type_text(
+    let outcome = interaction::type_text(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7362,7 +7388,7 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.iframe_sessions,
     )
     .await?;
-    Ok(json!({ "typed": text }))
+    Ok(form_outcome_data(json!({ "typed": text }), outcome.warning))
 }
 
 async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7496,7 +7522,7 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .unwrap_or_default(),
     };
 
-    interaction::select_option(
+    let warning = interaction::select_option(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7505,7 +7531,7 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         &state.iframe_sessions,
     )
     .await?;
-    Ok(json!({ "selected": values }))
+    Ok(form_outcome_data(json!({ "selected": values }), warning))
 }
 
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7516,21 +7542,24 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    if let Some(position) = interaction::check(
+    let outcome = interaction::check(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &state.iframe_sessions,
     )
-    .await?
-    {
+    .await?;
+    if let Some(position) = outcome.position {
         (state.mouse_state.x, state.mouse_state.y) = position;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(json!({ "checked": selector }))
+    Ok(form_outcome_data(
+        json!({ "checked": selector }),
+        outcome.warning,
+    ))
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7541,21 +7570,24 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    if let Some(position) = interaction::uncheck(
+    let outcome = interaction::uncheck(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &state.iframe_sessions,
     )
-    .await?
-    {
+    .await?;
+    if let Some(position) = outcome.position {
         (state.mouse_state.x, state.mouse_state.y) = position;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(json!({ "unchecked": selector }))
+    Ok(form_outcome_data(
+        json!({ "unchecked": selector }),
+        outcome.warning,
+    ))
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -11086,7 +11118,7 @@ async fn execute_subaction(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'value' for fill subaction")?;
-            interaction::fill(
+            let outcome = interaction::fill(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
@@ -11095,24 +11127,30 @@ async fn execute_subaction(
                 &state.iframe_sessions,
             )
             .await?;
-            Ok(json!({ "filled": selector }))
+            Ok(form_outcome_data(
+                json!({ "filled": selector }),
+                outcome.warning,
+            ))
         }
         "check" => {
-            if let Some(position) = interaction::check(
+            let outcome = interaction::check(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
                 selector,
                 &state.iframe_sessions,
             )
-            .await?
-            {
+            .await?;
+            if let Some(position) = outcome.position {
                 (state.mouse_state.x, state.mouse_state.y) = position;
                 if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
                     cursor.record(position.0, position.1, state.mouse_state.buttons);
                 }
             }
-            Ok(json!({ "checked": selector }))
+            Ok(form_outcome_data(
+                json!({ "checked": selector }),
+                outcome.warning,
+            ))
         }
         "hover" => {
             let position = interaction::hover(
@@ -11977,6 +12015,19 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
             const select = document.querySelector({sel});
             if (!select) return {{ __ab_miss: true }};
             const vals = {vals};
+            if (!(select instanceof HTMLSelectElement)) {{
+                return {{ code: 'not_editable', error: 'Element <' + select.localName + '> is not a <select>' }};
+            }}
+            if (select.matches(':disabled')) {{
+                return {{ code: 'disabled', error: 'Element <select> is disabled and cannot be changed' }};
+            }}
+            if (vals.length > 1 && !select.multiple) {{
+                return {{ code: 'ambiguous', error: vals.length + ' values requested but <select> does not allow multiple selection' }};
+            }}
+            const missing = vals.filter((v) => !Array.from(select.options).some((o) => o.value === v));
+            if (missing.length > 0) {{
+                return {{ code: 'option_not_found', error: 'No option matched ' + JSON.stringify(missing) + '. Available options: ' + Array.from(select.options).map((o) => JSON.stringify(o.value)).join(', ') }};
+            }}
             for (const opt of select.options) {{
                 opt.selected = vals.includes(opt.value);
             }}
@@ -11994,6 +12045,14 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
         .unwrap_or(false)
     {
         return Err(format!("No element found: {selector}"));
+    }
+    if let Some(error) = result.get("error").and_then(|v| v.as_str()) {
+        return Err(match result.get("code").and_then(|v| v.as_str()) {
+            Some(code) if interaction::FORM_ERROR_CODES.contains(&code) => {
+                interaction::form_error(code, error)
+            }
+            _ => error.to_string(),
+        });
     }
     let selected = result.get("selected").cloned().unwrap_or_else(|| json!([]));
     Ok(json!({ "selected": selected }))
@@ -15583,6 +15642,8 @@ fn error_response(id: &str, error: &str) -> Value {
         resp["code"] = json!("tab_gone");
     } else if error.starts_with(super::browser::PAGE_WEDGED_PREFIX) {
         resp["code"] = json!("page_wedged");
+    } else if let Some(code) = interaction::form_error_code(error) {
+        resp["code"] = json!(code);
     } else if let Some((code, _)) = error.split_once(": ") {
         if code.starts_with("webmcp_") {
             resp["code"] = json!(code);

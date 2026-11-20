@@ -87,7 +87,7 @@ agent-browser click @e1 --modifiers control,shift  # Hold keys during the click
 agent-browser dblclick @e1        # Double-click
 agent-browser dblclick @e1 --modifiers shift  # Double-click with Shift held
 agent-browser focus @e1           # Focus element
-agent-browser fill @e2 "text"     # Clear and fill
+agent-browser fill @e2 "text"     # Clear and fill (date/time/color/range set directly; errors if readonly, disabled or not text)
 agent-browser type @e2 "text"     # Type without clearing
 agent-browser press Enter         # Press key (alias: key)
 agent-browser press Control+a     # Key combination
@@ -96,7 +96,7 @@ agent-browser keyup Shift         # Release key
 agent-browser hover @e1           # Hover
 agent-browser check @e1           # Check checkbox
 agent-browser uncheck @e1         # Uncheck checkbox
-agent-browser select @e1 "value"  # Select by value or visible label
+agent-browser select @e1 "value"  # Select by visible label or value (a label shared by different values is an error)
 agent-browser select @e1 "a" "b"  # Select multiple options
 # On a custom ARIA combobox/listbox (Radix, Headless UI), select opens it and clicks the
 # role=option whose name or value matches; no match errors with the available options,

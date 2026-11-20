@@ -132,14 +132,202 @@ pub async fn hover(
     Ok((x + offset.0, y + offset.1))
 }
 
-pub async fn fill(
+/// Stable codes for refusals before acting. An error message that starts with
+/// `<code>: ` surfaces the code in the JSON envelope.
+pub const FORM_ERROR_CODES: &[&str] = &[
+    "not_editable",
+    "read_only",
+    "disabled",
+    "not_checkable",
+    "option_not_found",
+    "ambiguous",
+    "malformed_value",
+];
+
+/// Returns the form-action error code an error message starts with.
+pub fn form_error_code(error: &str) -> Option<&'static str> {
+    let (head, _) = error.split_once(": ")?;
+    FORM_ERROR_CODES.iter().copied().find(|c| *c == head)
+}
+
+pub fn form_error(code: &str, message: impl std::fmt::Display) -> String {
+    format!("{code}: {message}")
+}
+
+/// A part of a date or time input (what a snapshot ref points at) stands for
+/// the input.
+const RETARGET_JS: &str = r#"
+        const host = this.getRootNode && this.getRootNode().host;
+        const el = host && host.localName === 'input' ? host : this;
+"#;
+
+/// Decides from the target's own properties whether `fill` or `type` may act.
+/// Nothing depends on where focus lands.
+const PRECHECK_JS: &str = r#"function(mode) {
+        /*RETARGET*/
+        const describe = (n) => '<' + n.localName + (n.id ? '#' + n.id : '') + (n.localName === 'input' && n.type ? ' type="' + n.type + '"' : '') + '>';
+        const textTypes = ['text', 'search', 'url', 'tel', 'email', 'password', 'number'];
+        const valueTypes = ['color', 'date', 'time', 'datetime-local', 'month', 'week', 'range'];
+        const typable = el.isContentEditable || !!el.editContext || el.localName === 'textarea'
+            || (el.localName === 'input' && textTypes.includes(el.type));
+        const valueInput = el.localName === 'input' && valueTypes.includes(el.type);
+        // Hosts of other content may forward focus to the real field.
+        const forwards = !!el.shadowRoot || el.localName.includes('-') || el.localName === 'iframe' || el.localName === 'frame';
+        const verb = mode === 'fill' ? 'filled' : 'typed into';
+        const fail = (code, message) => ({ error: { code, message } });
+        if (el.matches(':disabled')) {
+            return fail('disabled', 'Element ' + describe(el) + ' is disabled and cannot be ' + verb);
+        }
+        const accepted = mode === 'fill' ? typable || valueInput || forwards : typable || forwards;
+        if (!accepted) {
+            const hint = mode === 'fill' ? '; use select or check for those'
+                : (valueInput ? '; use fill for date, time, color and range inputs' : '; use press to send key events');
+            return fail('not_editable', 'Element ' + describe(el) + ' cannot be ' + verb + hint);
+        }
+        if (el.readOnly) {
+            return fail('read_only', 'Element ' + describe(el) + ' is readonly and cannot be ' + verb);
+        }
+        return { ok: true };
+    }"#;
+
+/// Reads what the form actions need to know about an element.
+const PROBE_JS: &str = r#"function() {
+        /*RETARGET*/
+        const tag = el.localName;
+        const type = tag === 'input' ? el.type : '';
+        const ariaRoles = ['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio', 'option', 'treeitem'];
+        let box = null;
+        let state = null;
+        if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
+            box = el; state = el.checked;
+        } else if (ariaRoles.includes(el.getAttribute('role'))) {
+            box = el; state = el.getAttribute('aria-checked') === 'true';
+        } else {
+            const label = tag === 'label' ? el : el.closest('label');
+            const ctrl = label && label.control;
+            const sel = 'input[type="checkbox"], input[type="radio"], ' + ariaRoles.slice(0, 5).map((r) => '[role="' + r + '"]').join(', ');
+            const nested = el.querySelector(sel) || (el.shadowRoot && el.shadowRoot.querySelector(sel));
+            const inner = ctrl && (ctrl.type === 'checkbox' || ctrl.type === 'radio') ? ctrl : nested;
+            if (inner) {
+                box = inner;
+                state = inner.localName === 'input' ? inner.checked : inner.getAttribute('aria-checked') === 'true';
+            }
+        }
+        const boxRole = box && (box.getAttribute('role') || box.type);
+        let value = null;
+        if (el.isContentEditable) value = el.innerText;
+        else if (tag === 'input' || tag === 'textarea') value = el.type === 'password' ? '' : el.value;
+        return {
+            tag, type,
+            valueInput: tag === 'input' && ['color', 'date', 'time', 'datetime-local', 'month', 'week', 'range'].includes(type),
+            password: type === 'password',
+            maxLength: (tag === 'textarea' || (tag === 'input' && ['text', 'search', 'url', 'tel', 'email', 'password'].includes(type))) && typeof el.maxLength === 'number' ? el.maxLength : -1,
+            contentEditable: !!el.isContentEditable,
+            value,
+            disabled: el.matches(':disabled'),
+            checkable: box !== null,
+            checked: state,
+            native: !!box && box.localName === 'input',
+            radio: boxRole === 'radio' || boxRole === 'menuitemradio',
+            boxDisabled: box ? box.matches(':disabled') : false,
+        };
+    }"#;
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct FormProbe {
+    tag: String,
+    #[serde(rename = "type")]
+    input_type: String,
+    value_input: bool,
+    password: bool,
+    max_length: i64,
+    content_editable: bool,
+    value: Option<String>,
+    disabled: bool,
+    checkable: bool,
+    checked: Option<bool>,
+    native: bool,
+    radio: bool,
+    box_disabled: bool,
+}
+
+impl FormProbe {
+    fn describe(&self) -> String {
+        if self.tag == "input" && !self.input_type.is_empty() {
+            format!("<input type=\"{}\">", self.input_type)
+        } else {
+            format!("<{}>", self.tag)
+        }
+    }
+
+    fn comparable(&self, text: &str) -> String {
+        if self.content_editable {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        } else if self.input_type == "color" {
+            text.to_lowercase()
+        } else {
+            text.to_string()
+        }
+    }
+}
+
+/// What a text action reports when the page did not end up as requested. The
+/// action is not failed: pages apply values late or rewrite them.
+#[derive(Debug, Default)]
+pub struct FormOutcome {
+    pub warning: Option<String>,
+}
+
+async fn call_on(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    function_declaration: String,
+    argument: Option<Value>,
+) -> Result<EvaluateResult, String> {
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration,
+                object_id: Some(object_id.to_string()),
+                arguments: argument.map(|value| {
+                    vec![CallArgument {
+                        value: Some(value),
+                        object_id: None,
+                    }]
+                }),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+    Ok(result)
+}
+
+async fn probe_object(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+) -> Result<FormProbe, String> {
+    let js = PROBE_JS.replace("/*RETARGET*/", RETARGET_JS);
+    let result = call_on(client, session_id, object_id, js, None).await?;
+    let value = result
+        .result
+        .value
+        .ok_or_else(|| "Could not inspect the element".to_string())?;
+    serde_json::from_value(value).map_err(|e| format!("Could not inspect the element: {e}"))
+}
+
+async fn probe_selector(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
-    value: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<FormProbe, String> {
     let (object_id, effective_session_id) = resolve_element_object_id(
         client,
         session_id,
@@ -148,6 +336,154 @@ pub async fn fill(
         iframe_sessions,
     )
     .await?;
+    probe_object(client, &effective_session_id, &object_id).await
+}
+
+/// Refuses `fill` or `type` on a target that cannot take the text, before
+/// anything is changed.
+async fn precheck(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    mode: &str,
+) -> Result<(), String> {
+    let js = PRECHECK_JS.replace("/*RETARGET*/", RETARGET_JS);
+    let result = call_on(
+        client,
+        session_id,
+        object_id,
+        js,
+        Some(serde_json::json!(mode)),
+    )
+    .await?;
+    if let Some(error) = result.result.value.as_ref().and_then(|v| v.get("error")) {
+        let code = error
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("not_editable");
+        let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+        return Err(form_error(code, message));
+    }
+    Ok(())
+}
+
+/// Sets date, time, color and range inputs directly: Chrome drops inserted
+/// text there. Refuses a value the input would sanitize away.
+async fn set_value_input(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    value: &str,
+) -> Result<(), String> {
+    let js = r#"function(value) {
+        /*RETARGET*/
+        const type = el.type;
+        const formats = {
+            color: '#rrggbb', date: 'YYYY-MM-DD', time: 'HH:MM or HH:MM:SS',
+            'datetime-local': 'YYYY-MM-DDTHH:MM', month: 'YYYY-MM', week: 'YYYY-Www',
+            range: 'a number from ' + (el.min || 0) + ' to ' + (el.max || 100) + ' that matches the step (' + (el.step || 1) + ')',
+        };
+        const text = value.trim();
+        const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        const old = el.value;
+        set.call(el, text);
+        const got = el.value;
+        set.call(el, old);
+        const accepted = type === 'color' ? got === text.toLowerCase()
+            : type === 'range' ? /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(text) && Number(got) === Number(text)
+            : got !== '' || text === '';
+        if (!accepted) {
+            return { error: 'Malformed value ' + JSON.stringify(value) + ' for input of type "' + type + '": expected ' + formats[type] };
+        }
+        set.call(el, text);
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true };
+    }"#
+    .replace("/*RETARGET*/", RETARGET_JS);
+    let result = call_on(
+        client,
+        session_id,
+        object_id,
+        js,
+        Some(serde_json::json!(value)),
+    )
+    .await?;
+    if let Some(error) = result
+        .result
+        .value
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(Value::as_str)
+    {
+        return Err(form_error("malformed_value", error));
+    }
+    Ok(())
+}
+
+/// Warns when the value is longer than the field's maxlength; the browser
+/// keeps only the first characters. The value itself is never echoed.
+fn truncation_warning(probe: &FormProbe, value: &str) -> Option<String> {
+    let sent = value.encode_utf16().count();
+    (probe.max_length >= 0 && sent as i64 > probe.max_length).then(|| {
+        format!(
+            "value_truncated: {} accepts at most {} characters (maxlength) but {} were given",
+            probe.describe(),
+            probe.max_length,
+            sent
+        )
+    })
+}
+
+/// Warns when the element holds something other than what was sent.
+fn fill_warning(after: &FormProbe, sent: &str) -> Option<String> {
+    if after.password {
+        return None;
+    }
+    let observed = after.value.clone()?;
+    if after.comparable(&observed) == after.comparable(sent) {
+        return None;
+    }
+    if observed.is_empty() {
+        return Some(format!(
+            "effect_not_observed: {} is empty after fill; the page may apply the value later",
+            after.describe()
+        ));
+    }
+    Some(format!(
+        "{} holds {:?} instead of the requested {:?}",
+        after.describe(),
+        observed,
+        sent
+    ))
+}
+
+pub async fn fill(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    value: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<FormOutcome, String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    precheck(client, &effective_session_id, &object_id, "fill").await?;
+    let before = probe_object(client, &effective_session_id, &object_id).await?;
+    if before.value_input {
+        set_value_input(client, &effective_session_id, &object_id, value).await?;
+        let after = probe_object(client, &effective_session_id, &object_id).await?;
+        return Ok(FormOutcome {
+            warning: fill_warning(&after, value.trim()),
+        });
+    }
 
     // Focus the element
     client
@@ -175,7 +511,7 @@ pub async fn fill(
                     this.dispatchEvent(new Event('input', { bubbles: true }));
                 }"#
                 .to_string(),
-                object_id: Some(object_id),
+                object_id: Some(object_id.clone()),
                 arguments: None,
                 return_by_value: Some(true),
                 await_promise: Some(false),
@@ -195,7 +531,10 @@ pub async fn fill(
         )
         .await?;
 
-    Ok(())
+    let after = probe_object(client, &effective_session_id, &object_id).await?;
+    Ok(FormOutcome {
+        warning: truncation_warning(&before, value).or_else(|| fill_warning(&after, value)),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -208,7 +547,7 @@ pub async fn type_text(
     clear: bool,
     delay_ms: Option<u64>,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<FormOutcome, String> {
     let (object_id, effective_session_id) = resolve_element_object_id(
         client,
         session_id,
@@ -217,6 +556,14 @@ pub async fn type_text(
         iframe_sessions,
     )
     .await?;
+
+    // Control characters alone are key events, which any focused target can
+    // receive; any text needs a target that takes it.
+    let keys_only = !text.is_empty() && text.chars().all(|c| matches!(c, '\n' | '\r' | '\t'));
+    if !keys_only {
+        precheck(client, &effective_session_id, &object_id, "type").await?;
+    }
+    let before = probe_object(client, &effective_session_id, &object_id).await?;
 
     // Focus
     client
@@ -244,7 +591,7 @@ pub async fn type_text(
                         this.dispatchEvent(new Event('input', { bubbles: true }));
                     }"#
                     .to_string(),
-                    object_id: Some(object_id),
+                    object_id: Some(object_id.clone()),
                     arguments: None,
                     return_by_value: Some(true),
                     await_promise: Some(false),
@@ -254,7 +601,18 @@ pub async fn type_text(
             .await?;
     }
 
-    type_text_into_active_context(client, session_id, text, delay_ms).await
+    type_text_into_active_context(client, session_id, text, delay_ms).await?;
+
+    let after = probe_object(client, &effective_session_id, &object_id).await?;
+    let plain = !text.is_empty() && !text.contains(['\n', '\r', '\t']);
+    let warning = (plain && !clear && !after.password && after.value.is_some() && after.value == before.value)
+        .then(|| {
+            format!(
+                "effect_not_observed: {} did not change after typing; the page may apply the text later",
+                after.describe()
+            )
+        });
+    Ok(FormOutcome { warning })
 }
 
 pub async fn type_text_into_active_context(
@@ -445,7 +803,7 @@ pub async fn select_option(
     selector_or_ref: &str,
     values: &[String],
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let (object_id, effective_session_id) = resolve_element_object_id(
         client,
         session_id,
@@ -532,15 +890,15 @@ pub async fn select_option(
                     const matches = options.filter((o) => nameOf(o) === want || (valueOf(o) && valueOf(o) === want));
                     if (matches.length === 0) {
                         const available = options.map((o) => '"' + nameOf(o) + '"').join(', ');
-                        return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
+                        return { code: 'option_not_found', error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
                     }
                     if (matches.length > 1) {
-                        return { error: 'Multiple options matched ' + JSON.stringify(value) };
+                        return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ': ' + matches.map((o) => '"' + nameOf(o) + '"').join(', ') };
                     }
                     // A disabled option swallows the click, so selecting it would
                     // report success with an unchanged widget.
                     if (matches[0].getAttribute('aria-disabled') === 'true') {
-                        return { error: 'Option "' + nameOf(matches[0]) + '" is disabled' };
+                        return { code: 'disabled', error: 'Option "' + nameOf(matches[0]) + '" is disabled' };
                     }
                     wanted.add(matches[0]);
                 }
@@ -554,36 +912,74 @@ pub async fn select_option(
                 }
                 return { matched: wanted.size };
             }
-            const options = Array.from(this.options);
-            const wanted = new Set();
-            for (const value of vals) {
-                let matches = options.filter((opt) =>
-                    value === opt.value ||
-                    value === opt.label.trim() ||
-                    value === opt.textContent.trim()
-                );
-                if (matches.length === 0) {
-                    const normalizedValue = normalize(value);
-                    matches = options.filter((opt) =>
-                        normalize(opt.label) === normalizedValue
-                    );
-                    if (matches.length > 1) {
-                        return { error: 'Multiple options matched ' + JSON.stringify(value) + ' after whitespace normalization' };
-                    }
-                }
-                if (matches.length === 0) {
-                    const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
-                    return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-                }
-                for (const opt of matches) wanted.add(opt);
+            if (this.matches(':disabled')) {
+                return { code: 'disabled', error: 'select target <select> is disabled' };
             }
-            if (wanted.size === 0) {
-                const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
-                return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
+            if (vals.length > 1 && !this.multiple) {
+                return { code: 'ambiguous', error: vals.length + ' values requested but <select> does not allow multiple selection' };
+            }
+            const options = Array.from(this.options);
+            const labelOf = (o) => o.label.trim();
+            const show = (o) => normalize(o.label) + ' (' + o.value + ')';
+            // Options sharing a value are one choice.
+            const distinct = (found) => new Set(found.map((o) => o.value)).size;
+            // A unique exact label wins, then a unique exact value, then a
+            // label with normalized whitespace. Otherwise the request is
+            // ambiguous. Every option stays reachable through its label.
+            const resolve = (value) => {
+                const byLabel = options.filter((o) => value === labelOf(o) || value === o.textContent.trim());
+                if (byLabel.length && distinct(byLabel) === 1) return { found: byLabel };
+                const byValue = options.filter((o) => value === o.value);
+                if (byValue.length && distinct(byValue) === 1) return { found: byValue };
+                if (byLabel.length) return { found: byLabel, ambiguous: true };
+                const wanted = normalize(value);
+                const byNorm = options.filter((o) => normalize(o.label) === wanted);
+                if (byNorm.length && distinct(byNorm) === 1) return { found: byNorm };
+                if (byNorm.length) return { found: byNorm, ambiguous: true };
+                return { found: [] };
+            };
+            const wanted = new Set();
+            const warnings = [];
+            for (const value of vals) {
+                const r = resolve(value);
+                if (r.found.length === 0) {
+                    const available = options.map(show).join(', ');
+                    return { code: 'option_not_found', error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
+                }
+                if (r.ambiguous) {
+                    const seen = new Set();
+                    const candidates = r.found.filter((o) => !seen.has(o.value) && seen.add(o.value));
+                    const routes = candidates.filter((c) => {
+                        const again = resolve(c.value);
+                        return !again.ambiguous && again.found.length > 0 && again.found.every((o) => o.value === c.value);
+                    });
+                    const unreachable = candidates.filter((c) => !routes.includes(c));
+                    const advice = (routes.length
+                        ? ' Pass the value of the one you want: ' + routes.map((c) => JSON.stringify(c.value)).join(', ') + '.'
+                        : ' No label or value selects only one of them.')
+                        + (routes.length && unreachable.length ? ' ' + unreachable.map(show).join(', ') + ' cannot be selected by value or label.' : '');
+                    return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ': ' + candidates.map(show).join(', ') + '.' + advice };
+                }
+                const chosen = r.found[0];
+                const others = options.filter((o) => o.value !== chosen.value && (value === o.value || value === labelOf(o)));
+                if (others.length) {
+                    const route = (o) => [labelOf(o), o.value].find((str) => {
+                        const again = resolve(str);
+                        return !again.ambiguous && again.found.length > 0 && again.found.every((f) => f.value === o.value);
+                    });
+                    const advice = others.map((o) => {
+                        const str = route(o);
+                        return str === undefined ? show(o) + ' cannot be selected by value or label' : 'to select ' + show(o) + ' pass ' + JSON.stringify(str);
+                    }).join('; ');
+                    warnings.push(JSON.stringify(value) + ' matched ' + show(chosen) + '; it is also the ' +
+                        (others.some((o) => value === o.value) ? 'value' : 'label') + ' of ' + others.map(show).join(', ') +
+                        ': ' + advice + '.');
+                }
+                for (const opt of r.found) wanted.add(opt);
             }
             for (const opt of options) opt.selected = wanted.has(opt);
             this.dispatchEvent(new Event('change', { bubbles: true }));
-            return { matched: wanted.size };
+            return { matched: wanted.size, warning: warnings.join(' ') || undefined };
         }"#
     .to_string();
 
@@ -615,16 +1011,32 @@ pub async fn select_option(
         return Err(msg.to_string());
     }
 
-    if let Some(error) = result
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.get("error"))
-        .and_then(|e| e.as_str())
-    {
-        return Err(error.to_string());
+    let value = result.get("result").and_then(|r| r.get("value"));
+    if let Some(error) = value.and_then(|v| v.get("error")).and_then(Value::as_str) {
+        return Err(
+            match value
+                .and_then(|v| v.get("code"))
+                .and_then(Value::as_str)
+                .filter(|c| FORM_ERROR_CODES.contains(c))
+            {
+                Some(code) => form_error(code, error),
+                None => error.to_string(),
+            },
+        );
     }
 
-    Ok(())
+    Ok(value
+        .and_then(|v| v.get("warning"))
+        .and_then(Value::as_str)
+        .map(String::from))
+}
+
+/// Result of `check`/`uncheck`: where the pointer ended up, if a click was
+/// needed, and a warning when the state did not change as requested.
+#[derive(Debug, Default)]
+pub struct CheckOutcome {
+    pub position: Option<(f64, f64)>,
+    pub warning: Option<String>,
 }
 
 pub async fn check(
@@ -633,52 +1045,16 @@ pub async fn check(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<Option<(f64, f64)>, String> {
-    let mut position = None;
-    let is_checked = super::element::is_element_checked(
+) -> Result<CheckOutcome, String> {
+    set_checked(
         client,
         session_id,
         ref_map,
         selector_or_ref,
         iframe_sessions,
+        true,
     )
-    .await?;
-    if !is_checked {
-        let result = click_element(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            ClickSpec::default(),
-            iframe_sessions,
-            false,
-        )
-        .await?;
-        position = Some(result.position);
-
-        // Verify the click changed the state (Playwright parity: _setChecked re-checks).
-        // If the coordinate-based click missed (e.g. hidden input, overlay), retry
-        // with a JS .click() on the element and its associated input.
-        if !super::element::is_element_checked(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            iframe_sessions,
-        )
-        .await?
-        {
-            js_click_checkbox(
-                client,
-                session_id,
-                ref_map,
-                selector_or_ref,
-                iframe_sessions,
-            )
-            .await?;
-        }
-    }
-    Ok(position)
+    .await
 }
 
 pub async fn uncheck(
@@ -687,9 +1063,28 @@ pub async fn uncheck(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<Option<(f64, f64)>, String> {
-    let mut position = None;
-    let is_checked = super::element::is_element_checked(
+) -> Result<CheckOutcome, String> {
+    set_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+        false,
+    )
+    .await
+}
+
+async fn set_checked(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+    want: bool,
+) -> Result<CheckOutcome, String> {
+    let verb = if want { "checked" } else { "unchecked" };
+    let probe = probe_selector(
         client,
         session_id,
         ref_map,
@@ -697,40 +1092,83 @@ pub async fn uncheck(
         iframe_sessions,
     )
     .await?;
-    if is_checked {
-        let result = click_element(
+    if !probe.checkable {
+        return Err(form_error(
+            "not_checkable",
+            format!(
+                "Element {} is not a checkbox, radio or element with a checkbox-like role, so it cannot be {verb}",
+                probe.describe()
+            ),
+        ));
+    }
+    if probe.checked.unwrap_or(false) == want {
+        return Ok(CheckOutcome::default());
+    }
+    if probe.disabled || probe.box_disabled {
+        return Err(form_error(
+            "disabled",
+            format!(
+                "Element {} is disabled and cannot be {verb}",
+                probe.describe()
+            ),
+        ));
+    }
+    if !want && probe.radio {
+        return Err(form_error(
+            "not_checkable",
+            "A checked radio cannot be unchecked by clicking; select another radio in its group instead",
+        ));
+    }
+
+    let result = click_element(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        ClickSpec::default(),
+        iframe_sessions,
+        false,
+    )
+    .await?;
+    let position = Some(result.position);
+
+    // A native input whose coordinate click missed (hidden input, overlay) is
+    // retried with a DOM click. A custom control is not: a second click would
+    // undo a first one the page applies late.
+    let mut after = probe_selector(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    if after.checked.unwrap_or(false) != want && after.native {
+        js_click_checkbox(
             client,
             session_id,
             ref_map,
             selector_or_ref,
-            ClickSpec::default(),
             iframe_sessions,
-            false,
         )
         .await?;
-        position = Some(result.position);
-
-        // Same verify-and-retry as check().
-        if super::element::is_element_checked(
+        after = probe_selector(
             client,
             session_id,
             ref_map,
             selector_or_ref,
             iframe_sessions,
         )
-        .await?
-        {
-            js_click_checkbox(
-                client,
-                session_id,
-                ref_map,
-                selector_or_ref,
-                iframe_sessions,
-            )
-            .await?;
-        }
+        .await?;
     }
-    Ok(position)
+    let warning = (after.checked.unwrap_or(false) != want).then(|| {
+        format!(
+            "effect_not_observed: {} is still {} after clicking; the page may apply the change later",
+            after.describe(),
+            if want { "unchecked" } else { "checked" }
+        )
+    });
+    Ok(CheckOutcome { position, warning })
 }
 
 /// Fallback for when the coordinate-based CDP click did not toggle the
@@ -1525,5 +1963,65 @@ mod tests {
         assert_eq!(key_text("ArrowUp"), None);
         assert_eq!(key_text("Backspace"), None);
         assert_eq!(key_text("Delete"), None);
+    }
+
+    fn text_probe(value: &str, max_length: i64) -> FormProbe {
+        FormProbe {
+            tag: "input".into(),
+            input_type: "text".into(),
+            max_length,
+            value: Some(value.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_form_error_code_matches_only_known_prefixes() {
+        assert_eq!(form_error_code("read_only: x"), Some("read_only"));
+        assert_eq!(
+            form_error_code("ambiguous: Multiple options"),
+            Some("ambiguous")
+        );
+        assert_eq!(form_error_code("effect_not_observed: x"), None);
+        assert_eq!(form_error_code("value_truncated: x"), None);
+        assert_eq!(form_error_code("webmcp_failed: x"), None);
+        assert_eq!(form_error_code("read_only"), None);
+    }
+
+    #[test]
+    fn test_truncation_is_a_warning_and_never_echoes() {
+        let mut probe = text_probe("old", 5);
+        assert!(truncation_warning(&probe, "01234").is_none());
+        let w = truncation_warning(&probe, "0123456789").unwrap();
+        assert!(w.starts_with("value_truncated"));
+        probe.password = true;
+        probe.value = Some("secret".into());
+        let w = truncation_warning(&probe, "0123456789").unwrap();
+        assert!(!w.contains("0123456789") && !w.contains("secret"));
+        assert!(truncation_warning(&text_probe("", -1), "0123456789").is_none());
+        // maxlength counts UTF-16 units.
+        assert!(truncation_warning(&text_probe("", 2), "\u{1F600}").is_none());
+        assert!(truncation_warning(&text_probe("", 1), "\u{1F600}").is_some());
+    }
+
+    #[test]
+    fn test_fill_warning_is_never_an_error() {
+        assert!(fill_warning(&text_probe("abc", -1), "abc").is_none());
+        let w = fill_warning(&text_probe("", -1), "abc").unwrap();
+        assert!(w.starts_with("effect_not_observed"));
+        let w = fill_warning(&text_probe("(555) 123", -1), "555123").unwrap();
+        assert!(w.contains("(555) 123"));
+        // The browser keeps color values lowercase.
+        let mut color = text_probe("#ff0000", -1);
+        color.input_type = "color".into();
+        assert!(fill_warning(&color, "#FF0000").is_none());
+        // Password fields are never read back or echoed.
+        let mut probe = text_probe("", -1);
+        probe.password = true;
+        assert!(fill_warning(&probe, "secret").is_none());
+        // No value to compare, no warning.
+        let mut none = text_probe("", -1);
+        none.value = None;
+        assert!(fill_warning(&none, "abc").is_none());
     }
 }

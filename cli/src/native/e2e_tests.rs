@@ -2617,6 +2617,326 @@ async fn e2e_form_interaction() {
     assert_success(&resp);
 }
 
+/// Refusals are decided from the target alone, before acting, and never change
+/// a field value; valid actions never fail because of the read-back.
+#[tokio::test]
+#[ignore]
+async fn e2e_form_actions_refuse_before_acting() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body><form id='frm'><div id='grp'><input id='prev' value='kept'></div></form>",
+        "<input id='ro' value='READONLY' readonly><input id='dis' value='DISABLED' disabled>",
+        "<select id='s'><option value='one'>one</option><option value='two'>two</option></select>",
+        "<select id='sdis' disabled><option value='one'>one</option></select>",
+        "<input id='cb' type='checkbox'><input id='radio' type='radio' checked>",
+        "<input id='dcb' type='checkbox' checked disabled>",
+        "<div id='plain'>x</div><button id='btn' disabled>b</button><button id='ebtn'>b</button>",
+        "<canvas id='cv' width='20' height='20'></canvas><a id='lnk' href='about:blank'>l</a>",
+        "<input id='file' type='file'><input id='sub' type='submit'>",
+        "<div id='rcb' role='checkbox' aria-checked='false' tabindex='0'>x</div>",
+        "<div id='tgl' role='button' aria-pressed='false' tabindex='0'>x</div>",
+        "<div id='adis' role='checkbox' aria-checked='false' aria-disabled='true' tabindex='0'>x</div>",
+        "<input id='date' type='date'><input id='color' type='color'><input id='range' type='range' value='50'>",
+        "<input id='short' maxlength='5'><input id='pw' type='password' maxlength='5'>",
+        "<input id='num' type='number' maxlength='3'><textarea id='area' maxlength='4'></textarea>",
+        "<div id='editor' contenteditable>old text</div><div id='ec' tabindex='0'>ec</div>",
+        "<label id='lab' for='labeled'>lab</label><input id='labeled'>",
+        "<select id='amb'><option value='u1'>United States</option><option value='u2'>United States</option></select>",
+        "<select id='dup'><option value=''>Pick</option><option value='US'>United States</option><option value='AR'>Argentina</option><option value='US'>United States</option></select>",
+        "<select id='vl'><option value='a'>Alpha</option><option value='Alpha'>Other</option></select>",
+        "<select id='cross'><option value='1'>0</option><option value='2'>1</option></select>",
+        "<select id='swap'><option value='Alpha'>Beta</option><option value='Beta'>Alpha</option></select>",
+        "<input id='a0'><input id='a300'><input id='mask'><input id='blocked' value='old'>",
+        "<div id='sw' role='switch' aria-checked='false' tabindex='0'>x</div>",
+        "<div id='slow' role='switch' aria-checked='false' tabindex='0'>x</div>",
+        "<x-input id='xin'></x-input><x-check id='xcheck'></x-check>",
+        "<script>",
+        "window.clicks = { sw: 0, slow: 0 };",
+        "ec.editContext = new EditContext();",
+        "function ctl(id, ms) { const el = document.getElementById(id); let state = '';",
+        " el.addEventListener('input', () => { const v = el.value; el.value = state; setTimeout(() => { state = v; el.value = v; }, ms); }); }",
+        "ctl('a0', 0); ctl('a300', 300);",
+        "mask.addEventListener('input', () => { const d = mask.value.replace(/[^0-9]/g, ''); mask.value = '(' + d.slice(0, 3) + ') ' + d.slice(3); });",
+        "blocked.addEventListener('beforeinput', e => e.preventDefault());",
+        "const flip = (el) => el.setAttribute('aria-checked', el.getAttribute('aria-checked') === 'true' ? 'false' : 'true');",
+        "sw.addEventListener('click', () => { clicks.sw++; flip(sw); });",
+        "slow.addEventListener('click', () => { clicks.slow++; setTimeout(() => flip(slow), 150); });",
+        "customElements.define('x-input', class extends HTMLElement { constructor() { super();",
+        " this.attachShadow({ mode: 'open', delegatesFocus: true }).innerHTML = '<input id=inner>'; } });",
+        "customElements.define('x-check', class extends HTMLElement { constructor() { super();",
+        " this.attachShadow({ mode: 'open' }).innerHTML = '<label><input type=checkbox> shadow</label>'; } });",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    async fn run(state: &mut DaemonState, action: &str, selector: &str, arg: &Value) -> Value {
+        let key = match action {
+            "fill" => "value",
+            "type" => "text",
+            "select" | "multiselect" => "values",
+            _ => "unused",
+        };
+        execute_command(
+            &json!({ "id": "x", "action": action, "selector": selector, key: arg }),
+            state,
+        )
+        .await
+    }
+    const FIELDS: &str = "JSON.stringify([...document.querySelectorAll('input,select,textarea,[contenteditable]')].map(e => [e.id, e.value, e.checked, e.isContentEditable ? e.innerText : null]).concat(Object.entries(clicks)))";
+
+    let mut failures = Vec::new();
+
+    // A refused action leaves every field value as it was, whatever had focus.
+    for (action, selector, arg, code) in [
+        ("fill", "#ro", json!("HACKED"), "read_only"),
+        ("fill", "#dis", json!("HACKED"), "disabled"),
+        ("fill", "#s", json!("two"), "not_editable"),
+        ("fill", "#cb", json!("yes"), "not_editable"),
+        ("fill", "#plain", json!("x"), "not_editable"),
+        ("fill", "#ebtn", json!("x"), "not_editable"),
+        ("fill", "#cv", json!("x"), "not_editable"),
+        ("fill", "#lnk", json!("x"), "not_editable"),
+        ("fill", "#file", json!("x"), "not_editable"),
+        ("fill", "#lab", json!("x"), "not_editable"),
+        ("fill", "#date", json!("01/15/2024"), "malformed_value"),
+        ("fill", "#range", json!("150"), "malformed_value"),
+        ("fill", "#color", json!("red"), "malformed_value"),
+        ("type", "#ro", json!("x"), "read_only"),
+        ("type", "#dis", json!("x"), "disabled"),
+        ("type", "#s", json!("x"), "not_editable"),
+        ("type", "#ebtn", json!("x"), "not_editable"),
+        ("type", "#cb", json!("x"), "not_editable"),
+        ("type", "#sub", json!("x"), "not_editable"),
+        ("type", "#color", json!("x"), "not_editable"),
+        ("type", "#range", json!("x"), "not_editable"),
+        ("type", "#date", json!("x"), "not_editable"),
+        ("type", "#rcb", json!("x"), "not_editable"),
+        ("type", "#rcb", json!("x\ny"), "not_editable"),
+        ("type", "#cv", json!("x"), "not_editable"),
+        ("check", "#plain", json!(""), "not_checkable"),
+        ("check", "#short", json!(""), "not_checkable"),
+        ("check", "#btn", json!(""), "not_checkable"),
+        ("check", "#tgl", json!(""), "not_checkable"),
+        ("uncheck", "#dcb", json!(""), "disabled"),
+        ("uncheck", "#radio", json!(""), "not_checkable"),
+        ("select", "#amb", json!(["United States"]), "ambiguous"),
+        ("select", "#s", json!(["one", "two"]), "ambiguous"),
+        ("select", "#sdis", json!(["one"]), "disabled"),
+        ("select", "#s", json!(["nope"]), "option_not_found"),
+        ("multiselect", "#s", json!(["one", "two"]), "ambiguous"),
+        ("multiselect", "#s", json!(["nope"]), "option_not_found"),
+    ] {
+        evaluate_value(&mut state, "prev.focus()").await;
+        let before = evaluate_value(&mut state, FIELDS).await;
+        let resp = run(&mut state, action, selector, &arg).await;
+        let after = evaluate_value(&mut state, FIELDS).await;
+        if resp["success"] != false || resp["code"] != code || before != after {
+            failures.push(format!(
+                "refuse {action} {selector}: {resp}\n{before}\n{after}"
+            ));
+        }
+    }
+
+    // A valid action on a valid target never fails because of the read-back.
+    for (action, selector, arg, script, expected) in [
+        ("fill", "#a0", json!("hello"), "a0.value", None),
+        ("fill", "#a300", json!("hello"), "'x'", None),
+        (
+            "fill",
+            "#mask",
+            json!("555123"),
+            "mask.value",
+            Some(json!("(555) 123")),
+        ),
+        (
+            "fill",
+            "#blocked",
+            json!("new"),
+            "blocked.value",
+            Some(json!("")),
+        ),
+        (
+            "fill",
+            "#xin",
+            json!("shadow"),
+            "xin.shadowRoot.querySelector('input').value",
+            Some(json!("shadow")),
+        ),
+        ("fill", "#ec", json!("ctx"), "'x'", None),
+        ("fill", "#editor", json!("new text"), "'x'", None),
+        (
+            "fill",
+            "#date",
+            json!("2024-01-15"),
+            "date.value",
+            Some(json!("2024-01-15")),
+        ),
+        (
+            "fill",
+            "#color",
+            json!("#FF0000"),
+            "color.value",
+            Some(json!("#ff0000")),
+        ),
+        (
+            "fill",
+            "#range",
+            json!("80"),
+            "range.value",
+            Some(json!("80")),
+        ),
+        (
+            "fill",
+            "#short",
+            json!("0123456789"),
+            "short.value",
+            Some(json!("01234")),
+        ),
+        (
+            "fill",
+            "#pw",
+            json!("0123456789"),
+            "pw.value",
+            Some(json!("01234")),
+        ),
+        (
+            "fill",
+            "#area",
+            json!("0123456789"),
+            "area.value",
+            Some(json!("0123")),
+        ),
+        (
+            "fill",
+            "#num",
+            json!("12345"),
+            "num.value",
+            Some(json!("12345")),
+        ),
+        ("type", "#rcb", json!("\n"), "'x'", None),
+        ("type", "#ebtn", json!("\t"), "'x'", None),
+        (
+            "select",
+            "#dup",
+            json!(["United States"]),
+            "dup.value",
+            Some(json!("US")),
+        ),
+        (
+            "select",
+            "#vl",
+            json!(["Alpha"]),
+            "vl.value",
+            Some(json!("a")),
+        ),
+        (
+            "select",
+            "#vl",
+            json!(["Other"]),
+            "vl.value",
+            Some(json!("Alpha")),
+        ),
+        (
+            "select",
+            "#cross",
+            json!(["1"]),
+            "cross.value",
+            Some(json!("2")),
+        ),
+        (
+            "select",
+            "#cross",
+            json!(["0"]),
+            "cross.value",
+            Some(json!("1")),
+        ),
+        (
+            "select",
+            "#swap",
+            json!(["Alpha"]),
+            "swap.value",
+            Some(json!("Beta")),
+        ),
+        (
+            "select",
+            "#swap",
+            json!(["Beta"]),
+            "swap.value",
+            Some(json!("Alpha")),
+        ),
+        ("check", "#sw", json!(""), "clicks.sw", None),
+        ("check", "#slow", json!(""), "clicks.slow", Some(json!(1))),
+        ("check", "#adis", json!(""), "'x'", None),
+        (
+            "check",
+            "#xcheck",
+            json!(""),
+            "xcheck.shadowRoot.querySelector('input').checked",
+            Some(json!(true)),
+        ),
+        ("check", "#cb", json!(""), "cb.checked", Some(json!(true))),
+        ("check", "#dcb", json!(""), "dcb.checked", Some(json!(true))),
+        (
+            "uncheck",
+            "#cb",
+            json!(""),
+            "cb.checked",
+            Some(json!(false)),
+        ),
+    ] {
+        let resp = run(&mut state, action, selector, &arg).await;
+        let got = evaluate_value(&mut state, script).await;
+        if resp["success"] != true || expected.as_ref().is_some_and(|w| *w != got) {
+            failures.push(format!("accept {action} {selector}: {resp} -> {got}"));
+        }
+    }
+
+    // Truncation, a value the page has not applied, a rewrite, and a select
+    // string that is also another option's value are visible warnings.
+    for (action, selector, arg) in [
+        ("fill", "#short", json!("0123456789")),
+        ("fill", "#a300", json!("later")),
+        ("fill", "#mask", json!("555123")),
+        ("select", "#vl", json!(["Alpha"])),
+    ] {
+        let resp = run(&mut state, action, selector, &arg).await;
+        if resp["success"] != true || resp["warning"].as_str().is_none() {
+            failures.push(format!("expected a warning for {selector}: {resp}"));
+        }
+    }
+    let resp = run(&mut state, "fill", "#num", &json!("12345")).await;
+    if resp["warning"].as_str().is_some() {
+        failures.push(format!(
+            "maxlength does not apply to a number input: {resp}"
+        ));
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+async fn evaluate_value(state: &mut DaemonState, script: &str) -> Value {
+    let resp = execute_command(
+        &json!({ "id": "eval", "action": "evaluate", "script": script }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["result"].clone()
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_select_option_label_override_names() {
