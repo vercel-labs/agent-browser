@@ -4309,6 +4309,46 @@ async fn e2e_attach_starts_without_the_local_session_setup() {
     assert_success(&resp);
 }
 
+/// A relaunch that fails after the browser started keeps the previous session
+/// setup, including a viewport the relaunch's window sizing would have dropped.
+#[tokio::test]
+#[ignore]
+async fn e2e_failed_relaunch_keeps_the_remembered_viewport() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 800, "height": 600 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let before = format!("{:?}", state.session_setup);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "launch",
+            "headless": true,
+            "args": ["--window-size=1100,700"],
+            "storageState": "/nonexistent/state.json",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+
+    assert_eq!(format!("{:?}", state.session_setup), before);
+    assert!(state.session_setup.viewport.is_some());
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_viewport_emulation() {

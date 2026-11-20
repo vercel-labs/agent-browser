@@ -5188,6 +5188,7 @@ async fn launch_browser_from_settings(
     }
     let launch_setup = SessionSetup::from_launch_options(&options);
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
+    let rollback_setup = state.session_setup.clone();
     let previous_setup = std::mem::take(&mut state.session_setup);
     state.session_setup = previous_setup.carried_into_relaunch(launch_setup);
     state.touch_sessions.clear();
@@ -5199,14 +5200,33 @@ async fn launch_browser_from_settings(
     state.start_fetch_handler();
     state.start_dialog_handler();
     state.update_stream_client().await;
-    install_network_controls_or_close(state, has_proxy_auth).await?;
 
-    let replay_warning = replay_session_setup_after_launch(state).await;
+    // The carried setup is kept only when every step after the launch
+    // succeeds, like the launch settings.
+    let result = async {
+        install_network_controls_or_close(state, has_proxy_auth).await?;
 
-    apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-    try_auto_restore_state(state).await;
-    load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
-    Ok(with_session_setup_warning(json!({}), replay_warning))
+        let replay_warning = replay_session_setup_after_launch(state).await;
+
+        apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
+        try_auto_restore_state(state).await;
+        load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
+        Ok(with_session_setup_warning(json!({}), replay_warning))
+    }
+    .await;
+    restore_setup_unless_launched(state, rollback_setup, &result);
+    result
+}
+
+/// Puts the pre-relaunch session setup back when the relaunch failed.
+fn restore_setup_unless_launched<T>(
+    state: &mut DaemonState,
+    rollback: SessionSetup,
+    result: &Result<T, String>,
+) {
+    if result.is_err() {
+        state.session_setup = rollback;
+    }
 }
 
 /// Replays the carried session setup onto the relaunched browser's page, as
@@ -18174,6 +18194,23 @@ mod tests {
 
         assert_eq!(format!("{:?}", state.session_setup), before);
         assert!(state.touch_sessions.contains("S-OLD"));
+    }
+
+    #[test]
+    fn a_relaunch_step_that_fails_after_launch_restores_the_previous_setup() {
+        let rollback = {
+            let mut setup = SessionSetup::default();
+            setup.viewport = Some(viewport(800, 600, false));
+            setup
+        };
+        for (result, restored) in [(Err("failed".to_string()), true), (Ok(()), false)] {
+            let mut state = DaemonState::new();
+            state.session_setup = SessionSetup::default();
+
+            restore_setup_unless_launched(&mut state, rollback.clone(), &result);
+
+            assert_eq!(state.session_setup.viewport.is_some(), restored);
+        }
     }
 
     #[tokio::test]
