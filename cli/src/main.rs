@@ -1580,6 +1580,12 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
+    if matches!(
+        clean_args(&args).first().map(|s| s.as_str()),
+        Some("close" | "quit" | "exit")
+    ) {
+        flags::allow_unusable_security_config();
+    }
     let mut flags = parse_flags(&args);
     if flags.restore_uses_session {
         flags.restore = Some(flags.session.clone());

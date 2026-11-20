@@ -148,6 +148,7 @@ fn an_unusable_allowlist_in_the_config_fails_instead_of_being_skipped() {
         r#"{"allowedDomains": ["a.example"]} trailing"#,
         r#"[{"allowedDomains": ["a.example"]}]"#,
         r#"{"allowedDomains": ["a.example"]"#,
+        r#"{"\u0061llowedDomains": ["a.example"],}"#,
     ];
     for config in configs {
         let home = TempDir::new().unwrap();
@@ -257,4 +258,40 @@ fn chat_passes_the_allowlist_to_the_commands_it_runs() {
     let _ = run(&home, &[], &["close"]);
     gateway.join().unwrap();
     assert!(text.contains("not in the allowed domains list"), "{text}");
+}
+
+#[test]
+fn a_broken_security_config_does_not_block_close() {
+    let home = TempDir::new().unwrap();
+    let dir = home.path().join(".agent-browser");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("config.json"),
+        r#"{"allowedDomains": ["a.example"],}"#,
+    )
+    .unwrap();
+    let (output, text) = run(&home, &[], &["close"]);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("invalid config file"), "{text}");
+    let (output, _) = run(&home, &[], &["open", "http://127.0.0.1:1/"]);
+    assert!(!output.status.success());
+}
+
+#[test]
+fn the_chat_model_cannot_confirm_or_deny_actions() {
+    for command in ["confirm c_1234", "deny c_1234"] {
+        let command: &'static str = Box::leak(format!("agent-browser {command}").into_boxed_str());
+        let (url, gateway) = fake_gateway(command);
+        let home = TempDir::new().unwrap();
+        let (_, text) = run(
+            &home,
+            &[("AI_GATEWAY_API_KEY", "test-key"), ("AI_GATEWAY_URL", &url)],
+            &["chat", "go"],
+        );
+        gateway.join().unwrap();
+        assert!(
+            text.contains("is not a valid agent-browser command"),
+            "{command}: {text}"
+        );
+    }
 }

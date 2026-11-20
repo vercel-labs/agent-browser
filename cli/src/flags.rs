@@ -31,14 +31,59 @@ const SECURITY_CONFIG_KEYS: &[&str] = &["allowedDomains", "actionPolicy", "confi
 /// Fails when a config file tries to set a security key and cannot: the value
 /// is unusable, or another field makes the whole file unreadable.
 fn check_security_config(path: &Path) -> Result<(), String> {
+    let result = check_security_config_inner(path);
+    match result {
+        Err(error) if LENIENT_SECURITY_CONFIG.load(std::sync::atomic::Ordering::Relaxed) => {
+            eprintln!("{} {}", color::warning_indicator(), error);
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// Set for commands that only close a session: an unusable security config is
+/// reported but does not stop them, so it can be fixed with the session closed.
+static LENIENT_SECURITY_CONFIG: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn allow_unusable_security_config() {
+    LENIENT_SECURITY_CONFIG.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The text with JSON `\uXXXX` escapes decoded, so an escaped key name still
+/// matches.
+fn decode_unicode_escapes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'u') && i + 6 <= bytes.len() {
+            let decoded = std::str::from_utf8(&bytes[i + 2..i + 6])
+                .ok()
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .and_then(char::from_u32);
+            if let Some(c) = decoded {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                i += 6;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+fn check_security_config_inner(path: &Path) -> Result<(), String> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("cannot read config {}: {}", path.display(), e)),
     };
+    let decoded = decode_unicode_escapes(&bytes);
     let mentions_security = SECURITY_CONFIG_KEYS
         .iter()
-        .any(|k| bytes.windows(k.len()).any(|w| w == k.as_bytes()));
+        .any(|k| decoded.windows(k.len()).any(|w| w == k.as_bytes()));
     let object = match serde_json::from_slice::<serde_json::Value>(&bytes) {
         Ok(serde_json::Value::Object(object)) => object,
         Ok(_) | Err(_) if mentions_security => {

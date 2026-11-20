@@ -410,8 +410,6 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "exit",
     "inspect",
     "auth",
-    "confirm",
-    "deny",
     "connect",
     "cookies",
     "storage",
@@ -1027,14 +1025,24 @@ mod tests {
     }
 
     #[test]
+    fn chat_cannot_answer_its_own_confirmations() {
+        assert!(!is_allowed_chat_command("confirm"));
+        assert!(!is_allowed_chat_command("deny"));
+    }
+
+    #[test]
     fn chat_rejects_unknown_command() {
         assert!(!is_allowed_chat_command("bash"));
     }
 
     #[test]
     fn chat_allows_every_browser_command() {
+        // `confirm` and `deny` are the human's answer to a confirmation, so the
+        // chat model never runs them.
         const MANAGEMENT: &[&str] = &[
             "chat",
+            "confirm",
+            "deny",
             "dashboard",
             "doctor",
             "install",
