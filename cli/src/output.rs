@@ -4913,6 +4913,8 @@ Environment:
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
   AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
+  AGENT_BROWSER_CDP_TIMEOUT_MS   Wait for one browser command's answer in ms, raising the
+                                 30-second default for eval and close (default: 30000)
   AGENT_BROWSER_SESSION_NAME     Legacy auto-save/load state persistence name
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
