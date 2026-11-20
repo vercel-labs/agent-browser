@@ -514,7 +514,7 @@ async fn focus_target(
         }};
         const before = deep(el.ownerDocument);
         let focused = false;
-        const seen = () => {{ focused = true; }};
+        const seen = (e) => {{ if (e.isTrusted) focused = true; }};
         el.addEventListener('focus', seen, true);
         el.focus();
         el.removeEventListener('focus', seen, true);

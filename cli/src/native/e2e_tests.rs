@@ -3116,11 +3116,12 @@ async fn e2e_form_actions_focus_guard_allows_focusable_targets() {
     assert_success(&resp);
     let html = concat!(
         "data:text/html,<html><body><input id='real'>",
-        "<div id='fwd' tabindex='0'>x</div><input id='hid' hidden><input id='dn' style='display:none'><div inert><input id='ine'></div><div id='plain'>x</div><canvas id='cv' width='9' height='9'></canvas>",
+        "<div id='fwd' tabindex='0'>x</div><input id='hid' hidden><input id='dn' style='display:none'><div inert><input id='ine'></div><div id='plain'>x</div><div id='fake'>x</div><canvas id='cv' width='9' height='9'></canvas>",
         "<script>",
         "window.keys = [];",
         "real.addEventListener('keydown', e => keys.push(e.key));",
         "fwd.addEventListener('focus', () => real.focus());",
+        "fake.focus = () => fake.dispatchEvent(new FocusEvent('focus'));",
         "real.focus();",
         "</script></body></html>"
     );
@@ -3142,7 +3143,7 @@ async fn e2e_form_actions_focus_guard_allows_focusable_targets() {
         failures.push(format!("type through a forwarding target: {resp} -> {got}"));
     }
 
-    for selector in ["#plain", "#cv", "#hid", "#dn", "#ine"] {
+    for selector in ["#plain", "#cv", "#hid", "#dn", "#ine", "#fake"] {
         let resp = execute_command(
             &json!({ "id": "x", "action": "type", "selector": selector, "text": "no" }),
             &mut state,
@@ -3162,7 +3163,7 @@ async fn e2e_form_actions_focus_guard_allows_focusable_targets() {
         }
     }
     let keys = evaluate_value(&mut state, "keys.join(',')").await;
-    if keys != json!("Enter,Tab,Enter,Tab,Enter,Tab,Enter,Tab,Enter,Tab") {
+    if keys != json!("Enter,Tab,Enter,Tab,Enter,Tab,Enter,Tab,Enter,Tab,Enter,Tab") {
         failures.push(format!("keys reached the focused control: {keys}"));
     }
 
