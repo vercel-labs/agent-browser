@@ -1,0 +1,16 @@
+/*
+ * Navbar: keep the Vercel Labs triangle and slash divider, hide the "Labs" word.
+ * Geistdocs renders the brand as one link (aria-label "Vercel Labs") holding two
+ * inline SVGs (light and dark). Each SVG uses a 183x42 viewBox: the triangle is
+ * the first path (x 0 to 47) and the "Labs" wordmark is the paths after it.
+ * Hide the wordmark paths, then pull back the SVG's trailing empty width so the
+ * divider keeps its original spacing. Imported by both the marketing and the
+ * documentation root layouts, which load separate base stylesheets.
+ */
+header a[aria-label='Vercel Labs'] svg path:not(:first-child) {
+  display: none;
+}
+
+header a[aria-label='Vercel Labs'] svg {
+  margin-right: -58.3px;
+}

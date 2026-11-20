@@ -1,18 +1,13 @@
 import { defineConfig } from "@vercel/geistdocs/config";
 import { siteUrl } from "@/lib/site";
+import { docsNav } from "@/lib/geistdocs/nav";
+import { ProductWordmark } from "@/components/landing/product-context";
 
 export const config = defineConfig({
   title: "agent-browser",
   siteUrl,
   defaultLanguage: "en",
-  logo: (
-    <span
-      className="font-medium tracking-tight"
-      style={{ fontFamily: "var(--font-geist-pixel-square)" }}
-    >
-      agent-browser
-    </span>
-  ),
+  logo: <ProductWordmark />,
   navbarActiveProduct: "agent-browser",
   navbarBrand: "labs",
   github: {
@@ -24,14 +19,7 @@ export const config = defineConfig({
   content: [
     { id: "docs", label: "Documentation", dir: "content/docs", route: "/" },
   ],
-  nav: [
-    { label: "Docs", href: "/" },
-    {
-      label: "npm",
-      href: "https://www.npmjs.com/package/agent-browser",
-      external: true,
-    },
-  ],
+  nav: docsNav(),
   ai: { enabled: false },
   feedback: { enabled: false },
   language: { enabled: false },
