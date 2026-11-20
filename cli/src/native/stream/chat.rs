@@ -496,6 +496,33 @@ fn first_chat_command(command: &str) -> &str {
     command.trim()
 }
 
+/// `batch` runs each item as a command of its own, so every item has to pass
+/// the same allowlist. Items are split the way `batch` splits them. A batch
+/// with no items would read its commands from stdin, which chat never provides.
+fn check_batch_items(words: &[String]) -> Result<(), String> {
+    let items: Vec<&String> = words
+        .iter()
+        .filter(|w| !matches!(w.as_str(), "--bail" | "--omit-command"))
+        .collect();
+    if items.is_empty() {
+        return Err("Blocked: batch needs its commands as arguments in chat.".to_string());
+    }
+    for item in items {
+        let parts = crate::commands::shell_words_split(item);
+        let command = parts.first().map(|s| s.as_str()).unwrap_or("");
+        if !is_allowed_chat_command(command) {
+            return Err(format!(
+                "Blocked: '{}' is not a valid agent-browser command.",
+                command
+            ));
+        }
+        if command == "batch" {
+            check_batch_items(&parts[1..])?;
+        }
+    }
+    Ok(())
+}
+
 /// Builds CLI arguments for one chat tool call in `session`, blocking commands
 /// outside the chat allowlist and global flags other than `CHAT_GLOBAL_FLAGS`.
 fn chat_command_args(session: &str, command: &str) -> Result<Vec<String>, String> {
@@ -525,6 +552,9 @@ fn chat_command_args(session: &str, command: &str) -> Result<Vec<String>, String
             first_cmd
         ));
     }
+    if first_cmd == "batch" {
+        check_batch_items(&args[3..])?;
+    }
     Ok(args)
 }
 
@@ -548,6 +578,7 @@ pub(crate) async fn execute_chat_tool(session: &str, command: &str, was_open: bo
 
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.args(&args)
+        .stdin(std::process::Stdio::null())
         .env_remove("AGENT_BROWSER_DASHBOARD")
         .env_remove("AGENT_BROWSER_DASHBOARD_PORT")
         .env_remove("AGENT_BROWSER_STREAM_PORT");
@@ -1022,6 +1053,27 @@ mod tests {
     #[test]
     fn chat_allows_webmcp_command() {
         assert!(is_allowed_chat_command("webmcp"));
+    }
+
+    #[test]
+    fn chat_checks_every_batch_item() {
+        for command in [
+            "batch 'confirm c_1'",
+            "batch 'open about:blank' 'deny c_1'",
+            "batch --bail \"confirm c_1\"",
+            "batch 'batch \"confirm c_1\"'",
+            "batch",
+            "batch --bail",
+            "agent-browser batch 'confirm c_1'",
+        ] {
+            assert!(chat_command_args("s", command).is_err(), "{command}");
+        }
+        for command in [
+            "batch 'open about:blank' 'get url'",
+            "batch --bail 'snapshot -i'",
+        ] {
+            assert!(chat_command_args("s", command).is_ok(), "{command}");
+        }
     }
 
     #[test]

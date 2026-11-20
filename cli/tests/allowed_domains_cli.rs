@@ -279,7 +279,13 @@ fn a_broken_security_config_does_not_block_close() {
 
 #[test]
 fn the_chat_model_cannot_confirm_or_deny_actions() {
-    for command in ["confirm c_1234", "deny c_1234"] {
+    for command in [
+        "confirm c_1234",
+        "deny c_1234",
+        "batch 'confirm c_1234'",
+        "batch 'open about:blank' 'deny c_1234'",
+        "batch",
+    ] {
         let command: &'static str = Box::leak(format!("agent-browser {command}").into_boxed_str());
         let (url, gateway) = fake_gateway(command);
         let home = TempDir::new().unwrap();
@@ -290,7 +296,8 @@ fn the_chat_model_cannot_confirm_or_deny_actions() {
         );
         gateway.join().unwrap();
         assert!(
-            text.contains("is not a valid agent-browser command"),
+            text.contains("is not a valid agent-browser command")
+                || text.contains("batch needs its commands"),
             "{command}: {text}"
         );
     }
