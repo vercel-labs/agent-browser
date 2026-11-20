@@ -380,14 +380,6 @@ fn run_get(
     } else {
         let mut targets = Vec::new();
         for name in names {
-            if name.starts_with('-') {
-                eprintln!(
-                    "{} Unknown flag ignored: {}",
-                    color::warning_indicator(),
-                    name
-                );
-                continue;
-            }
             match all_skills.iter().find(|s| s.name == *name) {
                 Some(s) => targets.push(s),
                 None => {
@@ -605,6 +597,11 @@ pub fn run_skills(args: &[String], json_mode: bool) {
                     },
                     other => match other.strip_prefix("--ref=") {
                         Some(value) => refs.push(value.to_string()),
+                        None if arg.starts_with('-') => eprintln!(
+                            "{} Unknown flag ignored: {}",
+                            color::warning_indicator(),
+                            arg
+                        ),
                         None => names.push(arg.clone()),
                     },
                 }

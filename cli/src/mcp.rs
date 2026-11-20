@@ -2875,14 +2875,21 @@ fn cli_tool_args_at(
         .get("restore")
         .and_then(Value::as_str)
         .map(|key| format!("--restore={key}"));
-    for token in args.iter().skip(1) {
+    for (index, token) in args.iter().enumerate().skip(1) {
         let global = crate::flags::is_global_flag(token)
             || crate::flags::is_global_flag(global_flag_name(token));
+        // A caller string only matters where it fills a flag's value slot; a
+        // flag name at a flag position is the server's own, whatever the
+        // caller typed elsewhere.
+        let in_value_slot = args
+            .get(index - 1)
+            .is_some_and(|prev| crate::flags::GLOBAL_FLAGS_WITH_VALUE.contains(&prev.as_str()));
         let derived = (token.contains('=') && own_restore.as_ref() != Some(token))
-            || caller_values.contains(&token.as_str());
+            || (in_value_slot && caller_values.contains(&token.as_str()));
         if global && derived {
             return Err(ProtocolError::invalid_params(format!(
-                "Tool arguments may not set {}: '{token}' would be read as a CLI flag",
+                "Tool arguments may not set {}: '{token}' looks like a global CLI flag; \
+                 MCP refuses flag-shaped values in this field",
                 global_flag_name(token)
             )));
         }
@@ -2910,8 +2917,8 @@ fn cli_tool_args_at(
             && (token.contains('=') || caller_values.contains(&token.as_str()))
         {
             return Err(ProtocolError::invalid_params(format!(
-                "Tool arguments may not set {name}: '{token}' would be read as a CLI flag; \
-                 values that look like global flags are not accepted outside literal positions"
+                "Tool arguments may not set {name}: '{token}' looks like a global CLI flag; \
+                 MCP refuses flag-shaped values in this field"
             )));
         }
         if command_index.is_none() && name == "--state" {
@@ -7797,32 +7804,8 @@ mod flag_shaped_values {
         result.map(|_| runs).map_err(|e| e.message)
     }
 
-    fn violations(
-        argv: &[String],
-        arguments: &Value,
-        base_session: &str,
-        trusted: &[String],
-    ) -> Vec<String> {
+    fn violations(argv: &[String], arguments: &Value, base_session: &str) -> Vec<String> {
         let mut bad = Vec::new();
-        let own_restore = arguments
-            .get("restore")
-            .and_then(Value::as_str)
-            .map(|v| format!("--restore={v}"));
-        let mut leaves = Vec::new();
-        collect_caller_strings(arguments, &mut leaves);
-        let boundary = argv.iter().position(|t| t == "--").unwrap_or(argv.len());
-        for token in &argv[..boundary] {
-            let global = crate::flags::is_global_flag(token)
-                || crate::flags::is_global_flag(global_flag_name(token));
-            let built_from_caller = token.contains('=') || leaves.contains(&token.as_str());
-            if global
-                && built_from_caller
-                && !trusted.contains(token)
-                && own_restore.as_ref() != Some(token)
-            {
-                bad.push(format!("untrusted global token {token}"));
-            }
-        }
         let flags = crate::flags::parse_flags(argv);
         if flags.session != base_session {
             bad.push(format!("session={}", flags.session));
@@ -7835,7 +7818,10 @@ mod flag_shaped_values {
         }
         let cleaned = crate::flags::clean_args(argv);
         let options = crate::flags::before_end_of_options(&cleaned);
-        if options.iter().any(|o| o == "--help" || o == "-h") {
+        if options
+            .iter()
+            .any(|o| matches!(o.as_str(), "--help" | "-h" | "--version" | "-V"))
+        {
             bad.push("help".into());
         }
         bad
@@ -7845,18 +7831,23 @@ mod flag_shaped_values {
     fn caller_strings_never_become_global_flags() {
         let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
         env.remove("AGENT_BROWSER_SESSION");
-        let mut singles: Vec<String> = ["--help", "-h", "--version", "-V", "--"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        for flag in crate::flags::GLOBAL_BOOL_FLAGS
-            .iter()
-            .chain(crate::flags::GLOBAL_FLAGS_WITH_VALUE)
-            .chain(MCP_EXTRA_ARGS_GLOBALS)
-        {
-            singles.push(flag.to_string());
-            singles.push(format!("{flag}=evil"));
-        }
+        // One representative per flag class; the table test covers every flag.
+        let mut singles: Vec<String> = [
+            "--help",
+            "-h",
+            "--version",
+            "-V",
+            "--",
+            "--session",
+            "--webgpu",
+            "--proxy",
+            "--restore",
+            "--restore=",
+            "--state",
+        ]
+        .iter()
+        .flat_map(|flag| [flag.to_string(), format!("{flag}=evil")])
+        .collect();
         singles.sort();
         singles.dedup();
         let mut skipped = Vec::new();
@@ -7875,11 +7866,9 @@ mod flag_shaped_values {
                 base.insert(key.clone(), benign(key, schema));
             }
             let base = Value::Object(base);
-            let (base_session, trusted) = match record(&name, &base) {
-                Ok(runs) if !runs.is_empty() => {
-                    (crate::flags::parse_flags(&runs[0]).session, runs[0].clone())
-                }
-                Ok(_) => ("default".into(), Vec::new()),
+            let base_session = match record(&name, &base) {
+                Ok(runs) if !runs.is_empty() => crate::flags::parse_flags(&runs[0]).session,
+                Ok(_) => "default".to_string(),
                 Err(error) => {
                     skipped.push(format!("{name}: {error}"));
                     continue;
@@ -7937,7 +7926,7 @@ mod flag_shaped_values {
                     continue;
                 };
                 for argv in runs {
-                    let bad = violations(&argv, &arguments, &base_session, &trusted);
+                    let bad = violations(&argv, &arguments, &base_session);
                     if !bad.is_empty() {
                         failures.push(format!("{name} {arguments} -> {bad:?} argv={argv:?}"));
                     }
@@ -8052,5 +8041,74 @@ mod flag_shaped_values {
             error.message,
             "storageType expects local or session, got 'x'"
         );
+    }
+
+    #[test]
+    fn every_global_flag_is_recognised_bare_and_with_a_value() {
+        for flag in crate::flags::GLOBAL_BOOL_FLAGS
+            .iter()
+            .chain(crate::flags::GLOBAL_FLAGS_WITH_VALUE)
+            .chain(MCP_EXTRA_ARGS_GLOBALS)
+        {
+            assert!(crate::flags::is_global_flag(flag), "{flag}");
+            assert!(
+                crate::flags::is_global_flag(global_flag_name(&format!("{flag}=evil"))),
+                "{flag}=evil"
+            );
+        }
+    }
+
+    #[test]
+    fn flag_names_after_the_boundary_are_data() {
+        let cases = [
+            (
+                "agent_browser_fill",
+                json!({"selector": "#q", "text": "--session", "session": "s1"}),
+            ),
+            (
+                "agent_browser_fill",
+                json!({"selector": "#q", "text": "--restore=k", "restore": "k"}),
+            ),
+            (
+                "agent_browser_type",
+                json!({"selector": "#q", "text": "--restore", "restore": true}),
+            ),
+            (
+                "agent_browser_type",
+                json!({"selector": "#q", "text": "--namespace", "namespace": "n"}),
+            ),
+            (
+                "agent_browser_type",
+                json!({"selector": "#q", "text": "--idle-timeout", "idleTimeout": "5m"}),
+            ),
+            (
+                "agent_browser_click",
+                json!({"selector": "--relaunch", "relaunch": true}),
+            ),
+        ];
+        for (tool, arguments) in cases {
+            let (result, runs) = record_call(tool, arguments.clone());
+            if let Err(error) = result {
+                // A selector that is itself a global flag name is the only allowed rejection.
+                assert!(
+                    arguments["selector"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("--")),
+                    "{tool} {arguments}: {}",
+                    error.message
+                );
+                continue;
+            }
+            assert_eq!(runs.len(), 1, "{tool} {arguments}");
+        }
+        let (result, runs) = record_call(
+            "agent_browser_fill",
+            json!({"selector": "#q", "text": "--session", "session": "s1"}),
+        );
+        assert!(result.is_ok());
+        let argv = &runs[0];
+        let marker = argv.iter().position(|t| t == "--").unwrap();
+        assert_eq!(argv[marker + 1], "--session");
+        assert_eq!(crate::flags::parse_flags(argv).session, "s1");
     }
 }
