@@ -64,6 +64,10 @@
       {
         "from": "Each tool has typed fields such as url, selector, text, key, session, and allowedDomains, so MCP clients show meaningful approval prompts instead of raw command arrays. The common allowedDomains array maps to --allowed-domains and activates the same WebRTC containment and launch-mode restrictions. The common idleTimeout string maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. Each tool also accepts extraArgs for per-command options and display or emulation flags such as --engine; extraArgs cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured allowedDomains is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.",
         "to": "Each tool has typed fields such as url, selector, text, and key, so MCP clients show meaningful approval prompts instead of raw command arrays. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.\n\nEvery tool also accepts the shared arguments session, restore, allowedDomains, extraArgs, timeoutMs, namespace, restoreSave, restoreCheckUrl, restoreCheckText, restoreCheckFn, caCert, useSystemCa, clearCaCert, idleTimeout, and relaunch. A tool's schema lists only the ones that usually matter for it: session on every tool, restore and relaunch on open and tab_new, allowedDomains and extraArgs on open, tab_new, and read, and timeoutMs on tools that navigate, wait, or run scripts. The server's initialize instructions describe all of them. allowedDomains maps to --allowed-domains, activates the same WebRTC containment and launch-mode restrictions, and is rejected when the server already sets allowed domains. idleTimeout maps to --idle-timeout, accepts values such as 30s, 5m, 1h, or raw milliseconds, and accepts 0 to disable idle shutdown. relaunch: true maps to --relaunch. extraArgs carries per-command options and display or emulation flags such as --engine; it cannot set --config or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config."
+      },
+      {
+        "from": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser dblclick <sel> # Double-click",
+        "to": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser click <sel> --button right # Right-click (fires contextmenu) agent-browser click <sel> --modifiers control,shift # Hold keys during the click agent-browser dblclick <sel> # Double-click agent-browser dblclick <sel> --modifiers shift # Double-click with Shift held"
       }
     ],
     "/configuration": [
@@ -174,6 +178,18 @@
       {
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
+      },
+      {
+        "from": "string[]; also disables WebRTC",
+        "to": "string[]; must list at least one domain (an empty array is rejected); also disables WebRTC"
+      },
+      {
+        "from": "Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). Requires",
+        "to": "Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). An empty value is rejected; unset the variable to run unrestricted. Requires"
+      },
+      {
+        "from": "Comma-separated allowed domain patterns (e.g., example.com,*.example.com). Requires",
+        "to": "Comma-separated allowed domain patterns (e.g., example.com,*.example.com). An empty value is rejected; unset the variable to run unrestricted. Requires"
       }
     ],
     "/plugins": [
@@ -369,12 +385,34 @@
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
       }
+    ],
+    "/native-mode": [
+      {
+        "from": "See the main [documentation](/) for current architecture and usage.",
+        "to": "See the main [documentation](/introduction) for current architecture and usage."
+      }
+    ],
+    "/snapshots": [
+      {
+        "from": "Re-snapshot after interactions to observe changes, and always after navigation:",
+        "to": "Using a ref issued for a document that has since been replaced, in the page or in its iframe (for example by a click that loads a new page), fails with \"Ref @eN is from a document that is no longer loaded\". A snapshot taken while the document is being replaced fails with \"The document changed while the snapshot was being captured\"; run it again. Re-snapshot after interactions to observe changes, and always after navigation:"
+      }
+    ],
+    "/streaming": [
+      {
+        "from": "Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.",
+        "to": "Browser clients are checked by the `Origin` and `Host` headers of the upgrade. The `Origin` must have the same host and port as the `Host` the client connected to, and that host must be `localhost`, `127.0.0.1` or `[::1]` (the server itself listens on 127.0.0.1). A page on another port, a `file://` page (browsers send `Origin: null`) and any other origin get a 403 on the upgrade. A custom viewer works when its page and the WebSocket share one authority, for example behind a reverse proxy that forwards the original `Host`; a proxy that rewrites `Host` to the stream address fails the check. Clients that send no `Origin` header, such as a server-side WebSocket client, are not restricted."
+      },
+      {
+        "from": "Browser clients must load from localhost, 127.0.0.1, ::1 or file://. Any other origin gets a 403 on the upgrade and needs a proxy.",
+        "to": "Browser clients are checked by the Origin and Host headers of the upgrade. The Origin must have the same host and port as the Host the client connected to, and that host must be localhost, 127.0.0.1 or [::1] (the server itself listens on 127.0.0.1). A page on another port, a file:// page (browsers send Origin: null) and any other origin get a 403 on the upgrade. A custom viewer works when its page and the WebSocket share one authority, for example behind a reverse proxy that forwards the original Host; a proxy that rewrites Host to the stream address fails the check. Clients that send no Origin header, such as a server-side WebSocket client, are not restricted."
+      }
     ]
   },
   "resources": {
     "/schema.json": {
-      "size": 9813,
-      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
+      "size": 9834,
+      "sha256": "22667a9fa7f532356116f762bedab84c8b1bad997352589a46add84023ef125c"
     }
   }
 }

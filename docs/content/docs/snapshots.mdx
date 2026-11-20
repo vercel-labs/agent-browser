@@ -90,7 +90,7 @@ agent-browser get text @e1        # Get heading text
 
 ## Ref lifecycle
 
-Surviving DOM elements retain their refs across snapshots and same-document updates. Replacing an element or navigating its page or iframe invalidates its refs without recycling IDs. Virtual accessibility nodes have snapshot-local refs. Re-snapshot after interactions to observe changes, and always after navigation:
+Surviving DOM elements retain their refs across snapshots and same-document updates. Replacing an element or navigating its page or iframe invalidates its refs without recycling IDs. Virtual accessibility nodes have snapshot-local refs. Using a ref issued for a document that has since been replaced, in the page or in its iframe (for example by a click that loads a new page), fails with "Ref @eN is from a document that is no longer loaded". A snapshot taken while the document is being replaced fails with "The document changed while the snapshot was being captured"; run it again. Re-snapshot after interactions to observe changes, and always after navigation:
 
 ```bash
 agent-browser click @e4      # Navigates to new page
@@ -99,6 +99,8 @@ agent-browser click @e8      # Use a ref from the new snapshot
 ```
 
 A ref keeps pointing at its DOM node while that node exists. If the node was replaced, agent-browser falls back to the one element with the same role and name, but only when the ref was unique in its snapshot. When duplicates make the match ambiguous, the action fails without acting. Run `snapshot` again and use a fresh ref.
+
+If a snapshot fails because its scope matches nothing, you can still use refs from the last successful snapshot as long as the document has not changed.
 
 ## Annotated screenshots
 
@@ -119,6 +121,8 @@ Headless Chromium screenshots hide native scrollbars for consistent image output
 
 Annotated screenshots also cache refs, so you can interact with elements immediately. This is useful when the text snapshot is insufficient for unlabeled icons, canvas content, or visual layout verification.
 
+If an annotated capture fails, the previous refs stay in place as long as the document has not changed.
+
 ## Iframes
 
 Presentational iframes use the same `Iframe` role for snapshots and stale-ref recovery.
@@ -137,6 +141,8 @@ agent-browser click @e4
 ```
 
 Only one level of iframe nesting is expanded. Cross-origin iframes that block accessibility tree access and empty iframes are silently omitted.
+
+A cross-origin frame can still share the page's renderer process, for example two ports on the same host. That frame has no CDP session of its own, so agent-browser takes the ref's press point from the browser's own box geometry, which stays correct across origin boundaries, frame nesting, and transformed frames. The browser then names the element and frame that would receive that exact point, and the click is refused unless the receiver is the ref itself, an element inside it, a label for it, or the frame the ref embeds.
 
 To scope a snapshot to a single iframe, switch into it first:
 
