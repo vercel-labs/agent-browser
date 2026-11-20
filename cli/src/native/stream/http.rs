@@ -13,6 +13,9 @@ use crate::session_files::SessionFile;
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::dashboard::spawn_session;
 use super::discovery::discover_sessions;
+use super::origin::{
+    is_loopback_authority, normalize_host_authority, origin_matches_host, request_header_value,
+};
 
 #[derive(Embed)]
 #[folder = "../packages/dashboard/out/"]
@@ -20,108 +23,14 @@ struct DashboardAssets;
 
 pub(super) const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n";
 
-/// CORS headers for sensitive endpoints (chat, models). The origin is never
-/// reflected, so these responses are not readable from another origin.
-pub(super) fn cors_headers_for_origin(_origin: Option<&str>) -> String {
-    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n".to_string()
-}
-
-fn request_headers(request: &str) -> &str {
-    request
-        .find("\r\n\r\n")
-        .or_else(|| request.find("\n\n"))
-        .map(|header_end| &request[..header_end])
-        .unwrap_or(request)
-}
-
-fn request_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
-    request_headers(request).lines().find_map(|line| {
-        let (header_name, value) = line.split_once(':')?;
-        if header_name.trim().eq_ignore_ascii_case(name) {
-            Some(value.trim())
-        } else {
-            None
-        }
-    })
-}
-
-fn parse_origin(peeked: &[u8]) -> Option<String> {
-    let header_str = std::str::from_utf8(peeked).ok()?;
-    request_header_value(header_str, "origin").map(ToString::to_string)
-}
-
-fn normalize_origin_authority(origin: &str) -> Option<String> {
-    let url = url::Url::parse(origin).ok()?;
-    // `host_str` already brackets IPv6 literals.
-    let host = url.host_str()?.to_ascii_lowercase();
-    let default_port = (url.scheme() == "http" && url.port() == Some(80))
-        || (url.scheme() == "https" && url.port() == Some(443));
-    Some(match url.port() {
-        Some(port) if !default_port => format!("{host}:{port}"),
-        _ => host,
-    })
-}
-
-fn normalize_host_authority(host: &str) -> String {
-    let host = host.trim().to_ascii_lowercase();
-
-    if let Some(bracket_end) = host.rfind(']') {
-        if bracket_end == host.len() - 1 {
-            return host;
-        }
-
-        if host.as_bytes().get(bracket_end + 1) == Some(&b':') {
-            let port = &host[bracket_end + 2..];
-            if port == "80" || port == "443" {
-                return host[..=bracket_end].to_string();
-            }
-        }
-
-        return host;
-    }
-
-    if let Some((name, port)) = host.rsplit_once(':') {
-        if !name.contains(':') && (port == "80" || port == "443") {
-            return name.to_string();
-        }
-    }
-
-    host
-}
-
-fn authority_host(authority: &str) -> &str {
-    if let Some(stripped) = authority.strip_prefix('[') {
-        if let Some(bracket_end) = stripped.find(']') {
-            return &authority[..=bracket_end + 1];
-        }
-    }
-
-    if let Some((host, _port)) = authority.rsplit_once(':') {
-        if !host.contains(':') {
-            return host;
-        }
-    }
-
-    authority
-}
-
-fn is_loopback_authority(authority: &str) -> bool {
-    matches!(
-        authority_host(authority),
-        "localhost" | "127.0.0.1" | "::1" | "[::1]"
-    )
-}
-
 fn header_authority_matches_host(request: &str, header_name: &str) -> bool {
-    let Some(authority) =
-        request_header_value(request, header_name).and_then(normalize_origin_authority)
-    else {
+    let (Some(value), Some(host)) = (
+        request_header_value(request, header_name),
+        request_header_value(request, "host"),
+    ) else {
         return false;
     };
-    let Some(host) = request_header_value(request, "host").map(normalize_host_authority) else {
-        return false;
-    };
-    authority == host && is_loopback_authority(&authority) && is_loopback_authority(&host)
+    origin_matches_host(value, host) && is_loopback_authority(&normalize_host_authority(host, None))
 }
 
 /// Protects the command relay by requiring same-origin browser metadata.
@@ -135,7 +44,7 @@ fn is_same_origin_command_request(request: &str) -> bool {
 
 fn has_loopback_host(request: &str) -> bool {
     request_header_value(request, "host")
-        .map(normalize_host_authority)
+        .map(|host| normalize_host_authority(host, None))
         .is_some_and(|host| is_loopback_authority(&host))
 }
 
@@ -216,7 +125,6 @@ pub(super) async fn handle_http_request(
     let first_line = request.lines().next().unwrap_or("");
     let method = first_line.split_whitespace().next().unwrap_or("GET");
     let path = first_line.split_whitespace().nth(1).unwrap_or("/");
-    let origin = parse_origin(peeked);
 
     if path.starts_with("/api/") && !is_authorized_api_request(method, &request) {
         write_json_error_response_no_cors(
@@ -303,13 +211,13 @@ pub(super) async fn handle_http_request(
         }
 
         if path == "/api/chat" {
-            handle_chat_request(&mut stream, body_str, origin.as_deref()).await;
+            handle_chat_request(&mut stream, body_str).await;
             return;
         }
     }
 
     if method == "GET" && path == "/api/models" {
-        handle_models_request(&mut stream, origin.as_deref()).await;
+        handle_models_request(&mut stream).await;
         return;
     }
 
@@ -505,6 +413,7 @@ pub(super) fn serve_embedded_file(url_path: &str) -> (&'static str, &'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::stream::origin::normalize_origin_authority;
     use crate::test_utils::EnvGuard;
     use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};

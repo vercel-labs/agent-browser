@@ -122,8 +122,11 @@ pub(super) fn origin_matches_host(origin: &str, host: &str) -> bool {
 
 /// WebSocket upgrade policy for the stream server. A browser upgrade is
 /// allowed only from the stream's own origin on a loopback `Host`, which also
-/// rules out DNS rebinding. Browsers always send `Origin`; clients that omit
-/// it are not browsers and are allowed.
+/// rules out DNS rebinding.
+///
+/// A missing `Origin` is allowed: browsers always send one on a WebSocket
+/// upgrade, so its absence means a non-browser client (a library, the
+/// dashboard proxy, a test) that is not subject to cross-origin attacks.
 pub(crate) fn is_allowed_ws_upgrade(origin: Option<&str>, host: Option<&str>) -> bool {
     let Some(origin) = origin else {
         return true;
@@ -273,11 +276,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn http_gate_refuses_every_foreign_origin_and_allows_same_origin() {
-        // The /api gate keeps its own origin helpers until it is routed through this module.
-        for origin in refused_origins(PORT)
-            .into_iter()
-            .filter(|origin| !origin.contains('@'))
-        {
+        for origin in refused_origins(PORT) {
             let status = http_status(&command_post(&origin)).await;
             assert!(
                 status.starts_with("HTTP/1.1 403"),

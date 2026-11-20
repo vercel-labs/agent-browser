@@ -644,7 +644,6 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
 
     let request = String::from_utf8_lossy(&buf[..n]).to_string();
     let (method, path) = parse_request_method_and_path(&request);
-    let origin = request_header_value(&request, "origin").map(|value| value.to_string());
 
     if path.starts_with("/api/") && !is_same_origin_dashboard_request(&request) {
         write_json_error_response_no_cors(
@@ -664,12 +663,12 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
 
     if method == "POST" && path == "/api/chat" {
         let body_str = read_post_body(&mut stream, &buf, n).await;
-        handle_chat_request(&mut stream, &body_str, origin.as_deref()).await;
+        handle_chat_request(&mut stream, &body_str).await;
         return;
     }
 
     if method == "GET" && path == "/api/models" {
-        handle_models_request(&mut stream, origin.as_deref()).await;
+        handle_models_request(&mut stream).await;
         return;
     }
 
