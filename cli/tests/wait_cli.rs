@@ -54,9 +54,19 @@ impl Fixture {
     }
 
     fn open(&self) {
-        let mut args = vec!["open", "data:text/html,<p>wait</p>", "--json"];
+        self.open_with("data:text/html,<p>wait</p>", &[], None);
+    }
+
+    /// Open `url` with extra flags. `extra_browser_arg` is appended to
+    /// `AGENT_BROWSER_ARGS`, which relaunches a running browser.
+    fn open_with(&self, url: &str, flags: &[&str], extra_browser_arg: Option<&str>) -> Value {
+        let mut args = vec!["open", url, "--json"];
+        args.extend(flags);
         let executable = std::env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok();
-        let browser_args = std::env::var("AGENT_BROWSER_ARGS").ok();
+        let browser_args = match (std::env::var("AGENT_BROWSER_ARGS").ok(), extra_browser_arg) {
+            (Some(args), Some(extra)) => Some(format!("{args},{extra}")),
+            (args, extra) => args.or(extra.map(str::to_string)),
+        };
         for (flag, value) in [
             ("--executable-path", executable.as_deref()),
             ("--args", browser_args.as_deref()),
@@ -66,7 +76,9 @@ impl Fixture {
             }
         }
         let output = self.command(&args).output().unwrap();
-        assert_eq!(json_output(&output)["success"], true, "{output:?}");
+        let response = json_output(&output);
+        assert_eq!(response["success"], true, "{output:?}");
+        response
     }
 
     /// Start a wait that only cancellation can end, and return once it polls.
@@ -261,4 +273,93 @@ fn e2e_sigterm_during_a_wait_stops_the_daemon_and_chrome() {
     let output = wait_output(wait, Duration::from_secs(10));
     let response = json_output(&output);
     assert_eq!(response["success"], false, "{response}");
+}
+
+#[test]
+#[ignore = "requires Chrome"]
+fn e2e_relaunching_the_browser_ends_a_pending_wait() {
+    let fixture = Fixture::new();
+    fixture.open();
+    // A duration wait sends nothing to the browser, so only the relaunch
+    // itself can end it early.
+    let wait = fixture
+        .command(&["wait", WAIT_TIMEOUT_MS, "--json"])
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+
+    let started = Instant::now();
+    let relaunch = fixture.open_with("data:text/html,<p>new</p>", &[], Some("--disable-gpu"));
+    assert_eq!(
+        relaunch["data"]["lifecycle"]["relaunchedBrowser"], true,
+        "{relaunch}"
+    );
+    let output = wait_output(wait, Duration::from_secs(10));
+    let response = json_output(&output);
+    assert_eq!(
+        response["error"], "Wait cancelled: the browser changed while it waited",
+        "{response}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the wait outlived the browser it waited on: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(fixture.run(&["close"])["success"], true);
+}
+
+#[test]
+#[ignore = "requires Chrome"]
+fn e2e_a_download_wait_that_loses_the_claim_waits_without_blocking() {
+    let fixture = Fixture::new();
+    let downloads = fixture.0.path().join("downloads");
+    let downloads_arg = downloads.to_string_lossy().to_string();
+    fixture.open_with(
+        "data:text/html,<a id=dl download=r.bin href='data:application/octet-stream,r'>dl</a>",
+        &["--download-path", &downloads_arg],
+        None,
+    );
+    let start = || {
+        fixture
+            .command(&["wait", "--download", "--timeout", WAIT_TIMEOUT_MS, "--json"])
+            .spawn()
+            .unwrap()
+    };
+    let mut first = start();
+    let mut second = start();
+    // Both waits are registered once a read gets through after them.
+    thread::sleep(Duration::from_millis(500));
+    let click = || {
+        let resp = fixture.run(&["eval", "document.getElementById('dl').click()"]);
+        assert_eq!(resp["success"], true, "{resp}");
+    };
+    click();
+
+    // One wait claims the download; the other must not hold up the session.
+    fixture.until("one wait to finish", || {
+        first.try_wait().unwrap().is_some() || second.try_wait().unwrap().is_some()
+    });
+    let started = Instant::now();
+    let url = fixture.run(&["get", "url"]);
+    assert_eq!(url["success"], true, "{url}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a wait that lost the download claim blocked the session: {:?}",
+        started.elapsed()
+    );
+
+    // The losing wait is still waiting and takes the next download.
+    let (done, pending) = if first.try_wait().unwrap().is_some() {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(
+        json_output(&done.wait_with_output().unwrap())["success"],
+        true
+    );
+    click();
+    let response = json_output(&wait_output(pending, Duration::from_secs(10)));
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(fixture.run(&["close"])["success"], true);
 }

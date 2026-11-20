@@ -3960,7 +3960,9 @@ async fn e2e_deferred_wait_lets_commands_run_and_resumes_with_its_response() {
         )
         .await
         .expect("the poll settled");
-        let resp = super::actions::resume_command(&wait, deferred.resume, polled, &mut state).await;
+        let resp = super::actions::resumed_response(
+            super::actions::resume_command(&wait, deferred.resume, polled, &mut state).await,
+        );
         assert_success(&resp);
         assert_eq!(resp["id"], wait["id"]);
         match wait["action"].as_str().unwrap() {
@@ -3979,7 +3981,9 @@ async fn e2e_deferred_wait_lets_commands_run_and_resumes_with_its_response() {
     let cancel = super::pending_wait::Cancel::new();
     cancel.cancel(super::pending_wait::CLIENT_DISCONNECTED);
     let polled = cancel.run(deferred.poll).await;
-    let resp = super::actions::resume_command(&wait, deferred.resume, polled, &mut state).await;
+    let resp = super::actions::resumed_response(
+        super::actions::resume_command(&wait, deferred.resume, polled, &mut state).await,
+    );
     assert_eq!(resp["success"], false);
     assert_eq!(
         resp["error"],

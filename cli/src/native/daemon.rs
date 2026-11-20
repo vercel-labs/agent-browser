@@ -13,7 +13,7 @@ use tokio::sync::{Notify, RwLock};
 
 use super::actions::{
     auto_save_restore_state, close_all_browser_backends, close_current_browser, execute_command,
-    maybe_autosave_restore_state, resume_command, DaemonState,
+    maybe_autosave_restore_state, resume_command, DaemonState, Resumed,
 };
 use super::cdp::client::CdpClient;
 use super::pending_wait::{self, Cancel, PendingWaits};
@@ -321,7 +321,7 @@ async fn run_socket_server(
             stream_server,
             idle_activity.clone(),
         )));
-    let waits = Arc::new(PendingWaits::new());
+    let waits = state.lock().await.waits.clone();
 
     // Lets handle_connection end the daemon loop after a "close" command,
     // instead of calling process::exit() which skips destructors and can
@@ -488,7 +488,7 @@ async fn run_socket_server(
             stream_server,
             idle_activity.clone(),
         )));
-    let waits = Arc::new(PendingWaits::new());
+    let waits = state.lock().await.waits.clone();
 
     let close = Arc::new(CloseHandshake::default());
     let mut closed_by_command = false;
@@ -782,31 +782,35 @@ async fn run_command(
     idle_activity: &IdleActivity,
     cancel: &Cancel,
 ) -> Value {
-    let deferred = {
-        let mut s = state.lock().await;
-        s.defer_wait = true;
-        let response = execute_command(cmd, &mut s).await;
-        s.defer_wait = false;
-        let deferred = s.take_deferred();
-        // Refresh while the state lock is still held. An idle timer waiting
-        // on this command will observe the updated clock as soon as it
-        // acquires the lock.
-        idle_activity.mark();
-        match deferred {
-            Some(deferred) => deferred,
-            None => return response,
-        }
-    };
-
-    let polled = {
-        let _registration = waits.register(cancel);
-        cancel.run(deferred.poll).await
-    };
-
     let mut s = state.lock().await;
-    let response = resume_command(cmd, deferred.resume, polled, &mut s).await;
+    s.defer_wait = true;
+    let response = execute_command(cmd, &mut s).await;
+    s.defer_wait = false;
+    let deferred = s.take_deferred();
+    // Refresh while the state lock is still held. An idle timer waiting on
+    // this command will observe the updated clock as soon as it acquires
+    // the lock.
     idle_activity.mark();
-    response
+    let Some(mut pending) = deferred else {
+        return response;
+    };
+
+    loop {
+        // Register before releasing the lock, so a command that replaces the
+        // browser right after cannot miss this wait.
+        let registration = waits.register(cancel);
+        drop(s);
+        let polled = cancel.run(pending.poll).await;
+        drop(registration);
+
+        s = state.lock().await;
+        let resumed = resume_command(cmd, pending.resume, polled, &mut s).await;
+        idle_activity.mark();
+        match resumed {
+            Resumed::Done(response) => return response,
+            Resumed::Again(again) => pending = *again,
+        }
+    }
 }
 
 /// Resolves true when the client closed its end of the connection. Resolves

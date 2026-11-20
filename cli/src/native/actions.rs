@@ -689,6 +689,10 @@ pub struct DaemonState {
     /// wait that polled without the state lock can tell on resume whether it
     /// still talks to the browser it started on.
     browser_generation: u64,
+    /// Waits polling without the state lock, shared with the daemon, which
+    /// cancels them on `close` and shutdown. Replacing the browser cancels
+    /// them too.
+    pub waits: Arc<super::pending_wait::PendingWaits>,
     /// The wait the last command left for the daemon to poll unlocked. In a
     /// mutex only so the state stays `Sync`; always reached through `&mut`.
     deferred: std::sync::Mutex<Option<DeferredCommand>>,
@@ -868,6 +872,7 @@ impl DaemonState {
             idle_activity: Arc::new(IdleActivity::new()),
             defer_wait: false,
             browser_generation: 0,
+            waits: Arc::new(super::pending_wait::PendingWaits::new()),
             deferred: std::sync::Mutex::new(None),
             launch_identity: None,
             cdp_headers: None,
@@ -945,9 +950,17 @@ impl DaemonState {
         s
     }
 
-    fn subscribe_to_browser_events(&mut self) {
+    /// The browser was replaced or closed: what the old one reported no
+    /// longer applies, and waits polling it end now rather than at their
+    /// timeout.
+    fn browser_replaced(&mut self) {
         self.browser_generation += 1;
         self.downloads.clear();
+        self.waits.cancel_all(super::pending_wait::BROWSER_CHANGED);
+    }
+
+    fn subscribe_to_browser_events(&mut self) {
+        self.browser_replaced();
         if let Some(ref browser) = self.browser {
             self.event_rx = Some(browser.client.subscribe());
         }
@@ -2659,8 +2672,7 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
     let browser = state.browser.take();
     // Downloads and pending waits belong to the browser being closed.
-    state.browser_generation += 1;
-    state.downloads.clear();
+    state.browser_replaced();
     state.launch_identity = None;
     state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
@@ -3082,14 +3094,23 @@ pub struct ResumeCommand {
     browser_generation: u64,
 }
 
+/// What resuming a deferred wait produced.
+pub enum Resumed {
+    /// The command's response.
+    Done(Value),
+    /// The wait has more to wait for, such as a `wait --download` whose
+    /// download another wait claimed first. Poll it again without the lock.
+    Again(Box<DeferredCommand>),
+}
+
 /// Finish a command whose wait the daemon polled without the state lock,
 /// through the same response pipeline as a command that never deferred.
 pub async fn resume_command(
     cmd: &Value,
-    resume: ResumeCommand,
+    mut resume: ResumeCommand,
     polled: Result<(), String>,
     state: &mut DaemonState,
-) -> Value {
+) -> Resumed {
     Box::pin(async move {
         // Another command may have replaced the browser while the wait
         // polled. The finish step must not act on the new browser with what
@@ -3101,13 +3122,60 @@ pub async fn resume_command(
             _ if browser_changed => Err(super::pending_wait::cancelled_error(
                 super::pending_wait::BROWSER_CHANGED,
             )),
-            Ok(()) => finish_wait(cmd, resume.finish, state).await,
+            Ok(()) => match claim_or_repoll_download(&mut resume.finish, state).await {
+                Ok(Some(poll)) => {
+                    return Resumed::Again(Box::new(DeferredCommand { poll, resume }))
+                }
+                Ok(None) => finish_wait(cmd, resume.finish, state).await,
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         };
         let resp = finish_command(resume.post, result, state).await;
-        finish_flow(cmd, resume.flow_seq, resp, state).await
+        Resumed::Done(finish_flow(cmd, resume.flow_seq, resp, state).await)
     })
     .await
+}
+
+#[cfg(test)]
+pub(crate) fn resumed_response(resumed: Resumed) -> Value {
+    match resumed {
+        Resumed::Done(response) => response,
+        Resumed::Again(_) => panic!("the wait asked to poll again"),
+    }
+}
+
+/// For a deferred `wait --download` whose poll saw a download finish, claim
+/// it from the ledger. When another wait claimed it first, return a poll for
+/// the next finished download so the wait keeps waiting without the lock.
+async fn claim_or_repoll_download(
+    finish: &mut WaitFinish,
+    state: &mut DaemonState,
+) -> Result<Option<WaitPoll>, String> {
+    let WaitFinish::Download {
+        claimed: claimed @ None,
+        deadline,
+    } = finish
+    else {
+        return Ok(None);
+    };
+    let rx = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .client
+        .subscribe();
+    state.drain_cdp_events_background().await?;
+    match state.downloads.claim_finished() {
+        Some(record) => {
+            *claimed = Some(record);
+            Ok(None)
+        }
+        None if tokio::time::Instant::now() >= *deadline => {
+            Err("Timeout waiting for download".to_string())
+        }
+        None => Ok(Some(Box::pin(next_finished_download_event(rx, *deadline)))),
+    }
 }
 
 /// The per-command bookkeeping the response pipeline needs after dispatch.
@@ -16425,7 +16493,9 @@ mod tests {
             .run(deferred.poll)
             .await;
         assert!(polled.is_ok(), "{polled:?}");
-        let resp = super::resume_command(&wait, deferred.resume, polled, &mut state).await;
+        let resp = super::resumed_response(
+            super::resume_command(&wait, deferred.resume, polled, &mut state).await,
+        );
         assert_eq!(resp["success"], false, "{resp}");
         assert_eq!(
             resp["error"],
