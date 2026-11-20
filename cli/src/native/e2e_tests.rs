@@ -9039,6 +9039,45 @@ async fn e2e_snapshot_cursor_scan_keeps_link_wrapping_hidden_control() {
     assert_success(&resp);
 }
 
+/// A link wrapping a `display:contents` control is covered by that control.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_scan_skips_link_wrapping_display_contents_control() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<a style='cursor:pointer;display:block'><span>Wrapper</span>\
+        <button style='display:contents'>Contents button</button></a>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    let refs = snapshot.lines().filter(|l| l.contains("ref=e")).count();
+    assert_eq!(refs, 1, "only the button gets a ref:\n{snapshot}");
+    assert!(
+        snapshot_line_has_ref(snapshot, "Contents button"),
+        "{snapshot}"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// `snapshot -s` lists matches in page order, whatever the AX tree order is.
 #[tokio::test]
 #[ignore]

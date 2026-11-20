@@ -1088,7 +1088,15 @@ async fn scan_cursor_interactive_elements(
         if (el.closest('[hidden], [aria-hidden="true"]')) return false;
         var style = getComputedStyle(el);
         if (style.display === 'none' || style.visibility === 'hidden') return false;
-        var rect = el.getBoundingClientRect();
+        var rect;
+        if (style.display === 'contents') {
+            // Generates no box of its own; its rendered children decide.
+            var range = document.createRange();
+            range.selectNodeContents(el);
+            rect = range.getBoundingClientRect();
+        } else {
+            rect = el.getBoundingClientRect();
+        }
         return rect.width > 0 && rect.height > 0;
     }
 
