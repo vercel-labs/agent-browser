@@ -8279,6 +8279,151 @@ async fn e2e_snapshot_selector_includes_shadow_root() {
     assert_success(&resp);
 }
 
+fn snapshot_line_has_ref(snapshot: &str, label: &str) -> bool {
+    snapshot
+        .lines()
+        .find(|l| l.contains(label))
+        .is_some_and(|l| l.contains("ref=e"))
+}
+
+/// Native tags the AX pass leaves unreferenced (summary, a control with a
+/// non-interactive explicit role) and clickables inside open shadow roots get
+/// refs, and the scan does not touch the DOM.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_scan_covers_native_and_shadow_elements() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<details><summary>Advanced</summary><p>Body</p></details>\
+        <button type='button' role='menu' tabindex='0' style='cursor:pointer'>Menu button</button>\
+        <a href='x' role='menu' tabindex='0' style='cursor:pointer'>Menu link</a>\
+        <button type='button' style='cursor:pointer'>Plain button</button>\
+        <my-el></my-el><script>\
+        customElements.define('my-el', class extends HTMLElement { constructor() { \
+        super(); this.attachShadow({ mode: 'open' }).innerHTML = \
+        '<div onclick=\"void 0\" style=\"cursor:pointer\">Shadow clickable</div>'; } });\
+        window.__mutations = 0;\
+        new MutationObserver(function(r) { window.__mutations += r.length; })\
+        .observe(document, { attributes: true, childList: true, subtree: true });</script>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    for label in [
+        "Advanced",
+        "Menu button",
+        "Menu link",
+        "Plain button",
+        "Shadow clickable",
+    ] {
+        assert!(
+            snapshot_line_has_ref(snapshot, label),
+            "Expected {label:?} to get a ref:\n{snapshot}"
+        );
+    }
+
+    // Natively interactive elements are ref'd by the AX pass and carry no
+    // cursor-interactive hints.
+    let plain = snapshot
+        .lines()
+        .find(|l| l.contains("Plain button"))
+        .unwrap();
+    assert!(!plain.contains("clickable"), "{plain}");
+
+    // Let queued mutation records flush, then check the scan left the DOM alone.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_evaluate(&mut state, "4", "window.__mutations", json!(0)).await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `snapshot -s` scopes to every element the selector matches.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_scopes_to_all_matches() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<div class='item'><button>First</button></div>\
+        <div class='item'><button>Second</button></div>\
+        <div class='item'><button>Third</button></div>\
+        <button>Outside</button>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": ".item" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    for label in ["First", "Second", "Third"] {
+        assert!(
+            snapshot_line_has_ref(snapshot, label),
+            "Expected {label:?} in the scoped snapshot:\n{snapshot}"
+        );
+    }
+    assert!(!snapshot.contains("Outside"), "{snapshot}");
+
+    // A hidden first match does not fail the snapshot.
+    let html = "data:text/html,<div class='drop' style='display:none'>\
+        <button>Closed</button></div><div class='drop'><button>Open</button></div>";
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "snapshot", "selector": ".drop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(snapshot_line_has_ref(snapshot, "Open"), "{snapshot}");
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "snapshot", "selector": ".missing" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{}", resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Test that InlineTextBox nodes are filtered from snapshot output while preserving
 /// the actual text content from parent elements.
 #[tokio::test]
