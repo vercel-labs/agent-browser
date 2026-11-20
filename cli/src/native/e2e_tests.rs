@@ -8465,6 +8465,97 @@ async fn e2e_snapshot_cursor_scan_skips_hrefless_link_wrapping_control() {
     assert_success(&resp);
 }
 
+/// A link without href is only skipped for a wrapped control that is visible.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_scan_keeps_link_wrapping_hidden_control() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let a = "<a style='cursor:pointer;display:block'>";
+    let html = format!(
+        "data:text/html,{a}<span>Display none</span><input type='checkbox' style='display:none'></a>\
+        {a}<span>Visibility hidden</span><input type='checkbox' style='visibility:hidden'></a>\
+        {a}<span>Aria hidden</span><input type='checkbox' aria-hidden='true'></a>\
+        {a}<button>Visible control</button></a>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    for label in ["Display none", "Visibility hidden", "Aria hidden"] {
+        assert!(
+            snapshot_line_has_ref(snapshot, label),
+            "Expected the link around the hidden control {label:?} to get a ref:\n{snapshot}"
+        );
+    }
+    let refs = snapshot.lines().filter(|l| l.contains("ref=e")).count();
+    assert_eq!(refs, 4, "three links and the visible button:\n{snapshot}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `snapshot -s` lists matches in page order, whatever the AX tree order is.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_lists_matches_in_page_order() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<div><div><div class='k'><button>K1</button></div></div></div>\
+        <div class='k'><button>K2</button></div>\
+        <ul><li class='k'><button>K3</button></li></ul>\
+        <div class='k'><button>K4</button></div>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": ".k" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    let order: Vec<&str> = ["K1", "K2", "K3", "K4"]
+        .into_iter()
+        .filter(|l| snapshot.contains(l))
+        .collect();
+    assert_eq!(order.len(), 4, "{snapshot}");
+    let pos = |l: &str| snapshot.find(l).unwrap();
+    assert!(
+        pos("K1") < pos("K2") && pos("K2") < pos("K3") && pos("K3") < pos("K4"),
+        "matches out of page order:\n{snapshot}"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// The `snapshot -s` match list leaves out matches nested in another match.
 #[tokio::test]
 #[ignore]

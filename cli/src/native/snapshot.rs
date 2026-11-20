@@ -375,7 +375,7 @@ pub async fn take_snapshot(
     // belong to the DOM subtrees rooted at every matched element.  We use this
     // set to pick the right AX subtree root(s) later.  Hidden matches have no
     // AX nodes, so they drop out without failing the snapshot.
-    let selector_backend_ids: Option<std::collections::HashSet<i64>> =
+    let selector_backend_ids: Option<HashMap<i64, usize>> =
         if let Some(ref selector) = options.selector {
             let resolved = resolve_selector_backend_ids(client, session_id, selector).await;
             let _ = client
@@ -431,7 +431,10 @@ pub async fn take_snapshot(
         // Mark which tree_nodes belong to the target DOM subtree.
         let in_subtree: Vec<bool> = tree_nodes
             .iter()
-            .map(|n| n.backend_node_id.is_some_and(|bid| id_set.contains(&bid)))
+            .map(|n| {
+                n.backend_node_id
+                    .is_some_and(|bid| id_set.contains_key(&bid))
+            })
             .collect();
 
         // An AX node is a "top-level" match if it is in the subtree but none
@@ -448,9 +451,15 @@ pub async fn take_snapshot(
             }
             false
         };
-        let roots: Vec<usize> = (0..tree_nodes.len())
+        let mut roots: Vec<usize> = (0..tree_nodes.len())
             .filter(|&idx| in_subtree[idx] && !has_ancestor_in_subtree(idx))
             .collect();
+        // Page order of the selector matches, not AX-tree index order.
+        roots.sort_by_key(|&idx| {
+            tree_nodes[idx]
+                .backend_node_id
+                .and_then(|bid| id_set.get(&bid).copied())
+        });
 
         if roots.is_empty() {
             return Err(format!(
@@ -807,13 +816,14 @@ pub(super) fn outermost_matches_expression(selector: &str) -> String {
 
 const SELECTOR_SCOPE_GROUP: &str = "ab-snapshot-scope";
 
-/// backendNodeIds of the DOM subtrees under every element matching `selector`.
-/// A match nested inside an earlier match is skipped: its subtree is covered.
+/// backendNodeIds of the DOM subtrees under every element matching `selector`,
+/// each mapped to the page-order index of its match. A match nested inside an
+/// earlier match is skipped: its subtree is covered.
 async fn resolve_selector_backend_ids(
     client: &CdpClient,
     session_id: &str,
     selector: &str,
-) -> Result<std::collections::HashSet<i64>, String> {
+) -> Result<HashMap<i64, usize>, String> {
     let js = outermost_matches_expression(selector);
     let evaluated: Value = client
         .send_command(
@@ -858,10 +868,14 @@ async fn resolve_selector_backend_ids(
     }))
     .await;
 
-    let mut ids = std::collections::HashSet::new();
-    for describe in describes {
+    let mut ids: HashMap<i64, usize> = HashMap::new();
+    for (match_index, describe) in describes.into_iter().enumerate() {
         if let Some(root_node) = describe?.get("node") {
-            collect_backend_node_ids(root_node, &mut ids);
+            let mut subtree = std::collections::HashSet::new();
+            collect_backend_node_ids(root_node, &mut subtree);
+            for id in subtree {
+                ids.entry(id).or_insert(match_index);
+            }
         }
     }
     if ids.is_empty() {
@@ -1042,6 +1056,22 @@ async fn scan_cursor_interactive_elements(
         '[role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], ' +
         '[role="menuitem"], [role="switch"], [role="textbox"], [role="combobox"]';
 
+    function isVisible(el) {
+        if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+        var style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        var rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function hasVisibleControl(el) {
+        var found = el.querySelectorAll(interactiveDescendant);
+        for (var i = 0; i < found.length; i++) {
+            if (isVisible(found[i])) return true;
+        }
+        return false;
+    }
+
     function scan(root) {
         var all = root.querySelectorAll('*');
         for (var i = 0; i < all.length; i++) {
@@ -1062,7 +1092,7 @@ async fn scan_cursor_interactive_elements(
             if (isNative && !explicitRole && hasInteractiveImplicitRole(el, tagName)) continue;
 
             // A link without href that wraps a control is covered by that control.
-            if (tagName === 'a' && !explicitRole && el.querySelector(interactiveDescendant)) continue;
+            if (tagName === 'a' && !explicitRole && hasVisibleControl(el)) continue;
 
             var computedStyle = getComputedStyle(el);
             var hasCursorPointer = computedStyle.cursor === 'pointer';
