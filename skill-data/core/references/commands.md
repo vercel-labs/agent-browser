@@ -104,7 +104,7 @@ agent-browser select @e1 "a" "b"  # Select multiple options
 agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
-agent-browser upload @e1 file.pdf # Upload files
+agent-browser upload @e1 file.pdf # Upload files (relative to cwd; a missing file errors)
 ```
 
 For `fill` and `type`, put options before the optional `--` marker. Text after the marker is literal, including values that look like flags. For example, `agent-browser fill @e2 -- --json` fills with `--json`, and `agent-browser type @e2 --clear --delay 10 -- --clear` clears the field, then types `--clear`. MCP `agent_browser_fill` and `agent_browser_type` pass typed `text` values literally, so they do not need the marker.
@@ -282,6 +282,8 @@ agent-browser network har stop [output.har]    # Stop and save HAR
 ```
 
 If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
+
+`har stop` fails with `no_har_recording` when no recording is active, for example after the browser restarted.
 
 ## Saved flows
 
