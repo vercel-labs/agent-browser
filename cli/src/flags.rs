@@ -22,6 +22,139 @@ pub(crate) const PROJECT_CONFIG_ALLOWED_KEYS: &[&str] = &[
     "idleTimeout",
 ];
 
+const MISSING_ALLOWED_DOMAINS_VALUE: &str = "--allowed-domains needs a value";
+
+/// Config keys that carry containment. A file that sets one must load whole or
+/// fail; dropping the file would run the session without it.
+const SECURITY_CONFIG_KEYS: &[&str] = &["allowedDomains", "actionPolicy", "confirmActions"];
+
+/// Fails when a config file tries to set a security key and cannot: the value
+/// is unusable, or another field makes the whole file unreadable.
+fn check_security_config(path: &Path) -> Result<(), String> {
+    let result = check_security_config_inner(path);
+    match result {
+        Err(error) if LENIENT_SECURITY_CONFIG.load(std::sync::atomic::Ordering::Relaxed) => {
+            eprintln!("{} {}", color::warning_indicator(), error);
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// Whether the command can run a browser or apply settings. Help, version and
+/// commands that only manage files, sessions or the install never do, so a
+/// bad security setting is reported for them but does not stop them.
+///
+/// It reads the arguments the way dispatch does: after `clean_args` has taken
+/// global flags and their values out, so a value such as the `--help` in
+/// `--user-agent --help` is not a help flag.
+pub fn command_runs_browser(args: &[String]) -> bool {
+    let clean = clean_args(args);
+    if before_end_of_options(&clean)
+        .iter()
+        .any(|a| matches!(a.as_str(), "--help" | "-h" | "--version" | "-V"))
+    {
+        return false;
+    }
+    !matches!(
+        clean.first().map(|s| s.as_str()),
+        None | Some(
+            "close"
+                | "quit"
+                | "exit"
+                | "install"
+                | "upgrade"
+                | "doctor"
+                | "dashboard"
+                | "profiles"
+                | "skills"
+                | "plugin"
+                | "plugins"
+                | "mcp"
+                | "session"
+        )
+    )
+}
+
+/// Set for commands that cannot run a browser: an unusable security config is
+/// reported but does not stop them, so it can be fixed with them still usable.
+static LENIENT_SECURITY_CONFIG: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn allow_unusable_security_config() {
+    LENIENT_SECURITY_CONFIG.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The text with JSON `\uXXXX` escapes decoded, so an escaped key name still
+/// matches.
+fn decode_unicode_escapes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'u') && i + 6 <= bytes.len() {
+            let decoded = std::str::from_utf8(&bytes[i + 2..i + 6])
+                .ok()
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .and_then(char::from_u32);
+            if let Some(c) = decoded {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                i += 6;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+fn check_security_config_inner(path: &Path) -> Result<(), String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot read config {}: {}", path.display(), e)),
+    };
+    let decoded = decode_unicode_escapes(&bytes);
+    let mentions_security = SECURITY_CONFIG_KEYS
+        .iter()
+        .any(|k| decoded.windows(k.len()).any(|w| w == k.as_bytes()));
+    let object = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(serde_json::Value::Object(object)) => object,
+        Ok(_) | Err(_) if mentions_security => {
+            return Err(format!(
+                "invalid config file {}: not a valid JSON object; it mentions security settings, so it is not skipped",
+                path.display()
+            ));
+        }
+        _ => return Ok(()),
+    };
+    if !SECURITY_CONFIG_KEYS.iter().any(|k| object.contains_key(*k)) {
+        return Ok(());
+    }
+    if let Some(value) = object.get("allowedDomains") {
+        let usable = value.as_array().is_some_and(|domains| {
+            let domains: Vec<&str> = domains.iter().filter_map(|d| d.as_str()).collect();
+            crate::native::network::ensure_allowed_domains_not_empty(&domains).is_ok()
+        });
+        if !usable {
+            return Err(format!(
+                "config file {}: allowedDomains must be an array with at least one domain; remove the key to run without containment",
+                path.display()
+            ));
+        }
+    }
+    serde_json::from_slice::<Config>(&bytes)
+        .map(|_| ())
+        .map_err(|e| {
+            format!(
+                "invalid config file {}: {}; it sets security settings, so it is not skipped",
+                path.display(),
+                e
+            )
+        })
+}
+
 /// Split `--args` into launch args. Newlines always separate args; commas separate
 /// only before another `--` flag, so values like `--disable-features=A,B` and
 /// `--window-position=-32000,-32000` stay whole.
@@ -465,12 +598,16 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
         if !path.exists() {
             return Err(format!("config file not found: {}", path_str));
         }
+        check_security_config(&path)?;
         return read_config_file(&path, false)
             .ok_or_else(|| format!("failed to load config from {}", path_str));
     }
 
-    let user_config = std::env::home_dir()
-        .map(|d| d.join(CONFIG_DIR).join(CONFIG_FILENAME))
+    let user_config_path = std::env::home_dir().map(|d| d.join(CONFIG_DIR).join(CONFIG_FILENAME));
+    if let Some(path) = user_config_path.as_deref() {
+        check_security_config(path)?;
+    }
+    let user_config = user_config_path
         .and_then(|p| read_config_file(&p, false))
         .unwrap_or_default();
 
@@ -1260,15 +1397,14 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                 }
             }
             "--allowed-domains" => {
-                if let Some(s) = args.get(i + 1) {
-                    flags.allowed_domains = Some(
-                        s.split(',')
-                            .map(|d| d.trim().to_lowercase())
-                            .filter(|d| !d.is_empty())
-                            .collect(),
-                    );
-                    i += 1;
-                }
+                let s = args.get(i + 1).ok_or(MISSING_ALLOWED_DOMAINS_VALUE)?;
+                flags.allowed_domains = Some(
+                    s.split(',')
+                        .map(|d| d.trim().to_lowercase())
+                        .filter(|d| !d.is_empty())
+                        .collect(),
+                );
+                i += 1;
             }
             "--capture" => {
                 if let Some(s) = args.get(i + 1) {
@@ -1277,16 +1413,14 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                 }
             }
             "--action-policy" => {
-                if let Some(s) = args.get(i + 1) {
-                    flags.action_policy = Some(s.clone());
-                    i += 1;
-                }
+                let s = args.get(i + 1).ok_or("--action-policy needs a value")?;
+                flags.action_policy = Some(s.clone());
+                i += 1;
             }
             "--confirm-actions" => {
-                if let Some(s) = args.get(i + 1) {
-                    flags.confirm_actions = Some(s.clone());
-                    i += 1;
-                }
+                let s = args.get(i + 1).ok_or("--confirm-actions needs a value")?;
+                flags.confirm_actions = Some(s.clone());
+                i += 1;
             }
             "--confirm-interactive" => {
                 let (val, consumed) = parse_bool_arg(args, i);
