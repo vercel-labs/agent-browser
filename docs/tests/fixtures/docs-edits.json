@@ -178,6 +178,18 @@
       {
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
+      },
+      {
+        "from": "string[]; also disables WebRTC",
+        "to": "string[]; must list at least one domain (an empty array is rejected); also disables WebRTC"
+      },
+      {
+        "from": "Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). Requires",
+        "to": "Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). An empty value is rejected; unset the variable to run unrestricted. Requires"
+      },
+      {
+        "from": "Comma-separated allowed domain patterns (e.g., example.com,*.example.com). Requires",
+        "to": "Comma-separated allowed domain patterns (e.g., example.com,*.example.com). An empty value is rejected; unset the variable to run unrestricted. Requires"
       }
     ],
     "/plugins": [
@@ -379,12 +391,28 @@
         "from": "See the main [documentation](/) for current architecture and usage.",
         "to": "See the main [documentation](/introduction) for current architecture and usage."
       }
+    ],
+    "/snapshots": [
+      {
+        "from": "Re-snapshot after interactions to observe changes, and always after navigation:",
+        "to": "Using a ref issued for a document that has since been replaced, in the page or in its iframe (for example by a click that loads a new page), fails with \"Ref @eN is from a document that is no longer loaded\". A snapshot taken while the document is being replaced fails with \"The document changed while the snapshot was being captured\"; run it again. Re-snapshot after interactions to observe changes, and always after navigation:"
+      }
+    ],
+    "/streaming": [
+      {
+        "from": "Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.",
+        "to": "Browser clients are checked by the `Origin` and `Host` headers of the upgrade. The `Origin` must have the same host and port as the `Host` the client connected to, and that host must be `localhost`, `127.0.0.1` or `[::1]` (the server itself listens on 127.0.0.1). A page on another port, a `file://` page (browsers send `Origin: null`) and any other origin get a 403 on the upgrade. A custom viewer works when its page and the WebSocket share one authority, for example behind a reverse proxy that forwards the original `Host`; a proxy that rewrites `Host` to the stream address fails the check. Clients that send no `Origin` header, such as a server-side WebSocket client, are not restricted."
+      },
+      {
+        "from": "Browser clients must load from localhost, 127.0.0.1, ::1 or file://. Any other origin gets a 403 on the upgrade and needs a proxy.",
+        "to": "Browser clients are checked by the Origin and Host headers of the upgrade. The Origin must have the same host and port as the Host the client connected to, and that host must be localhost, 127.0.0.1 or [::1] (the server itself listens on 127.0.0.1). A page on another port, a file:// page (browsers send Origin: null) and any other origin get a 403 on the upgrade. A custom viewer works when its page and the WebSocket share one authority, for example behind a reverse proxy that forwards the original Host; a proxy that rewrites Host to the stream address fails the check. Clients that send no Origin header, such as a server-side WebSocket client, are not restricted."
+      }
     ]
   },
   "resources": {
     "/schema.json": {
-      "size": 9813,
-      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
+      "size": 9834,
+      "sha256": "22667a9fa7f532356116f762bedab84c8b1bad997352589a46add84023ef125c"
     }
   }
 }

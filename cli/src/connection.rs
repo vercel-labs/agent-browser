@@ -647,6 +647,11 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(ad) = opts.allowed_domains {
         cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
+    } else if crate::native::network::check_allowed_domains_env().is_err() {
+        // Only a command that cannot run a browser gets this far with an
+        // unusable list (the others stop earlier); the daemon it starts would
+        // refuse to boot on it.
+        cmd.env_remove("AGENT_BROWSER_ALLOWED_DOMAINS");
     }
     if let Some(ap) = opts.action_policy {
         cmd.env("AGENT_BROWSER_ACTION_POLICY", ap);

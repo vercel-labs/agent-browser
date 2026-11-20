@@ -807,7 +807,8 @@ impl DaemonState {
             last_snapshot: None,
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
-                // An empty list is no filter, as when it is cleared live.
+                // A stored empty list predates rejection and restores as no
+                // filter.
                 security
                     .allowed_domains
                     .as_ref()
@@ -3746,9 +3747,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     };
     attach_tab_gone_data(&mut resp, state);
     attach_flow_stop(&mut resp, state);
-    if action == "upload" {
-        lift_data_warning(&mut resp);
-    }
+    lift_data_warnings(&mut resp, action == "upload");
     if resp.get("success").and_then(Value::as_bool) == Some(false) {
         attach_settings_outcome(&mut resp, &settings_outcome);
     }
@@ -4080,11 +4079,12 @@ fn should_defer_url_until_network_controls(
     };
 
     check_url_allowed_by_filter(filter, url)?;
-    Ok(filter.is_some_and(|filter| !filter.allowed_domains.is_empty()) || handle_auth_requests)
+    Ok(filter.is_some() || handle_auth_requests)
 }
 
 struct AllowedDomainsLaunchSupport<'a> {
-    allowed_domains: &'a [String],
+    /// A domain filter is installed.
+    contained: bool,
     cdp_url: Option<&'a str>,
     cdp_port: Option<u64>,
     auto_connect: bool,
@@ -4098,7 +4098,7 @@ struct AllowedDomainsLaunchSupport<'a> {
 fn ensure_allowed_domains_supported_for_launch(
     support: AllowedDomainsLaunchSupport<'_>,
 ) -> Result<(), String> {
-    if support.allowed_domains.is_empty() {
+    if !support.contained {
         return Ok(());
     }
 
@@ -4181,16 +4181,23 @@ async fn ensure_state_replay_supported_by_active_domain_filter(
     source: &str,
 ) -> Result<(), String> {
     let filter = state.domain_filter.read().await;
-    if filter
-        .as_ref()
-        .is_some_and(|filter| !filter.allowed_domains.is_empty())
-    {
+    if filter.is_some() {
         return Err(format!(
             "--allowed-domains is not supported with {} because loading state replays saved origins",
             source
         ));
     }
     Ok(())
+}
+
+/// The filter the stored allowlist describes; no list, or a legacy empty one,
+/// is no filter.
+fn filter_from_settings(settings: &Running) -> Option<DomainFilter> {
+    settings
+        .security()
+        .allowed_domains
+        .filter(|domains| !domains.is_empty())
+        .map(|domains| DomainFilter::new(&domains.join(",")))
 }
 
 async fn restore_domain_filter(state: &mut DaemonState, filter: &Option<DomainFilter>) {
@@ -4558,14 +4565,22 @@ fn may_replace_wedged_tab(state: &DaemonState) -> bool {
     })
 }
 
-/// Moves a `warning` a handler put in its result data to the response level.
-fn lift_data_warning(resp: &mut Value) {
-    let warning = resp
-        .get_mut("data")
-        .and_then(Value::as_object_mut)
-        .and_then(|data| data.remove("warning"));
-    if let Some(Value::String(w)) = warning {
-        append_warning(resp, &w);
+/// Moves warnings a handler put in its result data to the response level:
+/// `postActionWarning` for every action, `warning` when `include_warning`.
+fn lift_data_warnings(resp: &mut Value, include_warning: bool) {
+    let keys: &[&str] = if include_warning {
+        &["postActionWarning", "warning"]
+    } else {
+        &["postActionWarning"]
+    };
+    for key in keys {
+        let lifted = resp
+            .get_mut("data")
+            .and_then(Value::as_object_mut)
+            .and_then(|data| data.remove(*key));
+        if let Some(Value::String(w)) = lifted {
+            append_warning(resp, &w);
+        }
     }
 }
 
@@ -4858,8 +4873,8 @@ async fn auto_launch_inner(
     )?;
     let enable_features = state.settings.enable_features();
     let init_script_paths = state.settings.init_scripts();
-    let allowed_domains = current_allowed_domains(state).await;
-    options.restrict_webrtc = !allowed_domains.is_empty();
+    let contained = state.domain_filter.read().await.is_some();
+    options.restrict_webrtc = contained;
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
     let restore_key = state.session_name.clone();
@@ -4895,7 +4910,7 @@ async fn auto_launch_inner(
 
     if let Some(cdp) = cdp {
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            allowed_domains: &allowed_domains,
+            contained,
             cdp_url: Some(cdp.as_str()),
             cdp_port: None,
             auto_connect: false,
@@ -4926,7 +4941,7 @@ async fn auto_launch_inner(
 
     if auto_connect {
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            allowed_domains: &allowed_domains,
+            contained,
             cdp_url: None,
             cdp_port: None,
             auto_connect: true,
@@ -4962,7 +4977,7 @@ async fn auto_launch_inner(
     if let Some(provider) = provider {
         let p = provider.to_lowercase();
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            allowed_domains: &allowed_domains,
+            contained,
             cdp_url: None,
             cdp_port: None,
             auto_connect: false,
@@ -5002,7 +5017,7 @@ async fn auto_launch_inner(
             let conn =
                 providers::connect_provider_with_plugins(&p, &plugins, &state.settings).await?;
             let provider_metadata = conn.metadata.clone();
-            if conn.direct_page && !allowed_domains.is_empty() {
+            if conn.direct_page && contained {
                 if let Some(ref ps) = conn.session {
                     let _ = providers::close_provider_session_with_plugins(ps, &plugins).await;
                 }
@@ -5049,7 +5064,7 @@ async fn auto_launch_inner(
     }
 
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        allowed_domains: &allowed_domains,
+        contained,
         cdp_url: None,
         cdp_port: None,
         auto_connect: false,
@@ -5063,7 +5078,7 @@ async fn auto_launch_inner(
     apply_launch_mutator_plugins(state, &mut options, plugins).await?;
     validate_ca_cert_launch_mode(&options, engine.as_deref(), false)?;
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        allowed_domains: &allowed_domains,
+        contained,
         cdp_url: None,
         cdp_port: None,
         auto_connect: false,
@@ -5107,20 +5122,24 @@ fn string_array_from_command(cmd: &Value, key: &str) -> Option<Vec<String>> {
     })
 }
 
-fn allowed_domains_from_launch_command(cmd: &Value) -> Option<Vec<String>> {
-    let value = cmd.get("allowedDomains")?;
+/// `Ok(None)` means the key is absent. A key that parses to zero domains is
+/// rejected, since an empty list would otherwise disable containment.
+fn allowed_domains_from_launch_command(cmd: &Value) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = cmd.get("allowedDomains") else {
+        return Ok(None);
+    };
     let raw_domains: Vec<&str> = match value {
         Value::String(domains) => domains.split(',').collect(),
         Value::Array(domains) => domains.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
     };
-    Some(
-        raw_domains
-            .into_iter()
-            .map(|domain| domain.trim().to_lowercase())
-            .filter(|domain| !domain.is_empty())
-            .collect(),
-    )
+    let domains: Vec<String> = raw_domains
+        .into_iter()
+        .map(|domain| domain.trim().to_lowercase())
+        .filter(|domain| !domain.is_empty())
+        .collect();
+    network::ensure_allowed_domains_not_empty(&domains)?;
+    Ok(Some(domains))
 }
 
 async fn apply_launch_init_scripts(
@@ -5616,6 +5635,17 @@ fn check_capture_setting(patch: &Patch) -> Result<(), String> {
     }
 }
 
+/// Rejects an allowlist that lists no domain, before it is stored or applied.
+fn check_allowed_domains_setting(patch: &Patch) -> Result<(), String> {
+    match patch.value(Key::AllowedDomains) {
+        Some(Value::Array(domains)) => {
+            let domains: Vec<&str> = domains.iter().filter_map(Value::as_str).collect();
+            network::ensure_allowed_domains_not_empty(&domains)
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn handle_launch_for_target(
     cmd: &Value,
     state: &mut DaemonState,
@@ -5631,7 +5661,6 @@ async fn handle_launch_for_target(
     {
         return handle_launch_inner(cmd, state).await;
     }
-    let filter = state.domain_filter.read().await.clone();
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
@@ -5640,7 +5669,10 @@ async fn handle_launch_for_target(
         Err(_) => Err(browser_use_setup_timeout(state).await),
     };
     if result.is_err() {
-        restore_domain_filter(state, &filter).await;
+        // The stored security settings decide what survives a failed launch, so
+        // the live filter follows them.
+        let stored = filter_from_settings(&state.settings);
+        restore_domain_filter(state, &stored).await;
         *state.proxy_credentials.write().await = credentials;
         state.plugin_init_scripts = scripts;
         state.session_setup = setup;
@@ -5652,7 +5684,7 @@ async fn handle_launch_for_target(
 /// the launch protocol directly (rather than through the CLI) sets session
 /// settings this way; the CLI sends the same settings as a patch on every
 /// command.
-fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
+fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Result<Patch, String> {
     let mut entries: Vec<(Key, Requested)> = Vec::new();
     let mut set = |key: Key, value: Value| entries.push((key, Requested::Set(value)));
     let string = |field: &str| cmd.get(field).and_then(Value::as_str).map(Value::from);
@@ -5756,17 +5788,10 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
             _ => {}
         }
     }
-    if let Some(domains) = allowed_domains_from_launch_command(cmd) {
-        entries.push((
-            Key::AllowedDomains,
-            if domains.is_empty() {
-                Requested::Default
-            } else {
-                Requested::Set(Value::from(domains))
-            },
-        ));
+    if let Some(domains) = allowed_domains_from_launch_command(cmd)? {
+        entries.push((Key::AllowedDomains, Requested::Set(Value::from(domains))));
     }
-    Patch::from_entries(entries)
+    Ok(Patch::from_entries(entries))
 }
 
 /// What applying a settings patch did to the session.
@@ -5946,6 +5971,7 @@ async fn apply_settings_patch(
     patch: &Patch,
     launches: bool,
 ) -> Result<SettingsOutcome, String> {
+    check_allowed_domains_setting(patch)?;
     let mut patch = patch.clone();
     if launches {
         adjust_ca_patch(state, &mut patch)?;
@@ -6090,7 +6116,6 @@ async fn apply_settings_patch(
         *state.domain_filter.write().await = next
             .security()
             .allowed_domains
-            .filter(|domains| !domains.is_empty())
             .map(|domains| DomainFilter::new(&domains.join(",")));
     }
     if let Some(ca_cert) = ca_cert {
@@ -6198,7 +6223,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .and_then(Value::as_str)
         .map(String::from)
         .or_else(|| state.settings.engine());
-    let patch = launch_envelope_patch(cmd, engine.as_deref());
+    let patch = launch_envelope_patch(cmd, engine.as_deref())?;
     check_capture_setting(&patch)?;
     let had_browser_before_launch = has_active_browser_session(state);
 
@@ -6490,9 +6515,7 @@ async fn handle_read(cmd: &Value, state: &DaemonState) -> Result<Value, String> 
         let df = state.domain_filter.read().await;
         df.as_ref().map(|filter| filter.allowed_domains.clone())
     } {
-        if !allowed_domains.is_empty() {
-            options.enforced_allowed_domains.push(allowed_domains);
-        }
+        options.enforced_allowed_domains.push(allowed_domains);
     }
 
     if let Some(url) = cmd.get("url").and_then(|v| v.as_str()) {
@@ -7555,6 +7578,15 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "selected": values }))
 }
 
+/// Response of a check or uncheck; an unverified toggle carries a warning.
+fn toggle_response(key: &str, selector: &str, verified: bool) -> Value {
+    let mut data = json!({ key: selector });
+    if !verified {
+        data["postActionWarning"] = json!(super::element::STATE_NOT_VERIFIED);
+    }
+    data
+}
+
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -7563,21 +7595,21 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    if let Some(position) = interaction::check(
+    let outcome = interaction::check(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &state.iframe_sessions,
     )
-    .await?
-    {
+    .await?;
+    if let Some(position) = outcome.position {
         (state.mouse_state.x, state.mouse_state.y) = position;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(json!({ "checked": selector }))
+    Ok(toggle_response("checked", selector, outcome.verified))
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7588,21 +7620,21 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    if let Some(position) = interaction::uncheck(
+    let outcome = interaction::uncheck(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &state.iframe_sessions,
     )
-    .await?
-    {
+    .await?;
+    if let Some(position) = outcome.position {
         (state.mouse_state.x, state.mouse_state.y) = position;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(json!({ "unchecked": selector }))
+    Ok(toggle_response("unchecked", selector, outcome.verified))
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -11167,6 +11199,14 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                 .ref_map
                 .get(&ref_id)
                 .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+            super::element::ensure_ref_document_current(
+                &mgr.client,
+                &session_id,
+                &ref_id,
+                entry,
+                &state.iframe_sessions,
+            )
+            .await?;
             let backend_node_id = entry
                 .backend_node_id
                 .ok_or_else(|| format!("Ref {} has no backend node id", ref_id))?;
@@ -11370,21 +11410,21 @@ async fn execute_subaction(
             Ok(json!({ "filled": selector }))
         }
         "check" => {
-            if let Some(position) = interaction::check(
+            let outcome = interaction::check(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
                 selector,
                 &state.iframe_sessions,
             )
-            .await?
-            {
+            .await?;
+            if let Some(position) = outcome.position {
                 (state.mouse_state.x, state.mouse_state.y) = position;
                 if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
                     cursor.record(position.0, position.1, state.mouse_state.buttons);
                 }
             }
-            Ok(json!({ "checked": selector }))
+            Ok(toggle_response("checked", selector, outcome.verified))
         }
         "hover" => {
             let position = interaction::hover(
@@ -11642,6 +11682,15 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &state.iframe_sessions,
     );
 
+    // Read before the tree: a navigation in between is caught when the ref resolves.
+    let document = super::element::current_document(
+        &mgr.client,
+        &session_id,
+        state.active_frame_id.as_deref(),
+        &state.iframe_sessions,
+    )
+    .await;
+
     let ax_tree: GetFullAXTreeResult = mgr
         .client
         .send_command_typed_raw(
@@ -11663,6 +11712,9 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
         state.active_frame_id.as_deref(),
     );
+    if let Some((session, loader)) = document {
+        state.ref_map.bind_document(&temp_ref, &session, &loader);
+    }
     state.ref_map.set_next_ref_num(ref_num + 1);
 
     let result = execute_subaction(cmd, state, &format!("@{}", temp_ref)).await;
@@ -19156,6 +19208,28 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[tokio::test]
+    async fn test_a_failed_provider_launch_leaves_the_filter_matching_the_stored_list() {
+        let guard = EnvGuard::new(&["BROWSER_USE_API_KEY", "AGENT_BROWSER_PROVIDER"]);
+        guard.remove("BROWSER_USE_API_KEY");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+        let mut state = DaemonState::new();
+        assert!(state.domain_filter.read().await.is_none());
+
+        let result = handle_launch(
+            &json!({"provider":"browser-use", "allowedDomains":["localhost"]}),
+            &mut state,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            state.settings.security().allowed_domains,
+            Some(vec!["localhost".to_string()])
+        );
+        assert_eq!(current_allowed_domains(&state).await, vec!["localhost"]);
+    }
+
+    #[tokio::test]
     async fn test_browser_use_failed_launches_restore_configuration() {
         let guard = EnvGuard::new(&[
             "BROWSER_USE_API_KEY",
@@ -19171,13 +19245,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             let mut state = DaemonState::new();
             state.settings.set(Key::Provider, json!("browser-use"));
             let credentials = Some(("old-user".to_string(), "old-password".to_string()));
+            state
+                .settings
+                .set(Key::AllowedDomains, json!(["example.com"]));
             *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
             *state.proxy_credentials.write().await = credentials.clone();
             state.plugin_init_scripts = vec!["previous-script".to_string()];
             state.session_setup.user_agent = Some("previous-agent".to_string());
             let result = if explicit {
                 handle_launch(
-                    &json!({"provider":"browser-use", "allowedDomains":[]}),
+                    &json!({"provider":"browser-use", "allowedDomains":["other.example"]}),
                     &mut state,
                 )
                 .await
@@ -19185,7 +19262,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 auto_launch(&mut state, Vec::new()).await
             };
             assert!(result.is_err());
-            assert_eq!(current_allowed_domains(&state).await, vec!["example.com"]);
+            let expected = if explicit {
+                vec!["other.example".to_string()]
+            } else {
+                vec!["example.com".to_string()]
+            };
+            assert_eq!(
+                state.settings.security().allowed_domains,
+                Some(expected.clone())
+            );
+            assert_eq!(current_allowed_domains(&state).await, expected);
             assert_eq!(*state.proxy_credentials.read().await, credentials);
             assert_eq!(state.plugin_init_scripts, vec!["previous-script"]);
             assert_eq!(
@@ -19234,6 +19320,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             rt.block_on(async {
                 let mut state = DaemonState::new();
                 state.session_setup.user_agent = Some("previous-agent".to_string());
+                state
+                    .settings
+                    .set(Key::AllowedDomains, json!(["example.com"]));
                 *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
                 let deadline = std::time::Duration::from_millis(200);
                 if closing {
@@ -19261,7 +19350,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                     assert!(!state.screencasting && !state.network_auto_attach_installed);
                 } else {
                     let result = handle_launch_with_deadline(
-                        &json!({"provider":"browser-use", "allowedDomains":[]}),
+                        &json!({"provider":"browser-use", "allowedDomains":["other.example"]}),
                         &mut state,
                         deadline,
                     )
@@ -19272,7 +19361,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                     state.session_setup.user_agent.as_deref(),
                     Some("previous-agent")
                 );
-                assert_eq!(current_allowed_domains(&state).await, vec!["example.com"]);
+                let expected = if closing {
+                    vec!["example.com".to_string()]
+                } else {
+                    vec!["other.example".to_string()]
+                };
+                assert_eq!(
+                    state.settings.security().allowed_domains,
+                    Some(expected.clone())
+                );
+                assert_eq!(current_allowed_domains(&state).await, expected);
             });
             server.join().unwrap();
         }
@@ -20205,12 +20303,43 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
-    fn test_separator_only_allowed_domains_allow_every_host() {
+    fn test_separator_only_allowed_domains_env_stops_the_daemon_start() {
+        for raw in [" , ", "", "  "] {
+            let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+            guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", raw);
+            let err = network::check_allowed_domains_env().unwrap_err();
+            assert!(
+                err.contains(network::EMPTY_ALLOWED_DOMAINS_ERROR),
+                "{raw:?}"
+            );
+        }
         let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
-        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", " , ");
-        let state = DaemonState::new();
-        // No filter at all, so direct-page providers are not refused either.
-        assert!(state.domain_filter.try_read().unwrap().is_none());
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        assert!(network::check_allowed_domains_env().is_ok());
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
+        assert!(network::check_allowed_domains_env().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_an_empty_filter_denies_read_and_counts_as_contained() {
+        let (_env, state) = isolated_state();
+        *state.domain_filter.write().await = Some(DomainFilter::new(""));
+        let err = handle_read(
+            &json!({"action":"read","url":"http://127.0.0.1:1/"}),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("not in the allowed domains list") || err.contains("empty"),
+            "{err}"
+        );
+        assert!(should_defer_url_until_network_controls(
+            state.domain_filter.read().await.as_ref(),
+            false,
+            Some("http://example.com/")
+        )
+        .is_err());
     }
 
     #[test]
@@ -20310,17 +20439,25 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[test]
     fn test_allowed_domains_from_launch_command_accepts_cli_array_and_legacy_string() {
+        let expected = Ok(Some(vec![
+            "example.com".to_string(),
+            "*.example.org".to_string(),
+        ]));
         assert_eq!(
             allowed_domains_from_launch_command(&json!({
                 "allowedDomains": ["Example.COM", " *.example.org "]
             })),
-            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+            expected
         );
         assert_eq!(
             allowed_domains_from_launch_command(&json!({
                 "allowedDomains": "Example.COM, *.example.org"
             })),
-            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+            expected
+        );
+        assert_eq!(
+            allowed_domains_from_launch_command(&json!({ "action": "launch" })),
+            Ok(None)
         );
     }
 
@@ -22169,6 +22306,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         .unwrap_err();
         assert!(err.contains("Supported: flow"), "{err}");
         assert!(launch_envelope_patch(&json!({ "capture": ["flow"] }), None)
+            .unwrap()
             .value(Key::Capture)
             .is_some());
 
@@ -23239,7 +23377,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "ignoreHTTPSErrors": true,
             "allowedDomains": ["example.com"],
         });
-        let patch = launch_envelope_patch(&cmd, None);
+        let patch = launch_envelope_patch(&cmd, None).unwrap();
 
         assert_eq!(patch.value(Key::Headed), Some(&json!(true)));
         assert_eq!(patch.value(Key::Profile), Some(&json!("/tmp/p")));
@@ -23263,11 +23401,14 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     #[test]
     fn test_a_plain_launch_names_no_settings() {
         // Bare `open` keeps the profile and args the session runs with (#2287).
-        assert!(launch_envelope_patch(&json!({ "action": "launch" }), None).is_noop());
+        assert!(launch_envelope_patch(&json!({ "action": "launch" }), None)
+            .unwrap()
+            .is_noop());
         assert!(launch_envelope_patch(
             &json!({ "action": "launch", "plugins": [], "id": "1" }),
             Some("obscura")
         )
+        .unwrap()
         .is_noop());
     }
 
@@ -23275,21 +23416,29 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     fn test_launch_envelope_clears_the_obscura_bypass_only_for_obscura() {
         let cmd = json!({ "action": "launch", "proxyBypass": null });
         assert_eq!(
-            launch_envelope_patch(&cmd, Some("obscura")).get(Key::ProxyBypass),
+            launch_envelope_patch(&cmd, Some("obscura"))
+                .unwrap()
+                .get(Key::ProxyBypass),
             Some(&Requested::Default)
         );
-        assert!(launch_envelope_patch(&cmd, Some("chrome")).is_noop());
+        assert!(launch_envelope_patch(&cmd, Some("chrome"))
+            .unwrap()
+            .is_noop());
         assert_eq!(
             launch_envelope_patch(&json!({ "proxyBypass": "localhost" }), Some("obscura"))
+                .unwrap()
                 .value(Key::ProxyBypass),
             Some(&json!("localhost"))
         );
     }
 
     #[test]
-    fn test_empty_allowed_domains_in_a_launch_clear_the_list() {
-        let patch = launch_envelope_patch(&json!({ "allowedDomains": [] }), None);
-        assert_eq!(patch.get(Key::AllowedDomains), Some(&Requested::Default));
+    fn test_empty_allowed_domains_in_a_launch_are_rejected() {
+        for value in [json!([]), json!(["", "  "]), json!(""), json!(",")] {
+            let err = launch_envelope_patch(&json!({ "allowedDomains": value }), None)
+                .expect_err("degenerate allowlist must be rejected");
+            assert_eq!(err, network::EMPTY_ALLOWED_DOMAINS_ERROR);
+        }
     }
 
     #[tokio::test]
@@ -24218,7 +24367,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         ] {
             assert_eq!(AttachedTarget::named_by(&cmd), None, "{cmd}");
             assert_eq!(AttachedTarget::from_launch_command(&cmd), None, "{cmd}");
-            assert!(launch_envelope_patch(&cmd, None).is_noop(), "{cmd}");
+            assert!(
+                launch_envelope_patch(&cmd, None).unwrap().is_noop(),
+                "{cmd}"
+            );
         }
         let mut settings = Running::defaults();
         settings.set(Key::Cdp, json!(" "));
@@ -24721,7 +24873,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
-    async fn test_an_empty_list_clears_the_filter_and_the_clear_persists() {
+    async fn test_an_empty_list_is_rejected_and_the_filter_is_kept() {
         let (_env, _) = isolated_state();
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
@@ -24734,15 +24886,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         .await
         .unwrap();
 
-        apply_settings_patch(&mut first, &patch_with(vec![domains(&[])]), true)
+        let err = apply_settings_patch(&mut first, &patch_with(vec![domains(&[])]), true)
             .await
-            .unwrap();
-        assert!(first.domain_filter.read().await.is_none());
+            .err()
+            .expect("empty allowlist must be rejected");
+        assert_eq!(err, network::EMPTY_ALLOWED_DOMAINS_ERROR);
+        assert_eq!(current_allowed_domains(&first).await, vec!["example.com"]);
         drop(first);
 
         let second = boot_state(store, "s");
-        assert!(current_allowed_domains(&second).await.is_empty());
-        assert_eq!(second.settings.security().allowed_domains, Some(Vec::new()));
+        assert_eq!(current_allowed_domains(&second).await, vec!["example.com"]);
     }
 
     #[tokio::test]
