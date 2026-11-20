@@ -2350,7 +2350,7 @@ agent-browser type - Type text into an element
 Usage: agent-browser type <selector> [--clear] [--delay <ms>] [--] <text>
 
 Types text into the specified element character by character.
-Disabled and readonly fields, and elements that can never take text (select, checkbox,
+Disabled fields, and elements that can never take text (select, checkbox,
 radio, file, and the color, range and date-type inputs) are
 refused before any text is typed (disabled, read_only, not_editable); use fill for date,
 time, color and range inputs. To send text to a focused element use keyboard type, or

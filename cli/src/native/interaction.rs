@@ -187,7 +187,9 @@ const PRECHECK_JS: &str = r#"function(mode) {
         if (hint !== null) {
             return fail('not_editable', 'Element ' + describe(el) + ' cannot be ' + verb + hint);
         }
-        if (el.readOnly) {
+        // `type` does not clear, so a readonly field is left to the page (a
+        // trigger may forward focus); `fill` would empty it.
+        if (mode === 'fill' && el.readOnly) {
             return fail('read_only', 'Element ' + describe(el) + ' is readonly and cannot be ' + verb);
         }
         return { ok: true };

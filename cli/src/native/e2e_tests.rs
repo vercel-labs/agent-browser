@@ -2632,6 +2632,7 @@ async fn e2e_form_actions_refuse_before_acting() {
     let html = concat!(
         "data:text/html,<html><body><form id='frm'><div id='grp'><input id='prev' value='kept'></div></form>",
         "<input id='ro' value='READONLY' readonly><input id='dis' value='DISABLED' disabled>",
+        "<input id='trigger' readonly><input id='real'>",
         "<select id='s'><option value='one'>one</option><option value='two'>two</option></select>",
         "<select id='sdis' disabled><option value='one'>one</option></select>",
         "<input id='cb' type='checkbox'><input id='radio' type='radio' checked>",
@@ -2671,6 +2672,7 @@ async fn e2e_form_actions_refuse_before_acting() {
         "const flip = (el) => el.setAttribute('aria-checked', el.getAttribute('aria-checked') === 'true' ? 'false' : 'true');",
         "sw.addEventListener('click', () => { clicks.sw++; flip(sw); });",
         "slow.addEventListener('click', () => { clicks.slow++; setTimeout(() => flip(slow), 150); });",
+        "trigger.addEventListener('focus', () => real.focus());",
         "customElements.define('x-input', class extends HTMLElement { constructor() { super();",
         " this.attachShadow({ mode: 'open', delegatesFocus: true }).innerHTML = '<input id=inner>'; } });",
         "customElements.define('x-check', class extends HTMLElement { constructor() { super();",
@@ -2711,7 +2713,6 @@ async fn e2e_form_actions_refuse_before_acting() {
         ("fill", "#date", json!("01/15/2024"), "malformed_value"),
         ("fill", "#range", json!("150"), "malformed_value"),
         ("fill", "#color", json!("red"), "malformed_value"),
-        ("type", "#ro", json!("x"), "read_only"),
         ("type", "#dis", json!("x"), "disabled"),
         ("type", "#s", json!("x"), "not_editable"),
         ("type", "#cb", json!("x"), "not_editable"),
@@ -2830,6 +2831,14 @@ async fn e2e_form_actions_refuse_before_acting() {
         ("fill", "#plain", json!("x"), "'x'", None),
         ("type", "#cv", json!("x"), "'x'", None),
         ("type", "#ebtn", json!("\t"), "'x'", None),
+        (
+            "type",
+            "#trigger",
+            json!("docs"),
+            "real.value",
+            Some(json!("docs")),
+        ),
+        ("type", "#ro", json!("x"), "'x'", None),
         (
             "select",
             "#dup",
