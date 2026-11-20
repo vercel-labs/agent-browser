@@ -11806,6 +11806,60 @@ async fn e2e_diff_snapshot_without_baseline_uses_last_snapshot() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_bare_diff_snapshot_is_kept_per_tab() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Tab A</h1>" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await);
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "tab_new", "url": "data:text/html,<h1>Tab B</h1>" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "5", "action": "snapshot" }), &mut state).await);
+    assert_eq!(state.tracked_snapshot_tabs(), 2);
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "tab_switch", "tabId": "t1" }),
+            &mut state,
+        )
+        .await,
+    );
+    let resp = execute_command(&json!({ "id": "7", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+
+    // Closing a tab drops its baseline at the next snapshot.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "8", "action": "tab_close", "tabId": "t2" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "9", "action": "snapshot" }), &mut state).await);
+    assert_eq!(state.tracked_snapshot_tabs(), 1);
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_diff_url_reports_snapshot_and_screenshot_diffs() {
     let mut state = DaemonState::new();
 

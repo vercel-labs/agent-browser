@@ -593,8 +593,9 @@ pub struct DaemonState {
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
     snapshot_revisions: HashMap<String, SnapshotRevision>,
-    /// The last snapshot taken, the implicit baseline of `diff snapshot`.
-    last_snapshot: Option<LastSnapshot>,
+    /// The last snapshot of each open tab, keyed by page session id; the implicit
+    /// baseline of `diff snapshot`.
+    last_snapshots: HashMap<String, LastSnapshot>,
     screenshot_observations: HashMap<(String, String), ScreenshotObservation>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
@@ -757,6 +758,21 @@ fn default_idle_shutdown_is_blocked(
 }
 
 impl DaemonState {
+    #[cfg(test)]
+    pub(super) fn tracked_snapshot_tabs(&self) -> usize {
+        self.last_snapshots.len()
+    }
+
+    /// Keeps `snapshot` as its tab's baseline and drops those of closed tabs.
+    fn remember_snapshot(&mut self, snapshot: LastSnapshot) {
+        if let Some(browser) = self.browser.as_ref() {
+            self.last_snapshots
+                .retain(|session, _| browser.has_page_session(session));
+        }
+        self.last_snapshots
+            .insert(snapshot.session_id.clone(), snapshot);
+    }
+
     /// The client received the `page_wedged` response to request `id`, so it
     /// is not replayed. A newer report from another request stays pending.
     pub fn wedge_report_delivered(&mut self, id: &str) {
@@ -804,7 +820,7 @@ impl DaemonState {
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
-            last_snapshot: None,
+            last_snapshots: HashMap::new(),
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
                 // A stored empty list predates rejection and restores as no
@@ -4805,7 +4821,7 @@ async fn auto_launch_with(
     strict_state: bool,
 ) -> Result<Value, String> {
     let resumed = state.attached_target.is_some() && cmd.is_null();
-    let result = auto_launch_with_settings(state, plugins, cmd, strict_state).await;
+    let result = Box::pin(auto_launch_with_settings(state, plugins, cmd, strict_state)).await;
     if result.is_ok() && !resumed {
         state.attached_target = attached_target_for(&state.settings.connection());
     }
@@ -6809,14 +6825,13 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     )
     .await?;
     state.ref_map = refs;
-    state.last_snapshot = Some(LastSnapshot {
+    let url = mgr.get_url().await.unwrap_or_default();
+    state.remember_snapshot(LastSnapshot {
         session_id: session_id.clone(),
         frame_id: state.active_frame_id.clone(),
         scope: SnapshotScope::of(&options),
         text: tree.clone(),
     });
-
-    let url = mgr.get_url().await.unwrap_or_default();
 
     let refs: serde_json::Map<String, Value> = state
         .ref_map
@@ -8433,14 +8448,14 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
                 .map(|d| d as usize),
             urls: cmd.get("urls").and_then(Value::as_bool) == Some(true),
         },
-        None => match &state.last_snapshot {
-            Some(last) if last.session_id == session_id => {
+        None => match state.last_snapshots.get(&session_id) {
+            Some(last) => {
                 if last.frame_id != state.active_frame_id {
                     return Err("baseline_mismatch: the last snapshot was taken in a different frame; select that frame or run `snapshot` again, or pass --baseline <file>".to_string());
                 }
                 implicit_baseline_scope(cmd, &last.scope)?
             }
-            _ => {
+            None => {
                 return Err("no_baseline: no earlier snapshot on this tab; run `snapshot` first or pass --baseline <file>".to_string());
             }
         },
@@ -8473,8 +8488,8 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
             contents
         }
         None => state
-            .last_snapshot
-            .as_ref()
+            .last_snapshots
+            .get(&session_id)
             .map(|last| last.text.clone())
             .unwrap_or_default(),
     };
@@ -8484,7 +8499,7 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         &diff::snapshot_comparison_text(&current),
     );
     state.ref_map = current_ref_map;
-    state.last_snapshot = Some(LastSnapshot {
+    state.remember_snapshot(LastSnapshot {
         session_id,
         frame_id: state.active_frame_id.clone(),
         scope,
@@ -19011,6 +19026,23 @@ mod tests {
             "settings": { "action-policy": "/tmp/a.json" }
         }));
         assert!(only_security.get("settings").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_auto_launch_wrapper_does_not_inline_the_launch_future() {
+        let (_env, mut state) = isolated_state();
+        let cmd = Value::Null;
+        let inner = std::mem::size_of_val(&auto_launch_with_settings(
+            &mut state,
+            Vec::new(),
+            &cmd,
+            false,
+        ));
+        let outer = std::mem::size_of_val(&auto_launch_with(&mut state, Vec::new(), &cmd, false));
+        assert!(
+            outer < inner,
+            "auto_launch_with embeds the launch future ({outer} >= {inner} bytes)"
+        );
     }
 
     #[tokio::test]
