@@ -265,6 +265,71 @@ fn e2e_cdp_url_rejects_dead_external_browser_without_relaunch() {
 
 #[test]
 #[ignore]
+fn e2e_cdp_url_keeps_the_browser_the_session_launched() {
+    let sessions = Sessions::new();
+    let host = "pin-tab-cli-host";
+    let owner = "pin-tab-cli-victim";
+
+    sessions.run_json(host, &["open", "data:text/html,<title>host</title>"]);
+    let host_url = sessions.run_json(host, &["get", "cdp-url"])["data"]["cdpUrl"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    sessions.run_json(owner, &["open", "data:text/html,<title>owner</title>"]);
+    let own_url = sessions.run_json(owner, &["get", "cdp-url"])["data"]["cdpUrl"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(own_url, host_url);
+
+    let response = sessions.run_json(owner, &["--cdp", &host_url, "get", "cdp-url"]);
+
+    assert_eq!(response["data"]["cdpUrl"], own_url.as_str(), "{response}");
+    assert_ne!(
+        response["data"]["lifecycle"]["relaunchedBrowser"], true,
+        "{response}"
+    );
+    let after = sessions.run_json(owner, &["get", "cdp-url"]);
+    assert_eq!(after["data"]["cdpUrl"], own_url.as_str(), "{after}");
+}
+
+#[test]
+#[ignore]
+fn e2e_cdp_url_attach_refuses_allowed_domains_like_connect() {
+    let sessions = Sessions::new();
+    let host = "pin-tab-cli-host";
+    let victim = "pin-tab-cli-victim";
+
+    sessions.run_json(host, &["open", "data:text/html,<title>host</title>"]);
+    let cdp = sessions.run_json(host, &["get", "cdp-url"]);
+    let ws_url = cdp["data"]["cdpUrl"].as_str().unwrap();
+    // The victim's daemon is already running when it is asked to attach.
+    let unattached = sessions.run_json_failure(victim, &["get", "cdp-url"]);
+    assert_eq!(unattached["error"], "Browser not launched");
+
+    let response = sessions.run_json_failure(
+        victim,
+        &[
+            "--cdp",
+            ws_url,
+            "--allowed-domains",
+            "a.test",
+            "get",
+            "cdp-url",
+        ],
+    );
+
+    let error = response["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--allowed-domains is not supported with --cdp"),
+        "{response}"
+    );
+    let unattached = sessions.run_json_failure(victim, &["get", "cdp-url"]);
+    assert_eq!(unattached["error"], "Browser not launched");
+}
+
+#[test]
+#[ignore]
 fn e2e_cdp_pin_tab_precedes_attach_in_existing_daemon() {
     let server = TestServer::start();
     let sessions = Sessions::new();
