@@ -361,6 +361,14 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
 
 /// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
+/// Resolves a path argument against this process's working directory. The
+/// daemon runs elsewhere, so a relative path sent as-is would resolve there.
+fn absolute_path_arg(path: &str) -> String {
+    std::path::absolute(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     parse_command_with_batch_scope(args, flags, false)
 }
@@ -892,7 +900,8 @@ fn parse_command_inner(
                 context: "upload".to_string(),
                 usage: "upload <selector> <files...>",
             })?;
-            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
+            let files: Vec<String> = rest[1..].iter().map(|f| absolute_path_arg(f)).collect();
+            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": files }))
         }
         "download" => {
             const USAGE: &str = "download <selector> <path>";
@@ -8266,6 +8275,30 @@ mod tests {
         let cmd = parse_command(&args("trace stop"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "trace_stop");
         assert!(cmd.get("path").is_none() || cmd["path"].is_null());
+    }
+
+    #[test]
+    fn test_upload_resolves_relative_paths_in_the_cli() {
+        let abs = std::env::temp_dir().join("abs.txt");
+        let abs_arg = abs.to_string_lossy().into_owned();
+        let argv = vec![
+            "upload".to_string(),
+            "#f".to_string(),
+            "./rel.txt".to_string(),
+            "sub/rel2.txt".to_string(),
+            abs_arg.clone(),
+        ];
+        let cmd = parse_command(&argv, &default_flags()).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let files: Vec<&str> = cmd["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(files[0], cwd.join("rel.txt").to_string_lossy());
+        assert_eq!(files[1], cwd.join("sub/rel2.txt").to_string_lossy());
+        assert_eq!(files[2], abs_arg);
     }
 
     // === Diff Tests ===

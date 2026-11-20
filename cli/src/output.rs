@@ -2477,6 +2477,11 @@ Usage: agent-browser upload <selector> <files...>
 
 Uploads one or more files to a file input element.
 
+Relative paths resolve against the current directory. A missing file fails with
+file_not_found, and a target that is not a file input fails with not_file_input.
+With a provider, the browser host reads the files, so a path missing locally
+only warns.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
@@ -3155,6 +3160,9 @@ Examples:
   agent-browser network har start
   agent-browser network har start --content all
   agent-browser network har stop ./capture.har
+
+`har stop` fails with no_har_recording when no recording is active, for example
+after the browser restarted.
 "##
         }
 
@@ -4100,7 +4108,8 @@ Snapshot Diff:
     -c, --compact            Use compact snapshot format
     -d, --depth <n>          Limit snapshot tree depth
 
-  Without --baseline, compares against the last snapshot taken in this session.
+  Without --baseline, compares against the last snapshot taken in this session
+  (each diff becomes the next baseline). With none, it fails with no_baseline.
 
 Screenshot Diff:
 

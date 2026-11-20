@@ -569,6 +569,9 @@ pub struct DaemonState {
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
     snapshot_revisions: HashMap<String, SnapshotRevision>,
+    /// Page session id and text of the last snapshot taken, the implicit
+    /// baseline of `diff snapshot`.
+    last_snapshot: Option<(String, String)>,
     screenshot_observations: HashMap<(String, String), ScreenshotObservation>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
@@ -778,6 +781,7 @@ impl DaemonState {
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
+            last_snapshot: None,
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
                 // An empty list is no filter, as when it is cleared live.
@@ -3719,6 +3723,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     };
     attach_tab_gone_data(&mut resp, state);
     attach_flow_stop(&mut resp, state);
+    if action == "upload" {
+        lift_data_warning(&mut resp);
+    }
     if resp.get("success").and_then(Value::as_bool) == Some(false) {
         attach_settings_outcome(&mut resp, &settings_outcome);
     }
@@ -4529,6 +4536,17 @@ fn may_replace_wedged_tab(state: &DaemonState) -> bool {
 }
 
 /// Add to the response's warning instead of replacing one already set.
+/// Moves a `warning` a handler put in its result data to the response level.
+fn lift_data_warning(resp: &mut Value) {
+    let warning = resp
+        .get_mut("data")
+        .and_then(Value::as_object_mut)
+        .and_then(|data| data.remove("warning"));
+    if let Some(Value::String(w)) = warning {
+        append_warning(resp, &w);
+    }
+}
+
 fn append_warning(resp: &mut Value, warning: &str) {
     let merged = match resp.get("warning").and_then(Value::as_str) {
         Some(existing) => format!("{}\n{}", existing, warning),
@@ -6720,6 +6738,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     )
     .await?;
     state.ref_map = refs;
+    state.last_snapshot = Some((session_id.clone(), tree.clone()));
 
     let url = mgr.get_url().await.unwrap_or_default();
 
@@ -8262,7 +8281,12 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
             contents
         }
         Some(b) => b.to_string(),
-        None => String::new(),
+        None => match &state.last_snapshot {
+            Some((id, text)) if *id == session_id => text.clone(),
+            _ => {
+                return Err("no_baseline: no earlier snapshot in this session; run `snapshot` first or pass --baseline <file>".to_string());
+            }
+        },
     };
 
     let result = diff::diff_snapshots(
@@ -8270,6 +8294,7 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         &diff::snapshot_comparison_text(&current),
     );
     state.ref_map = current_ref_map;
+    state.last_snapshot = Some((session_id, current));
     Ok(json!({
         "diff": result.diff,
         "additions": result.additions,
@@ -8297,14 +8322,40 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .map(WaitUntil::from_str)
         .unwrap_or(WaitUntil::Load);
 
+    let options = SnapshotOptions {
+        selector: cmd
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        compact: cmd
+            .get("compact")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        depth: cmd
+            .get("maxDepth")
+            .and_then(|v| v.as_u64())
+            .map(|d| d as usize),
+        ..SnapshotOptions::default()
+    };
+    let screenshot_options = cmd
+        .get("screenshot")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        .then(|| ScreenshotOptions {
+            full_page: cmd
+                .get("fullPage")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            ..ScreenshotOptions::default()
+        });
+
     // Each navigation can replace the document, so invalidate refs before it starts.
     let first_session_id = mgr.active_session_id()?.to_string();
     state.ref_map.invalidate_page(&first_session_id);
 
-    // Navigate to URL1 and snapshot
+    // Navigate to URL1, then capture it before leaving the page.
     mgr.navigate(url1, wait_until).await?;
     let first_session_id = mgr.active_session_id()?.to_string();
-    let options = SnapshotOptions::default();
     let mut snap1_ref_map = state.ref_map.clone();
     let snap1 = snapshot::take_snapshot(
         &mgr.client,
@@ -8315,8 +8366,16 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &state.iframe_sessions,
     )
     .await?;
+    let shot1 = capture_diff_url_screenshot(
+        mgr,
+        &first_session_id,
+        &snap1_ref_map,
+        screenshot_options.as_ref(),
+        &state.iframe_sessions,
+    )
+    .await?;
 
-    // Navigate to URL2 and snapshot
+    // Navigate to URL2 and capture it the same way.
     snap1_ref_map.invalidate_page(&first_session_id);
     mgr.navigate(url2, wait_until).await?;
     let second_session_id = mgr.active_session_id()?.to_string();
@@ -8330,19 +8389,71 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &state.iframe_sessions,
     )
     .await?;
+    let shot2 = capture_diff_url_screenshot(
+        mgr,
+        &second_session_id,
+        &snap2_ref_map,
+        screenshot_options.as_ref(),
+        &state.iframe_sessions,
+    )
+    .await?;
 
-    let result = diff::diff_text(
-        &diff::snapshot_comparison_text(&snap1),
-        &diff::snapshot_comparison_text(&snap2),
-    );
+    let before = diff::snapshot_comparison_text(&snap1);
+    let after = diff::snapshot_comparison_text(&snap2);
+    let result = diff::diff_text(&before, &after);
+    let snapshot_diff = diff::diff_snapshots(&before, &after);
     state.ref_map = snap2_ref_map;
-    Ok(json!({
+    let mut data = json!({
         "diff": result,
+        "snapshot": {
+            "diff": snapshot_diff.diff,
+            "additions": snapshot_diff.additions,
+            "removals": snapshot_diff.removals,
+            "unchanged": snapshot_diff.unchanged,
+            "changed": snapshot_diff.changed,
+        },
         "url1": url1,
         "url2": url2,
         "snapshot1": snap1,
         "snapshot2": snap2,
-    }))
+    });
+    if let (Some(a), Some(b)) = (shot1, shot2) {
+        // Same default tolerance as `diff screenshot`.
+        let shot_diff = diff::diff_screenshot(&a, &b, 0.1)?;
+        data["screenshot"] = screenshot_diff_json(&shot_diff, None);
+    }
+    Ok(data)
+}
+
+/// PNG bytes of the current page for `diff url --screenshot`, or `None` when
+/// no screenshot was requested.
+async fn capture_diff_url_screenshot(
+    mgr: &BrowserManager,
+    session_id: &str,
+    ref_map: &RefMap,
+    options: Option<&ScreenshotOptions>,
+    iframe_sessions: &std::collections::HashMap<String, String>,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let shot =
+        screenshot::take_screenshot(&mgr.client, session_id, ref_map, options, iframe_sessions)
+            .await?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &shot.base64)
+        .map(Some)
+        .map_err(|e| format!("Failed to decode screenshot: {}", e))
+}
+
+fn screenshot_diff_json(d: &diff::ScreenshotDiffResult, diff_path: Option<&str>) -> Value {
+    json!({
+        "match": d.matched,
+        "mismatchPercentage": d.mismatch_percentage,
+        "totalPixels": d.total_pixels,
+        "differentPixels": d.different_pixels,
+        "diffPath": diff_path,
+        "dimensionMismatch": d.dimension_mismatch,
+    })
 }
 
 async fn handle_credentials_set(cmd: &Value) -> Result<Value, String> {
@@ -9633,9 +9744,39 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         })
         .unwrap_or_default();
 
+    let warning = check_upload_files(&files, state.active_provider_connection)?;
     mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
         .await?;
-    Ok(json!({ "uploaded": files.len(), "selector": selector }))
+    let mut data = json!({ "uploaded": files.len(), "selector": selector });
+    if let Some(warning) = warning {
+        data["warning"] = json!(warning);
+    }
+    Ok(data)
+}
+
+/// Rejects upload paths that are not regular files on this host. A provider
+/// browser reads the files on its own host, so there a local miss only warns.
+fn check_upload_files(files: &[String], remote_browser: bool) -> Result<Option<String>, String> {
+    let mut unverified = Vec::new();
+    for file in files {
+        let problem = match std::fs::metadata(file) {
+            Ok(meta) if meta.is_file() => continue,
+            Ok(_) => "is not a file",
+            Err(_) => "does not exist",
+        };
+        if remote_browser {
+            unverified.push(file.as_str());
+        } else {
+            return Err(format!("file_not_found: {file} {problem}"));
+        }
+    }
+    if unverified.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "Not found on this host: {}. The provider browser reads upload paths on its own host.",
+        unverified.join(", ")
+    )))
 }
 
 async fn handle_addscript(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -12340,14 +12481,7 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
             .map_err(|e| format!("Failed to write diff image: {}", e))?;
     }
 
-    Ok(json!({
-        "match": result.matched,
-        "mismatchPercentage": result.mismatch_percentage,
-        "totalPixels": result.total_pixels,
-        "differentPixels": result.different_pixels,
-        "diffPath": output_path,
-        "dimensionMismatch": result.dimension_mismatch,
-    }))
+    Ok(screenshot_diff_json(&result, output_path))
 }
 
 // ---------------------------------------------------------------------------
@@ -12453,6 +12587,9 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if state.flow.active() {
         return Err("capture is owned by --capture flow; use flow save".to_string());
+    }
+    if !state.har_recording {
+        return Err("no_har_recording: no HAR recording is active; run `network har start` first. A browser restart discards an active recording".to_string());
     }
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
@@ -15583,6 +15720,8 @@ fn error_response(id: &str, error: &str) -> Value {
         resp["code"] = json!("tab_gone");
     } else if error.starts_with(super::browser::PAGE_WEDGED_PREFIX) {
         resp["code"] = json!("page_wedged");
+    } else if let Some(code) = super::browser::precondition_code(error) {
+        resp["code"] = json!(code);
     } else if let Some((code, _)) = error.split_once(": ") {
         if code.starts_with("webmcp_") {
             resp["code"] = json!(code);
@@ -20921,6 +21060,46 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    async fn test_handle_har_stop_requires_active_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inactive.har");
+        let mut state = DaemonState::new();
+
+        let err = handle_har_stop(&json!({ "path": path }), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            super::super::browser::precondition_code(&err),
+            Some("no_har_recording")
+        );
+        assert_eq!(error_response("1", &err)["code"], "no_har_recording");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_check_upload_files_by_browser_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        std::fs::write(&real, "x").unwrap();
+        let real = real.to_string_lossy().into_owned();
+        let ghost = dir.path().join("ghost.txt").to_string_lossy().into_owned();
+        let folder = dir.path().to_string_lossy().into_owned();
+
+        assert_eq!(check_upload_files(&[real.clone()], false), Ok(None));
+        for bad in [&ghost, &folder] {
+            let err = check_upload_files(&[real.clone(), bad.clone()], false).unwrap_err();
+            assert_eq!(
+                super::super::browser::precondition_code(&err),
+                Some("file_not_found")
+            );
+        }
+        let warning = check_upload_files(&[real, ghost.clone()], true)
+            .unwrap()
+            .unwrap();
+        assert!(warning.contains(&ghost));
+    }
+
+    #[tokio::test]
     async fn test_handle_har_stop_without_path_uses_default_location() {
         let mut state = DaemonState::new();
         state.har_recording = true;
@@ -21941,6 +22120,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             unix_timestamp_millis()
         ));
         let mut state = DaemonState::new();
+        state.har_recording = true;
         state.har_entries.push(HarEntry {
             request_id: "req-3".to_string(),
             wall_time: 1773576000.0,

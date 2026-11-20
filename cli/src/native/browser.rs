@@ -233,9 +233,58 @@ fn active_page_index_after_add(
     }
 }
 
+/// Machine-readable codes for commands that reject an unmet precondition. An
+/// error message carries one as a `<code>: ` prefix.
+const PRECONDITION_CODES: [&str; 4] = [
+    "file_not_found",
+    "not_file_input",
+    "no_baseline",
+    "no_har_recording",
+];
+
+pub fn precondition_code(error: &str) -> Option<&'static str> {
+    let (code, _) = error.split_once(": ")?;
+    PRECONDITION_CODES.iter().copied().find(|c| *c == code)
+}
+
+/// Rejects a node that is not `<input type=file>`; `describe` is the
+/// `DOM.describeNode` result.
+fn ensure_file_input(selector: &str, describe: &Value) -> Result<(), String> {
+    let node = describe.get("node");
+    let name = node
+        .and_then(|n| n.get("nodeName"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let input_type = node
+        .and_then(|n| n.get("attributes"))
+        .and_then(|a| a.as_array())
+        .and_then(|attrs| {
+            attrs
+                .chunks(2)
+                .find(|pair| pair[0].as_str() == Some("type"))
+                .and_then(|pair| pair.get(1))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("");
+    if name.eq_ignore_ascii_case("input") && input_type.eq_ignore_ascii_case("file") {
+        return Ok(());
+    }
+    let found = if name.eq_ignore_ascii_case("input") && !input_type.is_empty() {
+        format!("<input type={}>", input_type.to_ascii_lowercase())
+    } else {
+        format!("<{}>", name.to_ascii_lowercase())
+    };
+    Err(format!(
+        "not_file_input: '{selector}' matched {found}, not an <input type=file>"
+    ))
+}
+
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
+    if precondition_code(error).is_some() {
+        return error.to_string();
+    }
     // Classify a genuine locator miss first: its anchored shape ("No element
     // found: ...") echoes the selector/name, which may itself contain a word like
     // "timeout" or "intercept". The broad substring checks below would otherwise
@@ -2588,6 +2637,8 @@ impl BrowserManager {
             )
             .await?;
 
+        ensure_file_input(selector, &describe)?;
+
         let backend_node_id = describe
             .get("node")
             .and_then(|n| n.get("backendNodeId"))
@@ -3221,6 +3272,28 @@ async fn resolve_cdp_url(input: &str, headers: &[(String, String)]) -> Result<St
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ensure_file_input_accepts_only_file_inputs() {
+        let node =
+            |name: &str, attrs: Value| json!({ "node": { "nodeName": name, "attributes": attrs } });
+        assert!(
+            ensure_file_input("#f", &node("INPUT", json!(["id", "f", "type", "file"]))).is_ok()
+        );
+        let text = ensure_file_input("#t", &node("INPUT", json!(["type", "text"]))).unwrap_err();
+        assert_eq!(precondition_code(&text), Some("not_file_input"));
+        let button = ensure_file_input("#b", &node("BUTTON", json!([]))).unwrap_err();
+        assert_eq!(precondition_code(&button), Some("not_file_input"));
+        // A bare input defaults to type=text.
+        assert!(ensure_file_input("#i", &node("INPUT", json!([]))).is_err());
+    }
+
+    #[test]
+    fn precondition_errors_keep_their_code_through_friendly_rewrite() {
+        let err = "file_not_found: /tmp/timeout.txt does not exist";
+        assert_eq!(to_ai_friendly_error(err), err);
+        assert_eq!(precondition_code("timeout: x"), None);
+    }
+
     use super::*;
 
     #[test]
