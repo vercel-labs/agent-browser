@@ -16267,7 +16267,7 @@ mod tests {
         assert!(state.undelivered_wedge.is_none());
     }
 
-    async fn state_with_evaluate_value(value: Value) -> DaemonState {
+    async fn state_with_evaluate_value(value: Value) -> (IsolatedEnv, DaemonState) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
 
@@ -16305,14 +16305,14 @@ mod tests {
             title: String::new(),
             target_type: "page".to_string(),
         });
-        let mut state = DaemonState::new();
+        let (env, mut state) = isolated_state();
         state.browser = Some(browser);
-        state
+        (env, state)
     }
 
     #[tokio::test]
     async fn page_data_with_warning_keys_never_becomes_a_warning() {
-        let mut state = state_with_evaluate_value(json!({
+        let (_env, mut state) = state_with_evaluate_value(json!({
             "elapsed": 0, "fps": {"avg": 0, "min": 0, "max": 0, "drops": 0},
             "totalRenders": 0, "totalMounts": 0, "totalReRenders": 0,
             "totalComponents": 0, "components": [],
@@ -16335,7 +16335,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pending_warning_does_not_leak_into_the_next_command() {
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         state.push_action_warning("left over");
         let resp =
             super::execute_command(&json!({ "id": "1", "action": "cdp_url" }), &mut state).await;
