@@ -23132,7 +23132,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_execute_close_without_browser() {
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         let cmd = json!({ "action": "close", "id": "test-3" });
         let result = execute_command(&cmd, &mut state).await;
         assert_eq!(result["success"], true);
