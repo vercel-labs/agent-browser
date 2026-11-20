@@ -4,8 +4,6 @@ use serde_json::{json, Value};
 
 use tokio::io::AsyncWriteExt;
 
-use super::http::cors_headers_for_origin;
-
 pub(crate) const DEFAULT_AI_GATEWAY_URL: &str = "https://ai-gateway.vercel.sh";
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -29,11 +27,7 @@ pub(super) fn chat_status_json() -> String {
     obj.to_string()
 }
 
-pub(super) async fn handle_models_request(
-    stream: &mut tokio::net::TcpStream,
-    origin: Option<&str>,
-) {
-    let cors = cors_headers_for_origin(origin);
+pub(super) async fn handle_models_request(stream: &mut tokio::net::TcpStream) {
     let gateway_url = std::env::var("AI_GATEWAY_URL")
         .unwrap_or_else(|_| DEFAULT_AI_GATEWAY_URL.to_string())
         .trim_end_matches('/')
@@ -43,7 +37,7 @@ pub(super) async fn handle_models_request(
         Err(_) => {
             let body = r#"{"data":[]}"#;
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors}\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             let _ = stream.write_all(resp.as_bytes()).await;
@@ -69,7 +63,7 @@ pub(super) async fn handle_models_request(
     };
 
     let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors}\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(resp.as_bytes()).await;
@@ -709,12 +703,7 @@ async fn stream_gateway_response(
     tool_calls
 }
 
-pub(super) async fn handle_chat_request(
-    stream: &mut tokio::net::TcpStream,
-    body: &str,
-    origin: Option<&str>,
-) {
-    let cors = cors_headers_for_origin(origin);
+pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body: &str) {
     let gateway_url = std::env::var("AI_GATEWAY_URL")
         .unwrap_or_else(|_| DEFAULT_AI_GATEWAY_URL.to_string())
         .trim_end_matches('/')
@@ -724,7 +713,7 @@ pub(super) async fn handle_chat_request(
         Err(_) => {
             let err = r#"{"error":"AI_GATEWAY_API_KEY not set. Set the AI_GATEWAY_API_KEY environment variable to enable AI chat."}"#;
             let resp = format!(
-                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors}\r\n",
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 err.len()
             );
             let _ = stream.write_all(resp.as_bytes()).await;
@@ -741,7 +730,7 @@ pub(super) async fn handle_chat_request(
         Err(e) => {
             let err = format!(r#"{{"error":"Invalid JSON: {}"}}"#, e);
             let resp = format!(
-                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors}\r\n",
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 err.len()
             );
             let _ = stream.write_all(resp.as_bytes()).await;
@@ -851,9 +840,7 @@ pub(super) async fn handle_chat_request(
         }
     }
 
-    let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nx-vercel-ai-ui-message-stream: v1\r\n{cors}\r\n"
-    );
+    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nx-vercel-ai-ui-message-stream: v1\r\n\r\n";
     if stream.write_all(headers.as_bytes()).await.is_err() {
         return;
     }
