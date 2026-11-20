@@ -13,7 +13,9 @@ agent-browser upload @e4 ./invoice.pdf
 agent-browser upload @e4 ./front.png ./back.png
 ```
 
-The selector must resolve to a file input, otherwise the command fails with not_file_input. Multiple file paths are accepted for multi-file inputs. Relative paths resolve against the directory the command runs in. A file that does not exist fails with file_not_found. With a provider, the browser host reads the file, so a path missing locally only warns.
+The selector must resolve to a file input. Multiple file paths are accepted for multi-file inputs.
+
+Relative paths resolve against the directory the command runs in, and `~` expands to the home directory. A path that does not exist fails with `file_not_found`, and a target that is not a file input fails with `not_file_input`. A directory is accepted for `webkitdirectory` inputs. When the browser runs on another machine (a provider or a remote `--cdp` host), it reads the path on its own host, so a path missing locally only warns.
 
 ## Downloads
 

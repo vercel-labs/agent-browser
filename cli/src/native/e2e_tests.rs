@@ -11327,6 +11327,137 @@ async fn e2e_diff_url_reports_snapshot_and_screenshot_diffs() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_attaches_content_and_directories() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let page = "data:text/html,<input type=file id=f><input type=file id=d webkitdirectory>";
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": page }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("real.txt");
+    std::fs::write(&file, "hello world\n").unwrap();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "upload", "selector": "#f", "files": [file.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.querySelector('#f').files[0].size" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], 12, "{resp}");
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "upload", "selector": "#d", "files": [dir.path().to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.querySelector('#d').files.length" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], 1, "{resp}");
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_bare_diff_snapshot_reuses_snapshot_options_and_frame() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("snapshot_diff_probe") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let mut n = 10;
+    let mut run = |cmd: Value| {
+        n += 1;
+        let mut cmd = cmd;
+        cmd["id"] = json!(n.to_string());
+        cmd
+    };
+    for snapshot in [
+        json!({ "action": "snapshot", "interactive": true }),
+        json!({ "action": "snapshot", "selector": "#target" }),
+        json!({ "action": "snapshot", "compact": true, "maxDepth": 1 }),
+    ] {
+        assert_success(&execute_command(&run(snapshot), &mut state).await);
+        let resp = execute_command(&run(json!({ "action": "diff_snapshot" })), &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+    }
+
+    // An option the baseline lacks is refused instead of diffing mismatched trees.
+    let resp = execute_command(
+        &run(json!({ "action": "diff_snapshot", "selector": "#primary-action" })),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["code"], "baseline_mismatch", "{resp}");
+
+    // A missing baseline file is an error, not a literal baseline.
+    let resp = execute_command(
+        &run(json!({ "action": "diff_snapshot", "baseline": "/nonexistent/baseline.txt" })),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["code"], "file_not_found", "{resp}");
+
+    // Frame: a snapshot taken inside a frame is the baseline only for that frame.
+    assert_success(
+        &execute_command(
+            &run(json!({ "action": "navigate", "url": "data:text/html,<iframe id='child' srcdoc='<button>Inner</button>'></iframe>" })),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &run(json!({ "action": "frame", "selector": "#child" })),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&run(json!({ "action": "snapshot" })), &mut state).await);
+    let resp = execute_command(&run(json!({ "action": "diff_snapshot" })), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+    assert_success(&execute_command(&run(json!({ "action": "mainframe" })), &mut state).await);
+    let resp = execute_command(&run(json!({ "action": "diff_snapshot" })), &mut state).await;
+    assert_eq!(resp["code"], "baseline_mismatch", "{resp}");
+
+    assert_success(&execute_command(&run(json!({ "action": "close" })), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Recording: default records the current active page
 // ---------------------------------------------------------------------------

@@ -2477,10 +2477,12 @@ Usage: agent-browser upload <selector> <files...>
 
 Uploads one or more files to a file input element.
 
-Relative paths resolve against the current directory. A missing file fails with
-file_not_found, and a target that is not a file input fails with not_file_input.
-With a provider, the browser host reads the files, so a path missing locally
-only warns.
+Relative paths resolve against the current directory and ~ expands to the home
+directory. A missing path fails with `file_not_found`, and a target that is not
+a file input fails with `not_file_input`. A directory is accepted for
+webkitdirectory inputs. When the browser runs on another machine (provider or
+remote --cdp host), it reads the path on its own host, so a path missing
+locally only warns.
 
 Global Options:
   --json               Output as JSON
@@ -3161,8 +3163,8 @@ Examples:
   agent-browser network har start --content all
   agent-browser network har stop ./capture.har
 
-`har stop` fails with no_har_recording when no recording is active, for example
-after the browser restarted.
+`har stop` fails with `no_har_recording` when no recording is active, for example
+after a daemon restart (`close` or idle shutdown).
 "##
         }
 
@@ -4105,11 +4107,16 @@ Snapshot Diff:
   Options:
     -b, --baseline <file>    Compare against a saved snapshot file
     -s, --selector <sel>     Scope snapshot to a CSS selector or @ref
+    -i, --interactive        Interactive elements only
     -c, --compact            Use compact snapshot format
     -d, --depth <n>          Limit snapshot tree depth
+    -u, --urls               Include link URLs
 
-  Without --baseline, compares against the last snapshot taken in this session
-  (each diff becomes the next baseline). With none, it fails with no_baseline.
+  Without --baseline, compares against the last snapshot taken on this tab,
+  captured with that snapshot's options (each diff becomes the next baseline).
+  Naming an option that differs fails with `baseline_mismatch`; with no earlier
+  snapshot it fails with `no_baseline`. A missing --baseline file fails with
+  `file_not_found`.
 
 Screenshot Diff:
 
@@ -4128,7 +4135,7 @@ URL Diff:
 
   Options:
     --screenshot             Also compare screenshots (default: snapshot only)
-    --full                   Full page screenshots
+    --full                   Full page screenshots (requires --screenshot)
     --wait-until <strategy>  Navigation wait strategy: load, domcontentloaded, networkidle (default: load)
     -s, --selector <sel>     Scope snapshots to a CSS selector or @ref
     -c, --compact            Use compact snapshot format

@@ -379,18 +379,6 @@
         "from": "See the main [documentation](/) for current architecture and usage.",
         "to": "See the main [documentation](/introduction) for current architecture and usage."
       }
-    ],
-    "/files": [
-      {
-        "from": "The selector must resolve to a file input. Multiple file paths are accepted for multi-file inputs.",
-        "to": "The selector must resolve to a file input, otherwise the command fails with not_file_input. Multiple file paths are accepted for multi-file inputs. Relative paths resolve against the directory the command runs in. A file that does not exist fails with file_not_found. With a provider, the browser host reads the file, so a path missing locally only warns."
-      }
-    ],
-    "/diffing": [
-      {
-        "from": "the command automatically compares against the most recent snapshot taken in the current session. This is the primary use case for agents verifying that an action had the intended effect.",
-        "to": "the command automatically compares against the most recent snapshot taken in the current session, and each diff snapshot becomes the baseline for the next one. This is the primary use case for agents verifying that an action had the intended effect. With no earlier snapshot in the session, it fails with no_baseline."
-      }
     ]
   },
   "resources": {

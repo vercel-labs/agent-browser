@@ -356,6 +356,30 @@ impl AttachedTarget {
             .filter(|target| !matches!(target, Self::Provider(p) if p == "ios" || p == "safari"))
     }
 
+    /// Whether the browser runs on another machine than the daemon, so it
+    /// reads local file paths on its own host.
+    fn is_remote(&self) -> bool {
+        match self {
+            Self::Provider(_) => true,
+            Self::CdpPort(_) | Self::AutoConnect => false,
+            Self::CdpUrl(url) => {
+                let authority = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+                let authority = authority.split(['/', '?']).next().unwrap_or("");
+                let authority = authority.rsplit('@').next().unwrap_or("");
+                let host = match authority.strip_prefix('[') {
+                    Some(v6) => v6.split(']').next().unwrap_or(""),
+                    None => authority.split(':').next().unwrap_or(""),
+                };
+                let is_port = !host.is_empty() && host.bytes().all(|b| b.is_ascii_digit());
+                !(is_port
+                    || host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback()))
+            }
+        }
+    }
+
     fn insert_into(&self, cmd: &mut serde_json::Map<String, Value>) {
         let (key, value) = match self {
             Self::CdpUrl(url) => ("cdpUrl", json!(url)),
@@ -569,9 +593,8 @@ pub struct DaemonState {
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
     snapshot_revisions: HashMap<String, SnapshotRevision>,
-    /// Page session id and text of the last snapshot taken, the implicit
-    /// baseline of `diff snapshot`.
-    last_snapshot: Option<(String, String)>,
+    /// The last snapshot taken, the implicit baseline of `diff snapshot`.
+    last_snapshot: Option<LastSnapshot>,
     screenshot_observations: HashMap<(String, String), ScreenshotObservation>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
@@ -4535,7 +4558,6 @@ fn may_replace_wedged_tab(state: &DaemonState) -> bool {
     })
 }
 
-/// Add to the response's warning instead of replacing one already set.
 /// Moves a `warning` a handler put in its result data to the response level.
 fn lift_data_warning(resp: &mut Value) {
     let warning = resp
@@ -4547,6 +4569,7 @@ fn lift_data_warning(resp: &mut Value) {
     }
 }
 
+/// Add to the response's warning instead of replacing one already set.
 fn append_warning(resp: &mut Value, warning: &str) {
     let merged = match resp.get("warning").and_then(Value::as_str) {
         Some(existing) => format!("{}\n{}", existing, warning),
@@ -6738,7 +6761,12 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     )
     .await?;
     state.ref_map = refs;
-    state.last_snapshot = Some((session_id.clone(), tree.clone()));
+    state.last_snapshot = Some(LastSnapshot {
+        session_id: session_id.clone(),
+        frame_id: state.active_frame_id.clone(),
+        scope: SnapshotScope::of(&options),
+        text: tree.clone(),
+    });
 
     let url = mgr.get_url().await.unwrap_or_default();
 
@@ -8232,29 +8260,124 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
 // Phase 6 handlers
 // ---------------------------------------------------------------------------
 
+/// The options a snapshot was taken with.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SnapshotScope {
+    selector: Option<String>,
+    interactive: bool,
+    compact: bool,
+    depth: Option<usize>,
+    urls: bool,
+}
+
+impl SnapshotScope {
+    fn of(options: &SnapshotOptions) -> Self {
+        Self {
+            selector: options.selector.clone(),
+            interactive: options.interactive,
+            compact: options.compact,
+            depth: options.depth,
+            urls: options.urls,
+        }
+    }
+
+    fn options(&self) -> SnapshotOptions {
+        SnapshotOptions {
+            selector: self.selector.clone(),
+            interactive: self.interactive,
+            compact: self.compact,
+            depth: self.depth,
+            urls: self.urls,
+        }
+    }
+}
+
+/// A snapshot kept as the implicit baseline of `diff snapshot`.
+#[derive(Clone, Debug)]
+struct LastSnapshot {
+    session_id: String,
+    frame_id: Option<String>,
+    scope: SnapshotScope,
+    text: String,
+}
+
+/// Options a bare `diff snapshot` captures with: those the command names, which
+/// must agree with the baseline's, otherwise the baseline's.
+fn implicit_baseline_scope(cmd: &Value, stored: &SnapshotScope) -> Result<SnapshotScope, String> {
+    let flag = |key: &str| cmd.get(key).and_then(Value::as_bool).filter(|set| *set);
+    let mut scope = stored.clone();
+    let mut differing = Vec::new();
+    if let Some(selector) = cmd.get("selector").and_then(Value::as_str) {
+        if stored.selector.as_deref() != Some(selector) {
+            differing.push("--selector");
+        }
+        scope.selector = Some(selector.to_string());
+    }
+    if let Some(depth) = cmd.get("maxDepth").and_then(Value::as_u64) {
+        if stored.depth != Some(depth as usize) {
+            differing.push("--depth");
+        }
+        scope.depth = Some(depth as usize);
+    }
+    for (key, name, stored_set, field) in [
+        (
+            "interactive",
+            "--interactive",
+            stored.interactive,
+            &mut scope.interactive,
+        ),
+        ("compact", "--compact", stored.compact, &mut scope.compact),
+        ("urls", "--urls", stored.urls, &mut scope.urls),
+    ] {
+        if flag(key).is_some() {
+            if !stored_set {
+                differing.push(name);
+            }
+            *field = true;
+        }
+    }
+    if differing.is_empty() {
+        Ok(scope)
+    } else {
+        Err(format!(
+            "baseline_mismatch: the last snapshot was taken without {}; run `snapshot` with the same options or pass --baseline <file>",
+            differing.join(", ")
+        ))
+    }
+}
+
 async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let compact = cmd
-        .get("compact")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let max_depth = cmd
-        .get("maxDepth")
-        .and_then(|v| v.as_u64())
-        .map(|d| d as usize);
-    let selector = cmd
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    let options = SnapshotOptions {
-        compact,
-        depth: max_depth,
-        selector,
-        ..SnapshotOptions::default()
+    let baseline = cmd.get("baseline").and_then(|v| v.as_str());
+    let scope = match baseline {
+        Some(_) => SnapshotScope {
+            selector: cmd
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            interactive: cmd.get("interactive").and_then(Value::as_bool) == Some(true),
+            compact: cmd.get("compact").and_then(Value::as_bool) == Some(true),
+            depth: cmd
+                .get("maxDepth")
+                .and_then(|v| v.as_u64())
+                .map(|d| d as usize),
+            urls: cmd.get("urls").and_then(Value::as_bool) == Some(true),
+        },
+        None => match &state.last_snapshot {
+            Some(last) if last.session_id == session_id => {
+                if last.frame_id != state.active_frame_id {
+                    return Err("baseline_mismatch: the last snapshot was taken in a different frame; select that frame or run `snapshot` again, or pass --baseline <file>".to_string());
+                }
+                implicit_baseline_scope(cmd, &last.scope)?
+            }
+            _ => {
+                return Err("no_baseline: no earlier snapshot on this tab; run `snapshot` first or pass --baseline <file>".to_string());
+            }
+        },
     };
+    let options = scope.options();
     let (current, current_ref_map) = snapshot::stage_snapshot(
         &mgr.client,
         &session_id,
@@ -8265,10 +8388,11 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
     )
     .await?;
 
-    let baseline = cmd.get("baseline").and_then(|v| v.as_str());
-
     let baseline_text = match baseline {
-        Some(b) if std::path::Path::new(b).exists() => {
+        Some(b) => {
+            if !std::path::Path::new(b).exists() {
+                return Err(format!("file_not_found: baseline {b} does not exist"));
+            }
             let mut contents = std::fs::read_to_string(b)
                 .map_err(|e| format!("Failed to read baseline: {}", e))?;
             // Plain CLI output ends with one newline when redirected to a baseline file.
@@ -8280,13 +8404,11 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
             }
             contents
         }
-        Some(b) => b.to_string(),
-        None => match &state.last_snapshot {
-            Some((id, text)) if *id == session_id => text.clone(),
-            _ => {
-                return Err("no_baseline: no earlier snapshot in this session; run `snapshot` first or pass --baseline <file>".to_string());
-            }
-        },
+        None => state
+            .last_snapshot
+            .as_ref()
+            .map(|last| last.text.clone())
+            .unwrap_or_default(),
     };
 
     let result = diff::diff_snapshots(
@@ -8294,7 +8416,12 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         &diff::snapshot_comparison_text(&current),
     );
     state.ref_map = current_ref_map;
-    state.last_snapshot = Some((session_id, current));
+    state.last_snapshot = Some(LastSnapshot {
+        session_id,
+        frame_id: state.active_frame_id.clone(),
+        scope,
+        text: current,
+    });
     Ok(json!({
         "diff": result.diff,
         "additions": result.additions,
@@ -9744,7 +9871,12 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         })
         .unwrap_or_default();
 
-    let warning = check_upload_files(&files, state.active_provider_connection)?;
+    let remote = state.active_provider_connection
+        || state
+            .attached_target
+            .as_ref()
+            .is_some_and(AttachedTarget::is_remote);
+    let warning = check_upload_files(&files, remote)?;
     mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
         .await?;
     let mut data = json!({ "uploaded": files.len(), "selector": selector });
@@ -9754,27 +9886,26 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
     Ok(data)
 }
 
-/// Rejects upload paths that are not regular files on this host. A provider
-/// browser reads the files on its own host, so there a local miss only warns.
+/// Rejects upload paths that do not exist on this host. A browser on another
+/// machine reads the paths on its own host, so there a local miss only warns.
+/// Directories pass through for `webkitdirectory` inputs.
 fn check_upload_files(files: &[String], remote_browser: bool) -> Result<Option<String>, String> {
     let mut unverified = Vec::new();
     for file in files {
-        let problem = match std::fs::metadata(file) {
-            Ok(meta) if meta.is_file() => continue,
-            Ok(_) => "is not a file",
-            Err(_) => "does not exist",
-        };
+        if std::fs::metadata(file).is_ok() {
+            continue;
+        }
         if remote_browser {
             unverified.push(file.as_str());
         } else {
-            return Err(format!("file_not_found: {file} {problem}"));
+            return Err(format!("file_not_found: {file} does not exist"));
         }
     }
     if unverified.is_empty() {
         return Ok(None);
     }
     Ok(Some(format!(
-        "Not found on this host: {}. The provider browser reads upload paths on its own host.",
+        "Not found on this host: {}. A browser on another machine reads upload paths on its own host.",
         unverified.join(", ")
     )))
 }
@@ -12589,7 +12720,7 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         return Err("capture is owned by --capture flow; use flow save".to_string());
     }
     if !state.har_recording {
-        return Err("no_har_recording: no HAR recording is active; run `network har start` first. A browser restart discards an active recording".to_string());
+        return Err("no_har_recording: no HAR recording is active; run `network har start` first. A daemon restart (close or idle shutdown) discards an active recording".to_string());
     }
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
@@ -21086,17 +21217,63 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let folder = dir.path().to_string_lossy().into_owned();
 
         assert_eq!(check_upload_files(&[real.clone()], false), Ok(None));
-        for bad in [&ghost, &folder] {
-            let err = check_upload_files(&[real.clone(), bad.clone()], false).unwrap_err();
-            assert_eq!(
-                super::super::browser::precondition_code(&err),
-                Some("file_not_found")
-            );
-        }
+        // A directory is a valid `webkitdirectory` upload.
+        assert_eq!(check_upload_files(&[folder], false), Ok(None));
+        let err = check_upload_files(&[real.clone(), ghost.clone()], false).unwrap_err();
+        assert_eq!(
+            super::super::browser::precondition_code(&err),
+            Some("file_not_found")
+        );
         let warning = check_upload_files(&[real, ghost.clone()], true)
             .unwrap()
             .unwrap();
         assert!(warning.contains(&ghost));
+    }
+
+    #[test]
+    fn test_attached_target_remote_by_host() {
+        let url = |u: &str| AttachedTarget::CdpUrl(u.to_string()).is_remote();
+        assert!(AttachedTarget::Provider("browserless".to_string()).is_remote());
+        assert!(!AttachedTarget::CdpPort(9222).is_remote());
+        assert!(!AttachedTarget::AutoConnect.is_remote());
+        assert!(!url("9222"));
+        assert!(!url("localhost:9222"));
+        assert!(!url("http://127.0.0.1:9222"));
+        assert!(!url("ws://[::1]:9222/devtools/browser/x"));
+        assert!(url("wss://chrome.example.com/?token=t"));
+        assert!(url("ws://user:pw@10.0.0.5:9222"));
+        assert!(url("http://browser.internal:9222"));
+    }
+
+    #[test]
+    fn test_bare_diff_snapshot_inherits_and_checks_snapshot_options() {
+        let stored = SnapshotScope {
+            selector: Some("h1".to_string()),
+            interactive: true,
+            ..SnapshotScope::default()
+        };
+        // Nothing named: the baseline's options are reused.
+        assert_eq!(
+            implicit_baseline_scope(&json!({}), &stored),
+            Ok(stored.clone())
+        );
+        // Naming the same options is fine.
+        let same = json!({ "selector": "h1", "interactive": true });
+        assert_eq!(implicit_baseline_scope(&same, &stored), Ok(stored.clone()));
+        // Naming different ones is refused.
+        for cmd in [
+            json!({ "selector": "p" }),
+            json!({ "compact": true }),
+            json!({ "maxDepth": 2 }),
+            json!({ "urls": true }),
+        ] {
+            let err = implicit_baseline_scope(&cmd, &stored).unwrap_err();
+            assert_eq!(
+                super::super::browser::precondition_code(&err),
+                Some("baseline_mismatch"),
+                "{cmd}"
+            );
+        }
     }
 
     #[tokio::test]

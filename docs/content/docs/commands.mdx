@@ -284,6 +284,8 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 
 If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
 
+`network har stop` fails with `no_har_recording` when no recording is active, for example after a daemon restart (`close` or idle shutdown).
+
 See [Network](/network) for pre-navigation routing, request filters, HAR export, and SSR/no-JavaScript debugging.
 
 ## Tabs & frames

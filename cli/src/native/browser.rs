@@ -235,10 +235,11 @@ fn active_page_index_after_add(
 
 /// Machine-readable codes for commands that reject an unmet precondition. An
 /// error message carries one as a `<code>: ` prefix.
-const PRECONDITION_CODES: [&str; 4] = [
+const PRECONDITION_CODES: [&str; 5] = [
     "file_not_found",
     "not_file_input",
     "no_baseline",
+    "baseline_mismatch",
     "no_har_recording",
 ];
 
