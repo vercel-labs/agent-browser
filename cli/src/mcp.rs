@@ -4706,11 +4706,6 @@ fn append_common_global_args(
                 args.push("--restore".to_string());
             }
         } else if let Some(key) = restore.as_str() {
-            if key.starts_with('-') {
-                return Err(ProtocolError::invalid_params(
-                    "restore keys may not start with '-'",
-                ));
-            }
             args.push(format!("--restore={}", key));
         } else {
             return Err(ProtocolError::invalid_params(
@@ -8222,4 +8217,16 @@ mod flag_shaped_values {
         assert_eq!(argv[marker + 1], "--session");
         assert_eq!(crate::flags::parse_flags(argv).session, "s1");
     }
+    #[test]
+    fn restore_keys_round_trip_as_themselves() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.remove("AGENT_BROWSER_SESSION");
+        for key in ["-work", "--restore=evil", "plain"] {
+            let (result, runs) = record_call(TOOL_OPEN, json!({"restore": key}));
+            assert!(result.is_ok(), "{key}");
+            let flags = crate::flags::parse_flags(&runs[0]);
+            assert_eq!(flags.restore.as_deref(), Some(key), "{key}");
+        }
+    }
+
 }

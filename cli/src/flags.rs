@@ -902,7 +902,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         match arg {
             s if s.starts_with("--restore=") => {
                 flags.cli_restore = true;
-                let value = s.trim_start_matches("--restore=");
+                let value = s.strip_prefix("--restore=").unwrap_or(s);
                 if value.is_empty() {
                     flags.restore_uses_session = true;
                 } else {
