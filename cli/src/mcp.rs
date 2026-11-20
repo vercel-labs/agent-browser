@@ -3028,6 +3028,13 @@ fn literal_positionals(mut options: Vec<String>, positionals: Vec<String>) -> Li
     (options, literal_start)
 }
 
+/// Puts the end-of-options marker right after a two-word command, so every
+/// operand and option value that follows is read as data.
+fn operands_after_subcommand(mut args: Vec<String>) -> LiteralArgs {
+    args.insert(2, "--".to_string());
+    (args, Some(2))
+}
+
 fn command_parts(command: &str) -> Vec<String> {
     command
         .split_whitespace()
@@ -3204,7 +3211,8 @@ fn webmcp_list_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
 }
 
 fn call_webmcp_invoke(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, webmcp_invoke_args(arguments)?, None)
+    let (args, literal_start) = operands_after_subcommand(webmcp_invoke_args(arguments)?);
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn webmcp_invoke_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
@@ -3232,7 +3240,8 @@ fn webmcp_invoke_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
 }
 
 fn call_webmcp_result(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, webmcp_result_args(arguments)?, None)
+    let (args, literal_start) = operands_after_subcommand(webmcp_result_args(arguments)?);
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn webmcp_result_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
@@ -4074,7 +4083,8 @@ fn call_auth_save(arguments: &Value) -> Result<Value, ProtocolError> {
         }
     }
     args.push("--password-stdin".to_string());
-    call_cli_tool(arguments, args, Some(password))
+    let (args, literal_start) = operands_after_subcommand(args);
+    call_cli_tool_at(arguments, args, literal_start, Some(password))
 }
 
 fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
@@ -4087,7 +4097,8 @@ fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
 }
 
 fn call_auth_login(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, auth_login_args(arguments)?, None)
+    let (args, literal_start) = operands_after_subcommand(auth_login_args(arguments)?);
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn call_state_clear(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4413,7 +4424,8 @@ fn plugin_add_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
 }
 
 fn call_plugin_run(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, plugin_run_args(arguments)?, None)
+    let (args, literal_start) = operands_after_subcommand(plugin_run_args(arguments)?);
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn plugin_run_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
@@ -8229,4 +8241,83 @@ mod flag_shaped_values {
         }
     }
 
+    /// Parses a recorded argv the way main() does.
+    fn parsed_run(argv: &[String]) -> (String, Value) {
+        let flags = crate::flags::parse_flags(argv);
+        let mut clean = crate::flags::clean_args(argv);
+        // main() hands plugin commands to the registry before parse_command.
+        if clean.first().map(String::as_str) == Some("plugin") {
+            crate::commands::strip_operand_marker(&mut clean);
+            return (format!("{flags:#?}"), json!(clean));
+        }
+        let command = crate::commands::parse_command(&clean, &flags)
+            .unwrap_or_else(|e| panic!("{argv:?}: {}", e.format()));
+        (format!("{flags:#?}"), command)
+    }
+
+    #[test]
+    fn flag_shaped_operands_of_the_five_tools_are_data() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.remove("AGENT_BROWSER_SESSION");
+        let payloads = ["--session", "-v", "--json", "--model", "--help", "-h"];
+        // (tool, arguments with `$` where the payload goes, key the command stores it under)
+        let cases: [(&str, Value, &str); 8] = [
+            (
+                "agent_browser_auth_save",
+                json!({"name": "$", "url": "https://example.com", "username": "u", "password": "p"}),
+                "name",
+            ),
+            (
+                "agent_browser_auth_save",
+                json!({"name": "n", "url": "https://example.com", "username": "$", "password": "p"}),
+                "username",
+            ),
+            (
+                "agent_browser_auth_save",
+                json!({"name": "n", "url": "https://example.com", "username": "u", "password": "p", "usernameSelector": "$"}),
+                "usernameSelector",
+            ),
+            ("agent_browser_auth_login", json!({"name": "$"}), "name"),
+            ("agent_browser_webmcp_invoke", json!({"tool": "$"}), "tool"),
+            (
+                "agent_browser_webmcp_result",
+                json!({"invocationId": "$"}),
+                "invocationId",
+            ),
+            (
+                "agent_browser_plugin_run",
+                json!({"name": "$", "requestType": "x"}),
+                "name",
+            ),
+            (
+                "agent_browser_plugin_run",
+                json!({"name": "n", "requestType": "$"}),
+                "requestType",
+            ),
+        ];
+        for (tool, template, key) in cases {
+            let benign = template.to_string().replace('$', "plain");
+            let (_, benign_runs) = record_call(tool, serde_json::from_str(&benign).unwrap());
+            let (baseline_flags, _) = parsed_run(&benign_runs[0]);
+            for payload in payloads {
+                let arguments: Value =
+                    serde_json::from_str(&template.to_string().replace('$', payload)).unwrap();
+                let (result, runs) = record_call(tool, arguments);
+                assert!(
+                    result.is_ok(),
+                    "{tool} {key}={payload}: {:?}",
+                    result.err().map(|e| e.message)
+                );
+                let (flags, command) = parsed_run(&runs[0]);
+                assert!(
+                    command.to_string().contains(&format!("\"{payload}\"")),
+                    "{tool} {key}={payload} lost: {command}"
+                );
+                assert_eq!(
+                    flags, baseline_flags,
+                    "{tool} {key}={payload} changed Flags"
+                );
+            }
+        }
+    }
 }
