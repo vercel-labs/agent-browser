@@ -178,13 +178,14 @@ const PRECHECK_JS: &str = r#"function(mode) {
         const useCheck = '; use check or uncheck';
         const neverText = {
             select: useSelect, optgroup: useSelect, option: useSelect,
+            button: '', label: '',
         };
         const neverTextInput = {
             checkbox: useCheck, radio: useCheck,
             file: '', hidden: '', image: '', button: '', submit: '', reset: '',
         };
         const valueTypes = ['color', 'date', 'time', 'datetime-local', 'month', 'week', 'range'];
-        let hint = Object.hasOwn(neverText, tag) ? neverText[tag] : null;
+        let hint = Object.hasOwn(neverText, tag) && !el.isContentEditable ? neverText[tag] : null;
         if (hint === null && tag === 'input' && Object.hasOwn(neverTextInput, type)) hint = neverTextInput[type];
         if (hint === null && mode !== 'fill' && tag === 'input' && valueTypes.includes(type)) {
             hint = '; use fill to set the value of this input';
@@ -838,62 +839,56 @@ pub async fn type_text(
             })
         }
     };
+    Ok(FormOutcome {
+        warning: type_read_warning(&before, &after, text, clear),
+    })
+}
+
+/// What the read after `type` says about the page. Control characters are key
+/// events and a password reads back empty, so neither is judged.
+fn type_read_warning(
+    before: &FormProbe,
+    after: &FormProbe,
+    text: &str,
+    clear: bool,
+) -> Option<String> {
     let plain = !text.is_empty() && !text.contains(['\n', '\r', '\t']);
-    let warning = if !plain || after.password {
-        None
-    } else if !clear && after.value.is_some() && after.value == before.value {
-        Some(format!(
+    if !plain || after.password {
+        return None;
+    }
+    if !clear && after.value.is_some() && after.value == before.value {
+        return Some(format!(
             "effect_not_observed: {} did not change after typing; the page may apply the text later",
             after.describe()
-        ))
-    } else {
-        type_warning(&before, &after, text, clear)
-    };
-    Ok(FormOutcome { warning })
+        ));
+    }
+    type_warning(after, text)
 }
 
-/// Whether `held` is `prior` with `text` inserted at one position, which is
-/// what typing into a field produces wherever the caret was.
-fn is_insertion(prior: &str, text: &str, held: &str) -> bool {
-    let (prior, text, held): (Vec<char>, Vec<char>, Vec<char>) = (
-        prior.chars().collect(),
-        text.chars().collect(),
-        held.chars().collect(),
-    );
-    held.len() == prior.len() + text.len()
-        && (0..=prior.len()).any(|i| {
-            held[..i] == prior[..i]
-                && held[i..i + text.len()] == text[..]
-                && held[i + text.len()..] == prior[i..]
-        })
-}
-
-/// Warns when typing left the field with something other than the prior value
-/// plus the typed text (after `--clear`, the typed text alone), as a maxlength
-/// or an input mask does. Only lengths are reported, never values.
-fn type_warning(before: &FormProbe, after: &FormProbe, text: &str, clear: bool) -> Option<String> {
+/// Warns when the typed text is not in the field afterwards, as a maxlength
+/// cut or an input mask does. Where the caret was and what else the page adds
+/// (a selected value replaced, an autocompleted suffix) are the page's; email
+/// inputs trim what is typed. Only lengths are reported, never values.
+fn type_warning(after: &FormProbe, text: &str) -> Option<String> {
     let held = after.value.as_ref()?;
-    let prior = if clear {
-        String::new()
-    } else {
-        before.value.clone()?
-    };
     let squash = |value: &str| {
         let value = after.comparable(value);
         if after.content_editable {
             value.split_whitespace().collect::<String>()
+        } else if after.input_type == "email" {
+            value.trim().to_string()
         } else {
             value
         }
     };
-    if is_insertion(&squash(&prior), &squash(text), &squash(held)) {
+    if squash(held).contains(&squash(text)) {
         return None;
     }
-    let expected = prior.encode_utf16().count() + text.encode_utf16().count();
-    let found = held.encode_utf16().count();
     Some(format!(
-        "value_mismatch: {} holds a different value than typed (expected length {expected}, found {found}); the page may limit or rewrite the text (maxlength, input mask)",
-        after.describe()
+        "value_mismatch: {} does not hold the typed text (typed length {}, field length {}); the page may limit or rewrite the text (maxlength, input mask)",
+        after.describe(),
+        text.encode_utf16().count(),
+        held.encode_utf16().count()
     ))
 }
 
@@ -1112,7 +1107,7 @@ pub async fn select_option(
             if (!(this instanceof HTMLSelectElement)) {
                 const role = this.getAttribute('role');
                 if (role !== 'combobox' && role !== 'listbox') {
-                    return { code: 'not_editable', error: 'select target <' + this.tagName.toLowerCase() + '> is not a <select> or a role=combobox/listbox element' };
+                    return { code: 'not_editable', error: 'select target is not a <select> or a role=combobox/listbox element' };
                 }
                 const realClick = (el) => {
                     const r = el.getBoundingClientRect();
@@ -1172,8 +1167,7 @@ pub async fn select_option(
                     const want = normalize(value);
                     const matches = options.filter((o) => (by !== 'value' && nameOf(o) === want) || (by !== 'label' && valueOf(o) && valueOf(o) === want));
                     if (matches.length === 0) {
-                        const available = options.map((o) => '"' + nameOf(o) + '"').join(', ');
-                        return { code: 'option_not_found', error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
+                        return { code: 'option_not_found', error: 'No option matched ' + JSON.stringify(vals) + '. The list has ' + options.length + ' options' };
                     }
                     if (matches.length > 1) {
                         return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ' (' + matches.length + ' options). Pass --by value to match option values or --by label to match visible labels.' };
@@ -1181,7 +1175,7 @@ pub async fn select_option(
                     // A disabled option swallows the click, so selecting it would
                     // report success with an unchanged widget.
                     if (matches[0].getAttribute('aria-disabled') === 'true') {
-                        return { code: 'disabled', error: 'Option "' + nameOf(matches[0]) + '" is disabled' };
+                        return { code: 'disabled', error: 'The matched option is disabled' };
                     }
                     wanted.add(matches[0]);
                 }
@@ -1203,7 +1197,6 @@ pub async fn select_option(
             }
             const options = Array.from(this.options);
             const labelOf = (o) => o.label.trim();
-            const show = (o) => normalize(o.label) + ' (' + o.value + ')';
             // Options sharing a value are one choice.
             const distinct = (found) => new Set(found.map((o) => o.value)).size;
             // A string that reaches exactly one option, by value or by exact
@@ -1225,8 +1218,7 @@ pub async fn select_option(
             for (const value of vals) {
                 const r = resolve(value);
                 if (r.found.length === 0) {
-                    const available = options.map(show).join(', ');
-                    return { code: 'option_not_found', error: 'No option matched ' + JSON.stringify(vals) + (by ? ' by ' + by : '') + '. Available options: ' + available };
+                    return { code: 'option_not_found', error: 'No option matched ' + JSON.stringify(vals) + (by ? ' by ' + by : '') + '. The select has ' + options.length + ' options' };
                 }
                 if (r.ambiguous) {
                     const seen = new Set();
@@ -2353,33 +2345,74 @@ mod tests {
         assert_eq!(probe.describe(), "<unknown>");
     }
 
+    fn typed(before: &str, held: &str, text: &str, clear: bool) -> Option<String> {
+        type_read_warning(&text_probe(before, -1), &text_probe(held, -1), text, clear)
+    }
+
     #[test]
-    fn test_typing_is_checked_against_prior_value_plus_text() {
-        let after = |value: &str| text_probe(value, -1);
-        let warn = |before: &str, held: &str, text: &str, clear: bool| {
-            type_warning(&text_probe(before, -1), &after(held), text, clear)
-        };
-        // Inserted anywhere, or replacing a cleared value, is what was typed.
+    fn test_typing_warns_only_when_the_text_is_missing() {
+        // The caret, a selected value replaced, an autocompleted suffix and a
+        // clear are the page's business: the typed text is in the field.
         for held in ["XAB", "AXB", "ABX"] {
-            assert!(warn("AB", held, "X", false).is_none(), "{held}");
+            assert!(typed("AB", held, "X", false).is_none(), "{held}");
         }
-        assert!(warn("old", "new", "new", true).is_none());
-        // A maxlength cut or a mask rewrite is reported, with lengths only.
-        let cut = warn("", "01234", "0123456789", false).unwrap();
-        let mask = warn("", "(555) 123", "555123", false).unwrap();
+        assert!(typed("ab", "c", "c", false).is_none());
+        assert!(typed("", "United", "Un", false).is_none());
+        assert!(typed("old", "new", "new", true).is_none());
+        // A maxlength cut or a mask rewrite loses the text; lengths only.
+        let cut = typed("", "01234", "0123456789", false).unwrap();
+        let mask = typed("", "(555) 123", "555123", false).unwrap();
         for w in [&cut, &mask] {
             assert!(w.starts_with("value_mismatch"), "{w}");
             assert!(!w.contains("01234") && !w.contains("555"), "{w}");
         }
         assert!(
-            cut.contains("expected length 10") && cut.contains("found 5"),
+            cut.contains("typed length 10") && cut.contains("field length 5"),
             "{cut}"
         );
-        assert!(warn("old", "oldnew", "new", true).is_some());
+        assert!(typed("old", "oldnew", "new", true).is_none());
+        assert!(typed("old", "old", "new", true).is_some());
         // Nothing is read from a field that reports no value.
         let mut blind = text_probe("", -1);
         blind.value = None;
-        assert!(type_warning(&text_probe("a", -1), &blind, "b", false).is_none());
+        assert!(type_read_warning(&text_probe("a", -1), &blind, "b", false).is_none());
+    }
+
+    #[test]
+    fn test_typing_into_email_is_compared_trimmed() {
+        let mut after = text_probe("a@b.co", -1);
+        after.input_type = "email".into();
+        let before = text_probe("", -1);
+        assert!(type_read_warning(&before, &after, " a@b.co", false).is_none());
+        after.value = Some("a@b".into());
+        assert!(type_read_warning(&before, &after, " a@b.co", false).is_some());
+    }
+
+    #[test]
+    fn test_typing_never_judges_a_password_or_key_events() {
+        // A password reads back empty, which would otherwise look like loss.
+        let mut after = text_probe("", -1);
+        after.password = true;
+        assert!(type_read_warning(&text_probe("", -1), &after, "secret", false).is_none());
+        after.value = Some("".into());
+        assert!(type_read_warning(&text_probe("x", -1), &after, "secret", true).is_none());
+        // Control characters are key events.
+        assert!(typed("a", "a", "\n", false).is_none());
+    }
+
+    #[test]
+    fn test_typing_into_contenteditable_ignores_whitespace_layout() {
+        let probe = |value: &str| FormProbe {
+            tag: "div".into(),
+            content_editable: true,
+            value: Some(value.into()),
+            max_length: -1,
+            ..Default::default()
+        };
+        // innerText lays text out with its own spaces and line breaks.
+        assert!(type_read_warning(&probe("a"), &probe("a b\nc"), "a  b c", true).is_none());
+        assert!(type_read_warning(&probe("a"), &probe("a\nb"), "ab", true).is_none());
+        assert!(type_read_warning(&probe("a"), &probe("a b"), "a  bc", true).is_some());
     }
 
     #[test]

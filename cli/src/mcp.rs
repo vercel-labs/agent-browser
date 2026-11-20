@@ -1003,7 +1003,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_TYPE,
             "Type text",
-            "Type text into an element by @ref or CSS selector. Fails for disabled fields, for readonly fields when `clear` is set (clearing would empty them), and for elements that can never take text (select, option, checkbox, radio, file, hidden, image, button, submit, reset, color, range and date-type inputs; use fill for date, time, color and range inputs, keyboard type for a focused element, press for a single key); warns if the page does not show the text.",
+            "Type text into an element by @ref or CSS selector. Fails for disabled fields, for readonly fields when `clear` is set (clearing would empty them), and for elements that can never take text (select, option, button, a label without a control, checkbox, radio, file, hidden, image, button, submit, reset, color, range and date-type inputs; use fill for date, time, color and range inputs, keyboard type for a focused element, press for a single key); warns if the page does not show the text.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to type." },

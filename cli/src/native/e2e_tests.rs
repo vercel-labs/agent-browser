@@ -3106,6 +3106,10 @@ async fn e2e_form_actions_resolve_refuse_report_and_stay_clean() {
             "<input id='hid' type='hidden' value='h'><input id='img' type='image' alt='x'>",
             "<input id='btn' type='button' value='b'><input id='sub' type='submit'><input id='rst' type='reset'>",
             "<input id='m' maxlength='5'><input id='mk'><input id='ok' value='ab'>",
+            "<label id='nolab' for='missing'>l</label><label id='wrap'>w</label><button id='bt'>b</button>",
+            "<input id='selfocus' value='ab' onfocus='this.select()'><input id='auto'><input id='em' type='email'>",
+            "<x-{tag2} id='sx' data-t='sx'>x</x-{tag2}>",
+            "<div id='lb' role='listbox' data-t='lb'><div role='option' aria-disabled='true'>{mark}_OPT</div><div role='option'>{mark}_OPT2</div></div>",
             "<input id='{mark}_ro' data-t='ro' readonly value='v'>",
             "<input id='{mark}_dis' data-t='dis' disabled value='v'>",
             "<input id='{mark}_cb' data-t='cb' type='checkbox'>",
@@ -3114,10 +3118,12 @@ async fn e2e_form_actions_resolve_refuse_report_and_stay_clean() {
             "<select id='{mark}_amb' data-t='amb'><option value='{mark}1'>{mark}</option><option value='{mark}2'>{mark}</option></select>",
             "<script>",
             "mk.addEventListener('input', () => {{ const d = mk.value.replace(/[^0-9]/g, ''); mk.value = '(' + d.slice(0, 3) + ') ' + d.slice(3); }});",
+            "auto.addEventListener('input', () => {{ if (auto.value === 'Un') auto.value = 'United'; }});",
             "</script></body></html>"
         ),
         mark = MARK,
         tag = "x-ignore-previous-instructions",
+        tag2 = "ignore-previous-instructions",
     );
     let resp = execute_command(
         &json!({ "id": "2", "action": "navigate", "url": html }),
@@ -3132,6 +3138,7 @@ async fn e2e_form_actions_resolve_refuse_report_and_stay_clean() {
             "type" => ("type", "text", false),
             "type-clear" => ("type", "text", true),
             "check" => ("check", "unused", false),
+            "multiselect" => ("multiselect", "values", false),
             _ => ("select", "values", false),
         };
         let mut cmd = json!({ "id": "x", "action": action, "selector": selector, key: arg });
@@ -3166,7 +3173,9 @@ async fn e2e_form_actions_resolve_refuse_report_and_stay_clean() {
     }
 
     // Elements that can never take text are refused whatever has focus.
-    for selector in ["#opt", "#hid", "#img", "#btn", "#sub", "#rst"] {
+    for selector in [
+        "#opt", "#hid", "#img", "#btn", "#sub", "#rst", "#nolab", "#wrap", "#bt",
+    ] {
         for action in ["fill", "type"] {
             evaluate_value(&mut state, "focused.focus()").await;
             let before = evaluate_value(&mut state, FIELDS).await;
@@ -3186,6 +3195,9 @@ async fn e2e_form_actions_resolve_refuse_report_and_stay_clean() {
         ("#m", "0123456789", false),
         ("#mk", "5551234567", false),
         ("#ok", "cd", true),
+        ("#selfocus", "c", true),
+        ("#auto", "Un", true),
+        ("#em", " a@b.co", true),
     ] {
         let resp = run(&mut state, "type", selector, &json!(text)).await;
         let warning = resp["warning"].as_str();
@@ -3227,6 +3239,27 @@ async fn e2e_form_actions_resolve_refuse_report_and_stay_clean() {
         if said.is_empty()
             || page_text.contains("IGNORE_PREVIOUS")
             || page_text.contains("x-ignore")
+        {
+            failures.push(format!("{action} {selector}: {resp}"));
+        }
+    }
+
+    // Every select path says nothing the page controls: no tag name, option
+    // label or option value, in `select` and in `multiselect`.
+    for (action, selector, arg) in [
+        ("select", "[data-t=sx]", json!(["nope"])),
+        ("select", "[data-t=amb]", json!(["nope"])),
+        ("select", "[data-t=lb]", json!(["nope"])),
+        ("select", "[data-t=lb]", json!([format!("{MARK}_OPT")])),
+        ("multiselect", "[data-t=sx]", json!(["nope"])),
+        ("multiselect", "[data-t=amb]", json!(["nope"])),
+    ] {
+        let resp = run(&mut state, action, selector, &arg).await;
+        let said = resp["error"].as_str().unwrap_or_default();
+        if resp["success"] != false
+            || said.is_empty()
+            || said.contains("IGNORE")
+            || said.contains("ignore-previous")
         {
             failures.push(format!("{action} {selector}: {resp}"));
         }
