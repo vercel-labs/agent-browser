@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::flags::Flags;
 
-use super::spec::{redacted, spec, spec_by_name, Effect, Key, Persist, SPECS};
+use super::spec::{redacted, spec, spec_by_name, Effect, Key, Persist, RESTORE_UNIT, SPECS};
 use super::SettingsError;
 
 /// A requested value that does not fit its setting.
@@ -210,6 +210,24 @@ impl Patch {
 
     pub fn is_changed_in_place(&self, key: Key) -> bool {
         self.changed_in_place.contains(&key)
+    }
+
+    /// Splits the restore unit (key, save policy, checks) from the rest. The
+    /// unit applies once, past the policy gates; the rest keeps the patch's
+    /// relaunch and ambient state.
+    pub fn split_restore_unit(&self) -> (Patch, Patch) {
+        let mut rest = self.clone();
+        let mut unit = Patch::default();
+        for key in RESTORE_UNIT {
+            if let Some(requested) = rest.entries.remove(&key) {
+                unit.entries.insert(key, requested);
+            }
+            if rest.changed_in_place.remove(&key) {
+                unit.changed_in_place.insert(key);
+            }
+        }
+        rest.retain_ambient();
+        (rest, unit)
     }
 
     /// The patch without its launch settings and without a forced relaunch:

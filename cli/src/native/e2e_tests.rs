@@ -18629,3 +18629,49 @@ async fn e2e_restore_key_switch_does_not_check_the_old_browser_against_the_new_c
         "the old browser must be saved before the new key's checks apply"
     );
 }
+
+/// `close` carries settings like any other command: a save policy sent with it
+/// governs the save the close performs.
+#[tokio::test]
+#[ignore]
+async fn e2e_close_honors_the_restore_save_policy_it_carries() {
+    for (name, settings) in [
+        ("close-never", json!({ "restore-save": "never" })),
+        (
+            "close-never-same",
+            json!({ "restore-key": "close-never-same", "restore-save": "never" }),
+        ),
+    ] {
+        let (_env, _home) = isolated_restore_env();
+        let (page, server) = restore_fixture_page().await;
+        let mut state = DaemonState::new();
+        assert_success(
+            &execute_command(
+                &json!({ "id": "1", "action": "navigate", "url": page,
+                         "settings": { "restore-key": name } }),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(
+            &execute_command(
+                &json!({ "id": "2", "action": "cookies_set", "name": "kept", "value": "1" }),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(
+            &execute_command(
+                &json!({ "id": "3", "action": "close", "settings": settings }),
+                &mut state,
+            )
+            .await,
+        );
+        server.abort();
+
+        assert!(
+            saved_restore_states(name).is_empty(),
+            "{name}: close saved state although the policy it carried is never"
+        );
+    }
+}

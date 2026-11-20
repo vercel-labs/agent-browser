@@ -42,6 +42,17 @@ keys! {
     RestoreKey, RestoreSave, RestoreCheckUrl, RestoreCheckText, RestoreCheckFn,
 }
 
+/// The restore key, save policy and checks act as one unit: they apply,
+/// commit and roll back together, and only once the command that carries them
+/// has passed the policy gates.
+pub const RESTORE_UNIT: [Key; 5] = [
+    Key::RestoreKey,
+    Key::RestoreSave,
+    Key::RestoreCheckUrl,
+    Key::RestoreCheckText,
+    Key::RestoreCheckFn,
+];
+
 /// What changing a setting does to a running session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
