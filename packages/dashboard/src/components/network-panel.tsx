@@ -25,6 +25,8 @@ interface NetworkRequest {
   requestId: string;
   mimeType?: string;
   timestamp: number;
+  encodedDataLength?: number;
+  durationMs?: number;
 }
 
 type TypeFilter = "all" | "xhr" | "doc" | "css" | "js" | "img" | "font" | "other";
@@ -69,6 +71,20 @@ function urlHost(url: string): string {
   } catch {
     return "";
   }
+}
+
+function formatSize(bytes?: number): string {
+  if (bytes == null) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDuration(ms?: number): string {
+  if (ms == null) return "—";
+  if (ms < 1) return "<1ms";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 export function NetworkPanel() {
@@ -291,6 +307,12 @@ export function NetworkPanel() {
                   <span className="w-8 shrink-0 text-muted-foreground">{r.method}</span>
                   <span className="min-w-0 flex-1 truncate text-foreground" title={r.url}>
                     {truncateUrl(r.url, 80)}
+                  </span>
+                  <span className="w-14 shrink-0 text-right tabular-nums text-[10px] text-muted-foreground/60">
+                    {formatSize(r.encodedDataLength)}
+                  </span>
+                  <span className="w-12 shrink-0 text-right tabular-nums text-[10px] text-muted-foreground/60">
+                    {formatDuration(r.durationMs)}
                   </span>
                   <span className="shrink-0 text-[10px] text-muted-foreground/60">
                     {r.resourceType}
