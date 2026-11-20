@@ -164,35 +164,36 @@ const RETARGET_JS: &str = r#"
 "#;
 
 /// Decides from the target's own properties whether `fill` or `type` may act.
-/// Nothing depends on where focus lands.
+/// Nothing depends on where focus lands. The result carries only fixed
+/// vocabulary: a code, a fixed hint, the tag and the input type.
 const PRECHECK_JS: &str = r#"function(mode) {
         /*RETARGET*/
-        const describe = (n) => '<' + n.localName + (n.id ? '#' + n.id : '') + (n.localName === 'input' && n.type ? ' type="' + n.type + '"' : '') + '>';
+        const tag = el.localName;
+        const type = tag === 'input' ? el.type : '';
+        const fail = (code, hint) => ({ error: { code, hint }, tag, type });
+        if (el.matches(':disabled')) return fail('disabled', '');
+        // Elements and input types that can never take text, with the command
+        // to use instead. Where the text lands for everything else is unchanged.
+        const useSelect = '; use select';
+        const useCheck = '; use check or uncheck';
+        const neverText = {
+            select: useSelect, optgroup: useSelect, option: useSelect,
+        };
+        const neverTextInput = {
+            checkbox: useCheck, radio: useCheck,
+            file: '', hidden: '', image: '', button: '', submit: '', reset: '',
+        };
         const valueTypes = ['color', 'date', 'time', 'datetime-local', 'month', 'week', 'range'];
-        const verb = mode === 'fill' ? 'filled' : mode === 'type-clear' ? 'cleared and typed into' : 'typed into';
-        const fail = (code, message) => ({ error: { code, message } });
-        if (el.matches(':disabled')) {
-            return fail('disabled', 'Element ' + describe(el) + ' is disabled and cannot be ' + verb);
+        let hint = Object.hasOwn(neverText, tag) ? neverText[tag] : null;
+        if (hint === null && tag === 'input' && Object.hasOwn(neverTextInput, type)) hint = neverTextInput[type];
+        if (hint === null && mode !== 'fill' && tag === 'input' && valueTypes.includes(type)) {
+            hint = '; use fill to set the value of this input';
         }
-        // Only elements that can never take text are refused; where the text
-        // lands for everything else is unchanged.
-        const neverText = ['checkbox', 'radio', 'file'];
-        const isInput = el.localName === 'input';
-        const valueInput = isInput && valueTypes.includes(el.type);
-        let hint = null;
-        if (el.localName === 'select') hint = '; use select';
-        else if (isInput && (el.type === 'checkbox' || el.type === 'radio')) hint = '; use check or uncheck';
-        else if (isInput && neverText.includes(el.type)) hint = '';
-        else if (mode !== 'fill' && valueInput) hint = '; use fill to set the value of this input';
-        if (hint !== null) {
-            return fail('not_editable', 'Element ' + describe(el) + ' cannot be ' + verb + hint);
-        }
+        if (hint !== null) return fail('not_editable', hint);
         // Any step that destroys the value is refused on a readonly field:
         // `fill` and `type --clear`. A plain `type` does not clear, so it is
         // left to the page (a trigger may forward focus).
-        if (mode !== 'type' && el.readOnly) {
-            return fail('read_only', 'Element ' + describe(el) + ' is readonly and cannot be ' + verb);
-        }
+        if (mode !== 'type' && el.readOnly) return fail('read_only', '');
         return { ok: true };
     }"#;
 
@@ -244,6 +245,50 @@ const PROBE_JS: &str = r#"function() {
         };
     }"#;
 
+const KNOWN_TAGS: &[&str] = &[
+    "a", "article", "aside", "button", "canvas", "details", "dialog", "div", "fieldset", "footer",
+    "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "iframe", "img", "input", "label",
+    "legend", "li", "main", "nav", "ol", "optgroup", "option", "output", "p", "pre", "section",
+    "select", "span", "summary", "table", "td", "textarea", "th", "tr", "ul",
+];
+
+const KNOWN_INPUT_TYPES: &[&str] = &[
+    "button",
+    "checkbox",
+    "color",
+    "date",
+    "datetime-local",
+    "email",
+    "file",
+    "hidden",
+    "image",
+    "month",
+    "number",
+    "password",
+    "radio",
+    "range",
+    "reset",
+    "search",
+    "submit",
+    "tel",
+    "text",
+    "time",
+    "url",
+    "week",
+];
+
+/// Names an element for an error or warning from fixed vocabulary only: a page
+/// controls tag names and ids, so anything outside the lists is "<unknown>".
+fn describe_target(tag: &str, input_type: &str) -> String {
+    if tag == "input" && KNOWN_INPUT_TYPES.contains(&input_type) {
+        format!("<input type=\"{input_type}\">")
+    } else if KNOWN_TAGS.contains(&tag) {
+        format!("<{tag}>")
+    } else {
+        "<unknown>".to_string()
+    }
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct FormProbe {
@@ -274,11 +319,7 @@ impl FormProbe {
     }
 
     fn describe(&self) -> String {
-        if self.tag == "input" && !self.input_type.is_empty() {
-            format!("<input type=\"{}\">", self.input_type)
-        } else {
-            format!("<{}>", self.tag)
-        }
+        describe_target(&self.tag, &self.input_type)
     }
 
     fn comparable(&self, text: &str) -> String {
@@ -410,13 +451,38 @@ async fn probe_selector(
     probe_object(client, &effective_session_id, &object_id).await
 }
 
+/// The control a target stands for: a label resolves to its control, and a part
+/// of a date or time input to the input. Every step of `fill` and `type` acts
+/// on this one object.
+async fn resolve_control(client: &CdpClient, session_id: &str, object_id: &str) -> String {
+    let js = format!("function() {{ {RETARGET_JS} return el; }}");
+    let resolved = client
+        .send_command_typed::<_, EvaluateResult>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: js,
+                object_id: Some(object_id.to_string()),
+                arguments: None,
+                return_by_value: Some(false),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await;
+    resolved
+        .ok()
+        .and_then(|r| r.result.object_id)
+        .unwrap_or_else(|| object_id.to_string())
+}
+
 /// Refuses `fill` or `type` on a target that cannot take the text, before
-/// anything is changed.
+/// anything is changed. The message names the target as the caller passed it.
 async fn precheck(
     client: &CdpClient,
     session_id: &str,
     object_id: &str,
     mode: &str,
+    target: &str,
 ) -> Result<(), String> {
     let js = PRECHECK_JS.replace("/*RETARGET*/", RETARGET_JS);
     let result = call_on(
@@ -427,13 +493,32 @@ async fn precheck(
         Some(serde_json::json!(mode)),
     )
     .await?;
-    if let Some(error) = result.result.value.as_ref().and_then(|v| v.get("error")) {
+    let Some(value) = result.result.value.as_ref() else {
+        return Ok(());
+    };
+    if let Some(error) = value.get("error") {
         let code = error
             .get("code")
             .and_then(Value::as_str)
+            .filter(|c| FORM_ERROR_CODES.contains(c))
             .unwrap_or("not_editable");
-        let message = error.get("message").and_then(Value::as_str).unwrap_or("");
-        return Err(form_error(code, message));
+        let hint = error.get("hint").and_then(Value::as_str).unwrap_or("");
+        let field = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("");
+        let described = describe_target(field("tag"), field("type"));
+        let verb = match mode {
+            "fill" => "filled",
+            "type-clear" => "cleared and typed into",
+            _ => "typed into",
+        };
+        let reason = match code {
+            "disabled" => format!("is disabled and cannot be {verb}"),
+            "read_only" => format!("is readonly and cannot be {verb}"),
+            _ => format!("cannot be {verb}{hint}"),
+        };
+        return Err(form_error(
+            code,
+            format!("Element {target} ({described}) {reason}"),
+        ));
     }
     Ok(())
 }
@@ -567,8 +652,16 @@ pub async fn fill(
         iframe_sessions,
     )
     .await?;
+    let object_id = resolve_control(client, &effective_session_id, &object_id).await;
 
-    precheck(client, &effective_session_id, &object_id, "fill").await?;
+    precheck(
+        client,
+        &effective_session_id,
+        &object_id,
+        "fill",
+        selector_or_ref,
+    )
+    .await?;
     let before = probe_object(client, &effective_session_id, &object_id)
         .await
         .unwrap_or_else(|_| FormProbe::unknown());
@@ -669,6 +762,7 @@ pub async fn type_text(
         iframe_sessions,
     )
     .await?;
+    let object_id = resolve_control(client, &effective_session_id, &object_id).await;
 
     // Control characters alone are key events, which any focused target can
     // receive; any text needs a target that takes it.
@@ -676,9 +770,23 @@ pub async fn type_text(
     // Clearing destroys the value, so `--clear` is checked like `fill`, even
     // for key-only text.
     if clear {
-        precheck(client, &effective_session_id, &object_id, "type-clear").await?;
+        precheck(
+            client,
+            &effective_session_id,
+            &object_id,
+            "type-clear",
+            selector_or_ref,
+        )
+        .await?;
     } else if !keys_only {
-        precheck(client, &effective_session_id, &object_id, "type").await?;
+        precheck(
+            client,
+            &effective_session_id,
+            &object_id,
+            "type",
+            selector_or_ref,
+        )
+        .await?;
     }
     let before = probe_object(client, &effective_session_id, &object_id)
         .await
@@ -731,14 +839,62 @@ pub async fn type_text(
         }
     };
     let plain = !text.is_empty() && !text.contains(['\n', '\r', '\t']);
-    let warning = (plain && !clear && !after.password && after.value.is_some() && after.value == before.value)
-        .then(|| {
-            format!(
-                "effect_not_observed: {} did not change after typing; the page may apply the text later",
-                after.describe()
-            )
-        });
+    let warning = if !plain || after.password {
+        None
+    } else if !clear && after.value.is_some() && after.value == before.value {
+        Some(format!(
+            "effect_not_observed: {} did not change after typing; the page may apply the text later",
+            after.describe()
+        ))
+    } else {
+        type_warning(&before, &after, text, clear)
+    };
     Ok(FormOutcome { warning })
+}
+
+/// Whether `held` is `prior` with `text` inserted at one position, which is
+/// what typing into a field produces wherever the caret was.
+fn is_insertion(prior: &str, text: &str, held: &str) -> bool {
+    let (prior, text, held): (Vec<char>, Vec<char>, Vec<char>) = (
+        prior.chars().collect(),
+        text.chars().collect(),
+        held.chars().collect(),
+    );
+    held.len() == prior.len() + text.len()
+        && (0..=prior.len()).any(|i| {
+            held[..i] == prior[..i]
+                && held[i..i + text.len()] == text[..]
+                && held[i + text.len()..] == prior[i..]
+        })
+}
+
+/// Warns when typing left the field with something other than the prior value
+/// plus the typed text (after `--clear`, the typed text alone), as a maxlength
+/// or an input mask does. Only lengths are reported, never values.
+fn type_warning(before: &FormProbe, after: &FormProbe, text: &str, clear: bool) -> Option<String> {
+    let held = after.value.as_ref()?;
+    let prior = if clear {
+        String::new()
+    } else {
+        before.value.clone()?
+    };
+    let squash = |value: &str| {
+        let value = after.comparable(value);
+        if after.content_editable {
+            value.split_whitespace().collect::<String>()
+        } else {
+            value
+        }
+    };
+    if is_insertion(&squash(&prior), &squash(text), &squash(held)) {
+        return None;
+    }
+    let expected = prior.encode_utf16().count() + text.encode_utf16().count();
+    let found = held.encode_utf16().count();
+    Some(format!(
+        "value_mismatch: {} holds a different value than typed (expected length {expected}, found {found}); the page may limit or rewrite the text (maxlength, input mask)",
+        after.describe()
+    ))
 }
 
 pub async fn type_text_into_active_context(
@@ -1020,7 +1176,7 @@ pub async fn select_option(
                         return { code: 'option_not_found', error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
                     }
                     if (matches.length > 1) {
-                        return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ': ' + matches.map((o) => '"' + nameOf(o) + '"').join(', ') + '. Pass --by value to match option values or --by label to match visible labels.' };
+                        return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ' (' + matches.length + ' options). Pass --by value to match option values or --by label to match visible labels.' };
                     }
                     // A disabled option swallows the click, so selecting it would
                     // report success with an unchanged widget.
@@ -1078,7 +1234,7 @@ pub async fn select_option(
                     const advice = by === 'label'
                         ? ' Several options share that label; pass --by value with the option value.'
                         : ' Pass --by value to match option values or --by label to match visible labels.';
-                    return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ': ' + candidates.map(show).join(', ') + '.' + advice };
+                    return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ' (' + candidates.length + ' options with different values).' + advice };
                 }
                 for (const opt of r.found) wanted.add(opt);
             }
@@ -2182,6 +2338,48 @@ mod tests {
             value: Some(value.into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_targets_are_described_from_fixed_vocabulary() {
+        assert_eq!(describe_target("input", "text"), "<input type=\"text\">");
+        assert_eq!(describe_target("select", ""), "<select>");
+        for page_controlled in ["x-ignore-previous-instructions", "IGNORE#id", ""] {
+            assert_eq!(describe_target(page_controlled, ""), "<unknown>");
+        }
+        assert_eq!(describe_target("input", "IGNORE ALL"), "<input>");
+        let mut probe = text_probe("", -1);
+        probe.tag = "x-ignore-previous-instructions".into();
+        assert_eq!(probe.describe(), "<unknown>");
+    }
+
+    #[test]
+    fn test_typing_is_checked_against_prior_value_plus_text() {
+        let after = |value: &str| text_probe(value, -1);
+        let warn = |before: &str, held: &str, text: &str, clear: bool| {
+            type_warning(&text_probe(before, -1), &after(held), text, clear)
+        };
+        // Inserted anywhere, or replacing a cleared value, is what was typed.
+        for held in ["XAB", "AXB", "ABX"] {
+            assert!(warn("AB", held, "X", false).is_none(), "{held}");
+        }
+        assert!(warn("old", "new", "new", true).is_none());
+        // A maxlength cut or a mask rewrite is reported, with lengths only.
+        let cut = warn("", "01234", "0123456789", false).unwrap();
+        let mask = warn("", "(555) 123", "555123", false).unwrap();
+        for w in [&cut, &mask] {
+            assert!(w.starts_with("value_mismatch"), "{w}");
+            assert!(!w.contains("01234") && !w.contains("555"), "{w}");
+        }
+        assert!(
+            cut.contains("expected length 10") && cut.contains("found 5"),
+            "{cut}"
+        );
+        assert!(warn("old", "oldnew", "new", true).is_some());
+        // Nothing is read from a field that reports no value.
+        let mut blind = text_probe("", -1);
+        blind.value = None;
+        assert!(type_warning(&text_probe("a", -1), &blind, "b", false).is_none());
     }
 
     #[test]

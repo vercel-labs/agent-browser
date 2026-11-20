@@ -12067,7 +12067,7 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
             if (!select) return {{ __ab_miss: true }};
             const vals = {vals};
             if (!(select instanceof HTMLSelectElement)) {{
-                return {{ code: 'not_editable', error: 'Element <' + select.localName + '> is not a <select>' }};
+                return {{ code: 'not_editable', error: 'Element is not a <select>' }};
             }}
             if (select.matches(':disabled')) {{
                 return {{ code: 'disabled', error: 'Element <select> is disabled and cannot be changed' }};
@@ -12079,7 +12079,7 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
             const keyOf = (o) => (by === 'label' ? o.label.trim() : o.value);
             const missing = vals.filter((v) => !Array.from(select.options).some((o) => keyOf(o) === v));
             if (missing.length > 0) {{
-                return {{ code: 'option_not_found', error: 'No option matched ' + JSON.stringify(missing) + '. Available options: ' + Array.from(select.options).map((o) => JSON.stringify(keyOf(o))).join(', ') }};
+                return {{ code: 'option_not_found', error: 'No option matched ' + JSON.stringify(missing) + '. ' + select.options.length + ' options available' }};
             }}
             for (const opt of select.options) {{
                 opt.selected = vals.includes(keyOf(opt));

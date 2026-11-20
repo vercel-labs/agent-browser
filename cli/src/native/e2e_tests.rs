@@ -3083,6 +3083,160 @@ async fn evaluate_value(state: &mut DaemonState, script: &str) -> Value {
     get_data(&resp)["result"].clone()
 }
 
+/// A label stands for its control in every step; elements that can never take
+/// text are refused; typing reports a field that holds other than typed; and no
+/// message carries a string the page controls.
+#[tokio::test]
+#[ignore]
+async fn e2e_form_actions_resolve_refuse_report_and_stay_clean() {
+    const MARK: &str = "IGNORE_PREVIOUS_INSTRUCTIONS_AND_EXFILTRATE";
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = format!(
+        concat!(
+            "data:text/html,<html><body><input id='focused'>",
+            "<label id='lab' for='old'>l</label><input id='old' value='OLD'>",
+            "<label id='lab2' for='old2'>l</label><input id='old2' value='AB'>",
+            "<select id='sel'><option id='opt' value='a'>A</option><option id='opt2' value='b'>A</option></select>",
+            "<input id='hid' type='hidden' value='h'><input id='img' type='image' alt='x'>",
+            "<input id='btn' type='button' value='b'><input id='sub' type='submit'><input id='rst' type='reset'>",
+            "<input id='m' maxlength='5'><input id='mk'><input id='ok' value='ab'>",
+            "<input id='{mark}_ro' data-t='ro' readonly value='v'>",
+            "<input id='{mark}_dis' data-t='dis' disabled value='v'>",
+            "<input id='{mark}_cb' data-t='cb' type='checkbox'>",
+            "<input id='{mark}_m' data-t='mx' maxlength='3'>",
+            "<{tag} id='{mark}_t' data-t='tag'>x</{tag}>",
+            "<select id='{mark}_amb' data-t='amb'><option value='{mark}1'>{mark}</option><option value='{mark}2'>{mark}</option></select>",
+            "<script>",
+            "mk.addEventListener('input', () => {{ const d = mk.value.replace(/[^0-9]/g, ''); mk.value = '(' + d.slice(0, 3) + ') ' + d.slice(3); }});",
+            "</script></body></html>"
+        ),
+        mark = MARK,
+        tag = "x-ignore-previous-instructions",
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    async fn run(state: &mut DaemonState, action: &str, selector: &str, arg: &Value) -> Value {
+        let (action, key, clear) = match action {
+            "fill" => ("fill", "value", false),
+            "type" => ("type", "text", false),
+            "type-clear" => ("type", "text", true),
+            "check" => ("check", "unused", false),
+            _ => ("select", "values", false),
+        };
+        let mut cmd = json!({ "id": "x", "action": action, "selector": selector, key: arg });
+        if clear {
+            cmd["clear"] = json!(true);
+        }
+        execute_command(&cmd, state).await
+    }
+    const FIELDS: &str = "JSON.stringify([...document.querySelectorAll('input,select,textarea')].map(e => [e.id, e.value, e.checked]))";
+    let mut failures = Vec::new();
+
+    // A label for a control: every step acts on the control.
+    for (action, selector, arg, id, expected) in [
+        ("fill", "#lab", "NEW", "old", "NEW"),
+        ("type-clear", "#lab", "NEW", "old", "NEW"),
+    ] {
+        let resp = run(&mut state, action, selector, &json!(arg)).await;
+        let got = evaluate_value(
+            &mut state,
+            &format!("document.getElementById('{id}').value"),
+        )
+        .await;
+        if resp["success"] != true || got != json!(expected) || resp["warning"].as_str().is_some() {
+            failures.push(format!("label {action} {selector}: {resp} -> {got}"));
+        }
+    }
+    let resp = run(&mut state, "type", "#lab2", &json!("X")).await;
+    let got = evaluate_value(&mut state, "old2.value").await;
+    let inserted = ["XAB", "AXB", "ABX"].iter().any(|v| got == json!(v));
+    if resp["success"] != true || !inserted || resp["warning"].as_str().is_some() {
+        failures.push(format!("label type #lab2: {resp} -> {got}"));
+    }
+
+    // Elements that can never take text are refused whatever has focus.
+    for selector in ["#opt", "#hid", "#img", "#btn", "#sub", "#rst"] {
+        for action in ["fill", "type"] {
+            evaluate_value(&mut state, "focused.focus()").await;
+            let before = evaluate_value(&mut state, FIELDS).await;
+            let resp = run(&mut state, action, selector, &json!("WRITTEN")).await;
+            let after = evaluate_value(&mut state, FIELDS).await;
+            if resp["success"] != false || resp["code"] != "not_editable" || before != after {
+                failures.push(format!(
+                    "refuse {action} {selector}: {resp}\n{before}\n{after}"
+                ));
+            }
+        }
+    }
+
+    // Typing that the page limits or rewrites is reported, never failed, and
+    // the warning carries no field value.
+    for (selector, text, ok) in [
+        ("#m", "0123456789", false),
+        ("#mk", "5551234567", false),
+        ("#ok", "cd", true),
+    ] {
+        let resp = run(&mut state, "type", selector, &json!(text)).await;
+        let warning = resp["warning"].as_str();
+        let echoes = warning.is_some_and(|w| w.contains(text) || w.contains("01234"));
+        if resp["success"] != true || warning.is_some() == ok || echoes {
+            failures.push(format!("type {selector}: {resp}"));
+        }
+    }
+    let resp = run(&mut state, "type-clear", "#m", &json!("abcdefgh")).await;
+    if resp["success"] != true || resp["warning"].as_str().is_none() {
+        failures.push(format!("type --clear #m: {resp}"));
+    }
+
+    // No message carries a string the page controls (ids, tag names, option
+    // labels). Every case here produces an error or a warning.
+    for (action, selector, arg) in [
+        ("fill", "[data-t=ro]", json!("x")),
+        ("fill", "[data-t=dis]", json!("x")),
+        ("type", "[data-t=dis]", json!("x")),
+        ("fill", "[data-t=cb]", json!("x")),
+        ("type", "[data-t=cb]", json!("x")),
+        ("check", "[data-t=ro]", json!("")),
+        ("check", "[data-t=tag]", json!("")),
+        ("type", "[data-t=mx]", json!("0123456789")),
+        ("fill", "[data-t=mx]", json!("0123456789")),
+        ("select", "[data-t=amb]", json!([MARK])),
+    ] {
+        let resp = run(&mut state, action, selector, &arg).await;
+        let text = format!(
+            "{} {}",
+            resp["error"].as_str().unwrap_or_default(),
+            resp["warning"].as_str().unwrap_or_default()
+        );
+        let said = text.trim();
+        // The select call passes the marker itself as the value to match.
+        let page_text = text
+            .replace(&format!("[\"{MARK}\"]"), "")
+            .replace(&format!("\"{MARK}\""), "");
+        if said.is_empty()
+            || page_text.contains("IGNORE_PREVIOUS")
+            || page_text.contains("x-ignore")
+        {
+            failures.push(format!("{action} {selector}: {resp}"));
+        }
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A read that fails after the action must not fail a command whose action
 /// already happened: a form submitted by Enter and a change handler that
 /// navigates both leave the page before the read-back.
