@@ -310,7 +310,7 @@ fn unverified(error: &str) -> String {
     if navigated {
         "page navigated after the action; result not verified".to_string()
     } else {
-        format!("could not verify the result: {error}")
+        "could not verify the result: the page could not be inspected".to_string()
     }
 }
 
@@ -440,13 +440,13 @@ async fn set_value_input(
             : type === 'range' ? /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(text) && number >= minimum && number <= maximum
             : got !== '' || text === '';
         if (!accepted) {
-            return { error: 'Malformed value ' + JSON.stringify(value) + ' for input of type "' + type + '": expected ' + formats[type] };
+            return { error: 'Malformed value for input of type "' + type + '": expected ' + formats[type] };
         }
         set.call(el, text);
         el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         if (type === 'range' && Number(el.value) !== number) {
-            return { snapped: 'value snapped to step: requested ' + text + ', field holds ' + el.value };
+            return { snapped: 'value snapped to the step: the field holds a different value than requested' };
         }
         return { ok: true };
     }"#
@@ -506,12 +506,20 @@ fn fill_warning(after: &FormProbe, sent: &str) -> Option<String> {
             after.describe()
         ));
     }
-    Some(format!(
-        "{} holds {:?} instead of the requested {:?}",
-        after.describe(),
-        observed,
-        sent
-    ))
+    // Field values are never echoed: only lengths.
+    let held = observed.encode_utf16().count();
+    let given = sent.encode_utf16().count();
+    Some(if held != given {
+        format!(
+            "{} was changed by the page after it was entered (length {given} \u{2192} {held})",
+            after.describe()
+        )
+    } else {
+        format!(
+            "{} holds a different value than requested",
+            after.describe()
+        )
+    })
 }
 
 pub async fn fill(
@@ -1010,7 +1018,7 @@ pub async fn select_option(
             // same kind of match or across kinds, is ambiguous; `by` restricts
             // matching to one attribute so every option stays reachable.
             const resolve = (value) => {
-                const byLabel = by === 'value' ? [] : options.filter((o) => value === labelOf(o) || value === o.textContent.trim());
+                const byLabel = by === 'value' ? [] : options.filter((o) => value === labelOf(o));
                 const byValue = by === 'label' ? [] : options.filter((o) => value === o.value);
                 const all = byLabel.concat(byValue.filter((o) => !byLabel.includes(o)));
                 if (all.length) return distinct(all) === 1 ? { found: all } : { found: all, ambiguous: true };
@@ -2163,7 +2171,11 @@ mod tests {
         let w = fill_warning(&text_probe("", -1), "abc").unwrap();
         assert!(w.starts_with("effect_not_observed"));
         let w = fill_warning(&text_probe("(555) 123", -1), "555123").unwrap();
-        assert!(w.contains("(555) 123"));
+        assert!(w.contains("length 6") && w.contains("9"), "{w}");
+        assert!(!w.contains("555") && !w.contains("(555) 123"), "{w}");
+        // Same length, different value: still no value.
+        let w = fill_warning(&text_probe("4111-1111", -1), "411111111").unwrap();
+        assert!(!w.contains("4111") && w.contains("different value"), "{w}");
         // The browser keeps color values lowercase.
         let mut color = text_probe("#ff0000", -1);
         color.input_type = "color".into();

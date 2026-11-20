@@ -2633,6 +2633,7 @@ async fn e2e_form_actions_refuse_before_acting() {
         "data:text/html,<html><body><form id='frm'><div id='grp'><input id='prev' value='kept'></div></form>",
         "<input id='ro' value='READONLY' readonly><input id='dis' value='DISABLED' disabled>",
         "<input id='trigger' readonly><input id='real'>",
+        "<input id='card'>",
         "<select id='s'><option value='one'>one</option><option value='two'>two</option></select>",
         "<select id='sdis' disabled><option value='one'>one</option></select>",
         "<input id='cb' type='checkbox'><input id='radio' type='radio' checked>",
@@ -2655,6 +2656,8 @@ async fn e2e_form_actions_refuse_before_acting() {
         "<select id='vl'><option value='a'>Alpha</option><option value='Alpha'>Other</option></select>",
         "<select id='cross'><option value='1'>0</option><option value='2'>1</option></select>",
         "<select id='swap'><option value='Alpha'>Beta</option><option value='Beta'>Alpha</option></select>",
+        "<select id='lbl'><option label='Short' value='x'>Long hidden text</option><option label='Other' value='y'>Short</option></select>",
+        "<select id='lbl2'><option label='Short' value='x'>Hidden</option><option value='w'>Hidden</option></select>",
         "<select id='idx'><option value='0'>1</option><option value='1'>2</option><option value='2'>3</option></select>",
         "<select id='hour'><option value='0'>12</option><option value='1'>1</option><option value='12'>12</option></select>",
         "<input id='a0'><input id='a300'><input id='mask'><input id='blocked' value='old'>",
@@ -2668,6 +2671,7 @@ async fn e2e_form_actions_refuse_before_acting() {
         " el.addEventListener('input', () => { const v = el.value; el.value = state; setTimeout(() => { state = v; el.value = v; }, ms); }); }",
         "ctl('a0', 0); ctl('a300', 300);",
         "mask.addEventListener('input', () => { const d = mask.value.replace(/[^0-9]/g, ''); mask.value = '(' + d.slice(0, 3) + ') ' + d.slice(3); });",
+        "card.addEventListener('input', () => { const d = card.value.replace(/[^0-9]/g, ''); card.value = d.replace(/(.{4})/g, '$1 ').trim(); });",
         "blocked.addEventListener('beforeinput', e => e.preventDefault());",
         "const flip = (el) => el.setAttribute('aria-checked', el.getAttribute('aria-checked') === 'true' ? 'false' : 'true');",
         "sw.addEventListener('click', () => { clicks.sw++; flip(sw); });",
@@ -2912,6 +2916,10 @@ async fn e2e_form_actions_refuse_before_acting() {
         ("#idx", "1", "value", "1"),
         ("#idx", "1", "label", "0"),
         ("#hour", "12", "value", "12"),
+        ("#lbl", "Short", "label", "x"),
+        ("#lbl", "Other", "label", "y"),
+        ("#lbl2", "Hidden", "label", "w"),
+        ("#lbl2", "Short", "label", "x"),
     ] {
         let resp = execute_command(
             &json!({ "id": "x", "action": "select", "selector": selector, "values": [string], "by": by }),
@@ -2929,6 +2937,24 @@ async fn e2e_form_actions_refuse_before_acting() {
             ));
         }
     }
+    // An option's label is what the browser shows; its hidden text is not a label.
+    let resp = execute_command(
+        &json!({ "id": "x", "action": "select", "selector": "#lbl", "values": ["Long hidden text"], "by": "label" }),
+        &mut state,
+    )
+    .await;
+    if resp["success"] != false || resp["code"] != "option_not_found" {
+        failures.push(format!("hidden text matched as a label: {resp}"));
+    }
+    let resp = execute_command(
+        &json!({ "id": "x", "action": "select", "selector": "#lbl", "values": ["Short"] }),
+        &mut state,
+    )
+    .await;
+    if resp["success"] != true {
+        failures.push(format!("default match on an overridden label: {resp}"));
+    }
+
     // Labels shared by different values stay ambiguous by label and say how to
     // reach each option; an unknown `by` is refused.
     for (by, code) in [("label", "ambiguous"), ("nonsense", "")] {
@@ -2961,14 +2987,42 @@ async fn e2e_form_actions_refuse_before_acting() {
             failures.push(format!("expected a warning for {selector}: {resp}"));
         }
     }
+    // Warnings and errors never echo a field value, submitted or observed.
+    for (selector, secret) in [("#mask", "5551234567"), ("#card", "4111111111111111")] {
+        let resp = run(&mut state, "fill", selector, &json!(secret)).await;
+        let held = evaluate_value(
+            &mut state,
+            &format!("document.querySelector('{selector}').value"),
+        )
+        .await;
+        let held = held.as_str().unwrap_or_default().to_string();
+        let text = resp.to_string();
+        if resp["warning"].as_str().is_none()
+            || text.contains(secret)
+            || (held.len() > 2 && text.contains(&held))
+            || text.contains(&held.replace(' ', ""))
+        {
+            failures.push(format!(
+                "{selector}: warning echoes a value or is missing: {resp}"
+            ));
+        }
+    }
+    for (selector, value) in [("#date", "07/04/2031"), ("#color", "not-a-colour")] {
+        let resp = run(&mut state, "fill", selector, &json!(value)).await;
+        if resp["success"] != false || resp.to_string().contains(value) {
+            failures.push(format!("{selector}: error echoes the value: {resp}"));
+        }
+    }
+
     // A range value off the step is snapped as the browser does, and says so.
     let resp = run(&mut state, "fill", "#rstep", &json!("55")).await;
     let held = evaluate_value(&mut state, "rstep.value").await;
     let warning = resp["warning"].as_str().unwrap_or_default();
     if resp["success"] != true
-        || !warning.contains("value snapped to step: requested 55")
+        || !warning.contains("value snapped to the step")
         || !(held == json!("50") || held == json!("60"))
-        || !warning.contains(held.as_str().unwrap_or("?"))
+        || warning.contains("55")
+        || warning.contains(held.as_str().unwrap_or("?"))
     {
         failures.push(format!("range off the step: {resp} -> {held}"));
     }
@@ -3156,18 +3210,19 @@ async fn e2e_select_option_label_override_names() {
             "3",
             true,
         ),
+        // An option's hidden text is not its label once a label override is set.
         (
             "#label-overrides",
             vec!["Hidden\u{00A0}Only"],
-            vec!["hidden"],
-            "4",
-            true,
+            vec!["target"],
+            "3",
+            false,
         ),
         (
             "#label-overrides",
             vec!["Plain Text"],
             vec!["plain"],
-            "5",
+            "4",
             true,
         ),
         (
