@@ -184,7 +184,7 @@ const PRECHECK_JS: &str = r#"function(mode) {
         if (el.localName === 'select') hint = '; use select';
         else if (isInput && (el.type === 'checkbox' || el.type === 'radio')) hint = '; use check or uncheck';
         else if (el.localName === 'button' || (isInput && neverText.includes(el.type))) hint = mode === 'type' ? keys : '';
-        else if (mode === 'type' && valueInput) hint = '; use fill';
+        else if (mode === 'type' && valueInput) hint = '; use fill to set the value of this input';
         if (hint !== null) {
             return fail('not_editable', 'Element ' + describe(el) + ' cannot be ' + verb + hint);
         }
@@ -400,14 +400,16 @@ async fn set_value_input(
     session_id: &str,
     object_id: &str,
     value: &str,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let js = r#"function(value) {
         /*RETARGET*/
         const type = el.type;
+        const minimum = el.min !== '' ? Number(el.min) : 0;
+        const maximum = el.max !== '' ? Number(el.max) : 100;
         const formats = {
             color: '#rrggbb', date: 'YYYY-MM-DD', time: 'HH:MM or HH:MM:SS',
             'datetime-local': 'YYYY-MM-DDTHH:MM', month: 'YYYY-MM', week: 'YYYY-Www',
-            range: 'a number from ' + (el.min || 0) + ' to ' + (el.max || 100) + ' that matches the step (' + (el.step || 1) + ')',
+            range: 'a number from ' + minimum + ' to ' + maximum,
         };
         const text = value.trim();
         const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
@@ -415,8 +417,11 @@ async fn set_value_input(
         set.call(el, text);
         const got = el.value;
         set.call(el, old);
+        // A range value inside its bounds is set as the browser does, snapped
+        // to the step; unparsable or out-of-range values are refused.
+        const number = Number(text);
         const accepted = type === 'color' ? got === text.toLowerCase()
-            : type === 'range' ? /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(text) && Number(got) === Number(text)
+            : type === 'range' ? /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(text) && number >= minimum && number <= maximum
             : got !== '' || text === '';
         if (!accepted) {
             return { error: 'Malformed value ' + JSON.stringify(value) + ' for input of type "' + type + '": expected ' + formats[type] };
@@ -424,6 +429,9 @@ async fn set_value_input(
         set.call(el, text);
         el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
+        if (type === 'range' && Number(el.value) !== number) {
+            return { snapped: 'value snapped to step: requested ' + text + ', field holds ' + el.value };
+        }
         return { ok: true };
     }"#
     .replace("/*RETARGET*/", RETARGET_JS);
@@ -444,7 +452,13 @@ async fn set_value_input(
     {
         return Err(form_error("malformed_value", error));
     }
-    Ok(())
+    Ok(result
+        .result
+        .value
+        .as_ref()
+        .and_then(|v| v.get("snapped"))
+        .and_then(Value::as_str)
+        .map(String::from))
 }
 
 /// Warns when the value is longer than the field's maxlength; the browser
@@ -506,14 +520,18 @@ pub async fn fill(
         .await
         .unwrap_or_else(|_| FormProbe::unknown());
     if before.value_input {
-        if let Err(error) = set_value_input(client, &effective_session_id, &object_id, value).await
+        let snapped = match set_value_input(client, &effective_session_id, &object_id, value).await
         {
-            if form_error_code(&error).is_some() {
-                return Err(error);
+            Ok(snapped) => snapped,
+            Err(error) if form_error_code(&error).is_some() => return Err(error),
+            Err(error) => {
+                return Ok(FormOutcome {
+                    warning: Some(unverified(&error)),
+                })
             }
-            return Ok(FormOutcome {
-                warning: Some(unverified(&error)),
-            });
+        };
+        if snapped.is_some() {
+            return Ok(FormOutcome { warning: snapped });
         }
         let warning = match probe_object(client, &effective_session_id, &object_id).await {
             Ok(after) => fill_warning(&after, value.trim()),

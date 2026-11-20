@@ -2320,7 +2320,8 @@ Usage: agent-browser fill <selector> [--] <text>
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
 Date, time, color and range inputs get the value set directly (for example 2024-01-15);
-a value the input would reject fails with malformed_value.
+a value the input would reject fails with malformed_value, and a range value inside
+its bounds is snapped to the step as the browser does, with a warning.
 Readonly and disabled fields, and elements that can never take text (select, checkbox,
 radio, button, file, submit, reset), are refused before anything changes, with a code of
 read_only, disabled or not_editable. A label stands for its control.

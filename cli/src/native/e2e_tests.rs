@@ -2644,6 +2644,7 @@ async fn e2e_form_actions_refuse_before_acting() {
         "<div id='mrole' role='switch checkbox' aria-checked='false' tabindex='0' onclick=\"this.setAttribute('aria-checked', 'true')\">x</div>",
         "<div id='adis' role='checkbox' aria-checked='false' aria-disabled='true' tabindex='0'>x</div>",
         "<input id='date' type='date'><input id='color' type='color'><input id='range' type='range' value='50'>",
+        "<input id='rstep' type='range' min='0' max='100' step='10'>",
         "<input id='short' maxlength='5'><input id='pw' type='password' maxlength='5'>",
         "<input id='num' type='number' maxlength='3'><textarea id='area' maxlength='4'></textarea>",
         "<div id='editor' contenteditable>old text</div><div id='ec' tabindex='0'>ec</div>",
@@ -2946,12 +2947,24 @@ async fn e2e_form_actions_refuse_before_acting() {
     for (action, selector, arg) in [
         ("fill", "#short", json!("0123456789")),
         ("fill", "#a300", json!("later")),
+        ("fill", "#rstep", json!("55")),
         ("fill", "#mask", json!("555123")),
     ] {
         let resp = run(&mut state, action, selector, &arg).await;
         if resp["success"] != true || resp["warning"].as_str().is_none() {
             failures.push(format!("expected a warning for {selector}: {resp}"));
         }
+    }
+    // A range value off the step is snapped as the browser does, and says so.
+    let resp = run(&mut state, "fill", "#rstep", &json!("55")).await;
+    let held = evaluate_value(&mut state, "rstep.value").await;
+    let warning = resp["warning"].as_str().unwrap_or_default();
+    if resp["success"] != true
+        || !warning.contains("value snapped to step: requested 55")
+        || !(held == json!("50") || held == json!("60"))
+        || !warning.contains(held.as_str().unwrap_or("?"))
+    {
+        failures.push(format!("range off the step: {resp} -> {held}"));
     }
     let resp = run(&mut state, "fill", "#num", &json!("12345")).await;
     if resp["warning"].as_str().is_some() {
