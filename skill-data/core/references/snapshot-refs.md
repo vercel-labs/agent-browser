@@ -111,7 +111,8 @@ agent-browser snapshot -i
 # Click triggers page change
 agent-browser click @e1
 
-# Re-snapshot after navigation to get new refs
+# Re-snapshot after navigation to get new refs. A ref from the previous
+# page fails with "Ref @e1 is from a document that is no longer loaded" instead of acting.
 agent-browser snapshot -i
 # @e2 [heading] "Page 2"  ← New element, new ref
 ```

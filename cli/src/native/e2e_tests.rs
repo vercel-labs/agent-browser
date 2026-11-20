@@ -6835,6 +6835,534 @@ async fn e2e_diff_snapshot() {
     assert_success(&resp);
 }
 
+const RELOADED_WITH_FRAME: &str = "document.title === 'A2' \
+    && document.getElementById('f').contentDocument?.readyState === 'complete'";
+
+const REF_FIXTURE_ROUTES: &[(&str, &str)] = &[
+    (
+        "/a.html",
+        "<script>sessionStorage.n = (+sessionStorage.n || 0) + 1; document.title = 'A' + sessionStorage.n;</script>\
+         <button onclick=\"location.href='/b.html'\">Continue</button>\
+         <button onclick=\"history.pushState({}, '', '#p')\">Push</button>\
+         <button onclick=\"location.reload()\">Reload</button>\
+         <input id='field' aria-label='Field'>\
+         <iframe id='f' src='/fa.html'></iframe>",
+    ),
+    (
+        "/b.html",
+        "<title>B</title><button onclick=\"document.title='B-CLICKED'\">Continue</button>",
+    ),
+    (
+        "/fa.html",
+        "<title>FA</title><button onclick=\"location.href='/fb.html'\">Next</button>\
+         <button onclick=\"parent.document.title='FA-OK'\">Act</button>",
+    ),
+    (
+        "/fb.html",
+        "<title>FB</title><button onclick=\"parent.document.title='FB-DANGER'\">Act</button>",
+    ),
+    (
+        "/b2.html",
+        "<title>B2</title><button onclick=\"document.title='B2-CLICKED'\">Continue</button>",
+    ),
+    // The element reports itself disconnected while the page navigates, so
+    // resolution falls back to a role/name query on the new document.
+    (
+        "/trap-fallback.html",
+        "<title>T</title><button id='b'>Continue</button>\
+         <script>window.arm = () => {\
+           const b = document.getElementById('b'); let fired = 0;\
+           Object.defineProperty(b, 'isConnected', { get() {\
+             if (!fired) { fired = 1; location.href = '/b2.html';\
+               const t = performance.now(); while (performance.now() - t < 400); return false; }\
+             return true; } });\
+         };</script>",
+    ),
+    // Resolution succeeds on the element, but the page navigates while its
+    // click point is computed.
+    (
+        "/trap-point.html",
+        "<title>T</title><button id='b'>Continue</button>\
+         <script>window.arm = () => {\
+           const b = document.getElementById('b');\
+           b.scrollIntoViewIfNeeded = () => { location.href = '/b2.html'; };\
+           let n = 0; const orig = b.getBoundingClientRect.bind(b);\
+           b.getBoundingClientRect = () => { const r = orig(); n++; return new DOMRect(r.x + n, r.y, r.width, r.height); };\
+           window.setTimeout = () => 0; window.requestAnimationFrame = () => 0;\
+         };</script>",
+    ),
+    // A filter-style checkbox whose change navigates away.
+    (
+        "/filter.html",
+        "<title>Filter</title><label><input type='checkbox' id='f' \
+         onchange=\"location.href = '/b2.html'\"> Only open</label>",
+    ),
+    (
+        "/spin.html",
+        "<title>Spin</title><button>Go</button>\
+         <script>for (let i = 0; i < 3000; i++) {\
+           const b = document.createElement('button'); b.textContent = 'B' + i;\
+           document.body.appendChild(b); }\
+         setTimeout(() => location.reload(), 40);</script>",
+    ),
+    // Cross-site iframe: `localhost` and `127.0.0.1` are different sites.
+    (
+        "/x.html",
+        "<title>X</title><iframe id='f'></iframe>\
+         <script>onmessage = (e) => { document.title = e.data; };\
+         f.src = 'http://localhost:' + location.port + '/xa.html';</script>",
+    ),
+    (
+        "/xa.html",
+        "<button onclick=\"location.href='/xb.html'\">Next</button>\
+         <button onclick=\"parent.postMessage('XA-OK', '*')\">Act</button>\
+         <script>parent.postMessage('xa-loaded', '*');</script>",
+    ),
+    (
+        "/xb.html",
+        "<button onclick=\"parent.postMessage('XB-DANGER', '*')\">Act</button>\
+         <script>parent.postMessage('xb-loaded', '*');</script>",
+    ),
+];
+
+async fn ref_fixture_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // One task per connection: the browser opens idle ones.
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                let n = stream.read(&mut request).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&request[..n]);
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let body = REF_FIXTURE_ROUTES
+                    .iter()
+                    .find(|(route, _)| *route == path)
+                    .map_or("", |(_, html)| *html);
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (url, server)
+}
+
+async fn ref_cmd(state: &mut DaemonState, command: Value) -> Value {
+    execute_command(&command, state).await
+}
+
+fn snapshot_ref(resp: &Value, label: &str) -> String {
+    let snapshot = get_data(resp)["snapshot"].as_str().unwrap();
+    let line = snapshot
+        .lines()
+        .find(|line| line.contains(label))
+        .unwrap_or_else(|| panic!("no {label} in {snapshot}"));
+    let start = line.find("ref=").unwrap() + 4;
+    let id: String = line[start..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    format!("@{id}")
+}
+
+async fn ref_fixture_open(state: &mut DaemonState, url: &str) -> Value {
+    assert_success(
+        &ref_cmd(
+            state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/a.html") }),
+        )
+        .await,
+    );
+    ref_cmd(state, json!({ "id": "s", "action": "snapshot" })).await
+}
+
+async fn ref_click(state: &mut DaemonState, reference: &str) -> Value {
+    ref_cmd(
+        state,
+        json!({ "id": "c", "action": "click", "selector": reference }),
+    )
+    .await
+}
+
+async fn ref_wait_until(state: &mut DaemonState, expression: &str) {
+    assert_success(
+        &ref_cmd(
+            state,
+            json!({ "id": "w", "action": "wait", "function": expression }),
+        )
+        .await,
+    );
+}
+
+async fn ref_title(state: &mut DaemonState) -> String {
+    let resp = ref_cmd(state, json!({ "id": "t", "action": "title" })).await;
+    get_data(&resp)["title"].as_str().unwrap().to_string()
+}
+
+fn assert_previous_page(resp: &Value) {
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("no longer loaded"),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_fails_after_click_triggered_navigation() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    let snap = ref_fixture_open(&mut state, &url).await;
+    let cont = snapshot_ref(&snap, "\"Continue\"");
+    let push = snapshot_ref(&snap, "\"Push\"");
+
+    // A same-document change keeps refs usable.
+    assert_success(&ref_click(&mut state, &push).await);
+    assert_success(&ref_click(&mut state, &push).await);
+
+    // The click replaces the document. Every ref consumer must refuse the old
+    // ref instead of acting on /b.html's button of the same name.
+    assert_success(&ref_click(&mut state, &cont).await);
+    ref_wait_until(&mut state, "document.title === 'B'").await;
+    assert_previous_page(&ref_click(&mut state, &cont).await);
+    assert_previous_page(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "g", "action": "gettext", "selector": cont }),
+        )
+        .await,
+    );
+    assert_previous_page(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "h", "action": "hover", "selector": cont }),
+        )
+        .await,
+    );
+    assert_previous_page(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "d", "action": "drag", "source": cont, "target": push }),
+        )
+        .await,
+    );
+    assert_eq!(ref_title(&mut state).await, "B");
+
+    // A fresh snapshot of the new document works.
+    let snap = ref_cmd(&mut state, json!({ "id": "s2", "action": "snapshot" })).await;
+    assert_success(&ref_click(&mut state, &snapshot_ref(&snap, "\"Continue\"")).await);
+    assert_eq!(ref_title(&mut state).await, "B-CLICKED");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_find_after_navigation_following_a_snapshot() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    let snap = ref_fixture_open(&mut state, &url).await;
+    let cont = snapshot_ref(&snap, "\"Continue\"");
+    assert_success(&ref_click(&mut state, &cont).await);
+    ref_wait_until(&mut state, "document.title === 'B'").await;
+
+    // `find` makes its own ref for the current document; the snapshot refs of
+    // the previous page must not affect it.
+    let resp = ref_cmd(
+        &mut state,
+        json!({ "id": "f", "action": "getbyrole", "role": "button", "name": "Continue", "subaction": "click" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(ref_title(&mut state).await, "B-CLICKED");
+    // The old snapshot ref still fails.
+    assert_previous_page(&ref_click(&mut state, &cont).await);
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_fails_after_cross_site_iframe_navigation() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/x.html") }),
+        )
+        .await,
+    );
+    ref_wait_until(&mut state, "document.title === 'xa-loaded'").await;
+    let snap = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    assert!(
+        !state.iframe_sessions.is_empty(),
+        "the iframe must be out of process: {snap}"
+    );
+    let next = snapshot_ref(&snap, "\"Next\"");
+    let act = snapshot_ref(&snap, "\"Act\"");
+
+    assert_success(&ref_click(&mut state, &next).await);
+    ref_wait_until(&mut state, "document.title === 'xb-loaded'").await;
+    assert_previous_page(&ref_click(&mut state, &act).await);
+    assert_eq!(ref_title(&mut state).await, "xb-loaded");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+async fn ref_fails_when_the_page_navigates_during_resolution(
+    route: &str,
+    command: fn(&str) -> Value,
+) {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}{route}") }),
+        )
+        .await,
+    );
+    let snap = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    let cont = snapshot_ref(&snap, "\"Continue\"");
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "a", "action": "evaluate", "script": "window.arm(); 1" }),
+        )
+        .await,
+    );
+
+    // The navigation lands while the ref resolves: the click must fail with
+    // the stale-ref error and never reach /b2.html's button.
+    assert_previous_page(&ref_cmd(&mut state, command(&cont)).await);
+    ref_wait_until(&mut state, "document.title === 'B2'").await;
+    assert_eq!(ref_title(&mut state).await, "B2");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_fails_when_fallback_would_query_the_new_document() {
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-fallback.html",
+        |r| json!({ "id": "c", "action": "click", "selector": r }),
+    )
+    .await;
+}
+
+// The object-based resolver serves reads and writes, not only clicks.
+#[tokio::test]
+#[ignore]
+async fn e2e_gettext_ref_fails_when_fallback_would_query_the_new_document() {
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-fallback.html",
+        |r| json!({ "id": "g", "action": "gettext", "selector": r }),
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_ref_fails_when_fallback_would_query_the_new_document() {
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-fallback.html",
+        |r| json!({ "id": "f", "action": "fill", "selector": r, "value": "x" }),
+    )
+    .await;
+}
+
+// A large page that reloads every 40 ms never keeps one document for the length
+// of a snapshot, so the snapshot is refused instead of returning refs.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_is_refused_while_the_document_keeps_changing() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/spin.html") }),
+        )
+        .await,
+    );
+    let resp = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("document changed while the snapshot"),
+        "{resp}"
+    );
+    assert!(state.ref_map.entries_sorted().is_empty());
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_reports_navigation_during_click_point_resolution() {
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-point.html",
+        |r| json!({ "id": "c", "action": "click", "selector": r }),
+    )
+    .await;
+}
+
+// The toggle is read back after the click; a page the click navigated away
+// from must not turn a successful `check` into a failure.
+#[tokio::test]
+#[ignore]
+async fn e2e_check_succeeds_when_the_change_navigates() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/filter.html") }),
+        )
+        .await,
+    );
+    let snap = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    let checkbox = snapshot_ref(&snap, "checkbox");
+    let resp = ref_cmd(
+        &mut state,
+        json!({ "id": "c", "action": "check", "selector": checkbox }),
+    )
+    .await;
+    assert_success(&resp);
+    ref_wait_until(&mut state, "document.title === 'B2'").await;
+    assert_eq!(ref_title(&mut state).await, "B2");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_refs_after_undriven_reload() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    let snap = ref_fixture_open(&mut state, &url).await;
+    let reload = snapshot_ref(&snap, "\"Reload\"");
+    let iframe = snapshot_ref(&snap, "Iframe");
+    assert_success(&ref_click(&mut state, &reload).await);
+    ref_wait_until(&mut state, RELOADED_WITH_FRAME).await;
+
+    // `frame @ref` names the iframe of the replaced document.
+    assert_previous_page(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "fo", "action": "frame", "selector": iframe }),
+        )
+        .await,
+    );
+
+    // "e1" is text for these commands, not a ref.
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "f", "action": "fill", "selector": "#field", "value": "e1" }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "ty", "action": "type", "selector": "#field", "text": "e2" }),
+        )
+        .await,
+    );
+    let resp = ref_cmd(
+        &mut state,
+        json!({ "id": "v", "action": "evaluate", "script": "document.getElementById('field').value" }),
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "e1e2");
+
+    // A snapshot of only the iframe records just the frame's document.
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "fr", "action": "frame", "selector": "#f" }),
+        )
+        .await,
+    );
+    let snap = ref_cmd(&mut state, json!({ "id": "s2", "action": "snapshot" })).await;
+    assert_success(&ref_click(&mut state, &snapshot_ref(&snap, "\"Act\"")).await);
+    ref_wait_until(&mut state, "document.title === 'FA-OK'").await;
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_fails_after_iframe_navigation() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    let snap = ref_fixture_open(&mut state, &url).await;
+    let next = snapshot_ref(&snap, "\"Next\"");
+    let act = snapshot_ref(&snap, "\"Act\"");
+
+    // The iframe navigates; the main document keeps its loader.
+    assert_success(&ref_click(&mut state, &next).await);
+    ref_wait_until(
+        &mut state,
+        "document.getElementById('f').contentDocument.title === 'FB'",
+    )
+    .await;
+    assert_previous_page(&ref_click(&mut state, &act).await);
+    assert_eq!(ref_title(&mut state).await, "A1");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_diff_url_aligns_refs_after_snapshot() {

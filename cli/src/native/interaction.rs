@@ -294,25 +294,53 @@ impl FormProbe {
     }
 }
 
-/// A failed read after the action (context destroyed, target gone, page
-/// navigated) must not fail a command whose action already happened.
-fn unverified(error: &str) -> String {
-    let lower = error.to_lowercase();
-    let navigated = [
-        "cannot find context",
-        "context was destroyed",
-        "execution context",
-        "cannot find object",
-        "navigat",
-        "element not found",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker));
-    if navigated {
-        "page navigated after the action; result not verified".to_string()
-    } else {
-        "could not verify the result: the page could not be inspected".to_string()
+/// What a read after the action found. Every action reads its result through
+/// `read_after`, built on the shared `read_after_action`: a document that is
+/// gone, or a target that is no longer in the page, ends the verification
+/// without failing an action that already happened.
+enum AfterRead<T> {
+    Value(T),
+    Gone,
+    Unreadable,
+}
+
+async fn read_after<T>(read: impl std::future::Future<Output = Result<T, String>>) -> AfterRead<T> {
+    match super::element::read_after_action(read).await {
+        Ok(Some(value)) => AfterRead::Value(value),
+        Ok(None) => AfterRead::Gone,
+        Err(error) => {
+            let lower = error.to_lowercase();
+            if [
+                "element not found",
+                "cannot find object",
+                "target navigated",
+            ]
+            .iter()
+            .any(|marker| lower.contains(marker))
+            {
+                AfterRead::Gone
+            } else {
+                AfterRead::Unreadable
+            }
+        }
     }
+}
+
+/// The warning for a read that gave no value.
+fn unverified_warning<T>(read: &AfterRead<T>) -> Option<String> {
+    match read {
+        AfterRead::Value(_) => None,
+        AfterRead::Gone => Some(super::element::STATE_NOT_VERIFIED.to_string()),
+        AfterRead::Unreadable => {
+            Some("could not verify the result: the page could not be inspected".to_string())
+        }
+    }
+}
+
+/// The warning for a call that failed after the action was dispatched.
+async fn failure_warning(error: String) -> String {
+    let read = read_after(std::future::ready(Err::<(), String>(error))).await;
+    unverified_warning(&read).unwrap_or_default()
 }
 
 /// What a text action reports when the page did not end up as requested. The
@@ -551,16 +579,17 @@ pub async fn fill(
             Err(error) if form_error_code(&error).is_some() => return Err(error),
             Err(error) => {
                 return Ok(FormOutcome {
-                    warning: Some(unverified(&error)),
+                    warning: Some(failure_warning(error).await),
                 })
             }
         };
         if snapped.is_some() {
             return Ok(FormOutcome { warning: snapped });
         }
-        let warning = match probe_object(client, &effective_session_id, &object_id).await {
-            Ok(after) => fill_warning(&after, value.trim()),
-            Err(error) => Some(unverified(&error)),
+        let read = read_after(probe_object(client, &effective_session_id, &object_id)).await;
+        let warning = match &read {
+            AfterRead::Value(after) => fill_warning(after, value.trim()),
+            other => unverified_warning(other),
         };
         return Ok(FormOutcome { warning });
     }
@@ -611,9 +640,12 @@ pub async fn fill(
         )
         .await?;
 
-    let warning = match probe_object(client, &effective_session_id, &object_id).await {
-        Ok(after) => truncation_warning(&before, value).or_else(|| fill_warning(&after, value)),
-        Err(error) => Some(unverified(&error)),
+    let read = read_after(probe_object(client, &effective_session_id, &object_id)).await;
+    let warning = match &read {
+        AfterRead::Value(after) => {
+            truncation_warning(&before, value).or_else(|| fill_warning(after, value))
+        }
+        other => unverified_warning(other),
     };
     Ok(FormOutcome { warning })
 }
@@ -690,11 +722,11 @@ pub async fn type_text(
 
     type_text_into_active_context(client, session_id, text, delay_ms).await?;
 
-    let after = match probe_object(client, &effective_session_id, &object_id).await {
-        Ok(after) => after,
-        Err(error) => {
+    let after = match read_after(probe_object(client, &effective_session_id, &object_id)).await {
+        AfterRead::Value(after) => after,
+        other => {
             return Ok(FormOutcome {
-                warning: Some(unverified(&error)),
+                warning: unverified_warning(&other),
             })
         }
     };
@@ -1107,12 +1139,24 @@ pub async fn select_option(
     Ok(())
 }
 
-/// Result of `check`/`uncheck`: where the pointer ended up, if a click was
-/// needed, and a warning when the state did not change as requested.
-#[derive(Debug, Default)]
-pub struct CheckOutcome {
+/// What a check or uncheck did. `verified` is false when the page navigated
+/// before the toggle could be read back; `warning` says the state did not
+/// change as requested or could not be inspected.
+#[derive(Debug)]
+pub struct ToggleOutcome {
     pub position: Option<(f64, f64)>,
+    pub verified: bool,
     pub warning: Option<String>,
+}
+
+impl Default for ToggleOutcome {
+    fn default() -> Self {
+        Self {
+            position: None,
+            verified: true,
+            warning: None,
+        }
+    }
 }
 
 pub async fn check(
@@ -1121,15 +1165,15 @@ pub async fn check(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<CheckOutcome, String> {
-    set_checked(
+) -> Result<ToggleOutcome, String> {
+    Box::pin(toggle(
         client,
         session_id,
         ref_map,
         selector_or_ref,
         iframe_sessions,
         true,
-    )
+    ))
     .await
 }
 
@@ -1139,26 +1183,26 @@ pub async fn uncheck(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<CheckOutcome, String> {
-    set_checked(
+) -> Result<ToggleOutcome, String> {
+    Box::pin(toggle(
         client,
         session_id,
         ref_map,
         selector_or_ref,
         iframe_sessions,
         false,
-    )
+    ))
     .await
 }
 
-async fn set_checked(
+async fn toggle(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
     want: bool,
-) -> Result<CheckOutcome, String> {
+) -> Result<ToggleOutcome, String> {
     let verb = if want { "checked" } else { "unchecked" };
     let Ok(probe) = probe_selector(
         client,
@@ -1169,7 +1213,7 @@ async fn set_checked(
     )
     .await
     else {
-        return set_checked_unprobed(
+        return toggle_unprobed(
             client,
             session_id,
             ref_map,
@@ -1189,7 +1233,7 @@ async fn set_checked(
         ));
     }
     if probe.checked.unwrap_or(false) == want {
-        return Ok(CheckOutcome::default());
+        return Ok(ToggleOutcome::default());
     }
     if probe.disabled || probe.box_disabled {
         return Err(form_error(
@@ -1217,80 +1261,76 @@ async fn set_checked(
         false,
     )
     .await?;
-    let position = Some(result.position);
+    let mut outcome = ToggleOutcome {
+        position: Some(result.position),
+        ..ToggleOutcome::default()
+    };
 
     // A native input whose coordinate click missed (hidden input, overlay) is
     // retried with a DOM click. A custom control is not: a second click would
-    // undo a first one the page applies late.
-    let mut after = match probe_selector(
+    // undo a first one the page applies late. The click has already happened,
+    // so a read that fails afterwards ends the verification without failing
+    // the action.
+    let mut after = read_after(probe_selector(
         client,
         session_id,
         ref_map,
         selector_or_ref,
         iframe_sessions,
-    )
-    .await
-    {
-        Ok(after) => after,
-        Err(error) => {
-            return Ok(CheckOutcome {
-                position,
-                warning: Some(unverified(&error)),
-            })
-        }
-    };
-    if after.checked.unwrap_or(false) != want && after.native {
-        let retried = match js_click_checkbox(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            iframe_sessions,
-        )
-        .await
-        {
-            Ok(()) => {
-                probe_selector(
-                    client,
-                    session_id,
-                    ref_map,
-                    selector_or_ref,
-                    iframe_sessions,
-                )
-                .await
-            }
-            Err(error) => Err(error),
-        };
-        match retried {
-            Ok(probe) => after = probe,
-            Err(error) => {
-                return Ok(CheckOutcome {
-                    position,
-                    warning: Some(unverified(&error)),
-                })
-            }
+    ))
+    .await;
+    if let AfterRead::Value(probe) = &after {
+        if probe.checked.unwrap_or(false) != want && probe.native {
+            let retried = read_after(js_click_checkbox(
+                client,
+                session_id,
+                ref_map,
+                selector_or_ref,
+                iframe_sessions,
+            ))
+            .await;
+            after = match retried {
+                AfterRead::Value(()) => {
+                    read_after(probe_selector(
+                        client,
+                        session_id,
+                        ref_map,
+                        selector_or_ref,
+                        iframe_sessions,
+                    ))
+                    .await
+                }
+                AfterRead::Gone => AfterRead::Gone,
+                AfterRead::Unreadable => AfterRead::Unreadable,
+            };
         }
     }
-    let warning = (after.checked.unwrap_or(false) != want).then(|| {
-        format!(
-            "effect_not_observed: {} is still {} after clicking; the page may apply the change later",
-            after.describe(),
-            if want { "unchecked" } else { "checked" }
-        )
-    });
-    Ok(CheckOutcome { position, warning })
+    match after {
+        AfterRead::Value(probe) => {
+            if probe.checked.unwrap_or(false) != want {
+                outcome.warning = Some(format!(
+                    "effect_not_observed: {} is still {} after clicking; the page may apply the change later",
+                    probe.describe(),
+                    if want { "unchecked" } else { "checked" }
+                ));
+            }
+        }
+        AfterRead::Gone => outcome.verified = false,
+        AfterRead::Unreadable => outcome.warning = unverified_warning(&AfterRead::<()>::Unreadable),
+    }
+    Ok(outcome)
 }
 
 /// Toggles without the preconditions when the element cannot be inspected, as
 /// before: click when the state differs, retry once with a DOM click.
-async fn set_checked_unprobed(
+async fn toggle_unprobed(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
     want: bool,
-) -> Result<CheckOutcome, String> {
+) -> Result<ToggleOutcome, String> {
     let state = || {
         super::element::is_element_checked(
             client,
@@ -1301,7 +1341,7 @@ async fn set_checked_unprobed(
         )
     };
     if state().await? == want {
-        return Ok(CheckOutcome::default());
+        return Ok(ToggleOutcome::default());
     }
     let result = click_element(
         client,
@@ -1313,39 +1353,42 @@ async fn set_checked_unprobed(
         false,
     )
     .await?;
-    let position = Some(result.position);
-    let mut now = state().await;
-    if matches!(now, Ok(current) if current != want) {
-        let retried = js_click_checkbox(
+    let mut outcome = ToggleOutcome {
+        position: Some(result.position),
+        ..ToggleOutcome::default()
+    };
+    let mut now = read_after(state()).await;
+    if matches!(now, AfterRead::Value(current) if current != want) {
+        let retried = read_after(js_click_checkbox(
             client,
             session_id,
             ref_map,
             selector_or_ref,
             iframe_sessions,
-        )
+        ))
         .await;
         now = match retried {
-            Ok(()) => state().await,
-            Err(error) => Err(error),
+            AfterRead::Value(()) => read_after(state()).await,
+            AfterRead::Gone => AfterRead::Gone,
+            AfterRead::Unreadable => AfterRead::Unreadable,
         };
     }
-    let warning = match now {
-        Ok(current) if current == want => None,
-        Ok(_) => Some("effect_not_observed: the state did not change after clicking; the page may apply the change later".to_string()),
-        Err(error) => Some(unverified(&error)),
-    };
-    Ok(CheckOutcome { position, warning })
+    match now {
+        AfterRead::Value(current) if current == want => {}
+        AfterRead::Value(_) => {
+            outcome.warning = Some("effect_not_observed: the state did not change after clicking; the page may apply the change later".to_string())
+        }
+        AfterRead::Gone => outcome.verified = false,
+        AfterRead::Unreadable => {
+            outcome.warning = unverified_warning(&AfterRead::<()>::Unreadable)
+        }
+    }
+    Ok(outcome)
 }
 
 /// Fallback for when the coordinate-based CDP click did not toggle the
-/// checkbox/radio state. This mirrors how Playwright dispatches clicks
-/// through the DOM rather than via raw Input.dispatchMouseEvent coordinates.
-///
-/// Uses the same follow-label resolution as `is_element_checked`:
-/// 1. If the element is a native input → `.click()` it directly.
-/// 2. If the element is inside a `<label>` → `.click()` the label's `.control`.
-/// 3. If the element has a nested `<input>` → `.click()` that input.
-/// 4. Otherwise → `.click()` the element itself (handles ARIA role controls).
+/// checkbox/radio state: dispatch the click through the DOM, following the
+/// label to its control, as Playwright does.
 async fn js_click_checkbox(
     client: &CdpClient,
     session_id: &str,
@@ -2196,13 +2239,6 @@ mod tests {
     }
 
     #[test]
-    fn test_unverified_reads_become_a_warning_text() {
-        let w = unverified("Could not inspect the element");
-        assert!(w.starts_with("could not verify the result: "));
-        assert_eq!(form_error_code(&w), None);
-    }
-
-    #[test]
     fn test_line_endings_do_not_cause_a_warning() {
         let mut area = text_probe("a\nb", -1);
         area.tag = "textarea".into();
@@ -2215,18 +2251,27 @@ mod tests {
         assert!(truncation_warning(&probe, "any length at all").is_none());
     }
 
-    #[test]
-    fn test_navigation_errors_read_as_navigation() {
+    #[tokio::test]
+    async fn test_post_action_reads_go_through_one_helper() {
+        let gone = "Ref @e1 is from a document that is no longer loaded (x)".to_string();
         for error in [
-            "CDP error (Runtime.callFunctionOn): Cannot find context with specified id",
-            "Execution context was destroyed, most likely because of a navigation",
-            "Element not found: #cb",
+            "CDP error (Runtime.callFunctionOn): Cannot find context with specified id".to_string(),
+            "Element not found: #cb".to_string(),
+            gone,
         ] {
+            let read = read_after(std::future::ready(Err::<bool, String>(error))).await;
             assert_eq!(
-                unverified(error),
-                "page navigated after the action; result not verified"
+                unverified_warning(&read).as_deref(),
+                Some(super::super::element::STATE_NOT_VERIFIED)
             );
         }
-        assert!(unverified("Could not inspect the element").starts_with("could not verify"));
+        let read = read_after(std::future::ready(Err::<bool, String>(
+            "Could not inspect the element".to_string(),
+        )))
+        .await;
+        assert!(unverified_warning(&read)
+            .unwrap()
+            .starts_with("could not verify the result"));
+        assert!(unverified_warning(&AfterRead::Value(true)).is_none());
     }
 }

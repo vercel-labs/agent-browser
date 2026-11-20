@@ -2210,7 +2210,7 @@ Options:
 Global Options:
   --json               Output metadata and content as JSON
   --headers <json>     Additional HTTP headers, such as Authorization
-  --allowed-domains <list>  Restrict read fetches and redirects to allowed domains
+  --allowed-domains <list>  Restrict read fetches and redirects to allowed domains; must list at least one
   --content-boundaries Wrap read output in boundary markers
   --max-output <chars> Truncate read output to N chars
   Invalid --max-output and AGENT_BROWSER_MAX_OUTPUT values warn and leave the
@@ -2836,7 +2836,11 @@ Usage: agent-browser snapshot [options]
 
 Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
-Refs can be reused across snapshots. Take a fresh snapshot after navigation.
+Refs can be reused across snapshots. Take a fresh snapshot after navigation:
+a ref issued for a document that has since been replaced, in the page or in its
+iframe, fails with "from a document that is no longer loaded". A snapshot taken
+while the document is being replaced fails with "The document changed while the
+snapshot was being captured"; run it again.
 If a ref's element was replaced, the action uses the one element with the same
 role and name. If that is ambiguous, it fails: run snapshot again.
 Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
@@ -4835,7 +4839,7 @@ Options:
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
                              Invalid values warn and leave the existing output limit unchanged.
-  --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --allowed-domains <list>   Restrict network domains; must list at least one; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --capture <list>           Record the session as it runs; only flow is supported (or AGENT_BROWSER_CAPTURE)
                              On a running session without capture, passing it relaunches with capture on
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
@@ -4959,7 +4963,7 @@ Environment:
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
   AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
-  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
+  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; an empty value is rejected; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
   AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
