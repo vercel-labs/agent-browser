@@ -2202,8 +2202,9 @@ fn shared_property(key: &str) -> Value {
         }),
         "allowedDomains" => json!({
             "type": "array",
+            "minItems": 1,
             "items": { "type": "string" },
-            "description": "Restrict browser and read traffic to these domain patterns."
+            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected."
         }),
         "capture" => json!({
             "type": "array",
@@ -4611,18 +4612,18 @@ fn append_common_global_args(
         args.push(check);
     }
     if let Some(domains) = optional_string_array(arguments, "allowedDomains")? {
-        if !domains.is_empty() {
-            if env::var_os("AGENT_BROWSER_ALLOWED_DOMAINS").is_some()
-                || crate::flags::load_config(&[])
-                    .is_ok_and(|c| c.allowed_domains.is_some_and(|d| !d.is_empty()))
-            {
-                return Err(ProtocolError::invalid_params(
-                    "allowedDomains is already set in the MCP server's environment or config",
-                ));
-            }
-            args.push("--allowed-domains".to_string());
-            args.push(domains.join(","));
+        crate::native::network::ensure_allowed_domains_not_empty(&domains)
+            .map_err(ProtocolError::invalid_params)?;
+        if env::var_os("AGENT_BROWSER_ALLOWED_DOMAINS").is_some()
+            || crate::flags::load_config(&[])
+                .is_ok_and(|c| c.allowed_domains.is_some_and(|d| !d.is_empty()))
+        {
+            return Err(ProtocolError::invalid_params(
+                "allowedDomains is already set in the MCP server's environment or config",
+            ));
         }
+        args.push("--allowed-domains".to_string());
+        args.push(domains.join(","));
     }
     if let Some(modes) = optional_string_array(arguments, "capture")? {
         if !modes.is_empty() {
@@ -6634,6 +6635,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["--allowed-domains", "example.com,*.example.org"]);
+    }
+
+    #[test]
+    fn common_global_args_reject_blank_allowed_domains() {
+        let mut args = Vec::new();
+        let err =
+            append_common_global_args(&mut args, &json!({ "allowedDomains": ["", "  "] }), None)
+                .expect_err("blank allowlist must be rejected");
+        assert_eq!(
+            err.message,
+            crate::native::network::EMPTY_ALLOWED_DOMAINS_ERROR
+        );
+    }
+
+    #[test]
+    fn common_global_args_omit_allowed_domains_when_absent() {
+        let mut args = Vec::new();
+        append_common_global_args(&mut args, &json!({}), None).unwrap();
+        assert!(!args.iter().any(|arg| arg == "--allowed-domains"));
     }
 
     #[test]

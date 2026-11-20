@@ -675,16 +675,12 @@ fn security_view() {
 }
 
 #[test]
-fn blank_allowed_domains_do_not_restrict() {
-    let r = seeded(&[("AGENT_BROWSER_ALLOWED_DOMAINS", "  ")]);
-    assert_eq!(r.security().allowed_domains, None);
-    assert!(!r.launch_options().restrict_webrtc);
-}
-
-#[test]
-fn separator_only_allowed_domains_seed_an_empty_list() {
-    let r = seeded(&[("AGENT_BROWSER_ALLOWED_DOMAINS", " , ")]);
-    assert_eq!(r.security().allowed_domains, Some(vec![]));
+fn blank_or_separator_only_allowed_domains_seed_nothing() {
+    for raw in ["", "  ", " , "] {
+        let r = seeded(&[("AGENT_BROWSER_ALLOWED_DOMAINS", raw)]);
+        assert_eq!(r.security().allowed_domains, None, "{raw:?}");
+        assert!(!r.launch_options().restrict_webrtc);
+    }
 }
 
 #[test]

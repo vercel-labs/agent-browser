@@ -178,6 +178,18 @@
       {
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
+      },
+      {
+        "from": "string[]; also disables WebRTC",
+        "to": "string[]; must list at least one domain (an empty array is rejected); also disables WebRTC"
+      },
+      {
+        "from": "Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). Requires",
+        "to": "Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). An empty value is rejected; unset the variable to run unrestricted. Requires"
+      },
+      {
+        "from": "Comma-separated allowed domain patterns (e.g., example.com,*.example.com). Requires",
+        "to": "Comma-separated allowed domain patterns (e.g., example.com,*.example.com). An empty value is rejected; unset the variable to run unrestricted. Requires"
       }
     ],
     "/plugins": [
@@ -393,8 +405,8 @@
   },
   "resources": {
     "/schema.json": {
-      "size": 9813,
-      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
+      "size": 9834,
+      "sha256": "22667a9fa7f532356116f762bedab84c8b1bad997352589a46add84023ef125c"
     }
   }
 }
