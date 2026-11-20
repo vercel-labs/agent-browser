@@ -40,6 +40,7 @@ pub enum SessionFile {
     Log,
     /// Held while a command starts, restarts or replaces the session's daemon.
     /// Never removed: unlinking a lock file lets a second holder in.
+    /// Owner-only (0600) on Unix.
     Lock,
 }
 
