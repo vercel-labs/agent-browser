@@ -331,3 +331,57 @@ fn a_broken_security_config_stops_only_commands_that_run_a_browser() {
     assert!(!output.status.success(), "open: {text}");
     assert!(!text.contains("nonexistent"), "open: {text}");
 }
+
+#[test]
+fn help_like_option_values_do_not_make_a_command_browserless() {
+    // `--user-agent --help` and friends give the option a value; the command is
+    // still `read` and must refuse the empty allowlist it inherited.
+    let values: [(&str, &str); 5] = [
+        ("--user-agent", "--help"),
+        ("--user-agent", "-h"),
+        ("--proxy", "-V"),
+        ("--user-agent", "--version"),
+        ("--session-name", "--help"),
+    ];
+    for (option, value) in values {
+        let home = TempDir::new().unwrap();
+        let (output, text) = run(
+            &home,
+            &[("AGENT_BROWSER_ALLOWED_DOMAINS", " , ")],
+            &["read", "http://127.0.0.1:1/", option, value],
+        );
+        assert!(!output.status.success(), "{option} {value}: {text}");
+        assert!(text.contains(EMPTY), "{option} {value}: {text}");
+        // A refusal, not the warning a browserless command prints.
+        assert!(!text.contains('\u{26a0}'), "{option} {value}: {text}");
+    }
+}
+
+#[test]
+fn mcp_extra_args_cannot_turn_off_containment_with_help_like_values() {
+    for extra in [
+        r#"["--user-agent","--help"]"#,
+        r#"["--user-agent","-V"]"#,
+        r#"["--user-agent","--version"]"#,
+        r#"["--user-agent","-h"]"#,
+    ] {
+        let home = TempDir::new().unwrap();
+        let args = format!(r#"{{"url":"http://127.0.0.1:1/","extraArgs":{extra}}}"#);
+        let (_, text) = run(
+            &home,
+            &[("AGENT_BROWSER_ALLOWED_DOMAINS", " , ")],
+            &["mcp", "call", "agent_browser_open", &args],
+        );
+        assert!(text.contains(EMPTY), "{extra}: {text}");
+        assert!(!text.contains("nonexistent"), "{extra}: {text}");
+    }
+}
+
+#[test]
+fn close_still_works_with_an_empty_allowlist_flag_or_env() {
+    let home = TempDir::new().unwrap();
+    let (output, text) = run(&home, &[], &["close", "--allowed-domains", ","]);
+    assert!(output.status.success(), "{text}");
+    let (output, text) = run(&home, &[("AGENT_BROWSER_ALLOWED_DOMAINS", " ")], &["close"]);
+    assert!(output.status.success(), "{text}");
+}

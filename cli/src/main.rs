@@ -145,6 +145,16 @@ fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings:
     if command_is_cdp_url_metadata(cmd) {
         return patch.without_launch_settings();
     }
+    // Closing a session applies no allowlist, so one that cannot be used does
+    // not ride along and fail the close.
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("close")
+        && flags
+            .allowed_domains
+            .as_deref()
+            .is_some_and(|d| native::network::ensure_allowed_domains_not_empty(d).is_err())
+    {
+        patch.remove(session_settings::Key::AllowedDomains);
+    }
     if command_is_browserless(cmd) {
         patch.remove(session_settings::Key::CaCert);
         patch.remove(session_settings::Key::ClearCaCert);
@@ -1761,13 +1771,11 @@ fn main() {
     }
 
     // Commands that start a browser or apply settings refuse an empty allowlist.
-    // `close` only tears a session down, so it warns and drops the list; that
-    // keeps it usable to recover from a bad value.
+    // Commands that cannot run a browser only warn. The list itself is left as
+    // given, so anything that does reach a browser still refuses it.
     if let Err(error) = validate_allowed_domains_flag(&flags, &args) {
         if !runs_browser {
             eprintln!("{} {}", color::warning_indicator(), error);
-            flags.allowed_domains = None;
-            env::remove_var("AGENT_BROWSER_ALLOWED_DOMAINS");
         } else {
             if flags.json {
                 print_json_error(error);
@@ -1994,7 +2002,10 @@ fn main() {
         restore_check_text: flags.restore_check_text.as_deref(),
         restore_check_fn: flags.restore_check_fn.as_deref(),
         download_path: flags.download_path.as_deref(),
-        allowed_domains: flags.allowed_domains.as_deref(),
+        allowed_domains: flags
+            .allowed_domains
+            .as_deref()
+            .filter(|d| native::network::ensure_allowed_domains_not_empty(d).is_ok()),
         action_policy: flags.action_policy.as_deref(),
         confirm_actions: flags.confirm_actions.as_deref(),
         engine: flags.engine.as_deref(),

@@ -44,16 +44,20 @@ fn check_security_config(path: &Path) -> Result<(), String> {
 /// Whether the command can run a browser or apply settings. Help, version and
 /// commands that only manage files, sessions or the install never do, so a
 /// bad security setting is reported for them but does not stop them.
+///
+/// It reads the arguments the way dispatch does: after `clean_args` has taken
+/// global flags and their values out, so a value such as the `--help` in
+/// `--user-agent --help` is not a help flag.
 pub fn command_runs_browser(args: &[String]) -> bool {
-    let options = before_end_of_options(args);
-    if options
+    let clean = clean_args(args);
+    if before_end_of_options(&clean)
         .iter()
         .any(|a| matches!(a.as_str(), "--help" | "-h" | "--version" | "-V"))
     {
         return false;
     }
     !matches!(
-        clean_args(args).first().map(|s| s.as_str()),
+        clean.first().map(|s| s.as_str()),
         None | Some(
             "close"
                 | "quit"
