@@ -1003,7 +1003,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_TYPE,
             "Type text",
-            "Type text into an element by @ref or CSS selector. Fails for disabled or readonly fields and elements that can never take text (select, button, checkbox, radio, file, submit, color, range and date-type inputs; use fill for date, time, color and range inputs, keyboard type for a focused element, press for a single key); warns if the page does not show the text.",
+            "Type text into an element by @ref or CSS selector. Fails for disabled or readonly fields and elements that can never take text (select, checkbox, radio, file, color, range and date-type inputs; use fill for date, time, color and range inputs, keyboard type for a focused element, press for a single key); warns if the page does not show the text.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to type." },
@@ -3398,7 +3398,24 @@ fn call_select(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push(by);
     }
     let (args, literal_start) = literal_positionals(args, values);
-    call_cli_tool_at(arguments, args, literal_start, None)
+    call_cli_tool_at(arguments, args, literal_start, None).map(mcp_by_advice)
+}
+
+/// The CLI advice names the `--by` flag; over MCP it is the `by` field.
+fn mcp_by_advice(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(
+            text.replace("--by value", "by: \"value\"")
+                .replace("--by label", "by: \"label\""),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(mcp_by_advice).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, mcp_by_advice(value)))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 fn call_scroll(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -7482,5 +7499,17 @@ mod snapshot_delta_schema_tests {
             crate::commands::parse_command(&args, &flags).unwrap()["delta"],
             true
         );
+    }
+
+    #[test]
+    fn select_advice_names_the_by_field_over_mcp() {
+        let value = json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": "Pass --by value to match option values or --by label to match visible labels." }],
+            "structuredContent": { "response": { "error": "Pass --by value" } }
+        });
+        let rewritten = mcp_by_advice(value).to_string();
+        assert!(!rewritten.contains("--by"));
+        assert!(rewritten.contains("by: \\\"value\\\""));
     }
 }

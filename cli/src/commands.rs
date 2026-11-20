@@ -835,54 +835,57 @@ fn parse_command_inner(
         }
         "select" => {
             const USAGE: &str = "select <selector> <value...> [--by value|label]";
-            const FLAGS: &[FlagSpec] = &[FlagSpec {
-                name: "--by",
-                aliases: &[],
-                takes_value: true,
-            }];
-            let mut by = None;
-            let mut positionals = Vec::new();
-            let mut scanner = ArgScanner::new(
-                &rest,
-                FLAGS,
-                "select",
-                USAGE,
-                batch_item,
-                DashPolicy::Numeric,
-            );
-            while let Some(arg) = scanner.next()? {
-                match arg {
-                    ScannedArg::ValueFlag {
-                        name: "--by",
-                        value,
-                    } => {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "select".to_string(),
+                usage: USAGE,
+            })?;
+            // Only `--by <v>`, `--by=<v>` and a `--` marker are special. Every
+            // other argument is an option value, including ones that start with
+            // `-` such as "-- Select --" or "-none-"; after `--` nothing is.
+            let mut by: Option<&str> = None;
+            let mut values: Vec<&str> = Vec::new();
+            let mut i = 1;
+            while i < rest.len() {
+                let arg = rest[i];
+                let by_value = if arg == "--by" {
+                    i += 1;
+                    Some(*rest.get(i).ok_or_else(|| ParseError::MissingArguments {
+                        context: "select --by".to_string(),
+                        usage: USAGE,
+                    })?)
+                } else {
+                    arg.strip_prefix("--by=")
+                };
+                match by_value {
+                    Some(value) => {
                         if value != "value" && value != "label" {
                             return Err(ParseError::InvalidValue {
                                 message: format!("--by must be 'value' or 'label', got '{value}'"),
                                 usage: USAGE,
                             });
                         }
+                        if by.is_some() {
+                            return Err(ParseError::InvalidValue {
+                                message: "--by was given more than once".to_string(),
+                                usage: USAGE,
+                            });
+                        }
                         by = Some(value);
                     }
-                    ScannedArg::Data(value) => positionals.push(value),
-                    ScannedArg::BoolFlag(name) | ScannedArg::ValueFlag { name, .. } => {
-                        unreachable!("select flag {name} has no handler")
+                    None if arg == "--" => {
+                        values.extend_from_slice(&rest[i + 1..]);
+                        break;
                     }
+                    None => values.push(arg),
                 }
+                i += 1;
             }
-            let sel = positionals
-                .first()
-                .ok_or_else(|| ParseError::MissingArguments {
-                    context: "select".to_string(),
-                    usage: USAGE,
-                })?;
-            if positionals.len() < 2 {
+            if values.is_empty() {
                 return Err(ParseError::MissingArguments {
                     context: "select".to_string(),
                     usage: USAGE,
                 });
             }
-            let values = &positionals[1..];
             let mut cmd = if values.len() == 1 {
                 json!({ "id": id, "action": "select", "selector": sel, "values": values[0] })
             } else {
@@ -6126,13 +6129,64 @@ mod tests {
         assert!(err.format().contains("--by"));
         let err = parse_command(&args("select #menu 1 --by"), &default_flags()).unwrap_err();
         assert!(err.format().contains("select"));
-        // A value that looks like the flag is literal after `--`.
-        let cmd = parse_command(&args("select #menu -- --by"), &default_flags()).unwrap();
-        assert_eq!(cmd["values"], "--by");
+        let err = parse_command(
+            &args("select #menu 1 --by value --by label"),
+            &default_flags(),
+        )
+        .unwrap_err();
+        assert!(err.format().contains("more than once"));
+        let cmd = parse_command(&args("select #menu 1 --by=label"), &default_flags()).unwrap();
+        assert_eq!(cmd["by"], "label");
+        assert_eq!(cmd["values"], "1");
+        let err = parse_command(&args("select #menu --by=nope 1"), &default_flags()).unwrap_err();
+        assert!(err.format().contains("--by"));
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn test_select_values_that_start_with_a_dash_are_data() {
+        for value in ["-- Select --", "- None -", "-none-", "--x", "-1", "--"] {
+            let tokens = if value == "--" {
+                argv(&["select", "#d", "--", "--"])
+            } else {
+                argv(&["select", "#d", value])
+            };
+            let cmd = parse_command(&tokens, &default_flags()).unwrap();
+            assert_eq!(cmd["selector"], "#d");
+            assert_eq!(cmd["values"], value, "{value}");
+            assert!(cmd.get("by").is_none());
+        }
+        let cmd = parse_command(&argv(&["select", "#m", "x", "-none-"]), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], json!(["x", "-none-"]));
+        // After `--` a value that looks like the flag is literal.
+        let cmd = parse_command(
+            &argv(&["select", "#d", "--", "--by", "value"]),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["values"], json!(["--by", "value"]));
         assert!(cmd.get("by").is_none());
-        // Negative numbers are values.
-        let cmd = parse_command(&args("select #menu -1"), &default_flags()).unwrap();
-        assert_eq!(cmd["values"], "-1");
+        // The flag still works next to a dash-leading value.
+        let cmd = parse_command(
+            &argv(&["select", "#d", "-- Select --", "--by", "label"]),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["values"], "-- Select --");
+        assert_eq!(cmd["by"], "label");
+    }
+
+    #[test]
+    fn test_select_dash_values_in_a_batch() {
+        let cmd = parse_batch_command(&argv(&["select", "#d", "-- Select --"]), &default_flags())
+            .unwrap();
+        assert_eq!(cmd["values"], "-- Select --");
+        let cmd =
+            parse_batch_command(&argv(&["select", "#d", "x", "-none-"]), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], json!(["x", "-none-"]));
     }
 
     #[test]

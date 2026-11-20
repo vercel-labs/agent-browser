@@ -176,14 +176,13 @@ const PRECHECK_JS: &str = r#"function(mode) {
         }
         // Only elements that can never take text are refused; where the text
         // lands for everything else is unchanged.
-        const neverText = ['checkbox', 'radio', 'file', 'submit', 'reset', 'button'];
+        const neverText = ['checkbox', 'radio', 'file'];
         const isInput = el.localName === 'input';
         const valueInput = isInput && valueTypes.includes(el.type);
-        const keys = '; to send text to a focused element use keyboard type, or press for a single key';
         let hint = null;
         if (el.localName === 'select') hint = '; use select';
         else if (isInput && (el.type === 'checkbox' || el.type === 'radio')) hint = '; use check or uncheck';
-        else if (el.localName === 'button' || (isInput && neverText.includes(el.type))) hint = mode === 'type' ? keys : '';
+        else if (isInput && neverText.includes(el.type)) hint = '';
         else if (mode === 'type' && valueInput) hint = '; use fill to set the value of this input';
         if (hint !== null) {
             return fail('not_editable', 'Element ' + describe(el) + ' cannot be ' + verb + hint);
@@ -295,7 +294,22 @@ impl FormProbe {
 /// A failed read after the action (context destroyed, target gone, page
 /// navigated) must not fail a command whose action already happened.
 fn unverified(error: &str) -> String {
-    format!("could not verify the result: {error}")
+    let lower = error.to_lowercase();
+    let navigated = [
+        "cannot find context",
+        "context was destroyed",
+        "execution context",
+        "cannot find object",
+        "navigat",
+        "element not found",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    if navigated {
+        "page navigated after the action; result not verified".to_string()
+    } else {
+        format!("could not verify the result: {error}")
+    }
 }
 
 /// What a text action reports when the page did not end up as requested. The
@@ -959,7 +973,7 @@ pub async fn select_option(
                         return { code: 'option_not_found', error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
                     }
                     if (matches.length > 1) {
-                        return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ': ' + matches.map((o) => '"' + nameOf(o) + '"').join(', ') };
+                        return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ': ' + matches.map((o) => '"' + nameOf(o) + '"').join(', ') + '. Pass --by value to match option values or --by label to match visible labels.' };
                     }
                     // A disabled option swallows the click, so selecting it would
                     // report success with an unchanged widget.
@@ -2164,7 +2178,7 @@ mod tests {
 
     #[test]
     fn test_unverified_reads_become_a_warning_text() {
-        let w = unverified("Cannot find context with specified id");
+        let w = unverified("Could not inspect the element");
         assert!(w.starts_with("could not verify the result: "));
         assert_eq!(form_error_code(&w), None);
     }
@@ -2180,5 +2194,20 @@ mod tests {
     fn test_unknown_probe_never_warns_about_length() {
         let probe = FormProbe::unknown();
         assert!(truncation_warning(&probe, "any length at all").is_none());
+    }
+
+    #[test]
+    fn test_navigation_errors_read_as_navigation() {
+        for error in [
+            "CDP error (Runtime.callFunctionOn): Cannot find context with specified id",
+            "Execution context was destroyed, most likely because of a navigation",
+            "Element not found: #cb",
+        ] {
+            assert_eq!(
+                unverified(error),
+                "page navigated after the action; result not verified"
+            );
+        }
+        assert!(unverified("Could not inspect the element").starts_with("could not verify"));
     }
 }

@@ -2323,7 +2323,7 @@ Date, time, color and range inputs get the value set directly (for example 2024-
 a value the input would reject fails with malformed_value, and a range value inside
 its bounds is snapped to the step as the browser does, with a warning.
 Readonly and disabled fields, and elements that can never take text (select, checkbox,
-radio, button, file, submit, reset), are refused before anything changes, with a code of
+radio, file), are refused before anything changes, with a code of
 read_only, disabled or not_editable. A label stands for its control.
 A value longer than maxlength is cut by the browser and reported as a value_truncated
 warning. If the page does not hold the value afterwards (it applies it late or rewrites
@@ -2350,8 +2350,8 @@ agent-browser type - Type text into an element
 Usage: agent-browser type <selector> [--clear] [--delay <ms>] [--] <text>
 
 Types text into the specified element character by character.
-Disabled and readonly fields, and elements that can never take text (select, button,
-checkbox, radio, file, submit, reset, and the color, range and date-type inputs) are
+Disabled and readonly fields, and elements that can never take text (select, checkbox,
+radio, file, and the color, range and date-type inputs) are
 refused before any text is typed (disabled, read_only, not_editable); use fill for date,
 time, color and range inputs. To send text to a focused element use keyboard type, or
 press for a single key. Where the text lands for any other element depends on focus, as

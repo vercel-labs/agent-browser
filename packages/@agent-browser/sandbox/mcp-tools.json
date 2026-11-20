@@ -4527,7 +4527,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Type text into an element by @ref or CSS selector. Fails for disabled or readonly fields and elements that can never take text (select, button, checkbox, radio, file, submit, color, range and date-type inputs; use fill for date, time, color and range inputs, keyboard type for a focused element, press for a single key); warns if the page does not show the text.",
+      "description": "Type text into an element by @ref or CSS selector. Fails for disabled or readonly fields and elements that can never take text (select, checkbox, radio, file, color, range and date-type inputs; use fill for date, time, color and range inputs, keyboard type for a focused element, press for a single key); warns if the page does not show the text.",
       "inputSchema": {
         "properties": {
           "clear": {
