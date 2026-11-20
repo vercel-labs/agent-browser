@@ -484,12 +484,25 @@ pub struct InitScriptSetup {
     pub session_identifiers: HashMap<String, String>,
 }
 
+/// Viewport emulation installed by `viewport`, `device` or a launch viewport.
+///
+/// Touch emulation follows `mobile`: a mobile viewport enables it and any
+/// later non-mobile viewport clears it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewportSetup {
+    pub width: i32,
+    pub height: i32,
+    pub device_scale_factor: f64,
+    pub mobile: bool,
+}
+
 /// Page-level setup the daemon has applied to the active page session.
 ///
 /// CDP scopes all of these to a single target session, so a tab the daemon
 /// creates itself starts without them. This record lets
 /// [`apply_session_setup`] replay them onto the new tab before its first
-/// navigation. Reset whenever a browser is (re)launched. Permissions are not
+/// navigation. Reset whenever a browser is (re)launched, except the viewport,
+/// which is re-applied to the relaunched browser. Permissions are not
 /// tracked: `Browser.grantPermissions` is context-scoped and already covers
 /// new tabs in the default context.
 #[derive(Debug, Default, Clone)]
@@ -508,6 +521,8 @@ pub struct SessionSetup {
     /// `DaemonState::origin_headers`.
     pub extra_headers: Option<HashMap<String, String>>,
     pub offline: Option<bool>,
+    /// Viewport size, scale factor and mobile (touch) emulation.
+    pub viewport: Option<ViewportSetup>,
     /// Init scripts registered with `Page.addScriptToEvaluateOnNewDocument`:
     /// `--enable`, `--init-script`, plugin init scripts, and `addinitscript`.
     pub init_scripts: Vec<InitScriptSetup>,
@@ -538,6 +553,7 @@ impl SessionSetup {
             && self.geolocation.is_none()
             && self.extra_headers.as_ref().is_none_or(HashMap::is_empty)
             && !self.offline.unwrap_or(false)
+            && self.viewport.is_none()
             && self.init_scripts.is_empty()
     }
 
@@ -695,9 +711,6 @@ pub struct DaemonState {
     pub engine: String,
     /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
     pub default_timeout_ms: u64,
-    /// Last viewport settings (width, height, deviceScaleFactor, mobile),
-    /// re-applied to new contexts (e.g., recording).
-    pub viewport: Option<(i32, i32, f64, bool)>,
     /// Session-scoped setup applied to the active page, re-applied to tabs the
     /// daemon creates. See [`SessionSetup`].
     pub session_setup: SessionSetup,
@@ -859,7 +872,6 @@ impl DaemonState {
             attached_target: None,
             effective_ca_cert: None,
             network_auto_attach_installed: false,
-            viewport: None,
             session_setup: SessionSetup::default(),
             plugin_init_scripts: Vec::new(),
             active_provider_session: None,
@@ -4629,6 +4641,33 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
             .await;
     }
 
+    if let Some(viewport) = setup.viewport {
+        let _ = client
+            .send_command(
+                "Emulation.setDeviceMetricsOverride",
+                Some(json!({
+                    "width": viewport.width,
+                    "height": viewport.height,
+                    "deviceScaleFactor": viewport.device_scale_factor,
+                    "mobile": viewport.mobile,
+                })),
+                Some(session_id),
+            )
+            .await;
+        if viewport.mobile {
+            let _ = client
+                .send_command(
+                    "Emulation.setTouchEmulationEnabled",
+                    Some(json!({
+                        "enabled": true,
+                        "maxTouchPoints": super::browser::TOUCH_POINTS,
+                    })),
+                    Some(session_id),
+                )
+                .await;
+        }
+    }
+
     if let Some(ref emulated) = setup.emulated_media {
         let mut params = json!({});
         if let Some(ref m) = emulated.media {
@@ -4792,6 +4831,7 @@ async fn auto_launch_inner(
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
     state.plugin_init_scripts.clear();
+    let carried_viewport = state.session_setup.viewport;
     state.session_setup = SessionSetup::default();
 
     // Use the stream server's viewport dimensions for --window-size so the
@@ -5051,6 +5091,12 @@ async fn auto_launch_inner(
     state.start_dialog_handler();
     state.update_stream_client().await;
     install_network_controls_or_close(state, has_proxy_auth).await?;
+
+    if let Some(viewport) = carried_viewport {
+        if let Err(e) = apply_viewport(state, viewport).await {
+            eprintln!("Failed to re-apply the viewport after launch: {e}");
+        }
+    }
 
     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
     try_auto_restore_state(state).await;
@@ -8674,8 +8720,34 @@ async fn handle_tab_keep(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     mgr.set_tab_keep(tab_id, keep).await
 }
 
-async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+/// Installs `viewport` on the active page, records it in the session setup
+/// so relaunches and new tabs get it, and syncs the stream server.
+async fn apply_viewport(state: &mut DaemonState, viewport: ViewportSetup) -> Result<(), String> {
+    let touch_was_enabled = state.session_setup.viewport.is_some_and(|v| v.mobile);
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    mgr.set_viewport(
+        viewport.width,
+        viewport.height,
+        viewport.device_scale_factor,
+        viewport.mobile,
+    )
+    .await?;
+    if viewport.mobile || touch_was_enabled {
+        mgr.set_touch_emulation(viewport.mobile).await?;
+    }
+
+    state.session_setup.viewport = Some(viewport);
+
+    // Update stream server viewport so status messages and screencast use the new dimensions
+    if let Some(ref server) = state.stream_server {
+        server
+            .set_viewport(viewport.width as u32, viewport.height as u32)
+            .await;
+    }
+    Ok(())
+}
+
+async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let width = cmd.get("width").and_then(|v| v.as_i64()).unwrap_or(1280) as i32;
     let height = cmd.get("height").and_then(|v| v.as_i64()).unwrap_or(720) as i32;
     let scale = cmd
@@ -8684,14 +8756,16 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .unwrap_or(1.0);
     let mobile = cmd.get("mobile").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    mgr.set_viewport(width, height, scale, mobile).await?;
-
-    state.viewport = Some((width, height, scale, mobile));
-
-    // Update stream server viewport so status messages and screencast use the new dimensions
-    if let Some(ref server) = state.stream_server {
-        server.set_viewport(width as u32, height as u32).await;
-    }
+    apply_viewport(
+        state,
+        ViewportSetup {
+            width,
+            height,
+            device_scale_factor: scale,
+            mobile,
+        },
+    )
+    .await?;
 
     Ok(json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }))
 }
@@ -10190,16 +10264,18 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         _ => return Err(format!("Unknown device: {}. Supported: iPhone 15, iPhone 16, iPhone 16 Pro, iPhone 17, iPad, iPad Pro, Pixel 9, Galaxy S25", name)),
     };
 
-    mgr.set_viewport(width, height, scale, mobile).await?;
     mgr.set_user_agent(ua).await?;
-
-    state.viewport = Some((width, height, scale, mobile));
+    apply_viewport(
+        state,
+        ViewportSetup {
+            width,
+            height,
+            device_scale_factor: scale,
+            mobile,
+        },
+    )
+    .await?;
     state.session_setup.user_agent = Some(ua.to_string());
-
-    // Update stream server viewport so status messages and screencast use the new dimensions
-    if let Some(ref server) = state.stream_server {
-        server.set_viewport(width as u32, height as u32).await;
-    }
 
     Ok(json!({
         "device": name,
@@ -12268,13 +12344,16 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .get("height")
             .and_then(|v| v.as_i64())
             .unwrap_or(720) as i32;
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        mgr.set_viewport(width, height, 1.0, false).await?;
-
-        // Update stream server viewport
-        if let Some(ref server) = state.stream_server {
-            server.set_viewport(width as u32, height as u32).await;
-        }
+        apply_viewport(
+            state,
+            ViewportSetup {
+                width,
+                height,
+                device_scale_factor: 1.0,
+                mobile: false,
+            },
+        )
+        .await?;
     }
 
     let total = state
@@ -17401,6 +17480,86 @@ mod tests {
             }
         });
         (url, resumed)
+    }
+
+    /// Fake CDP endpoint that answers every command and records
+    /// `(method, sessionId, params)`.
+    async fn spawn_recording_cdp_server() -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_by_server = seen.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                seen_by_server.lock().unwrap().push((
+                    format!(
+                        "{}@{}",
+                        command["method"].as_str().unwrap_or_default(),
+                        command["sessionId"].as_str().unwrap_or_default()
+                    ),
+                    command["params"].clone(),
+                ));
+                let reply = json!({ "id": command["id"], "result": {} });
+                if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                    return;
+                }
+            }
+        });
+        (url, seen)
+    }
+
+    /// The viewport and touch state in the session setup reaches a new
+    /// target session, so new tabs and replacement tabs keep it.
+    #[tokio::test]
+    async fn session_setup_replays_viewport_and_touch_onto_a_new_session() {
+        for (mobile, expect_touch) in [(true, true), (false, false)] {
+            let (url, seen) = spawn_recording_cdp_server().await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            state.session_setup.viewport = Some(ViewportSetup {
+                width: 390,
+                height: 844,
+                device_scale_factor: 3.0,
+                mobile,
+            });
+
+            apply_session_setup(&mut state, "S-NEW").await.unwrap();
+
+            let seen = seen.lock().unwrap();
+            let metrics = seen
+                .iter()
+                .find(|(method, _)| method == "Emulation.setDeviceMetricsOverride@S-NEW")
+                .map(|(_, params)| params.clone())
+                .expect("metrics override replayed");
+            assert_eq!(
+                metrics,
+                json!({ "width": 390, "height": 844, "deviceScaleFactor": 3.0, "mobile": mobile })
+            );
+            let touch = seen
+                .iter()
+                .any(|(method, _)| method == "Emulation.setTouchEmulationEnabled@S-NEW");
+            assert_eq!(touch, expect_touch);
+        }
+    }
+
+    #[test]
+    fn a_configured_viewport_counts_as_pending_session_setup() {
+        let mut setup = SessionSetup::default();
+        assert!(setup.is_empty());
+        setup.viewport = Some(ViewportSetup {
+            width: 800,
+            height: 600,
+            device_scale_factor: 1.0,
+            mobile: false,
+        });
+        assert!(!setup.is_empty());
     }
 
     /// A popup page or worker that detaches while the drain prepares it is

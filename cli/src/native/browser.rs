@@ -17,6 +17,9 @@ use super::cdp::types::*;
 use super::element::{resolve_element_object_id, RefMap};
 use super::tab_binding;
 
+/// `navigator.maxTouchPoints` reported while touch emulation is enabled.
+pub const TOUCH_POINTS: u32 = 5;
+
 // ---------------------------------------------------------------------------
 // Launch validation
 // ---------------------------------------------------------------------------
@@ -2390,6 +2393,26 @@ impl BrowserManager {
     // -----------------------------------------------------------------------
     // Emulation
     // -----------------------------------------------------------------------
+
+    /// Enables or disables touch emulation on the active page. Disabling is
+    /// only meaningful after it was enabled: it also resets the hover and
+    /// pointer types the browser was launched with.
+    pub async fn set_touch_emulation(&self, enabled: bool) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        let params = if enabled {
+            json!({ "enabled": true, "maxTouchPoints": TOUCH_POINTS })
+        } else {
+            json!({ "enabled": false })
+        };
+        self.client
+            .send_command(
+                "Emulation.setTouchEmulationEnabled",
+                Some(params),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
 
     pub async fn set_viewport(
         &self,
