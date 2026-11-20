@@ -486,7 +486,7 @@ pub async fn take_snapshot(
             .is_some_and(|tree| loader_replaced(recorded, &tree["frameTree"], frame_id))
         {
             return Err(
-                "The page navigated while the snapshot was being captured. Take the snapshot again."
+                "The document changed while the snapshot was being captured (the page navigated or the frame was removed). Take the snapshot again."
                     .to_string(),
             );
         }
@@ -822,12 +822,7 @@ async fn call_on_nodes(
         .collect()
 }
 
-/// Resolve the child frame ID for an iframe element given its backendNodeId.
-/// Whether the frame now shows a different document than `recorded`.
-fn loader_replaced(recorded: &str, tree: &Value, frame_id: Option<&str>) -> bool {
-    frame_loader(tree, frame_id) != Some(recorded)
-}
-
+/// Loader of the document currently shown in a frame of a `Page.getFrameTree` result.
 pub(super) fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> {
     let frame = &tree["frame"];
     if frame_id.is_none() || frame["id"].as_str() == frame_id {
@@ -839,6 +834,12 @@ pub(super) fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Optio
         .find_map(|child| frame_loader(child, frame_id))
 }
 
+/// Whether the frame now shows a different document than `recorded`.
+fn loader_replaced(recorded: &str, tree: &Value, frame_id: Option<&str>) -> bool {
+    frame_loader(tree, frame_id) != Some(recorded)
+}
+
+/// Resolve the child frame ID for an iframe element given its backendNodeId.
 async fn resolve_iframe_frame_id(
     client: &CdpClient,
     session_id: &str,

@@ -6357,6 +6357,14 @@ const REF_FIXTURE_ROUTES: &[(&str, &str)] = &[
            window.setTimeout = () => 0; window.requestAnimationFrame = () => 0;\
          };</script>",
     ),
+    (
+        "/spin.html",
+        "<title>Spin</title><button>Go</button>\
+         <script>for (let i = 0; i < 3000; i++) {\
+           const b = document.createElement('button'); b.textContent = 'B' + i;\
+           document.body.appendChild(b); }\
+         setTimeout(() => location.reload(), 40);</script>",
+    ),
     // Cross-site iframe: `localhost` and `127.0.0.1` are different sites.
     (
         "/x.html",
@@ -6581,7 +6589,10 @@ async fn e2e_ref_fails_after_cross_site_iframe_navigation() {
     server.abort();
 }
 
-async fn ref_fails_when_the_page_navigates_during_resolution(route: &str) {
+async fn ref_fails_when_the_page_navigates_during_resolution(
+    route: &str,
+    command: fn(&str) -> Value,
+) {
     let (url, server) = ref_fixture_server().await;
     let mut state = DaemonState::new();
     assert_success(
@@ -6610,7 +6621,7 @@ async fn ref_fails_when_the_page_navigates_during_resolution(route: &str) {
 
     // The navigation lands while the ref resolves: the click must fail with
     // the stale-ref error and never reach /b2.html's button.
-    assert_previous_page(&ref_click(&mut state, &cont).await);
+    assert_previous_page(&ref_cmd(&mut state, command(&cont)).await);
     ref_wait_until(&mut state, "document.title === 'B2'").await;
     assert_eq!(ref_title(&mut state).await, "B2");
 
@@ -6621,13 +6632,78 @@ async fn ref_fails_when_the_page_navigates_during_resolution(route: &str) {
 #[tokio::test]
 #[ignore]
 async fn e2e_ref_fails_when_fallback_would_query_the_new_document() {
-    ref_fails_when_the_page_navigates_during_resolution("/trap-fallback.html").await;
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-fallback.html",
+        |r| json!({ "id": "c", "action": "click", "selector": r }),
+    )
+    .await;
+}
+
+// The object-based resolver serves reads and writes, not only clicks.
+#[tokio::test]
+#[ignore]
+async fn e2e_gettext_ref_fails_when_fallback_would_query_the_new_document() {
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-fallback.html",
+        |r| json!({ "id": "g", "action": "gettext", "selector": r }),
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_ref_fails_when_fallback_would_query_the_new_document() {
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-fallback.html",
+        |r| json!({ "id": "f", "action": "fill", "selector": r, "value": "x" }),
+    )
+    .await;
+}
+
+// A large page that reloads every 40 ms never keeps one document for the length
+// of a snapshot, so the snapshot is refused instead of returning refs.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_is_refused_while_the_document_keeps_changing() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/spin.html") }),
+        )
+        .await,
+    );
+    let resp = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("document changed while the snapshot"),
+        "{resp}"
+    );
+    assert!(state.ref_map.entries_sorted().is_empty());
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_ref_reports_navigation_during_click_point_resolution() {
-    ref_fails_when_the_page_navigates_during_resolution("/trap-point.html").await;
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-point.html",
+        |r| json!({ "id": "c", "action": "click", "selector": r }),
+    )
+    .await;
 }
 
 #[tokio::test]

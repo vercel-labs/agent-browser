@@ -2803,7 +2803,9 @@ Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
 Refs can be reused across snapshots. Take a fresh snapshot after navigation:
 a ref issued for a document that has since been replaced, in the page or in its
-iframe, fails with "from a document that is no longer loaded".
+iframe, fails with "from a document that is no longer loaded". A snapshot taken
+while the document is being replaced fails with "The document changed while the
+snapshot was being captured"; run it again.
 If a ref's element was replaced, the action uses the one element with the same
 role and name. If that is ambiguous, it fails: run snapshot again.
 Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
