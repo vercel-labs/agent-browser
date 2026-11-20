@@ -7572,14 +7572,14 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let outcome = interaction::fill(
+    let outcome = Box::pin(interaction::fill(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         value,
         &state.iframe_sessions,
-    )
+    ))
     .await?;
     Ok(form_outcome_data(
         json!({ "filled": selector }),
@@ -7610,7 +7610,7 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     let delay = cmd.get("delay").and_then(|v| v.as_u64());
 
-    let outcome = interaction::type_text(
+    let outcome = Box::pin(interaction::type_text(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7619,7 +7619,7 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         clear,
         delay,
         &state.iframe_sessions,
-    )
+    ))
     .await?;
     Ok(form_outcome_data(json!({ "typed": text }), outcome.warning))
 }
@@ -11486,14 +11486,14 @@ async fn execute_subaction(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'value' for fill subaction")?;
-            let outcome = interaction::fill(
+            let outcome = Box::pin(interaction::fill(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
                 selector,
                 value,
                 &state.iframe_sessions,
-            )
+            ))
             .await?;
             Ok(form_outcome_data(
                 json!({ "filled": selector }),
@@ -23072,7 +23072,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "agent-browser-har-stop-{}.har",
             unix_timestamp_millis()
         ));
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         state.har_entries.push(HarEntry {
             request_id: "req-3".to_string(),
             wall_time: 1773576000.0,
@@ -23106,7 +23106,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         )
         .await;
 
-        assert_eq!(result["success"], true);
+        assert_eq!(result["success"], true, "{result}");
         assert_eq!(result["data"]["requestCount"], 1);
         let _ = fs::remove_file(path);
     }
