@@ -2734,6 +2734,19 @@ mod tests {
         let (_, wire) = settings_of(&["--auto-connect", "get", "cdp-url"]);
         assert_eq!(wire["auto-connect"], true, "{wire}");
 
+        // The attach is checked like `connect`, which refuses allowed domains.
+        let (_, wire) = settings_of(&[
+            "--cdp",
+            "9222",
+            "--allowed-domains",
+            "a.test",
+            "get",
+            "cdp-url",
+        ]);
+        assert_eq!(wire["allowed-domains"], json!(["a.test"]), "{wire}");
+        let (_, wire) = settings_of(&["--allowed-domains", "a.test", "get", "cdp-url"]);
+        assert!(wire.get("allowed-domains").is_none(), "{wire}");
+
         // Headers go with an endpoint; without one there is nothing to attach.
         let (_, wire) = settings_of(&["--cdp-headers", r#"{"A":"b"}"#, "get", "cdp-url"]);
         assert!(wire.get("cdp-headers").is_none(), "{wire}");

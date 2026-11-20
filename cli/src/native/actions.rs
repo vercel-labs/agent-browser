@@ -2721,8 +2721,9 @@ pub(crate) fn command_launches_browser(cmd: &Value) -> bool {
 }
 
 /// Whether the command runs without a browser launch. `get cdp-url` never
-/// launches one, but it attaches to the external browser its own settings
-/// name with `--cdp` or `--auto-connect`, as `connect` does.
+/// launches one, but a session with no browser attaches to the external
+/// browser its own settings name with `--cdp` or `--auto-connect`, as
+/// `connect` does.
 fn skips_launch(cmd: &Value) -> bool {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
     skip_launch_action(action) && !(action == "cdp_url" && cdp_url_attaches(cmd))
@@ -2730,6 +2731,13 @@ fn skips_launch(cmd: &Value) -> bool {
 
 fn cdp_url_attaches(cmd: &Value) -> bool {
     Patch::from_wire(cmd.get("settings")).is_ok_and(|patch| patch.names_attach_target())
+}
+
+/// `get cdp-url` on a session that already has a browser reports that
+/// browser. It never closes it to attach to another one.
+fn cdp_url_keeps_the_running_browser(cmd: &Value, state: &DaemonState) -> bool {
+    cmd.get("action").and_then(Value::as_str) == Some("cdp_url")
+        && (state.browser.is_some() || state.webdriver_backend.is_some())
 }
 
 fn skip_launch_action(action: &str) -> bool {
@@ -3150,7 +3158,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // apply now, before the policy checks, so a changed policy governs this
     // command too. Launch settings wait until the launch itself: a command that
     // is denied or needs confirmation leaves the browser and its settings alone.
-    let launches = command_launches_browser(cmd);
+    let keeps_running_browser = cdp_url_keeps_the_running_browser(cmd, state);
+    let launches = command_launches_browser(cmd) && !keeps_running_browser;
     let mut launch_patch: Option<Patch> = None;
     let mut settings_outcome = if action == "close" {
         SettingsOutcome::default()
@@ -3181,7 +3190,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .map(|patch| state.settings.plan(patch))
         .filter(|plan| plan.relaunch);
 
-    let skip_launch = skips_launch(cmd);
+    let skip_launch = skips_launch(cmd) || keeps_running_browser;
     let restore_key_change_needs_launch = !skip_launch
         && command_changes_restore_key(cmd, state)
         && has_active_browser_session(state);

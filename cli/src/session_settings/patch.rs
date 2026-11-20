@@ -227,14 +227,19 @@ impl Patch {
 
     /// What a command that never launches a browser but may attach to one
     /// can apply: the live settings plus, when the patch names an attach
-    /// target, that target and its CDP headers.
+    /// target, that target, its CDP headers, and the allowed domains, so
+    /// the attach is refused where `connect` would refuse it.
     pub fn attach_settings_only(&self) -> Patch {
         let attaches = self.names_attach_target();
         let mut patch = self.clone();
         patch.relaunch = false;
         patch.entries.retain(|key, _| {
             spec(*key).effect == Effect::Live
-                || (attaches && matches!(key, Key::Cdp | Key::AutoConnect | Key::CdpHeaders))
+                || (attaches
+                    && matches!(
+                        key,
+                        Key::Cdp | Key::AutoConnect | Key::CdpHeaders | Key::AllowedDomains
+                    ))
         });
         patch.retain_ambient();
         patch
