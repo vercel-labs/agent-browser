@@ -359,6 +359,22 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
     Ok(headers)
 }
 
+/// Parses page-level `--headers`: a JSON object of string values sent with
+/// page requests (distinct from `--cdp-headers` on the CDP handshake).
+/// Rejects anything else before dispatch so an invalid value never starts
+/// the daemon or browser. Error messages never echo the caller's input.
+pub fn parse_page_headers(raw: &str) -> Result<Value, String> {
+    let headers = serde_json::from_str::<Value>(raw)
+        .map_err(|e| format!("Invalid JSON for --headers at column {}", e.column()))?;
+    let valid = headers
+        .as_object()
+        .is_some_and(|map| map.values().all(Value::is_string));
+    if !valid {
+        return Err("--headers must be a JSON object with string values".to_string());
+    }
+    Ok(headers)
+}
+
 /// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
@@ -741,13 +757,12 @@ fn parse_command_inner(
                 nav_cmd["waitUntil"] = json!("none");
             }
             if let Some(ref headers_json) = flags.headers {
-                let headers =
-                    serde_json::from_str::<serde_json::Value>(headers_json).map_err(|_| {
-                        ParseError::InvalidValue {
-                            message: format!("Invalid JSON for --headers: {}", headers_json),
-                            usage: "open <url> --headers '{\"Key\": \"Value\"}'",
-                        }
-                    })?;
+                let headers = parse_page_headers(headers_json).map_err(|message| {
+                    ParseError::InvalidValue {
+                        message,
+                        usage: "open <url> --headers '{\"Key\": \"Value\"}'",
+                    }
+                })?;
                 nav_cmd["headers"] = headers;
             }
             // Include iOS device info if specified (needed for auto-launch with existing daemon)
@@ -3286,18 +3301,11 @@ fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
         cmd["url"] = json!(url);
     }
     if let Some(ref headers_json) = flags.headers {
-        let headers = serde_json::from_str::<serde_json::Value>(headers_json).map_err(|_| {
-            ParseError::InvalidValue {
-                message: format!("Invalid JSON for --headers: {}", headers_json),
+        let headers =
+            parse_page_headers(headers_json).map_err(|message| ParseError::InvalidValue {
+                message,
                 usage: READ_USAGE,
-            }
-        })?;
-        if !headers.is_object() {
-            return Err(ParseError::InvalidValue {
-                message: format!("Invalid JSON object for --headers: {}", headers_json),
-                usage: READ_USAGE,
-            });
-        }
+            })?;
         cmd["headers"] = headers;
     }
     if let Some(ref allowed_domains) = flags.allowed_domains {
@@ -4397,11 +4405,11 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "set headers".to_string(),
                 usage: "set headers <json>",
             })?;
-            // Parse the JSON string into an object
-            let headers: serde_json::Value =
-                serde_json::from_str(headers_json).map_err(|_| ParseError::MissingArguments {
-                    context: "set headers".to_string(),
-                    usage: "set headers <json> (must be valid JSON object)",
+            // Parse the JSON string into an object of string values
+            let headers =
+                parse_page_headers(headers_json).map_err(|message| ParseError::InvalidValue {
+                    message,
+                    usage: "set headers <json>",
                 })?;
             Ok(json!({ "id": id, "action": "headers", "headers": headers }))
         }
@@ -5691,6 +5699,19 @@ mod tests {
     }
 
     #[test]
+    fn test_read_rejects_non_object_headers() {
+        for raw in [r#"["X-Test"]"#, r#"{"X-Test":123}"#, r#"{"X-Test":null}"#] {
+            let mut flags = default_flags();
+            flags.headers = Some(raw.to_string());
+            let result = parse_command(&args("read https://example.com/docs"), &flags);
+            assert!(
+                matches!(result, Err(ParseError::InvalidValue { .. })),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
     fn test_read_llms_index_filter_flags() {
         let cmd = parse_command(
             &args("read https://example.com/docs --llms index --filter auth"),
@@ -5806,6 +5827,40 @@ mod tests {
     }
 
     #[test]
+    fn test_navigate_rejects_non_object_headers() {
+        for raw in [r#"["X-Test"]"#, r#"{"X-Test":123}"#, r#"{"X-Test":true}"#] {
+            let mut flags = default_flags();
+            flags.headers = Some(raw.to_string());
+            let result = parse_command(&args("open api.example.com"), &flags);
+            assert!(result.is_err(), "{raw} should be rejected");
+        }
+    }
+
+    #[test]
+    fn test_navigate_headers_error_never_echoes_input() {
+        // Malformed JSON carrying a secret value.
+        let mut flags = default_flags();
+        flags.headers = Some(r#"{"Authorization":"Bearer s3cr3t-value-123",}"#.to_string());
+        let err = parse_command(&args("open api.example.com"), &flags)
+            .unwrap_err()
+            .format();
+        assert!(!err.contains("s3cr3t-value-123"), "{err}");
+        // Wrong shape carrying a secret value.
+        let mut flags = default_flags();
+        flags.headers = Some(r#"{"X-Test":"s3cr3t-value-123","Bad":1}"#.to_string());
+        let err = parse_command(&args("open api.example.com"), &flags)
+            .unwrap_err()
+            .format();
+        assert!(!err.contains("s3cr3t-value-123"), "{err}");
+        let mut flags = default_flags();
+        flags.headers = Some(r#"["X-Test"]"#.to_string());
+        let err = parse_command(&args("open api.example.com"), &flags)
+            .unwrap_err()
+            .format();
+        assert!(!err.contains("X-Test"), "{err}");
+    }
+
+    #[test]
     fn test_navigate_chrome_extension_url() {
         let cmd = parse_command(
             &args("open chrome-extension://abcdefghijklmnop/popup.html"),
@@ -5860,6 +5915,19 @@ mod tests {
         ];
         let result = parse_command(&input, &default_flags());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_headers_rejects_invalid_shapes() {
+        for raw in [r#"["X-Test"]"#, r#"{"X-Test":123}"#, r#"{"X-Test":["a"]}"#] {
+            let input: Vec<String> =
+                vec!["set".to_string(), "headers".to_string(), raw.to_string()];
+            let result = parse_command(&input, &default_flags());
+            assert!(
+                matches!(result, Err(ParseError::InvalidValue { .. })),
+                "{raw}"
+            );
+        }
     }
 
     #[test]
@@ -7940,6 +8008,29 @@ mod tests {
             r#"["Bearer SECRET"]"#,
         ] {
             let err = parse_cdp_headers(raw).unwrap_err();
+            assert!(!err.contains("SECRET"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_parse_page_headers_rejects_invalid_shapes() {
+        assert!(parse_page_headers(r#"{"Authorization":"Bearer <redacted>"}"#).is_ok());
+        assert!(parse_page_headers("{}").is_ok());
+        assert!(parse_page_headers("{bad").is_err());
+        assert!(parse_page_headers(r#"["x"]"#).is_err());
+        assert!(parse_page_headers(r#"{"Authorization":123}"#).is_err());
+        assert!(parse_page_headers(r#"{"Authorization":null}"#).is_err());
+        assert!(parse_page_headers(r#""just a string""#).is_err());
+    }
+
+    #[test]
+    fn test_parse_page_headers_errors_never_echo_values() {
+        for raw in [
+            r#"{"Authorization":"Bearer SECRET",}"#,
+            r#"{"Authorization":"Bearer SECRET","n":1}"#,
+            r#"["Bearer SECRET"]"#,
+        ] {
+            let err = parse_page_headers(raw).unwrap_err();
             assert!(!err.contains("SECRET"), "{err}");
         }
     }
