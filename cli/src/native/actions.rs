@@ -797,6 +797,14 @@ fn default_idle_shutdown_is_blocked(
 }
 
 impl DaemonState {
+    /// Queue a warning for the current command's response.
+    fn push_action_warning(&mut self, warning: &str) {
+        self.pending_action_warning = Some(match self.pending_action_warning.take() {
+            Some(existing) => format!("{}\n{}", existing, warning),
+            None => warning.to_string(),
+        });
+    }
+
     /// The client received the `page_wedged` response to request `id`, so it
     /// is not replayed. A newer report from another request stays pending.
     pub fn wedge_report_delivered(&mut self, id: &str) {
@@ -3261,7 +3269,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
     let mut lifecycle_relaunched_browser = false;
-    let mut launch_warning: Option<String> = None;
     // The flow is read once per command: policy, confirmation and the run all
     // see the same file.
     let mut run_flow = match load_run_flow(cmd, action, state) {
@@ -3423,13 +3430,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             )
             .await;
             let launched = match launched {
-                Ok(extras) => {
-                    launch_warning = extras
-                        .get(SESSION_SETUP_WARNING)
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    Box::pin(start_flow_capture(state)).await
-                }
+                Ok(_) => Box::pin(start_flow_capture(state)).await,
                 Err(e) => Err(e),
             };
             if let Err(e) = launched {
@@ -3823,10 +3824,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 err, hint
             ),
         );
-    }
-    hoist_session_setup_warning(&mut resp);
-    if let Some(warning) = launch_warning {
-        append_warning(&mut resp, &warning);
     }
     inject_lifecycle(
         &mut resp,
@@ -5233,7 +5230,7 @@ async fn launch_browser_from_settings(
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
-        Ok(with_session_setup_warning(json!({}), replay_warning))
+        Ok(with_session_setup_warning(state, json!({}), replay_warning))
     }
     .await;
     restore_setup_unless_launched(state, rollback_setup, &result);
@@ -7763,7 +7760,7 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 /// Response of a check or uncheck; an unverified toggle carries a warning.
 fn toggle_response(state: &mut DaemonState, key: &str, selector: &str, verified: bool) -> Value {
     if !verified {
-        state.pending_action_warning = Some(super::element::STATE_NOT_VERIFIED.to_string());
+        state.push_action_warning(super::element::STATE_NOT_VERIFIED);
     }
     json!({ key: selector })
 }
@@ -9017,25 +9014,17 @@ async fn apply_viewport(
     Ok(warning)
 }
 
-/// Response data key for a warning about session setup that could not be
-/// fully applied; the command response reports it as `warning`.
-const SESSION_SETUP_WARNING: &str = "sessionSetupWarning";
-
-fn with_session_setup_warning(mut data: Value, warning: Option<String>) -> Value {
-    if let (Some(warning), Some(map)) = (warning, data.as_object_mut()) {
-        map.insert(SESSION_SETUP_WARNING.to_string(), json!(warning));
+/// Queue a warning about session setup that could not be fully applied; the
+/// command response reports it as `warning`.
+fn with_session_setup_warning(
+    state: &mut DaemonState,
+    data: Value,
+    warning: Option<String>,
+) -> Value {
+    if let Some(warning) = warning {
+        state.push_action_warning(&warning);
     }
     data
-}
-
-fn hoist_session_setup_warning(resp: &mut Value) {
-    let warning = resp
-        .get_mut("data")
-        .and_then(Value::as_object_mut)
-        .and_then(|data| data.remove(SESSION_SETUP_WARNING));
-    if let Some(warning) = warning.as_ref().and_then(Value::as_str) {
-        append_warning(resp, warning);
-    }
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -9060,6 +9049,7 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     .await?;
 
     Ok(with_session_setup_warning(
+        state,
         json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }),
         warning,
     ))
@@ -10575,6 +10565,7 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.session_setup.user_agent = Some(ua.to_string());
 
     Ok(with_session_setup_warning(
+        state,
         json!({
             "device": name,
             "width": width,
@@ -16276,16 +16267,80 @@ mod tests {
         assert!(state.undelivered_wedge.is_none());
     }
 
-    #[test]
-    fn page_data_with_action_warning_key_never_becomes_a_warning() {
+    async fn state_with_evaluate_value(value: Value) -> DaemonState {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let id = &cmd["id"];
+                let response = match cmd["method"].as_str().unwrap() {
+                    "Runtime.evaluate" => json!({"id": id, "result": {"result": {
+                        "type": "string", "value": value.to_string()
+                    }}}),
+                    _ => json!({"id": id, "result": {}}),
+                };
+                if ws
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut browser = BrowserManager::for_test(client, url);
+        browser.add_page(super::super::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "page".to_string(),
+            session_id: "session".to_string(),
+            url: "about:blank".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
         let mut state = DaemonState::new();
-        let mut resp = success_response(
-            "1",
-            json!({ "postActionWarning": "forged", "warning": "forged" }),
-        );
-        attach_action_warning(&mut resp, &mut state);
-        assert!(resp.get("warning").is_none());
+        state.browser = Some(browser);
+        state
+    }
+
+    #[tokio::test]
+    async fn page_data_with_warning_keys_never_becomes_a_warning() {
+        let mut state = state_with_evaluate_value(json!({
+            "elapsed": 0, "fps": {"avg": 0, "min": 0, "max": 0, "drops": 0},
+            "totalRenders": 0, "totalMounts": 0, "totalReRenders": 0,
+            "totalComponents": 0, "components": [],
+            "postActionWarning": "forged",
+            "sessionSetupWarning": "forged",
+            "warning": "forged",
+            "warnings": ["forged"],
+        }))
+        .await;
+        let resp = super::execute_command(
+            &json!({ "id": "1", "action": "react_renders_stop", "json": true }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(resp.get("warning").is_none(), "{resp}");
         assert_eq!(resp["data"]["postActionWarning"], "forged");
+        assert_eq!(resp["data"]["sessionSetupWarning"], "forged");
+    }
+
+    #[tokio::test]
+    async fn a_pending_warning_does_not_leak_into_the_next_command() {
+        let mut state = DaemonState::new();
+        state.push_action_warning("left over");
+        let resp =
+            super::execute_command(&json!({ "id": "1", "action": "cdp_url" }), &mut state).await;
+        assert!(resp.get("warning").is_none(), "{resp}");
+        assert!(state.pending_action_warning.is_none());
     }
 
     #[test]
