@@ -548,11 +548,8 @@ pub(crate) async fn execute_chat_tool(session: &str, command: &str, was_open: bo
         Err(e) => return format!("Failed to resolve executable: {}", e),
     };
 
-    let mut cmd = tokio::process::Command::new(&exe);
-    cmd.args(&args)
-        .env_remove("AGENT_BROWSER_DASHBOARD")
-        .env_remove("AGENT_BROWSER_DASHBOARD_PORT")
-        .env_remove("AGENT_BROWSER_STREAM_PORT");
+    let mut cmd = super::dashboard::cli_command(&exe);
+    cmd.args(&args);
 
     match cmd.output().await {
         Ok(output) => {
