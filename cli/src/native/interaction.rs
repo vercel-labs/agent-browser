@@ -164,37 +164,33 @@ const RETARGET_JS: &str = r#"
 "#;
 
 /// Decides from the target's own properties whether `fill` or `type` may act.
-/// Nothing depends on where focus lands. The result carries only fixed
-/// vocabulary: a code, a fixed hint, the tag and the input type.
+/// The page only answers with a refusal kind; the message is built in Rust
+/// from fixed text, so nothing the page returns reaches it.
 const PRECHECK_JS: &str = r#"function(mode) {
         /*RETARGET*/
         const tag = el.localName;
         const type = tag === 'input' ? el.type : '';
-        const fail = (code, hint) => ({ error: { code, hint }, tag, type });
-        if (el.matches(':disabled')) return fail('disabled', '');
+        const fail = (refuse) => ({ refuse, tag, type });
+        if (el.matches(':disabled')) return fail('disabled');
         // Elements and input types that can never take text, with the command
-        // to use instead. Where the text lands for everything else is unchanged.
-        const useSelect = '; use select';
-        const useCheck = '; use check or uncheck';
+        // to use instead.
         const neverText = {
-            select: useSelect, optgroup: useSelect, option: useSelect,
-            button: '', label: '',
+            select: 'select', optgroup: 'select', option: 'select',
+            button: 'plain', label: 'plain',
         };
         const neverTextInput = {
-            checkbox: useCheck, radio: useCheck,
-            file: '', hidden: '', image: '', button: '', submit: '', reset: '',
+            checkbox: 'check', radio: 'check',
+            file: 'plain', hidden: 'plain', image: 'plain', button: 'plain', submit: 'plain', reset: 'plain',
         };
         const valueTypes = ['color', 'date', 'time', 'datetime-local', 'month', 'week', 'range'];
-        let hint = Object.hasOwn(neverText, tag) && !el.isContentEditable ? neverText[tag] : null;
-        if (hint === null && tag === 'input' && Object.hasOwn(neverTextInput, type)) hint = neverTextInput[type];
-        if (hint === null && mode !== 'fill' && tag === 'input' && valueTypes.includes(type)) {
-            hint = '; use fill to set the value of this input';
-        }
-        if (hint !== null) return fail('not_editable', hint);
+        let kind = Object.hasOwn(neverText, tag) && !el.isContentEditable ? neverText[tag] : null;
+        if (kind === null && tag === 'input' && Object.hasOwn(neverTextInput, type)) kind = neverTextInput[type];
+        if (kind === null && mode !== 'fill' && tag === 'input' && valueTypes.includes(type)) kind = 'fill';
+        if (kind !== null) return fail(kind);
         // Any step that destroys the value is refused on a readonly field:
         // `fill` and `type --clear`. A plain `type` does not clear, so it is
         // left to the page (a trigger may forward focus).
-        if (mode !== 'type' && el.readOnly) return fail('read_only', '');
+        if (mode !== 'type' && el.readOnly) return fail('read_only');
         return { ok: true };
     }"#;
 
@@ -476,6 +472,93 @@ async fn resolve_control(client: &CdpClient, session_id: &str, object_id: &str) 
         .unwrap_or_else(|| object_id.to_string())
 }
 
+/// The code and text for a refusal kind. Anything the page sends outside the
+/// known kinds gets the plain refusal; the text is always owned here.
+fn refusal(kind: &str, verb: &str) -> (&'static str, String) {
+    match kind {
+        "disabled" => ("disabled", format!("is disabled and cannot be {verb}")),
+        "read_only" => ("read_only", format!("is readonly and cannot be {verb}")),
+        "select" => ("not_editable", format!("cannot be {verb}; use select")),
+        "check" => (
+            "not_editable",
+            format!("cannot be {verb}; use check or uncheck"),
+        ),
+        "fill" => (
+            "not_editable",
+            format!("cannot be {verb}; use fill to set the value of this input"),
+        ),
+        _ => ("not_editable", format!("cannot be {verb}")),
+    }
+}
+
+/// Focuses the control and checks the focus went somewhere: text goes to
+/// whatever is focused, so a target that neither takes focus nor forwards it
+/// is refused. Open and closed shadow roots are walked.
+async fn focus_target(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    target: &str,
+    verb: &str,
+) -> Result<(), String> {
+    let js = format!(
+        r#"function() {{
+        {RETARGET_JS}
+        const deep = (d) => {{
+            let a = d.activeElement;
+            while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+            return a;
+        }};
+        const before = deep(el.ownerDocument);
+        el.focus();
+        const after = deep(el.ownerDocument);
+        let landed = after !== before;
+        for (let n = after; n && !landed; n = n.parentNode || n.host) if (n === el) landed = true;
+        return {{ landed, tag: el.localName, type: el.localName === 'input' ? el.type : '' }};
+    }}"#
+    );
+    let result = call_on(client, session_id, object_id, js, None).await?;
+    let Some(value) = result.result.value.as_ref() else {
+        return Ok(());
+    };
+    if value.get("landed").and_then(Value::as_bool) == Some(false) {
+        let field = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("");
+        return Err(form_error(
+            "not_editable",
+            format!(
+                "Element {target} ({}) cannot be {verb}: focusing it does not move focus, so the text would go to whatever was focused before",
+                describe_target(field("tag"), field("type"))
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Empties the control so the next insert replaces its content: an input is
+/// cleared, an editable region has its content selected and deleted.
+async fn clear_control(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+) -> Result<(), String> {
+    let js = r#"function() {
+        if (this.isContentEditable) {
+            const range = document.createRange();
+            range.selectNodeContents(this);
+            const selection = getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            document.execCommand('delete');
+            return;
+        }
+        this.select && this.select();
+        this.value = '';
+        this.dispatchEvent(new Event('input', { bubbles: true }));
+    }"#;
+    call_on(client, session_id, object_id, js.to_string(), None).await?;
+    Ok(())
+}
+
 /// Refuses `fill` or `type` on a target that cannot take the text, before
 /// anything is changed. The message names the target as the caller passed it.
 async fn precheck(
@@ -497,31 +580,21 @@ async fn precheck(
     let Some(value) = result.result.value.as_ref() else {
         return Ok(());
     };
-    if let Some(error) = value.get("error") {
-        let code = error
-            .get("code")
-            .and_then(Value::as_str)
-            .filter(|c| FORM_ERROR_CODES.contains(c))
-            .unwrap_or("not_editable");
-        let hint = error.get("hint").and_then(Value::as_str).unwrap_or("");
-        let field = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("");
-        let described = describe_target(field("tag"), field("type"));
-        let verb = match mode {
-            "fill" => "filled",
-            "type-clear" => "cleared and typed into",
-            _ => "typed into",
-        };
-        let reason = match code {
-            "disabled" => format!("is disabled and cannot be {verb}"),
-            "read_only" => format!("is readonly and cannot be {verb}"),
-            _ => format!("cannot be {verb}{hint}"),
-        };
-        return Err(form_error(
-            code,
-            format!("Element {target} ({described}) {reason}"),
-        ));
-    }
-    Ok(())
+    let Some(kind) = value.get("refuse").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let field = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("");
+    let described = describe_target(field("tag"), field("type"));
+    let verb = match mode {
+        "fill" => "filled",
+        "type-clear" => "cleared and typed into",
+        _ => "typed into",
+    };
+    let (code, reason) = refusal(kind, verb);
+    Err(form_error(
+        code,
+        format!("Element {target} ({described}) {reason}"),
+    ))
 }
 
 /// Sets date, time, color and range inputs directly: Chrome drops inserted
@@ -537,11 +610,6 @@ async fn set_value_input(
         const type = el.type;
         const minimum = el.min !== '' ? Number(el.min) : 0;
         const maximum = el.max !== '' ? Number(el.max) : 100;
-        const formats = {
-            color: '#rrggbb', date: 'YYYY-MM-DD', time: 'HH:MM or HH:MM:SS',
-            'datetime-local': 'YYYY-MM-DDTHH:MM', month: 'YYYY-MM', week: 'YYYY-Www',
-            range: 'a number from ' + minimum + ' to ' + maximum,
-        };
         const text = value.trim();
         const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
         const old = el.value;
@@ -555,13 +623,13 @@ async fn set_value_input(
             : type === 'range' ? /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(text) && number >= minimum && number <= maximum
             : got !== '' || text === '';
         if (!accepted) {
-            return { error: 'Malformed value for input of type "' + type + '": expected ' + formats[type] };
+            return { malformed: true, type, minimum, maximum };
         }
         set.call(el, text);
         el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         if (type === 'range' && Number(el.value) !== number) {
-            return { snapped: 'value snapped to the step: the field holds a different value than requested' };
+            return { snapped: true };
         }
         return { ok: true };
     }"#
@@ -574,22 +642,53 @@ async fn set_value_input(
         Some(serde_json::json!(value)),
     )
     .await?;
-    if let Some(error) = result
-        .result
-        .value
-        .as_ref()
-        .and_then(|v| v.get("error"))
-        .and_then(Value::as_str)
-    {
-        return Err(form_error("malformed_value", error));
+    let value = result.result.value.unwrap_or(Value::Null);
+    if value.get("malformed").and_then(Value::as_bool) == Some(true) {
+        return Err(form_error("malformed_value", malformed_message(&value)));
     }
-    Ok(result
-        .result
-        .value
-        .as_ref()
-        .and_then(|v| v.get("snapped"))
-        .and_then(Value::as_str)
-        .map(String::from))
+    Ok(
+        (value.get("snapped").and_then(Value::as_bool) == Some(true)).then(|| {
+            "value snapped to the step: the field holds a different value than requested"
+                .to_string()
+        }),
+    )
+}
+
+/// The refusal for a value an input would sanitize away. The page supplies
+/// only the input type (checked against a fixed list) and the range bounds
+/// (numbers); the text is built here.
+fn malformed_message(page: &Value) -> String {
+    let kind = page.get("type").and_then(Value::as_str).unwrap_or("");
+    let bound = |key: &str, default: f64| {
+        let n = page
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|n| n.is_finite())
+            .unwrap_or(default);
+        if n.fract() == 0.0 && n.abs() < 1e15 {
+            format!("{}", n as i64)
+        } else {
+            format!("{n}")
+        }
+    };
+    let (kind, expected) = match kind {
+        "color" => ("color", "#rrggbb".to_string()),
+        "date" => ("date", "YYYY-MM-DD".to_string()),
+        "time" => ("time", "HH:MM or HH:MM:SS".to_string()),
+        "datetime-local" => ("datetime-local", "YYYY-MM-DDTHH:MM".to_string()),
+        "month" => ("month", "YYYY-MM".to_string()),
+        "week" => ("week", "YYYY-Www".to_string()),
+        "range" => (
+            "range",
+            format!(
+                "a number from {} to {}",
+                bound("minimum", 0.0),
+                bound("maximum", 100.0)
+            ),
+        ),
+        _ => return "Malformed value for this input".to_string(),
+    };
+    format!("Malformed value for input of type \"{kind}\": expected {expected}")
 }
 
 /// Warns when the value is longer than the field's maxlength; the browser
@@ -688,40 +787,15 @@ pub async fn fill(
         return Ok(FormOutcome { warning });
     }
 
-    // Focus the element
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
-    // Select all + delete to clear
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    this.select && this.select();
-                    this.value = '';
-                    this.dispatchEvent(new Event('input', { bubbles: true }));
-                }"#
-                .to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
+    focus_target(
+        client,
+        &effective_session_id,
+        &object_id,
+        selector_or_ref,
+        "filled",
+    )
+    .await?;
+    clear_control(client, &effective_session_id, &object_id).await?;
 
     // Insert text (keyboard input dispatched at page level, use parent session_id)
     client
@@ -793,40 +867,20 @@ pub async fn type_text(
         .await
         .unwrap_or_else(|_| FormProbe::unknown());
 
-    // Focus
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
+    focus_target(
+        client,
+        &effective_session_id,
+        &object_id,
+        selector_or_ref,
+        if clear {
+            "cleared and typed into"
+        } else {
+            "typed into"
+        },
+    )
+    .await?;
     if clear {
-        client
-            .send_command_typed::<_, Value>(
-                "Runtime.callFunctionOn",
-                &CallFunctionOnParams {
-                    function_declaration: r#"function() {
-                        this.select && this.select();
-                        this.value = '';
-                        this.dispatchEvent(new Event('input', { bubbles: true }));
-                    }"#
-                    .to_string(),
-                    object_id: Some(object_id.clone()),
-                    arguments: None,
-                    return_by_value: Some(true),
-                    await_promise: Some(false),
-                },
-                Some(&effective_session_id),
-            )
-            .await?;
+        clear_control(client, &effective_session_id, &object_id).await?;
     }
 
     type_text_into_active_context(client, session_id, text, delay_ms).await?;
@@ -856,6 +910,9 @@ fn type_read_warning(
     if !plain || after.password {
         return None;
     }
+    if let Some(warning) = overflow_warning(before, after, text, clear) {
+        return Some(warning);
+    }
     if !clear && after.value.is_some() && after.value == before.value {
         return Some(format!(
             "effect_not_observed: {} did not change after typing; the page may apply the text later",
@@ -863,6 +920,32 @@ fn type_read_warning(
         ));
     }
     type_warning(after, text)
+}
+
+/// Warns when the field has a maxlength that the old value plus the typed
+/// text exceeds and the field ended up full: the browser cut the typed text,
+/// even when what remains still reads like it. Only lengths are reported.
+fn overflow_warning(
+    before: &FormProbe,
+    after: &FormProbe,
+    text: &str,
+    clear: bool,
+) -> Option<String> {
+    let max = before.max_length;
+    let held = after.value.as_ref()?.encode_utf16().count() as i64;
+    let prior = if clear {
+        0
+    } else {
+        before.value.as_ref()?.encode_utf16().count() as i64
+    };
+    let typed = text.encode_utf16().count() as i64;
+    (max >= 0 && prior + typed > max && held >= max).then(|| {
+        format!(
+            "value_truncated: {} accepts at most {max} characters (maxlength) but {} would be held ({prior} existing, {typed} typed)",
+            after.describe(),
+            prior + typed
+        )
+    })
 }
 
 /// Warns when the typed text is not in the field afterwards, as a maxlength
@@ -1107,7 +1190,7 @@ pub async fn select_option(
             if (!(this instanceof HTMLSelectElement)) {
                 const role = this.getAttribute('role');
                 if (role !== 'combobox' && role !== 'listbox') {
-                    return { code: 'not_editable', error: 'select target is not a <select> or a role=combobox/listbox element' };
+                    return { kind: 'not_select' };
                 }
                 const realClick = (el) => {
                     const r = el.getBoundingClientRect();
@@ -1146,7 +1229,7 @@ pub async fn select_option(
                     options = collect();
                 }
                 if (options.length === 0) {
-                    return { error: 'combobox opened but no visible role=option elements were found' };
+                    return { kind: 'no_visible_options' };
                 }
                 // Accessible name precedence: aria-labelledby, aria-label, text
                 // content. Option rows often carry an indicator or a description
@@ -1167,15 +1250,15 @@ pub async fn select_option(
                     const want = normalize(value);
                     const matches = options.filter((o) => (by !== 'value' && nameOf(o) === want) || (by !== 'label' && valueOf(o) && valueOf(o) === want));
                     if (matches.length === 0) {
-                        return { code: 'option_not_found', error: 'No option matched ' + JSON.stringify(vals) + '. The list has ' + options.length + ' options' };
+                        return { kind: 'not_found_list', n: options.length };
                     }
                     if (matches.length > 1) {
-                        return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ' (' + matches.length + ' options). Pass --by value to match option values or --by label to match visible labels.' };
+                        return { kind: 'ambiguous_list', n: matches.length, value: vals.indexOf(value) };
                     }
                     // A disabled option swallows the click, so selecting it would
                     // report success with an unchanged widget.
                     if (matches[0].getAttribute('aria-disabled') === 'true') {
-                        return { code: 'disabled', error: 'The matched option is disabled' };
+                        return { kind: 'option_disabled' };
                     }
                     wanted.add(matches[0]);
                 }
@@ -1190,10 +1273,10 @@ pub async fn select_option(
                 return { matched: wanted.size };
             }
             if (this.matches(':disabled')) {
-                return { code: 'disabled', error: 'select target <select> is disabled' };
+                return { kind: 'select_disabled' };
             }
             if (vals.length > 1 && !this.multiple) {
-                return { code: 'not_multiple', error: vals.length + ' values requested but <select> does not allow multiple selection' };
+                return { kind: 'not_multiple' };
             }
             const options = Array.from(this.options);
             const labelOf = (o) => o.label.trim();
@@ -1218,15 +1301,12 @@ pub async fn select_option(
             for (const value of vals) {
                 const r = resolve(value);
                 if (r.found.length === 0) {
-                    return { code: 'option_not_found', error: 'No option matched ' + JSON.stringify(vals) + (by ? ' by ' + by : '') + '. The select has ' + options.length + ' options' };
+                    return { kind: 'not_found_select', n: options.length };
                 }
                 if (r.ambiguous) {
                     const seen = new Set();
                     const candidates = r.found.filter((o) => !seen.has(o.value) && seen.add(o.value));
-                    const advice = by === 'label'
-                        ? ' Several options share that label; pass --by value with the option value.'
-                        : ' Pass --by value to match option values or --by label to match visible labels.';
-                    return { code: 'ambiguous', error: 'Multiple options matched ' + JSON.stringify(value) + ' (' + candidates.length + ' options with different values).' + advice };
+                    return { kind: 'ambiguous_select', n: candidates.length, value: vals.indexOf(value) };
                 }
                 for (const opt of r.found) wanted.add(opt);
             }
@@ -1259,32 +1339,121 @@ pub async fn select_option(
         )
         .await?;
 
-    // A thrown script error must surface instead of reporting success.
-    if let Some(exc) = result.get("exceptionDetails") {
-        let msg = exc
-            .get("exception")
-            .and_then(|e| e.get("description"))
-            .and_then(|d| d.as_str())
-            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
-            .unwrap_or("select failed: script error");
-        return Err(msg.to_string());
+    // A thrown script error must surface instead of reporting success; the
+    // text of the error belongs to the page and is not repeated.
+    if result.get("exceptionDetails").is_some() {
+        return Err("select failed: the page script raised an error".to_string());
     }
 
     let value = result.get("result").and_then(|r| r.get("value"));
-    if let Some(error) = value.and_then(|v| v.get("error")).and_then(Value::as_str) {
-        return Err(
-            match value
-                .and_then(|v| v.get("code"))
-                .and_then(Value::as_str)
-                .filter(|c| FORM_ERROR_CODES.contains(c))
-            {
-                Some(code) => form_error(code, error),
-                None => error.to_string(),
-            },
-        );
+    if let Some((code, message)) = value.and_then(|v| select_failure(v, values, by)) {
+        return Err(match code {
+            Some(code) => form_error(code, message),
+            None => message,
+        });
     }
 
     Ok(())
+}
+
+/// The error for a refused `select`, built here from the failure kind the page
+/// reports. Counts are numbers and values are looked up in what the caller
+/// passed; nothing else from the page is used.
+pub fn select_failure(
+    page: &Value,
+    values: &[String],
+    by: Option<&str>,
+) -> Option<(Option<&'static str>, String)> {
+    let kind = page.get("kind").and_then(Value::as_str)?;
+    let count = page.get("n").and_then(Value::as_u64).unwrap_or(0);
+    let asked = serde_json::to_string(values).unwrap_or_default();
+    let named = page
+        .get("value")
+        .and_then(Value::as_u64)
+        .and_then(|i| values.get(i as usize))
+        .map(|v| serde_json::to_string(v).unwrap_or_default())
+        .unwrap_or_else(|| asked.clone());
+    let by_text = by.map(|b| format!(" by {b}")).unwrap_or_default();
+    let by_advice =
+        " Pass --by value to match option values or --by label to match visible labels.";
+    Some(match kind {
+        "not_select" => (
+            Some("not_editable"),
+            "select target is not a <select> or a role=combobox/listbox element".to_string(),
+        ),
+        "no_visible_options" => (
+            None,
+            "combobox opened but no visible role=option elements were found".to_string(),
+        ),
+        "not_found_list" => (
+            Some("option_not_found"),
+            format!("No option matched {asked}. The list has {count} options"),
+        ),
+        "not_found_select" => (
+            Some("option_not_found"),
+            format!("No option matched {asked}{by_text}. The select has {count} options"),
+        ),
+        "ambiguous_list" => (
+            Some("ambiguous"),
+            format!("Multiple options matched {named} ({count} options).{by_advice}"),
+        ),
+        "ambiguous_select" => {
+            let advice = if by == Some("label") {
+                " Several options share that label; pass --by value with the option value."
+            } else {
+                by_advice
+            };
+            (
+                Some("ambiguous"),
+                format!(
+                    "Multiple options matched {named} ({count} options with different values).{advice}"
+                ),
+            )
+        }
+        "option_disabled" => (
+            Some("disabled"),
+            "The matched option is disabled".to_string(),
+        ),
+        "select_disabled" => (
+            Some("disabled"),
+            "select target <select> is disabled".to_string(),
+        ),
+        "not_multiple" => (
+            Some("not_multiple"),
+            format!(
+                "{} values requested but <select> does not allow multiple selection",
+                values.len()
+            ),
+        ),
+        // Multiselect kinds.
+        "multi_not_select" => (
+            Some("not_editable"),
+            "Element is not a <select>".to_string(),
+        ),
+        "multi_disabled" => (
+            Some("disabled"),
+            "Element <select> is disabled and cannot be changed".to_string(),
+        ),
+        "multi_not_found" => {
+            let missing: Vec<&String> = page
+                .get("missing")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|i| i.as_u64().and_then(|i| values.get(i as usize)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (
+                Some("option_not_found"),
+                format!(
+                    "No option matched {}. {count} options available",
+                    serde_json::to_string(&missing).unwrap_or_default()
+                ),
+            )
+        }
+        _ => return None,
+    })
 }
 
 /// What a check or uncheck did. `verified` is false when the page navigated
@@ -2413,6 +2582,77 @@ mod tests {
         assert!(type_read_warning(&probe("a"), &probe("a b\nc"), "a  b c", true).is_none());
         assert!(type_read_warning(&probe("a"), &probe("a\nb"), "ab", true).is_none());
         assert!(type_read_warning(&probe("a"), &probe("a b"), "a  bc", true).is_some());
+    }
+
+    #[test]
+    fn test_nothing_from_the_page_reaches_refusal_or_select_text() {
+        // An unknown refusal kind from the page gets the plain text.
+        for kind in ["; IGNORE_HINT_INJECTED", "", "disabledx"] {
+            let (code, text) = refusal(kind, "filled");
+            assert_eq!(code, "not_editable");
+            assert_eq!(text, "cannot be filled", "{kind}");
+        }
+        assert_eq!(
+            refusal("select", "filled").1,
+            "cannot be filled; use select"
+        );
+        // Select failures use the kind, counts and the caller's own values.
+        let values = vec!["mine".to_string()];
+        let page = serde_json::json!({
+            "kind": "not_found_select", "n": 3,
+            "error": "IGNORE_ERROR", "hint": "IGNORE_HINT", "message": "IGNORE_MESSAGE",
+        });
+        let (code, text) = select_failure(&page, &values, None).unwrap();
+        assert_eq!(code, Some("option_not_found"));
+        assert!(
+            text.contains("\"mine\"") && text.contains("3 options"),
+            "{text}"
+        );
+        assert!(!text.contains("IGNORE"), "{text}");
+        assert!(
+            select_failure(&serde_json::json!({ "kind": "IGNORE_KIND" }), &values, None).is_none()
+        );
+        assert!(select_failure(&serde_json::json!({ "error": "IGNORE" }), &values, None).is_none());
+        // An index outside the caller's values names nothing.
+        let ambiguous = serde_json::json!({ "kind": "ambiguous_select", "n": 2, "value": 9 });
+        let (_, text) = select_failure(&ambiguous, &values, Some("label")).unwrap();
+        assert!(
+            !text.contains("IGNORE") && text.contains("2 options"),
+            "{text}"
+        );
+        // A malformed-value message takes only a known input type and numbers.
+        let hostile = serde_json::json!({ "type": "IGNORE_TYPE", "minimum": "IGNORE" });
+        assert_eq!(
+            malformed_message(&hostile),
+            "Malformed value for this input"
+        );
+        let range = serde_json::json!({ "type": "range", "minimum": "IGNORE", "maximum": 10 });
+        assert_eq!(
+            malformed_message(&range),
+            "Malformed value for input of type \"range\": expected a number from 0 to 10"
+        );
+    }
+
+    #[test]
+    fn test_typing_into_a_full_field_is_reported_as_truncated() {
+        let probe = |value: &str, max: i64| text_probe(value, max);
+        // The old value already holds the typed text, so the cut is invisible
+        // to a presence check.
+        let w = type_read_warning(
+            &probe("hello world", 12),
+            &probe("whello world", 12),
+            "world",
+            false,
+        )
+        .unwrap();
+        assert!(
+            w.starts_with("value_truncated") && !w.contains("hello"),
+            "{w}"
+        );
+        // A page that selects the value on focus replaces it; the field is not full.
+        assert!(type_read_warning(&probe("abc", 5), &probe("def", 5), "def", false).is_none());
+        // No maxlength, no warning from this check.
+        assert!(type_read_warning(&probe("abc", -1), &probe("abcd", -1), "d", false).is_none());
     }
 
     #[test]

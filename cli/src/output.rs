@@ -2356,8 +2356,9 @@ refused before any text is typed (disabled, not_editable); use fill for date, ti
 color and range inputs. With --clear a readonly field is refused too (read_only), as
 fill does, because clearing would empty it; plain type leaves a readonly field to the
 page. To send text to a focused element use keyboard type, or
-press for a single key. Where the text lands for any other element depends on focus, as
-before. Text made only of newline, carriage return and tab is
+press for a single key. An element that neither takes focus nor forwards it to a field (a plain div or
+custom element) is refused too (not_editable), since the text would go to whatever was
+focused before. Text made only of newline, carriage return and tab is
 sent as key events to any focused target. If the page does not show the text afterwards,
 the command still succeeds and prints a warning.
 Use --clear to clear existing content first. Use --delay to set the delay between keystrokes in milliseconds.

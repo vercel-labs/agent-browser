@@ -12067,19 +12067,19 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
             if (!select) return {{ __ab_miss: true }};
             const vals = {vals};
             if (!(select instanceof HTMLSelectElement)) {{
-                return {{ code: 'not_editable', error: 'Element is not a <select>' }};
+                return {{ kind: 'multi_not_select' }};
             }}
             if (select.matches(':disabled')) {{
-                return {{ code: 'disabled', error: 'Element <select> is disabled and cannot be changed' }};
+                return {{ kind: 'multi_disabled' }};
             }}
             if (vals.length > 1 && !select.multiple) {{
-                return {{ code: 'not_multiple', error: vals.length + ' values requested but <select> does not allow multiple selection' }};
+                return {{ kind: 'not_multiple' }};
             }}
             const by = {by};
             const keyOf = (o) => (by === 'label' ? o.label.trim() : o.value);
-            const missing = vals.filter((v) => !Array.from(select.options).some((o) => keyOf(o) === v));
+            const missing = vals.map((v, i) => i).filter((i) => !Array.from(select.options).some((o) => keyOf(o) === vals[i]));
             if (missing.length > 0) {{
-                return {{ code: 'option_not_found', error: 'No option matched ' + JSON.stringify(missing) + '. ' + select.options.length + ' options available' }};
+                return {{ kind: 'multi_not_found', missing, n: select.options.length }};
             }}
             for (const opt of select.options) {{
                 opt.selected = vals.includes(keyOf(opt));
@@ -12100,12 +12100,10 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
     {
         return Err(format!("No element found: {selector}"));
     }
-    if let Some(error) = result.get("error").and_then(|v| v.as_str()) {
-        return Err(match result.get("code").and_then(|v| v.as_str()) {
-            Some(code) if interaction::FORM_ERROR_CODES.contains(&code) => {
-                interaction::form_error(code, error)
-            }
-            _ => error.to_string(),
+    if let Some((code, message)) = interaction::select_failure(&result, &values, by) {
+        return Err(match code {
+            Some(code) => interaction::form_error(code, message),
+            None => message,
         });
     }
     let selected = result.get("selected").cloned().unwrap_or_else(|| json!([]));
