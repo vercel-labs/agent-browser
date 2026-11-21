@@ -356,6 +356,30 @@ impl AttachedTarget {
             .filter(|target| !matches!(target, Self::Provider(p) if p == "ios" || p == "safari"))
     }
 
+    /// Whether the browser runs on another machine than the daemon, so it
+    /// reads local file paths on its own host.
+    fn is_remote(&self) -> bool {
+        match self {
+            Self::Provider(_) => true,
+            Self::CdpPort(_) | Self::AutoConnect => false,
+            Self::CdpUrl(url) => {
+                let authority = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+                let authority = authority.split(['/', '?']).next().unwrap_or("");
+                let authority = authority.rsplit('@').next().unwrap_or("");
+                let host = match authority.strip_prefix('[') {
+                    Some(v6) => v6.split(']').next().unwrap_or(""),
+                    None => authority.split(':').next().unwrap_or(""),
+                };
+                let is_port = !host.is_empty() && host.bytes().all(|b| b.is_ascii_digit());
+                !(is_port
+                    || host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback()))
+            }
+        }
+    }
+
     fn insert_into(&self, cmd: &mut serde_json::Map<String, Value>) {
         let (key, value) = match self {
             Self::CdpUrl(url) => ("cdpUrl", json!(url)),
@@ -463,7 +487,7 @@ fn apply_effective_ca_cert(
 
 /// Arguments of the last `Emulation.setEmulatedMedia` call, kept so the same
 /// emulation can be replayed onto a new page session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EmulatedMedia {
     pub media: Option<String>,
     /// `(name, value)` media features, e.g. `("prefers-color-scheme", "dark")`.
@@ -482,6 +506,31 @@ pub struct InitScriptSetup {
     pub identifier: String,
     pub source: String,
     pub session_identifiers: HashMap<String, String>,
+    /// Registered from launch settings (`--init-script`, `--enable`, plugins),
+    /// which a relaunch registers again itself.
+    pub launch_owned: bool,
+}
+
+/// The launch settings [`SessionSetup::from_launch_options`] seeds from, kept
+/// to tell a relaunch that changes them from one that does not.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct LaunchSeed {
+    user_agent: Option<String>,
+    emulated_media: Option<EmulatedMedia>,
+    /// The window-sizing launch arguments in effect.
+    window_sizing: Vec<String>,
+}
+
+/// Viewport emulation installed by `viewport`, `device` or a launch viewport.
+///
+/// Touch emulation follows `mobile`: a mobile viewport enables it and any
+/// later non-mobile viewport clears it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewportSetup {
+    pub width: i32,
+    pub height: i32,
+    pub device_scale_factor: f64,
+    pub mobile: bool,
 }
 
 /// Page-level setup the daemon has applied to the active page session.
@@ -489,7 +538,9 @@ pub struct InitScriptSetup {
 /// CDP scopes all of these to a single target session, so a tab the daemon
 /// creates itself starts without them. This record lets
 /// [`apply_session_setup`] replay them onto the new tab before its first
-/// navigation. Reset whenever a browser is (re)launched. Permissions are not
+/// navigation. A browser agent-browser launches itself keeps this record across
+/// implicit relaunches and gets it replayed; `close` and attached or provider
+/// connections start empty. Permissions are not
 /// tracked: `Browser.grantPermissions` is context-scoped and already covers
 /// new tabs in the default context.
 #[derive(Debug, Default, Clone)]
@@ -508,6 +559,9 @@ pub struct SessionSetup {
     /// `DaemonState::origin_headers`.
     pub extra_headers: Option<HashMap<String, String>>,
     pub offline: Option<bool>,
+    /// Viewport size, scale factor and mobile (touch) emulation.
+    pub viewport: Option<ViewportSetup>,
+    launch_seed: LaunchSeed,
     /// Init scripts registered with `Page.addScriptToEvaluateOnNewDocument`:
     /// `--enable`, `--init-script`, plugin init scripts, and `addinitscript`.
     pub init_scripts: Vec<InitScriptSetup>,
@@ -519,14 +573,44 @@ pub struct SessionSetup {
 
 impl SessionSetup {
     fn from_launch_options(options: &LaunchOptions) -> Self {
+        let user_agent = options.user_agent.clone();
+        let emulated_media = options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
+            media: None,
+            features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
+        });
         Self {
-            user_agent: options.user_agent.clone(),
-            emulated_media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
-                media: None,
-                features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
-            }),
+            launch_seed: LaunchSeed {
+                user_agent: user_agent.clone(),
+                emulated_media: emulated_media.clone(),
+                window_sizing: window_sizing_args(&options.args),
+            },
+            user_agent,
+            emulated_media,
             ..Self::default()
         }
+    }
+
+    /// The setup for a relaunched browser: what was set at runtime, with the
+    /// new launch's own settings taking over where they changed.
+    fn carried_into_relaunch(mut self, launch: SessionSetup) -> Self {
+        if self.launch_seed.user_agent != launch.launch_seed.user_agent {
+            self.user_agent = launch.user_agent;
+        }
+        if self.launch_seed.emulated_media != launch.launch_seed.emulated_media {
+            self.emulated_media = launch.emulated_media;
+        }
+        // Window sizing given to this relaunch wins over a remembered viewport.
+        if !launch.launch_seed.window_sizing.is_empty()
+            && self.launch_seed.window_sizing != launch.launch_seed.window_sizing
+        {
+            self.viewport = None;
+        }
+        self.launch_seed = launch.launch_seed;
+        self.init_scripts.retain(|script| !script.launch_owned);
+        for script in &mut self.init_scripts {
+            script.session_identifiers.clear();
+        }
+        self
     }
 
     /// True when nothing has been configured, so there is nothing to replay.
@@ -538,6 +622,7 @@ impl SessionSetup {
             && self.geolocation.is_none()
             && self.extra_headers.as_ref().is_none_or(HashMap::is_empty)
             && !self.offline.unwrap_or(false)
+            && self.viewport.is_none()
             && self.init_scripts.is_empty()
     }
 
@@ -555,6 +640,7 @@ impl SessionSetup {
             identifier: identifier.clone(),
             source,
             session_identifiers,
+            launch_owned: false,
         });
         identifier
     }
@@ -569,6 +655,9 @@ pub struct DaemonState {
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
     snapshot_revisions: HashMap<String, SnapshotRevision>,
+    /// The last snapshot of each open tab, keyed by page session id; the implicit
+    /// baseline of `diff snapshot`.
+    last_snapshots: HashMap<String, LastSnapshot>,
     screenshot_observations: HashMap<(String, String), ScreenshotObservation>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
@@ -668,6 +757,9 @@ pub struct DaemonState {
     /// the daemon finishes replacing the tab, so a retry of the same request
     /// gets the report instead of running on the blank replacement tab.
     pub undelivered_wedge: Option<(String, WedgeReport)>,
+    /// Warning set by a handler for the response of the current command.
+    /// Drained once when the response is assembled; never read from `data`.
+    pending_action_warning: Option<String>,
     /// A mouse button left logically down because a dialog opened between
     /// mousePressed and mouseReleased; released when the dialog is resolved.
     pub pending_pointer_release: Option<super::interaction::PendingRelease>,
@@ -695,12 +787,13 @@ pub struct DaemonState {
     pub engine: String,
     /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
     pub default_timeout_ms: u64,
-    /// Last viewport settings (width, height, deviceScaleFactor, mobile),
-    /// re-applied to new contexts (e.g., recording).
-    pub viewport: Option<(i32, i32, f64, bool)>,
     /// Session-scoped setup applied to the active page, re-applied to tabs the
     /// daemon creates. See [`SessionSetup`].
     pub session_setup: SessionSetup,
+    /// Target sessions that touch emulation was enabled on. Disabling it is
+    /// only sent to these: on any other target it also resets the hover and
+    /// pointer types the browser was launched with.
+    touch_sessions: HashSet<String>,
     /// Init script sources returned by launch mutator plugins for this launch.
     pub plugin_init_scripts: Vec<String>,
     /// Provider cleanup metadata for the active external browser session.
@@ -731,6 +824,29 @@ fn default_idle_shutdown_is_blocked(
 }
 
 impl DaemonState {
+    #[cfg(test)]
+    pub(super) fn tracked_snapshot_tabs(&self) -> usize {
+        self.last_snapshots.len()
+    }
+
+    /// Keeps `snapshot` as its tab's baseline and drops those of closed tabs.
+    fn remember_snapshot(&mut self, snapshot: LastSnapshot) {
+        if let Some(browser) = self.browser.as_ref() {
+            self.last_snapshots
+                .retain(|session, _| browser.has_page_session(session));
+        }
+        self.last_snapshots
+            .insert(snapshot.session_id.clone(), snapshot);
+    }
+
+    /// Queue a warning for the current command's response.
+    fn push_action_warning(&mut self, warning: &str) {
+        self.pending_action_warning = Some(match self.pending_action_warning.take() {
+            Some(existing) => format!("{}\n{}", existing, warning),
+            None => warning.to_string(),
+        });
+    }
+
     /// The client received the `page_wedged` response to request `id`, so it
     /// is not replayed. A newer report from another request stays pending.
     pub fn wedge_report_delivered(&mut self, id: &str) {
@@ -778,9 +894,11 @@ impl DaemonState {
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
+            last_snapshots: HashMap::new(),
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
-                // An empty list is no filter, as when it is cleared live.
+                // A stored empty list predates rejection and restores as no
+                // filter.
                 security
                     .allowed_domains
                     .as_ref()
@@ -850,6 +968,7 @@ impl DaemonState {
             input_mode: "instant".to_string(),
             pending_dialog: None,
             undelivered_wedge: None,
+            pending_action_warning: None,
             pending_pointer_release: None,
             stream_client: None,
             stream_server: None,
@@ -859,8 +978,8 @@ impl DaemonState {
             attached_target: None,
             effective_ca_cert: None,
             network_auto_attach_installed: false,
-            viewport: None,
             session_setup: SessionSetup::default(),
+            touch_sessions: HashSet::new(),
             plugin_init_scripts: Vec::new(),
             active_provider_session: None,
             active_provider_connection: false,
@@ -1823,6 +1942,7 @@ impl DaemonState {
                                     browser.session_id_for_target(&te.target_id)
                                 }) {
                                     self.webmcp.observations.remove(session);
+                                    self.touch_sessions.remove(session);
                                 }
                                 new_targets
                                     .retain(|entry| entry.target_info.target_id != te.target_id);
@@ -1893,6 +2013,7 @@ impl DaemonState {
                                         }
                                     }
                                 }
+                                self.touch_sessions.remove(sid);
                                 attached_page_sessions.retain(|(_, known_sid)| known_sid != sid);
                                 attached_worker_sessions.retain(|(_, known_sid)| known_sid != sid);
                                 attached_iframe_sessions.retain(|(_, known_sid)| known_sid != sid);
@@ -3056,6 +3177,7 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
 }
 
 async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
+    state.pending_action_warning = None;
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
@@ -3720,6 +3842,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     };
     attach_tab_gone_data(&mut resp, state);
     attach_flow_stop(&mut resp, state);
+    attach_action_warning(&mut resp, state);
     if resp.get("success").and_then(Value::as_bool) == Some(false) {
         attach_settings_outcome(&mut resp, &settings_outcome);
     }
@@ -4051,11 +4174,12 @@ fn should_defer_url_until_network_controls(
     };
 
     check_url_allowed_by_filter(filter, url)?;
-    Ok(filter.is_some_and(|filter| !filter.allowed_domains.is_empty()) || handle_auth_requests)
+    Ok(filter.is_some() || handle_auth_requests)
 }
 
 struct AllowedDomainsLaunchSupport<'a> {
-    allowed_domains: &'a [String],
+    /// A domain filter is installed.
+    contained: bool,
     cdp_url: Option<&'a str>,
     cdp_port: Option<u64>,
     auto_connect: bool,
@@ -4069,7 +4193,7 @@ struct AllowedDomainsLaunchSupport<'a> {
 fn ensure_allowed_domains_supported_for_launch(
     support: AllowedDomainsLaunchSupport<'_>,
 ) -> Result<(), String> {
-    if support.allowed_domains.is_empty() {
+    if !support.contained {
         return Ok(());
     }
 
@@ -4152,16 +4276,23 @@ async fn ensure_state_replay_supported_by_active_domain_filter(
     source: &str,
 ) -> Result<(), String> {
     let filter = state.domain_filter.read().await;
-    if filter
-        .as_ref()
-        .is_some_and(|filter| !filter.allowed_domains.is_empty())
-    {
+    if filter.is_some() {
         return Err(format!(
             "--allowed-domains is not supported with {} because loading state replays saved origins",
             source
         ));
     }
     Ok(())
+}
+
+/// The filter the stored allowlist describes; no list, or a legacy empty one,
+/// is no filter.
+fn filter_from_settings(settings: &Running) -> Option<DomainFilter> {
+    settings
+        .security()
+        .allowed_domains
+        .filter(|domains| !domains.is_empty())
+        .map(|domains| DomainFilter::new(&domains.join(",")))
 }
 
 async fn restore_domain_filter(state: &mut DaemonState, filter: &Option<DomainFilter>) {
@@ -4529,6 +4660,13 @@ fn may_replace_wedged_tab(state: &DaemonState) -> bool {
     })
 }
 
+/// Move the handler-set warning into the response. `data` is never consulted.
+fn attach_action_warning(resp: &mut Value, state: &mut DaemonState) {
+    if let Some(warning) = state.pending_action_warning.take() {
+        append_warning(resp, &warning);
+    }
+}
+
 /// Add to the response's warning instead of replacing one already set.
 fn append_warning(resp: &mut Value, warning: &str) {
     let merged = match resp.get("warning").and_then(Value::as_str) {
@@ -4612,6 +4750,18 @@ async fn session_setup_pending(state: &DaemonState) -> bool {
 /// document. Emulation failures are ignored: a call the engine rejects
 /// should not abort creating the tab.
 async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Result<(), String> {
+    apply_session_setup_reporting(state, session_id)
+        .await
+        .map(|_| ())
+}
+
+/// [`apply_session_setup`], returning the emulation settings the browser
+/// rejected instead of dropping them.
+async fn apply_session_setup_reporting(
+    state: &mut DaemonState,
+    session_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut failed: Vec<String> = Vec::new();
     let client = state
         .browser
         .as_ref()
@@ -4621,13 +4771,37 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
     let setup = state.session_setup.clone();
 
     if let Some(ref ua) = setup.user_agent {
-        let _ = client
+        let result = client
             .send_command(
                 "Emulation.setUserAgentOverride",
                 Some(json!({ "userAgent": ua })),
                 Some(session_id),
             )
             .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setUserAgentOverride: {e}"));
+        }
+    }
+
+    if let Some(viewport) = setup.viewport {
+        let result = client
+            .send_command(
+                "Emulation.setDeviceMetricsOverride",
+                Some(json!({
+                    "width": viewport.width,
+                    "height": viewport.height,
+                    "deviceScaleFactor": viewport.device_scale_factor,
+                    "mobile": viewport.mobile,
+                })),
+                Some(session_id),
+            )
+            .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setDeviceMetricsOverride: {e}"));
+        }
+        if let Err(e) = set_touch_emulation(state, session_id, viewport.mobile).await {
+            failed.push(format!("Emulation.setTouchEmulationEnabled: {e}"));
+        }
     }
 
     if let Some(ref emulated) = setup.emulated_media {
@@ -4644,33 +4818,42 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
                     .collect(),
             );
         }
-        let _ = client
+        let result = client
             .send_command("Emulation.setEmulatedMedia", Some(params), Some(session_id))
             .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setEmulatedMedia: {e}"));
+        }
     }
 
     if let Some(ref tz) = setup.timezone {
-        let _ = client
+        let result = client
             .send_command(
                 "Emulation.setTimezoneOverride",
                 Some(json!({ "timezoneId": tz })),
                 Some(session_id),
             )
             .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setTimezoneOverride: {e}"));
+        }
     }
 
     if let Some(ref locale) = setup.locale {
-        let _ = client
+        let result = client
             .send_command(
                 "Emulation.setLocaleOverride",
                 Some(json!({ "locale": locale })),
                 Some(session_id),
             )
             .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setLocaleOverride: {e}"));
+        }
     }
 
     if let Some((lat, lon, accuracy)) = setup.geolocation {
-        let _ = client
+        let result = client
             .send_command(
                 "Emulation.setGeolocationOverride",
                 Some(json!({
@@ -4681,6 +4864,9 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
                 Some(session_id),
             )
             .await;
+        if let Err(e) = result {
+            failed.push(format!("Emulation.setGeolocationOverride: {e}"));
+        }
     }
 
     if let Some(ref headers) = setup.extra_headers {
@@ -4727,7 +4913,7 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
             .await?;
     }
 
-    Ok(())
+    Ok(failed)
 }
 
 async fn auto_launch(
@@ -4744,6 +4930,31 @@ async fn auto_launch(
 /// `strict_state` is set when the command named a `--state` file: a file that
 /// cannot be loaded then fails the launch instead of launching without state.
 async fn auto_launch_with(
+    state: &mut DaemonState,
+    plugins: Vec<crate::plugins::PluginConfig>,
+    cmd: &Value,
+    strict_state: bool,
+) -> Result<Value, String> {
+    let resumed = state.attached_target.is_some() && cmd.is_null();
+    let result = Box::pin(auto_launch_with_settings(state, plugins, cmd, strict_state)).await;
+    if result.is_ok() && !resumed {
+        state.attached_target = attached_target_for(&state.settings.connection());
+    }
+    result
+}
+
+/// The external browser a session's connection setting attaches to, if any.
+fn attached_target_for(connection: &Connection) -> Option<AttachedTarget> {
+    let named = match connection {
+        Connection::Local => return None,
+        Connection::Cdp(cdp) => json!({ "cdpUrl": cdp }),
+        Connection::AutoConnect => json!({ "autoConnect": true }),
+        Connection::Provider(provider) => json!({ "provider": provider }),
+    };
+    AttachedTarget::from_launch_command(&named)
+}
+
+async fn auto_launch_with_settings(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
     cmd: &Value,
@@ -4786,6 +4997,29 @@ async fn auto_launch_inner(
     cmd: &Value,
     strict_state: bool,
 ) -> Result<Value, String> {
+    // Only a browser agent-browser launches itself keeps its session setup
+    // across a relaunch; an attached or provider browser starts without one,
+    // and a failed attach leaves the previous setup in place.
+    let saved = (!matches!(state.settings.connection(), Connection::Local)).then(|| {
+        (
+            std::mem::take(&mut state.session_setup),
+            std::mem::take(&mut state.touch_sessions),
+        )
+    });
+    let result = launch_browser_from_settings(state, plugins, cmd, strict_state).await;
+    if let (Err(_), Some((setup, touch))) = (&result, saved) {
+        state.session_setup = setup;
+        state.touch_sessions = touch;
+    }
+    result
+}
+
+async fn launch_browser_from_settings(
+    state: &mut DaemonState,
+    plugins: Vec<crate::plugins::PluginConfig>,
+    cmd: &Value,
+    strict_state: bool,
+) -> Result<Value, String> {
     if has_active_browser_session(state) {
         close_before_implicit_relaunch(state).await?;
     }
@@ -4793,7 +5027,6 @@ async fn auto_launch_inner(
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
     state.plugin_init_scripts.clear();
-    state.session_setup = SessionSetup::default();
 
     // Use the stream server's viewport dimensions for --window-size so the
     // content area matches the desired viewport from the start.
@@ -4818,8 +5051,8 @@ async fn auto_launch_inner(
     )?;
     let enable_features = state.settings.enable_features();
     let init_script_paths = state.settings.init_scripts();
-    let allowed_domains = current_allowed_domains(state).await;
-    options.restrict_webrtc = !allowed_domains.is_empty();
+    let contained = state.domain_filter.read().await.is_some();
+    options.restrict_webrtc = contained;
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
     let restore_key = state.session_name.clone();
@@ -4855,7 +5088,7 @@ async fn auto_launch_inner(
 
     if let Some(cdp) = cdp {
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            allowed_domains: &allowed_domains,
+            contained,
             cdp_url: Some(cdp.as_str()),
             cdp_port: None,
             auto_connect: false,
@@ -4886,7 +5119,7 @@ async fn auto_launch_inner(
 
     if auto_connect {
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            allowed_domains: &allowed_domains,
+            contained,
             cdp_url: None,
             cdp_port: None,
             auto_connect: true,
@@ -4922,7 +5155,7 @@ async fn auto_launch_inner(
     if let Some(provider) = provider {
         let p = provider.to_lowercase();
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            allowed_domains: &allowed_domains,
+            contained,
             cdp_url: None,
             cdp_port: None,
             auto_connect: false,
@@ -4962,7 +5195,7 @@ async fn auto_launch_inner(
             let conn =
                 providers::connect_provider_with_plugins(&p, &plugins, &state.settings).await?;
             let provider_metadata = conn.metadata.clone();
-            if conn.direct_page && !allowed_domains.is_empty() {
+            if conn.direct_page && contained {
                 if let Some(ref ps) = conn.session {
                     let _ = providers::close_provider_session_with_plugins(ps, &plugins).await;
                 }
@@ -5009,7 +5242,7 @@ async fn auto_launch_inner(
     }
 
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        allowed_domains: &allowed_domains,
+        contained,
         cdp_url: None,
         cdp_port: None,
         auto_connect: false,
@@ -5023,7 +5256,7 @@ async fn auto_launch_inner(
     apply_launch_mutator_plugins(state, &mut options, plugins).await?;
     validate_ca_cert_launch_mode(&options, engine.as_deref(), false)?;
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        allowed_domains: &allowed_domains,
+        contained,
         cdp_url: None,
         cdp_port: None,
         auto_connect: false,
@@ -5041,8 +5274,12 @@ async fn auto_launch_inner(
     if let Some(ref ca) = effective_ca_cert {
         options.prepared_nss_home = Some(prepare_nss_home(&ca.bundle)?);
     }
-    state.session_setup = SessionSetup::from_launch_options(&options);
+    let launch_setup = SessionSetup::from_launch_options(&options);
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
+    let rollback_setup = state.session_setup.clone();
+    let previous_setup = std::mem::take(&mut state.session_setup);
+    state.session_setup = previous_setup.carried_into_relaunch(launch_setup);
+    state.touch_sessions.clear();
     state.reset_input_state();
     state.browser = Some(mgr);
     state.launch_identity = Some(state.settings.launch_identity());
@@ -5051,12 +5288,73 @@ async fn auto_launch_inner(
     state.start_fetch_handler();
     state.start_dialog_handler();
     state.update_stream_client().await;
-    install_network_controls_or_close(state, has_proxy_auth).await?;
 
-    apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-    try_auto_restore_state(state).await;
-    load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
-    Ok(json!({}))
+    // The carried setup is kept only when every step after the launch
+    // succeeds, like the launch settings.
+    let result = async {
+        install_network_controls_or_close(state, has_proxy_auth).await?;
+
+        let replay_warning = replay_session_setup_after_launch(state).await;
+
+        apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
+        try_auto_restore_state(state).await;
+        load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
+        Ok(with_session_setup_warning(state, json!({}), replay_warning))
+    }
+    .await;
+    restore_setup_unless_launched(state, rollback_setup, &result);
+    result
+}
+
+/// Puts the pre-relaunch session setup back when the relaunch failed.
+fn restore_setup_unless_launched<T>(
+    state: &mut DaemonState,
+    rollback: SessionSetup,
+    result: &Result<T, String>,
+) {
+    if result.is_err() {
+        state.session_setup = rollback;
+    }
+}
+
+/// Replays the carried session setup onto the relaunched browser's page, as
+/// for any new tab, and returns what could not be applied.
+async fn replay_session_setup_after_launch(state: &mut DaemonState) -> Option<String> {
+    if !session_setup_pending(state).await {
+        return None;
+    }
+    let session_id = state
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.active_session_id().ok().map(str::to_string))?;
+    let mut failed = match apply_session_setup_reporting(state, &session_id).await {
+        Ok(failed) => failed,
+        Err(e) => vec![e],
+    };
+    if let (Some(viewport), Some(mgr)) = (state.session_setup.viewport, state.browser.as_ref()) {
+        mgr.sync_contents_size(viewport.width, viewport.height)
+            .await;
+    }
+    if failed.is_empty() {
+        return None;
+    }
+    failed.dedup();
+    Some(format!(
+        "Session settings were not fully re-applied to the relaunched browser: {}",
+        failed.join("; ")
+    ))
+}
+
+/// The launch arguments that size the window themselves.
+fn window_sizing_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .filter(|arg| {
+            arg.starts_with("--window-size=")
+                || arg.starts_with("--start-maximized")
+                || arg.starts_with("--start-fullscreen")
+        })
+        .cloned()
+        .collect()
 }
 
 fn string_array_from_command(cmd: &Value, key: &str) -> Option<Vec<String>> {
@@ -5067,20 +5365,24 @@ fn string_array_from_command(cmd: &Value, key: &str) -> Option<Vec<String>> {
     })
 }
 
-fn allowed_domains_from_launch_command(cmd: &Value) -> Option<Vec<String>> {
-    let value = cmd.get("allowedDomains")?;
+/// `Ok(None)` means the key is absent. A key that parses to zero domains is
+/// rejected, since an empty list would otherwise disable containment.
+fn allowed_domains_from_launch_command(cmd: &Value) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = cmd.get("allowedDomains") else {
+        return Ok(None);
+    };
     let raw_domains: Vec<&str> = match value {
         Value::String(domains) => domains.split(',').collect(),
         Value::Array(domains) => domains.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
     };
-    Some(
-        raw_domains
-            .into_iter()
-            .map(|domain| domain.trim().to_lowercase())
-            .filter(|domain| !domain.is_empty())
-            .collect(),
-    )
+    let domains: Vec<String> = raw_domains
+        .into_iter()
+        .map(|domain| domain.trim().to_lowercase())
+        .filter(|domain| !domain.is_empty())
+        .collect();
+    network::ensure_allowed_domains_not_empty(&domains)?;
+    Ok(Some(domains))
 }
 
 async fn apply_launch_init_scripts(
@@ -5128,9 +5430,19 @@ async fn apply_launch_init_scripts(
         registered.push((source, session_identifier));
     }
     for (source, session_identifier) in registered {
-        state
+        let identifier = state.session_setup.register_init_script(
+            source,
+            session_id.clone(),
+            session_identifier,
+        );
+        if let Some(script) = state
             .session_setup
-            .register_init_script(source, session_id.clone(), session_identifier);
+            .init_scripts
+            .iter_mut()
+            .find(|script| script.identifier == identifier)
+        {
+            script.launch_owned = true;
+        }
     }
 }
 
@@ -5576,6 +5888,17 @@ fn check_capture_setting(patch: &Patch) -> Result<(), String> {
     }
 }
 
+/// Rejects an allowlist that lists no domain, before it is stored or applied.
+fn check_allowed_domains_setting(patch: &Patch) -> Result<(), String> {
+    match patch.value(Key::AllowedDomains) {
+        Some(Value::Array(domains)) => {
+            let domains: Vec<&str> = domains.iter().filter_map(Value::as_str).collect();
+            network::ensure_allowed_domains_not_empty(&domains)
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn handle_launch_for_target(
     cmd: &Value,
     state: &mut DaemonState,
@@ -5591,7 +5914,6 @@ async fn handle_launch_for_target(
     {
         return handle_launch_inner(cmd, state).await;
     }
-    let filter = state.domain_filter.read().await.clone();
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
@@ -5600,7 +5922,10 @@ async fn handle_launch_for_target(
         Err(_) => Err(browser_use_setup_timeout(state).await),
     };
     if result.is_err() {
-        restore_domain_filter(state, &filter).await;
+        // The stored security settings decide what survives a failed launch, so
+        // the live filter follows them.
+        let stored = filter_from_settings(&state.settings);
+        restore_domain_filter(state, &stored).await;
         *state.proxy_credentials.write().await = credentials;
         state.plugin_init_scripts = scripts;
         state.session_setup = setup;
@@ -5612,7 +5937,7 @@ async fn handle_launch_for_target(
 /// the launch protocol directly (rather than through the CLI) sets session
 /// settings this way; the CLI sends the same settings as a patch on every
 /// command.
-fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
+fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Result<Patch, String> {
     let mut entries: Vec<(Key, Requested)> = Vec::new();
     let mut set = |key: Key, value: Value| entries.push((key, Requested::Set(value)));
     let string = |field: &str| cmd.get(field).and_then(Value::as_str).map(Value::from);
@@ -5716,17 +6041,10 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Patch {
             _ => {}
         }
     }
-    if let Some(domains) = allowed_domains_from_launch_command(cmd) {
-        entries.push((
-            Key::AllowedDomains,
-            if domains.is_empty() {
-                Requested::Default
-            } else {
-                Requested::Set(Value::from(domains))
-            },
-        ));
+    if let Some(domains) = allowed_domains_from_launch_command(cmd)? {
+        entries.push((Key::AllowedDomains, Requested::Set(Value::from(domains))));
     }
-    Patch::from_entries(entries)
+    Ok(Patch::from_entries(entries))
 }
 
 /// What applying a settings patch did to the session.
@@ -5906,6 +6224,7 @@ async fn apply_settings_patch(
     patch: &Patch,
     launches: bool,
 ) -> Result<SettingsOutcome, String> {
+    check_allowed_domains_setting(patch)?;
     let mut patch = patch.clone();
     if launches {
         adjust_ca_patch(state, &mut patch)?;
@@ -6050,7 +6369,6 @@ async fn apply_settings_patch(
         *state.domain_filter.write().await = next
             .security()
             .allowed_domains
-            .filter(|domains| !domains.is_empty())
             .map(|domains| DomainFilter::new(&domains.join(",")));
     }
     if let Some(ca_cert) = ca_cert {
@@ -6158,7 +6476,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .and_then(Value::as_str)
         .map(String::from)
         .or_else(|| state.settings.engine());
-    let patch = launch_envelope_patch(cmd, engine.as_deref());
+    let patch = launch_envelope_patch(cmd, engine.as_deref())?;
     check_capture_setting(&patch)?;
     let had_browser_before_launch = has_active_browser_session(state);
 
@@ -6450,9 +6768,7 @@ async fn handle_read(cmd: &Value, state: &DaemonState) -> Result<Value, String> 
         let df = state.domain_filter.read().await;
         df.as_ref().map(|filter| filter.allowed_domains.clone())
     } {
-        if !allowed_domains.is_empty() {
-            options.enforced_allowed_domains.push(allowed_domains);
-        }
+        options.enforced_allowed_domains.push(allowed_domains);
     }
 
     if let Some(url) = cmd.get("url").and_then(|v| v.as_str()) {
@@ -6618,6 +6934,7 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
         map.clear();
     }
     state.session_setup = SessionSetup::default();
+    state.touch_sessions.clear();
 
     if let Some(server) = state.inspect_server.take() {
         server.shutdown();
@@ -6721,8 +7038,13 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     )
     .await?;
     state.ref_map = refs;
-
     let url = mgr.get_url().await.unwrap_or_default();
+    state.remember_snapshot(LastSnapshot {
+        session_id: session_id.clone(),
+        frame_id: state.active_frame_id.clone(),
+        scope: SnapshotScope::of(&options),
+        text: tree.clone(),
+    });
 
     let refs: serde_json::Map<String, Value> = state
         .ref_map
@@ -7509,6 +7831,14 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "selected": values }))
 }
 
+/// Response of a check or uncheck; an unverified toggle carries a warning.
+fn toggle_response(state: &mut DaemonState, key: &str, selector: &str, verified: bool) -> Value {
+    if !verified {
+        state.push_action_warning(super::element::STATE_NOT_VERIFIED);
+    }
+    json!({ key: selector })
+}
+
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -7517,21 +7847,26 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    if let Some(position) = interaction::check(
+    let outcome = interaction::check(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &state.iframe_sessions,
     )
-    .await?
-    {
+    .await?;
+    if let Some(position) = outcome.position {
         (state.mouse_state.x, state.mouse_state.y) = position;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(json!({ "checked": selector }))
+    Ok(toggle_response(
+        state,
+        "checked",
+        selector,
+        outcome.verified,
+    ))
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7542,21 +7877,26 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    if let Some(position) = interaction::uncheck(
+    let outcome = interaction::uncheck(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &state.iframe_sessions,
     )
-    .await?
-    {
+    .await?;
+    if let Some(position) = outcome.position {
         (state.mouse_state.x, state.mouse_state.y) = position;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(json!({ "unchecked": selector }))
+    Ok(toggle_response(
+        state,
+        "unchecked",
+        selector,
+        outcome.verified,
+    ))
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -8214,29 +8554,135 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
 // Phase 6 handlers
 // ---------------------------------------------------------------------------
 
+/// The options a snapshot was taken with.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SnapshotScope {
+    selector: Option<String>,
+    interactive: bool,
+    compact: bool,
+    depth: Option<usize>,
+    urls: bool,
+}
+
+impl SnapshotScope {
+    fn of(options: &SnapshotOptions) -> Self {
+        Self {
+            selector: options.selector.clone(),
+            interactive: options.interactive,
+            compact: options.compact,
+            depth: options.depth,
+            urls: options.urls,
+        }
+    }
+
+    fn options(&self) -> SnapshotOptions {
+        SnapshotOptions {
+            selector: self.selector.clone(),
+            interactive: self.interactive,
+            compact: self.compact,
+            depth: self.depth,
+            urls: self.urls,
+        }
+    }
+}
+
+/// A snapshot kept as the implicit baseline of `diff snapshot`.
+#[derive(Clone, Debug)]
+struct LastSnapshot {
+    session_id: String,
+    frame_id: Option<String>,
+    scope: SnapshotScope,
+    text: String,
+}
+
+/// Options a bare `diff snapshot` captures with: those the command names, which
+/// must agree with the baseline's, otherwise the baseline's.
+fn implicit_baseline_scope(cmd: &Value, stored: &SnapshotScope) -> Result<SnapshotScope, String> {
+    let flag = |key: &str| cmd.get(key).and_then(Value::as_bool).filter(|set| *set);
+    let mut scope = stored.clone();
+    let mut differing = Vec::new();
+    if let Some(selector) = cmd.get("selector").and_then(Value::as_str) {
+        if stored.selector.as_deref() != Some(selector) {
+            differing.push(format!(
+                "--selector {selector:?} (last snapshot: {})",
+                stored
+                    .selector
+                    .as_deref()
+                    .map_or("no selector".to_string(), |s| format!("{s:?}"))
+            ));
+        }
+        scope.selector = Some(selector.to_string());
+    }
+    if let Some(depth) = cmd.get("maxDepth").and_then(Value::as_u64) {
+        if stored.depth != Some(depth as usize) {
+            differing.push(format!(
+                "--depth {depth} (last snapshot: {})",
+                stored
+                    .depth
+                    .map_or("no depth".to_string(), |d| d.to_string())
+            ));
+        }
+        scope.depth = Some(depth as usize);
+    }
+    for (key, name, stored_set, field) in [
+        (
+            "interactive",
+            "--interactive",
+            stored.interactive,
+            &mut scope.interactive,
+        ),
+        ("compact", "--compact", stored.compact, &mut scope.compact),
+        ("urls", "--urls", stored.urls, &mut scope.urls),
+    ] {
+        if flag(key).is_some() {
+            if !stored_set {
+                differing.push(format!("{name} (last snapshot: without)"));
+            }
+            *field = true;
+        }
+    }
+    if differing.is_empty() {
+        Ok(scope)
+    } else {
+        Err(format!(
+            "baseline_mismatch: the last snapshot used different options: {}; run `snapshot` with the same options or pass --baseline <file>",
+            differing.join(", ")
+        ))
+    }
+}
+
 async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let compact = cmd
-        .get("compact")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let max_depth = cmd
-        .get("maxDepth")
-        .and_then(|v| v.as_u64())
-        .map(|d| d as usize);
-    let selector = cmd
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    let options = SnapshotOptions {
-        compact,
-        depth: max_depth,
-        selector,
-        ..SnapshotOptions::default()
+    let baseline = cmd.get("baseline").and_then(|v| v.as_str());
+    let scope = match baseline {
+        Some(_) => SnapshotScope {
+            selector: cmd
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            interactive: cmd.get("interactive").and_then(Value::as_bool) == Some(true),
+            compact: cmd.get("compact").and_then(Value::as_bool) == Some(true),
+            depth: cmd
+                .get("maxDepth")
+                .and_then(|v| v.as_u64())
+                .map(|d| d as usize),
+            urls: cmd.get("urls").and_then(Value::as_bool) == Some(true),
+        },
+        None => match state.last_snapshots.get(&session_id) {
+            Some(last) => {
+                if last.frame_id != state.active_frame_id {
+                    return Err("baseline_mismatch: the last snapshot was taken in a different frame; select that frame or run `snapshot` again, or pass --baseline <file>".to_string());
+                }
+                implicit_baseline_scope(cmd, &last.scope)?
+            }
+            None => {
+                return Err("no_baseline: no earlier snapshot on this tab; run `snapshot` first or pass --baseline <file>".to_string());
+            }
+        },
     };
+    let options = scope.options();
     let (current, current_ref_map) = snapshot::stage_snapshot(
         &mgr.client,
         &session_id,
@@ -8247,10 +8693,11 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
     )
     .await?;
 
-    let baseline = cmd.get("baseline").and_then(|v| v.as_str());
-
     let baseline_text = match baseline {
-        Some(b) if std::path::Path::new(b).exists() => {
+        Some(b) => {
+            if !std::path::Path::new(b).exists() {
+                return Err(format!("file_not_found: baseline {b} does not exist"));
+            }
             let mut contents = std::fs::read_to_string(b)
                 .map_err(|e| format!("Failed to read baseline: {}", e))?;
             // Plain CLI output ends with one newline when redirected to a baseline file.
@@ -8262,8 +8709,11 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
             }
             contents
         }
-        Some(b) => b.to_string(),
-        None => String::new(),
+        None => state
+            .last_snapshots
+            .get(&session_id)
+            .map(|last| last.text.clone())
+            .unwrap_or_default(),
     };
 
     let result = diff::diff_snapshots(
@@ -8271,6 +8721,12 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         &diff::snapshot_comparison_text(&current),
     );
     state.ref_map = current_ref_map;
+    state.remember_snapshot(LastSnapshot {
+        session_id,
+        frame_id: state.active_frame_id.clone(),
+        scope,
+        text: current,
+    });
     Ok(json!({
         "diff": result.diff,
         "additions": result.additions,
@@ -8298,14 +8754,40 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .map(WaitUntil::from_str)
         .unwrap_or(WaitUntil::Load);
 
+    let options = SnapshotOptions {
+        selector: cmd
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        compact: cmd
+            .get("compact")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        depth: cmd
+            .get("maxDepth")
+            .and_then(|v| v.as_u64())
+            .map(|d| d as usize),
+        ..SnapshotOptions::default()
+    };
+    let screenshot_options = cmd
+        .get("screenshot")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        .then(|| ScreenshotOptions {
+            full_page: cmd
+                .get("fullPage")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            ..ScreenshotOptions::default()
+        });
+
     // Each navigation can replace the document, so invalidate refs before it starts.
     let first_session_id = mgr.active_session_id()?.to_string();
     state.ref_map.invalidate_page(&first_session_id);
 
-    // Navigate to URL1 and snapshot
+    // Navigate to URL1, then capture it before leaving the page.
     mgr.navigate(url1, wait_until).await?;
     let first_session_id = mgr.active_session_id()?.to_string();
-    let options = SnapshotOptions::default();
     let mut snap1_ref_map = state.ref_map.clone();
     let snap1 = snapshot::take_snapshot(
         &mgr.client,
@@ -8316,8 +8798,16 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &state.iframe_sessions,
     )
     .await?;
+    let shot1 = capture_diff_url_screenshot(
+        mgr,
+        &first_session_id,
+        &snap1_ref_map,
+        screenshot_options.as_ref(),
+        &state.iframe_sessions,
+    )
+    .await?;
 
-    // Navigate to URL2 and snapshot
+    // Navigate to URL2 and capture it the same way.
     snap1_ref_map.invalidate_page(&first_session_id);
     mgr.navigate(url2, wait_until).await?;
     let second_session_id = mgr.active_session_id()?.to_string();
@@ -8331,19 +8821,71 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &state.iframe_sessions,
     )
     .await?;
+    let shot2 = capture_diff_url_screenshot(
+        mgr,
+        &second_session_id,
+        &snap2_ref_map,
+        screenshot_options.as_ref(),
+        &state.iframe_sessions,
+    )
+    .await?;
 
-    let result = diff::diff_text(
-        &diff::snapshot_comparison_text(&snap1),
-        &diff::snapshot_comparison_text(&snap2),
-    );
+    let before = diff::snapshot_comparison_text(&snap1);
+    let after = diff::snapshot_comparison_text(&snap2);
+    let result = diff::diff_text(&before, &after);
+    let snapshot_diff = diff::diff_snapshots(&before, &after);
     state.ref_map = snap2_ref_map;
-    Ok(json!({
+    let mut data = json!({
         "diff": result,
+        "snapshot": {
+            "diff": snapshot_diff.diff,
+            "additions": snapshot_diff.additions,
+            "removals": snapshot_diff.removals,
+            "unchanged": snapshot_diff.unchanged,
+            "changed": snapshot_diff.changed,
+        },
         "url1": url1,
         "url2": url2,
         "snapshot1": snap1,
         "snapshot2": snap2,
-    }))
+    });
+    if let (Some(a), Some(b)) = (shot1, shot2) {
+        // Same default tolerance as `diff screenshot`.
+        let shot_diff = diff::diff_screenshot(&a, &b, 0.1)?;
+        data["screenshot"] = screenshot_diff_json(&shot_diff, None);
+    }
+    Ok(data)
+}
+
+/// PNG bytes of the current page for `diff url --screenshot`, or `None` when
+/// no screenshot was requested.
+async fn capture_diff_url_screenshot(
+    mgr: &BrowserManager,
+    session_id: &str,
+    ref_map: &RefMap,
+    options: Option<&ScreenshotOptions>,
+    iframe_sessions: &std::collections::HashMap<String, String>,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let shot =
+        screenshot::take_screenshot(&mgr.client, session_id, ref_map, options, iframe_sessions)
+            .await?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &shot.base64)
+        .map(Some)
+        .map_err(|e| format!("Failed to decode screenshot: {}", e))
+}
+
+fn screenshot_diff_json(d: &diff::ScreenshotDiffResult, diff_path: Option<&str>) -> Value {
+    json!({
+        "match": d.matched,
+        "mismatchPercentage": d.mismatch_percentage,
+        "totalPixels": d.total_pixels,
+        "differentPixels": d.different_pixels,
+        "diffPath": diff_path,
+        "dimensionMismatch": d.dimension_mismatch,
+    })
 }
 
 async fn handle_credentials_set(cmd: &Value) -> Result<Value, String> {
@@ -8675,8 +9217,93 @@ async fn handle_tab_keep(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     mgr.set_tab_keep(tab_id, keep).await
 }
 
-async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+/// Enables touch emulation on a target session, or disables it where it was
+/// enabled. A target that never had it is left alone, since disabling also
+/// resets the hover and pointer types the browser was launched with.
+async fn set_touch_emulation(
+    state: &mut DaemonState,
+    session_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    if !enabled && !state.touch_sessions.contains(session_id) {
+        return Ok(());
+    }
+    let client = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .client
+        .clone();
+    let params = if enabled {
+        json!({ "enabled": true, "maxTouchPoints": super::browser::TOUCH_POINTS })
+    } else {
+        json!({ "enabled": false })
+    };
+    client
+        .send_command(
+            "Emulation.setTouchEmulationEnabled",
+            Some(params),
+            Some(session_id),
+        )
+        .await?;
+    if enabled {
+        state.touch_sessions.insert(session_id.to_string());
+    } else {
+        state.touch_sessions.remove(session_id);
+    }
+    Ok(())
+}
+
+/// Installs `viewport` on the active page and syncs the stream server. With
+/// `record`, it is also kept in the session setup for relaunches and new tabs.
+/// Touch emulation is best effort: an engine that rejects it keeps the
+/// viewport, and the rejection is returned as a warning.
+async fn apply_viewport(
+    state: &mut DaemonState,
+    viewport: ViewportSetup,
+    record: bool,
+) -> Result<Option<String>, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    mgr.set_viewport(
+        viewport.width,
+        viewport.height,
+        viewport.device_scale_factor,
+        viewport.mobile,
+    )
+    .await?;
+    let warning = set_touch_emulation(state, &session_id, viewport.mobile)
+        .await
+        .err()
+        .map(|e| format!("Touch emulation was not applied: {e}"));
+
+    if record {
+        state.session_setup.viewport = Some(viewport);
+    }
+
+    // Update stream server viewport so status messages and screencast use the new dimensions
+    if let Some(ref server) = state.stream_server {
+        server
+            .set_viewport(viewport.width as u32, viewport.height as u32)
+            .await;
+    }
+    Ok(warning)
+}
+
+/// Queue a warning about session setup that could not be fully applied; the
+/// command response reports it as `warning`.
+fn with_session_setup_warning(
+    state: &mut DaemonState,
+    data: Value,
+    warning: Option<String>,
+) -> Value {
+    if let Some(warning) = warning {
+        state.push_action_warning(&warning);
+    }
+    data
+}
+
+async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let width = cmd.get("width").and_then(|v| v.as_i64()).unwrap_or(1280) as i32;
     let height = cmd.get("height").and_then(|v| v.as_i64()).unwrap_or(720) as i32;
     let scale = cmd
@@ -8685,16 +9312,23 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .unwrap_or(1.0);
     let mobile = cmd.get("mobile").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    mgr.set_viewport(width, height, scale, mobile).await?;
+    let warning = apply_viewport(
+        state,
+        ViewportSetup {
+            width,
+            height,
+            device_scale_factor: scale,
+            mobile,
+        },
+        true,
+    )
+    .await?;
 
-    state.viewport = Some((width, height, scale, mobile));
-
-    // Update stream server viewport so status messages and screencast use the new dimensions
-    if let Some(ref server) = state.stream_server {
-        server.set_viewport(width as u32, height as u32).await;
-    }
-
-    Ok(json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }))
+    Ok(with_session_setup_warning(
+        state,
+        json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }),
+        warning,
+    ))
 }
 
 async fn handle_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -9612,7 +10246,7 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "handled": true, "accepted": accept }))
 }
 
-async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let selector = cmd
         .get("selector")
@@ -9634,9 +10268,42 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         })
         .unwrap_or_default();
 
+    let remote = state.active_provider_connection
+        || state
+            .attached_target
+            .as_ref()
+            .is_some_and(AttachedTarget::is_remote);
+    let warning = check_upload_files(&files, remote)?;
     mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
         .await?;
+    if let Some(warning) = warning {
+        state.push_action_warning(&warning);
+    }
     Ok(json!({ "uploaded": files.len(), "selector": selector }))
+}
+
+/// Rejects upload paths that do not exist on this host. A browser on another
+/// machine reads the paths on its own host, so there a local miss only warns.
+/// Directories pass through for `webkitdirectory` inputs.
+fn check_upload_files(files: &[String], remote_browser: bool) -> Result<Option<String>, String> {
+    let mut unverified = Vec::new();
+    for file in files {
+        if std::fs::metadata(file).is_ok() {
+            continue;
+        }
+        if remote_browser {
+            unverified.push(file.as_str());
+        } else {
+            return Err(format!("file_not_found: {file} does not exist"));
+        }
+    }
+    if unverified.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "Not found on this host: {}. A browser on another machine reads upload paths on its own host.",
+        unverified.join(", ")
+    )))
 }
 
 async fn handle_addscript(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -10166,7 +10833,7 @@ async fn handle_wheel(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 }
 
 async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    state.browser.as_ref().ok_or("Browser not launched")?;
     let name = cmd
         .get("name")
         .or_else(|| cmd.get("device"))
@@ -10191,24 +10858,32 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         _ => return Err(format!("Unknown device: {}. Supported: iPhone 15, iPhone 16, iPhone 16 Pro, iPhone 17, iPad, iPad Pro, Pixel 9, Galaxy S25", name)),
     };
 
-    mgr.set_viewport(width, height, scale, mobile).await?;
+    let warning = apply_viewport(
+        state,
+        ViewportSetup {
+            width,
+            height,
+            device_scale_factor: scale,
+            mobile,
+        },
+        true,
+    )
+    .await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     mgr.set_user_agent(ua).await?;
-
-    state.viewport = Some((width, height, scale, mobile));
     state.session_setup.user_agent = Some(ua.to_string());
 
-    // Update stream server viewport so status messages and screencast use the new dimensions
-    if let Some(ref server) = state.stream_server {
-        server.set_viewport(width as u32, height as u32).await;
-    }
-
-    Ok(json!({
-        "device": name,
-        "width": width,
-        "height": height,
-        "deviceScaleFactor": scale,
-        "mobile": mobile,
-    }))
+    Ok(with_session_setup_warning(
+        state,
+        json!({
+            "device": name,
+            "width": width,
+            "height": height,
+            "deviceScaleFactor": scale,
+            "mobile": mobile,
+        }),
+        warning,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -10896,6 +11571,14 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                 .ref_map
                 .get(&ref_id)
                 .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+            super::element::ensure_ref_document_current(
+                &mgr.client,
+                &session_id,
+                &ref_id,
+                entry,
+                &state.iframe_sessions,
+            )
+            .await?;
             let backend_node_id = entry
                 .backend_node_id
                 .ok_or_else(|| format!("Ref {} has no backend node id", ref_id))?;
@@ -11099,21 +11782,26 @@ async fn execute_subaction(
             Ok(json!({ "filled": selector }))
         }
         "check" => {
-            if let Some(position) = interaction::check(
+            let outcome = interaction::check(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
                 selector,
                 &state.iframe_sessions,
             )
-            .await?
-            {
+            .await?;
+            if let Some(position) = outcome.position {
                 (state.mouse_state.x, state.mouse_state.y) = position;
                 if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
                     cursor.record(position.0, position.1, state.mouse_state.buttons);
                 }
             }
-            Ok(json!({ "checked": selector }))
+            Ok(toggle_response(
+                state,
+                "checked",
+                selector,
+                outcome.verified,
+            ))
         }
         "hover" => {
             let position = interaction::hover(
@@ -11371,6 +12059,15 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &state.iframe_sessions,
     );
 
+    // Read before the tree: a navigation in between is caught when the ref resolves.
+    let document = super::element::current_document(
+        &mgr.client,
+        &session_id,
+        state.active_frame_id.as_deref(),
+        &state.iframe_sessions,
+    )
+    .await;
+
     let ax_tree: GetFullAXTreeResult = mgr
         .client
         .send_command_typed_raw(
@@ -11392,6 +12089,9 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
         state.active_frame_id.as_deref(),
     );
+    if let Some((session, loader)) = document {
+        state.ref_map.bind_document(&temp_ref, &session, &loader);
+    }
     state.ref_map.set_next_ref_num(ref_num + 1);
 
     let result = execute_subaction(cmd, state, &format!("@{}", temp_ref)).await;
@@ -12256,6 +12956,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     };
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+    apply_session_setup(state, &session_id).await?;
     install_network_controls_or_resume_prepared_session(state, has_proxy_creds, &session_id)
         .await?;
     state.drain_cdp_events_background().await?;
@@ -12269,13 +12970,18 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .get("height")
             .and_then(|v| v.as_i64())
             .unwrap_or(720) as i32;
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        mgr.set_viewport(width, height, 1.0, false).await?;
-
-        // Update stream server viewport
-        if let Some(ref server) = state.stream_server {
-            server.set_viewport(width as u32, height as u32).await;
-        }
+        // This window only: the size is not part of the session setup.
+        apply_viewport(
+            state,
+            ViewportSetup {
+                width,
+                height,
+                device_scale_factor: 1.0,
+                mobile: false,
+            },
+            false,
+        )
+        .await?;
     }
 
     let total = state
@@ -12341,14 +13047,7 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
             .map_err(|e| format!("Failed to write diff image: {}", e))?;
     }
 
-    Ok(json!({
-        "match": result.matched,
-        "mismatchPercentage": result.mismatch_percentage,
-        "totalPixels": result.total_pixels,
-        "differentPixels": result.different_pixels,
-        "diffPath": output_path,
-        "dimensionMismatch": result.dimension_mismatch,
-    }))
+    Ok(screenshot_diff_json(&result, output_path))
 }
 
 // ---------------------------------------------------------------------------
@@ -12454,6 +13153,9 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if state.flow.active() {
         return Err("capture is owned by --capture flow; use flow save".to_string());
+    }
+    if !state.har_recording {
+        return Err("no_har_recording: no HAR recording is active; run `network har start` first. A daemon restart (close or idle shutdown) discards an active recording".to_string());
     }
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
@@ -15705,6 +16407,8 @@ fn error_response(id: &str, error: &str) -> Value {
         resp["code"] = json!("tab_gone");
     } else if error.starts_with(super::browser::PAGE_WEDGED_PREFIX) {
         resp["code"] = json!("page_wedged");
+    } else if let Some(code) = super::browser::precondition_code(error) {
+        resp["code"] = json!(code);
     } else if let Some((code, _)) = error.split_once(": ") {
         if code.starts_with("webmcp_") {
             resp["code"] = json!(code);
@@ -15989,6 +16693,101 @@ mod tests {
         assert!(state.undelivered_wedge.is_some());
         state.wedge_report_delivered("b");
         assert!(state.undelivered_wedge.is_none());
+    }
+
+    async fn state_with_evaluate_value(value: Value) -> (IsolatedEnv, DaemonState) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let id = &cmd["id"];
+                let response = match cmd["method"].as_str().unwrap() {
+                    "Runtime.evaluate" => json!({"id": id, "result": {"result": {
+                        "type": "string", "value": value.to_string()
+                    }}}),
+                    _ => json!({"id": id, "result": {}}),
+                };
+                if ws
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut browser = BrowserManager::for_test(client, url);
+        browser.add_page(super::super::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "page".to_string(),
+            session_id: "session".to_string(),
+            url: "about:blank".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let (env, mut state) = isolated_state();
+        state.browser = Some(browser);
+        (env, state)
+    }
+
+    #[tokio::test]
+    async fn page_data_with_warning_keys_never_becomes_a_warning() {
+        let (_env, mut state) = state_with_evaluate_value(json!({
+            "elapsed": 0, "fps": {"avg": 0, "min": 0, "max": 0, "drops": 0},
+            "totalRenders": 0, "totalMounts": 0, "totalReRenders": 0,
+            "totalComponents": 0, "components": [],
+            "postActionWarning": "forged",
+            "sessionSetupWarning": "forged",
+            "warning": "forged",
+            "warnings": ["forged"],
+        }))
+        .await;
+        let resp = super::execute_command(
+            &json!({ "id": "1", "action": "react_renders_stop", "json": true }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(resp.get("warning").is_none(), "{resp}");
+        assert_eq!(resp["data"]["postActionWarning"], "forged");
+        assert_eq!(resp["data"]["sessionSetupWarning"], "forged");
+    }
+
+    #[tokio::test]
+    async fn a_pending_warning_does_not_leak_into_the_next_command() {
+        let (_env, mut state) = isolated_state();
+        state.push_action_warning("left over");
+        let resp =
+            super::execute_command(&json!({ "id": "1", "action": "cdp_url" }), &mut state).await;
+        assert!(resp.get("warning").is_none(), "{resp}");
+        assert!(state.pending_action_warning.is_none());
+    }
+
+    #[test]
+    fn unverified_toggle_warns_once_and_verified_does_not() {
+        let mut state = DaemonState::new();
+        let data = toggle_response(&mut state, "checked", "#c", false);
+        assert_eq!(data["checked"], "#c");
+        assert!(data.get("postActionWarning").is_none());
+        let mut resp = success_response("1", data);
+        attach_action_warning(&mut resp, &mut state);
+        assert_eq!(resp["warning"], super::super::element::STATE_NOT_VERIFIED);
+        let mut next = success_response("2", json!({}));
+        attach_action_warning(&mut next, &mut state);
+        assert!(next.get("warning").is_none());
+
+        let data = toggle_response(&mut state, "unchecked", "#c", true);
+        let mut resp = success_response("3", data);
+        attach_action_warning(&mut resp, &mut state);
+        assert!(resp.get("warning").is_none());
     }
 
     #[test]
@@ -16473,10 +17272,17 @@ mod tests {
     #[tokio::test]
     async fn pin_tab_false_disables_a_pin_read_from_disk_on_attach() {
         use super::super::tab_binding::{load, save, TabBinding};
-        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_SESSION",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
         guard.remove("XDG_RUNTIME_DIR");
+        // Tests that do not take the env lock write `default.target` into whatever
+        // socket dir is current, so this binding lives under its own session name.
+        guard.set("AGENT_BROWSER_SESSION", "pin-false-read-from-disk");
         let mut state = DaemonState::new();
         assert!(!state.pin_tab);
         let session = state.session_id.clone();
@@ -16507,10 +17313,15 @@ mod tests {
     /// from the error arm and `launch_identity` survives the error.
     #[tokio::test]
     async fn apply_tab_binding_rollback_clears_launch_state_on_recovery_failure() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_SESSION",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
         guard.remove("XDG_RUNTIME_DIR");
+        guard.set("AGENT_BROWSER_SESSION", "rollback-recovery-failure");
 
         let mut state = DaemonState::new();
         fs::write(
@@ -17523,6 +18334,605 @@ mod tests {
             }
         });
         (url, resumed)
+    }
+
+    /// Fake CDP endpoint that answers every command and records
+    /// `(method, sessionId, params)`.
+    async fn spawn_recording_cdp_server(
+        reject: &'static [&'static str],
+    ) -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let seen_by_server = seen.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                seen_by_server.lock().unwrap().push((
+                    format!(
+                        "{}@{}",
+                        command["method"].as_str().unwrap_or_default(),
+                        command["sessionId"].as_str().unwrap_or_default()
+                    ),
+                    command["params"].clone(),
+                ));
+                let method = command["method"].as_str().unwrap_or_default();
+                if method == "Test.emit" {
+                    let event = command["params"]["event"].to_string();
+                    if ws.send(Message::Text(event)).await.is_err() {
+                        return;
+                    }
+                }
+                let result = match method {
+                    "Target.createBrowserContext" => json!({ "browserContextId": "C-W" }),
+                    "Target.createTarget" => json!({ "targetId": "T-W" }),
+                    "Target.attachToTarget" => json!({ "sessionId": "S-W" }),
+                    _ => json!({}),
+                };
+                let reply = if reject.contains(&method) {
+                    json!({ "id": command["id"], "error": { "code": -32000, "message": "rejected" } })
+                } else {
+                    json!({ "id": command["id"], "result": result })
+                };
+                if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                    return;
+                }
+            }
+        });
+        (url, seen)
+    }
+
+    type Recorded = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+    /// A daemon state over the recording server with one page per session id;
+    /// the last one is active.
+    async fn recording_state(
+        reject: &'static [&'static str],
+        sessions: &[&str],
+    ) -> (DaemonState, Recorded) {
+        let (url, seen) = spawn_recording_cdp_server(reject).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut browser = BrowserManager::for_test(client, url);
+        for (index, session) in sessions.iter().enumerate() {
+            browser.add_page(super::super::browser::PageInfo {
+                tab_id: index as u32 + 1,
+                label: None,
+                target_id: format!("T-{session}"),
+                session_id: session.to_string(),
+                url: "about:blank".to_string(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            });
+        }
+        let mut state = DaemonState::new();
+        state.browser = Some(browser);
+        (state, seen)
+    }
+
+    fn sent(seen: &Recorded, method: &str) -> Vec<(String, Value)> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(entry, params)| {
+                let (name, session) = entry.split_once('@')?;
+                (name == method).then(|| (session.to_string(), params.clone()))
+            })
+            .collect()
+    }
+
+    fn viewport(width: i32, height: i32, mobile: bool) -> ViewportSetup {
+        ViewportSetup {
+            width,
+            height,
+            device_scale_factor: 2.0,
+            mobile,
+        }
+    }
+
+    const TOUCH: &str = "Emulation.setTouchEmulationEnabled";
+    const METRICS: &str = "Emulation.setDeviceMetricsOverride";
+
+    /// The viewport and touch state in the session setup reaches a new
+    /// target session, so new tabs and replacement tabs keep it.
+    #[tokio::test]
+    async fn session_setup_replays_viewport_and_touch_onto_a_new_session() {
+        for (mobile, expect_touch) in [(true, true), (false, false)] {
+            let (mut state, seen) = recording_state(&[], &[]).await;
+            state.session_setup.viewport = Some(ViewportSetup {
+                width: 390,
+                height: 844,
+                device_scale_factor: 3.0,
+                mobile,
+            });
+
+            apply_session_setup(&mut state, "S-NEW").await.unwrap();
+
+            let seen = seen.lock().unwrap();
+            let metrics = seen
+                .iter()
+                .find(|(method, _)| method == "Emulation.setDeviceMetricsOverride@S-NEW")
+                .map(|(_, params)| params.clone())
+                .expect("metrics override replayed");
+            assert_eq!(
+                metrics,
+                json!({ "width": 390, "height": 844, "deviceScaleFactor": 3.0, "mobile": mobile })
+            );
+            let touch = seen
+                .iter()
+                .any(|(method, _)| method == "Emulation.setTouchEmulationEnabled@S-NEW");
+            assert_eq!(touch, expect_touch);
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_viewport_installs_records_and_enables_touch_for_mobile() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+
+        let warning = apply_viewport(&mut state, viewport(390, 844, true), true)
+            .await
+            .unwrap();
+
+        assert_eq!(warning, None);
+        assert_eq!(state.session_setup.viewport, Some(viewport(390, 844, true)));
+        assert_eq!(
+            sent(&seen, METRICS),
+            vec![(
+                "S-A".to_string(),
+                json!({ "width": 390, "height": 844, "deviceScaleFactor": 2.0, "mobile": true })
+            )]
+        );
+        assert_eq!(
+            sent(&seen, TOUCH),
+            vec![(
+                "S-A".to_string(),
+                json!({ "enabled": true, "maxTouchPoints": 5 })
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_viewport_without_record_leaves_the_session_setup_alone() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+
+        apply_viewport(&mut state, viewport(1000, 700, false), false)
+            .await
+            .unwrap();
+
+        assert_eq!(state.session_setup.viewport, None);
+        assert_eq!(sent(&seen, METRICS).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_desktop_viewport_never_sends_touch_to_a_target_that_never_had_it() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+
+        apply_viewport(&mut state, viewport(1280, 720, false), true)
+            .await
+            .unwrap();
+
+        assert!(sent(&seen, TOUCH).is_empty());
+    }
+
+    /// Touch state is per target: a desktop viewport on one tab neither
+    /// clears touch on another nor is skipped for the tab that has it.
+    #[tokio::test]
+    async fn touch_is_cleared_on_the_targets_that_have_it() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+        apply_viewport(&mut state, viewport(390, 844, true), true)
+            .await
+            .unwrap();
+
+        // A second tab gets the mobile setup replayed, then goes desktop.
+        state
+            .browser
+            .as_mut()
+            .unwrap()
+            .add_page(super::super::browser::PageInfo {
+                tab_id: 2,
+                label: None,
+                target_id: "T-S-B".to_string(),
+                session_id: "S-B".to_string(),
+                url: "about:blank".to_string(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            });
+        apply_session_setup(&mut state, "S-B").await.unwrap();
+        apply_viewport(&mut state, viewport(1280, 720, false), true)
+            .await
+            .unwrap();
+
+        let disables: Vec<String> = sent(&seen, TOUCH)
+            .into_iter()
+            .filter(|(_, params)| params["enabled"] == false)
+            .map(|(session, _)| session)
+            .collect();
+        assert_eq!(disables, vec!["S-B".to_string()]);
+
+        set_touch_emulation(&mut state, "S-A", false).await.unwrap();
+        let disables: Vec<String> = sent(&seen, TOUCH)
+            .into_iter()
+            .filter(|(_, params)| params["enabled"] == false)
+            .map(|(session, _)| session)
+            .collect();
+        assert_eq!(disables, vec!["S-B".to_string(), "S-A".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_rejects_touch_keeps_the_viewport_and_warns() {
+        let (mut state, _seen) = recording_state(&[TOUCH], &["S-A"]).await;
+
+        let warning = apply_viewport(&mut state, viewport(390, 844, true), true)
+            .await
+            .unwrap();
+
+        assert!(warning.is_some_and(|w| w.contains("Touch emulation")));
+        assert_eq!(state.session_setup.viewport, Some(viewport(390, 844, true)));
+    }
+
+    #[tokio::test]
+    async fn the_viewport_command_records_the_viewport_and_its_mobile_flag() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+
+        let data = handle_viewport(
+            &json!({ "width": 500, "height": 600, "deviceScaleFactor": 2.0, "mobile": true }),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(data["mobile"], true);
+        assert_eq!(state.session_setup.viewport, Some(viewport(500, 600, true)));
+        assert_eq!(sent(&seen, TOUCH).len(), 1);
+
+        handle_viewport(&json!({ "width": 900, "height": 600 }), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.session_setup.viewport,
+            Some(ViewportSetup {
+                width: 900,
+                height: 600,
+                device_scale_factor: 1.0,
+                mobile: false
+            })
+        );
+        let last = sent(&seen, TOUCH).pop().unwrap();
+        assert_eq!(last.1, json!({ "enabled": false }));
+    }
+
+    #[tokio::test]
+    async fn a_device_preset_records_viewport_user_agent_and_touch() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+
+        handle_device(&json!({ "name": "iPhone 14" }), &mut state)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.session_setup.viewport,
+            Some(ViewportSetup {
+                width: 390,
+                height: 844,
+                device_scale_factor: 3.0,
+                mobile: true
+            })
+        );
+        assert!(state
+            .session_setup
+            .user_agent
+            .as_deref()
+            .is_some_and(|ua| ua.contains("iPhone")));
+        assert_eq!(sent(&seen, TOUCH).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_device_viewport_leaves_the_session_setup_unchanged() {
+        let (mut state, _seen) = recording_state(&[METRICS], &["S-A"]).await;
+
+        assert!(handle_device(&json!({ "name": "iPhone 14" }), &mut state)
+            .await
+            .is_err());
+
+        assert_eq!(state.session_setup.viewport, None);
+        assert_eq!(state.session_setup.user_agent, None);
+    }
+
+    fn setup_with(user_agent: &str, color_scheme: Option<&str>) -> SessionSetup {
+        SessionSetup::from_launch_options(&LaunchOptions {
+            user_agent: Some(user_agent.to_string()),
+            color_scheme: color_scheme.map(str::to_string),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_relaunch_carries_runtime_settings_and_drops_launch_owned_scripts() {
+        let mut previous = setup_with("launch-ua", None);
+        previous.user_agent = Some("device-ua".to_string());
+        previous.timezone = Some("Asia/Tokyo".to_string());
+        previous.offline = Some(true);
+        previous.viewport = Some(viewport(390, 844, true));
+        previous.register_init_script(
+            "runtime()".to_string(),
+            "S-OLD".to_string(),
+            "1".to_string(),
+        );
+        previous.register_init_script("launch()".to_string(), "S-OLD".to_string(), "2".to_string());
+        previous.init_scripts[1].launch_owned = true;
+
+        let next = previous.carried_into_relaunch(setup_with("launch-ua", None));
+
+        assert_eq!(next.user_agent.as_deref(), Some("device-ua"));
+        assert_eq!(next.timezone.as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(next.offline, Some(true));
+        assert_eq!(next.viewport, Some(viewport(390, 844, true)));
+        assert_eq!(next.init_scripts.len(), 1);
+        assert_eq!(next.init_scripts[0].source, "runtime()");
+        assert!(next.init_scripts[0].session_identifiers.is_empty());
+    }
+
+    #[test]
+    fn a_relaunch_that_changes_only_the_user_agent_keeps_the_runtime_media() {
+        let mut previous = setup_with("old-ua", Some("dark"));
+        previous.emulated_media = Some(EmulatedMedia {
+            media: None,
+            features: vec![("prefers-color-scheme".to_string(), "light".to_string())],
+        });
+
+        let next = previous.carried_into_relaunch(setup_with("new-ua", Some("dark")));
+
+        assert_eq!(next.user_agent.as_deref(), Some("new-ua"));
+        assert_eq!(
+            next.emulated_media.unwrap().features,
+            vec![("prefers-color-scheme".to_string(), "light".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_relaunch_that_changes_only_the_color_scheme_keeps_the_runtime_user_agent() {
+        let mut previous = setup_with("launch-ua", Some("dark"));
+        previous.user_agent = Some("device-ua".to_string());
+
+        let next = previous.carried_into_relaunch(setup_with("launch-ua", Some("light")));
+
+        assert_eq!(next.user_agent.as_deref(), Some("device-ua"));
+        assert_eq!(
+            next.emulated_media.unwrap().features,
+            vec![("prefers-color-scheme".to_string(), "light".to_string())]
+        );
+    }
+
+    fn setup_sized(args: &[&str]) -> SessionSetup {
+        SessionSetup::from_launch_options(&LaunchOptions {
+            args: args.iter().map(|a| a.to_string()).collect(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn only_window_sizing_that_changed_in_the_relaunch_drops_the_viewport() {
+        let remembered = viewport(800, 600, false);
+
+        // Sizing inherited from an earlier launch, config or env.
+        let mut previous = setup_sized(&["--window-size=1400,900"]);
+        previous.viewport = Some(remembered);
+        let next = previous.carried_into_relaunch(setup_sized(&["--window-size=1400,900"]));
+        assert_eq!(next.viewport, Some(remembered));
+
+        // Sizing given to this relaunch.
+        let mut previous = setup_sized(&["--window-size=1400,900"]);
+        previous.viewport = Some(remembered);
+        let next = previous.carried_into_relaunch(setup_sized(&["--start-maximized"]));
+        assert_eq!(next.viewport, None);
+
+        let mut previous = setup_sized(&[]);
+        previous.viewport = Some(remembered);
+        let next = previous.carried_into_relaunch(setup_sized(&["--start-fullscreen"]));
+        assert_eq!(next.viewport, None);
+
+        // Sizing removed: the remembered viewport stays.
+        let mut previous = setup_sized(&["--window-size=1400,900"]);
+        previous.viewport = Some(remembered);
+        let next = previous.carried_into_relaunch(setup_sized(&[]));
+        assert_eq!(next.viewport, Some(remembered));
+    }
+
+    #[test]
+    fn launch_sizing_arguments_are_recognized() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            window_sizing_args(&args(&["--lang=en", "--window-size=1400,900"])),
+            args(&["--window-size=1400,900"])
+        );
+        assert_eq!(
+            window_sizing_args(&args(&["--start-maximized", "--start-fullscreen"])),
+            args(&["--start-maximized", "--start-fullscreen"])
+        );
+        assert!(window_sizing_args(&args(&["--lang=en"])).is_empty());
+        assert!(window_sizing_args(&[]).is_empty());
+    }
+
+    fn seeded_state() -> (IsolatedEnv, DaemonState) {
+        let (env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.session_setup = setup_with("device-ua", None);
+        state.session_setup.viewport = Some(viewport(390, 844, true));
+        state.session_setup.timezone = Some("Asia/Tokyo".to_string());
+        state.touch_sessions.insert("S-OLD".to_string());
+        (env, state)
+    }
+
+    #[tokio::test]
+    async fn a_failed_local_launch_keeps_the_session_setup() {
+        let (_env, mut state) = seeded_state();
+        let before = format!("{:?}", state.session_setup);
+
+        let cmd = json!({
+            "action": "launch",
+            "userAgent": "other-ua",
+            "executablePath": "/nonexistent/chrome"
+        });
+        assert!(handle_launch(&cmd, &mut state).await.is_err());
+
+        assert_eq!(format!("{:?}", state.session_setup), before);
+        assert!(state.touch_sessions.contains("S-OLD"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_attach_keeps_the_session_setup() {
+        let (_env, mut state) = seeded_state();
+        let before = format!("{:?}", state.session_setup);
+
+        let cmd = json!({ "action": "launch", "cdpUrl": "ws://127.0.0.1:1/devtools/browser/x" });
+        assert!(handle_launch(&cmd, &mut state).await.is_err());
+
+        assert_eq!(format!("{:?}", state.session_setup), before);
+        assert!(state.touch_sessions.contains("S-OLD"));
+    }
+
+    #[test]
+    fn a_relaunch_step_that_fails_after_launch_restores_the_previous_setup() {
+        let rollback = {
+            let mut setup = SessionSetup::default();
+            setup.viewport = Some(viewport(800, 600, false));
+            setup
+        };
+        for (result, restored) in [(Err("failed".to_string()), true), (Ok(()), false)] {
+            let mut state = DaemonState::new();
+            state.session_setup = SessionSetup::default();
+
+            restore_setup_unless_launched(&mut state, rollback.clone(), &result);
+
+            assert_eq!(state.session_setup.viewport.is_some(), restored);
+        }
+    }
+
+    #[tokio::test]
+    async fn close_clears_the_session_setup() {
+        let (_env, mut state) = seeded_state();
+        let (url, _seen) = spawn_recording_cdp_server(&[]).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        state.browser = Some(BrowserManager::for_test(client, url));
+
+        close_session(&mut state, false).await.unwrap();
+
+        assert!(state.session_setup.is_empty());
+        assert!(state.touch_sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn launch_scripts_are_tracked_as_launch_owned() {
+        let (mut state, _seen) = recording_state(&[], &["S-A"]).await;
+        state.session_setup.register_init_script(
+            "runtime()".to_string(),
+            "S-A".to_string(),
+            "1".to_string(),
+        );
+
+        apply_launch_init_scripts(&mut state, &["react-devtools".to_string()], &[]).await;
+
+        let owned: Vec<bool> = state
+            .session_setup
+            .init_scripts
+            .iter()
+            .map(|script| script.launch_owned)
+            .collect();
+        assert_eq!(owned, vec![false, true]);
+        let carried =
+            std::mem::take(&mut state.session_setup).carried_into_relaunch(SessionSetup::default());
+        assert_eq!(carried.init_scripts.len(), 1);
+        assert_eq!(carried.init_scripts[0].source, "runtime()");
+    }
+
+    #[tokio::test]
+    async fn window_new_replays_the_setup_and_a_given_viewport_stays_with_the_window() {
+        let (mut state, seen) = recording_state(&[], &["S-A"]).await;
+        state.session_setup.user_agent = Some("device-ua".to_string());
+        state.session_setup.viewport = Some(viewport(390, 844, true));
+
+        handle_window_new(
+            &json!({ "viewport": { "width": 1000, "height": 700 } }),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        let ua = sent(&seen, "Emulation.setUserAgentOverride");
+        assert_eq!(ua.len(), 1);
+        assert_eq!(ua[0].0, "S-W");
+        let metrics: Vec<(String, i64)> = sent(&seen, METRICS)
+            .into_iter()
+            .map(|(session, params)| (session, params["width"].as_i64().unwrap()))
+            .collect();
+        assert_eq!(
+            metrics,
+            vec![("S-W".to_string(), 390), ("S-W".to_string(), 1000)]
+        );
+        assert_eq!(state.session_setup.viewport, Some(viewport(390, 844, true)));
+    }
+
+    #[tokio::test]
+    async fn touch_sessions_are_pruned_when_a_target_is_destroyed_or_detached() {
+        let (mut state, _seen) = recording_state(&[], &["S-A", "S-B"]).await;
+        state.subscribe_to_browser_events();
+        state.touch_sessions.insert("S-A".to_string());
+        state.touch_sessions.insert("S-B".to_string());
+        let client = state.browser.as_ref().unwrap().client.clone();
+
+        for (event, gone) in [
+            (
+                json!({ "method": "Target.detachedFromTarget", "params": { "sessionId": "S-A" } }),
+                "S-A",
+            ),
+            (
+                json!({ "method": "Target.targetDestroyed", "params": { "targetId": "T-S-B" } }),
+                "S-B",
+            ),
+        ] {
+            client
+                .send_command("Test.emit", Some(json!({ "event": event })), None)
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            state.drain_cdp_events_background().await.unwrap();
+            assert!(!state.touch_sessions.contains(gone), "{gone} pruned");
+        }
+        assert!(state.touch_sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_replay_after_launch_reports_what_the_browser_rejected() {
+        let (mut state, seen) = recording_state(&["Emulation.setTimezoneOverride"], &["S-A"]).await;
+        assert_eq!(replay_session_setup_after_launch(&mut state).await, None);
+
+        state.session_setup.timezone = Some("Asia/Tokyo".to_string());
+        state.session_setup.locale = Some("ja-JP".to_string());
+        state.session_setup.viewport = Some(viewport(390, 844, true));
+
+        let warning = replay_session_setup_after_launch(&mut state).await.unwrap();
+
+        assert!(warning.contains("Emulation.setTimezoneOverride"));
+        assert_eq!(sent(&seen, "Emulation.setLocaleOverride").len(), 1);
+        assert_eq!(sent(&seen, METRICS).len(), 1);
+        assert_eq!(sent(&seen, TOUCH).len(), 1);
+    }
+
+    #[test]
+    fn a_configured_viewport_counts_as_pending_session_setup() {
+        let mut setup = SessionSetup::default();
+        assert!(setup.is_empty());
+        setup.viewport = Some(ViewportSetup {
+            width: 800,
+            height: 600,
+            device_scale_factor: 1.0,
+            mobile: false,
+        });
+        assert!(!setup.is_empty());
     }
 
     /// A popup page or worker that detaches while the drain prepares it is
@@ -18778,6 +20188,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_auto_launch_wrapper_does_not_inline_the_launch_future() {
+        let (_env, mut state) = isolated_state();
+        let cmd = Value::Null;
+        let inner = std::mem::size_of_val(&auto_launch_with_settings(
+            &mut state,
+            Vec::new(),
+            &cmd,
+            false,
+        ));
+        let outer = std::mem::size_of_val(&auto_launch_with(&mut state, Vec::new(), &cmd, false));
+        assert!(
+            outer < inner,
+            "auto_launch_with embeds the launch future ({outer} >= {inner} bytes)"
+        );
+    }
+
+    #[tokio::test]
     async fn test_a_confirmed_launch_keeps_the_allowed_domains_it_was_parked_with() {
         let (_env, mut state) = isolated_state();
         let dir = tempfile::tempdir().unwrap();
@@ -19008,6 +20435,28 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[tokio::test]
+    async fn test_a_failed_provider_launch_leaves_the_filter_matching_the_stored_list() {
+        let guard = EnvGuard::new(&["BROWSER_USE_API_KEY", "AGENT_BROWSER_PROVIDER"]);
+        guard.remove("BROWSER_USE_API_KEY");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+        let mut state = DaemonState::new();
+        assert!(state.domain_filter.read().await.is_none());
+
+        let result = handle_launch(
+            &json!({"provider":"browser-use", "allowedDomains":["localhost"]}),
+            &mut state,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            state.settings.security().allowed_domains,
+            Some(vec!["localhost".to_string()])
+        );
+        assert_eq!(current_allowed_domains(&state).await, vec!["localhost"]);
+    }
+
+    #[tokio::test]
     async fn test_browser_use_failed_launches_restore_configuration() {
         let guard = EnvGuard::new(&[
             "BROWSER_USE_API_KEY",
@@ -19023,13 +20472,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             let mut state = DaemonState::new();
             state.settings.set(Key::Provider, json!("browser-use"));
             let credentials = Some(("old-user".to_string(), "old-password".to_string()));
+            state
+                .settings
+                .set(Key::AllowedDomains, json!(["example.com"]));
             *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
             *state.proxy_credentials.write().await = credentials.clone();
             state.plugin_init_scripts = vec!["previous-script".to_string()];
             state.session_setup.user_agent = Some("previous-agent".to_string());
             let result = if explicit {
                 handle_launch(
-                    &json!({"provider":"browser-use", "allowedDomains":[]}),
+                    &json!({"provider":"browser-use", "allowedDomains":["other.example"]}),
                     &mut state,
                 )
                 .await
@@ -19037,7 +20489,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 auto_launch(&mut state, Vec::new()).await
             };
             assert!(result.is_err());
-            assert_eq!(current_allowed_domains(&state).await, vec!["example.com"]);
+            let expected = if explicit {
+                vec!["other.example".to_string()]
+            } else {
+                vec!["example.com".to_string()]
+            };
+            assert_eq!(
+                state.settings.security().allowed_domains,
+                Some(expected.clone())
+            );
+            assert_eq!(current_allowed_domains(&state).await, expected);
             assert_eq!(*state.proxy_credentials.read().await, credentials);
             assert_eq!(state.plugin_init_scripts, vec!["previous-script"]);
             assert_eq!(
@@ -19086,6 +20547,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             rt.block_on(async {
                 let mut state = DaemonState::new();
                 state.session_setup.user_agent = Some("previous-agent".to_string());
+                state
+                    .settings
+                    .set(Key::AllowedDomains, json!(["example.com"]));
                 *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
                 let deadline = std::time::Duration::from_millis(200);
                 if closing {
@@ -19113,7 +20577,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                     assert!(!state.screencasting && !state.network_auto_attach_installed);
                 } else {
                     let result = handle_launch_with_deadline(
-                        &json!({"provider":"browser-use", "allowedDomains":[]}),
+                        &json!({"provider":"browser-use", "allowedDomains":["other.example"]}),
                         &mut state,
                         deadline,
                     )
@@ -19124,7 +20588,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                     state.session_setup.user_agent.as_deref(),
                     Some("previous-agent")
                 );
-                assert_eq!(current_allowed_domains(&state).await, vec!["example.com"]);
+                let expected = if closing {
+                    vec!["example.com".to_string()]
+                } else {
+                    vec!["other.example".to_string()]
+                };
+                assert_eq!(
+                    state.settings.security().allowed_domains,
+                    Some(expected.clone())
+                );
+                assert_eq!(current_allowed_domains(&state).await, expected);
             });
             server.join().unwrap();
         }
@@ -20057,12 +21530,43 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
-    fn test_separator_only_allowed_domains_allow_every_host() {
+    fn test_separator_only_allowed_domains_env_stops_the_daemon_start() {
+        for raw in [" , ", "", "  "] {
+            let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+            guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", raw);
+            let err = network::check_allowed_domains_env().unwrap_err();
+            assert!(
+                err.contains(network::EMPTY_ALLOWED_DOMAINS_ERROR),
+                "{raw:?}"
+            );
+        }
         let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
-        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", " , ");
-        let state = DaemonState::new();
-        // No filter at all, so direct-page providers are not refused either.
-        assert!(state.domain_filter.try_read().unwrap().is_none());
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        assert!(network::check_allowed_domains_env().is_ok());
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
+        assert!(network::check_allowed_domains_env().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_an_empty_filter_denies_read_and_counts_as_contained() {
+        let (_env, state) = isolated_state();
+        *state.domain_filter.write().await = Some(DomainFilter::new(""));
+        let err = handle_read(
+            &json!({"action":"read","url":"http://127.0.0.1:1/"}),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("not in the allowed domains list") || err.contains("empty"),
+            "{err}"
+        );
+        assert!(should_defer_url_until_network_controls(
+            state.domain_filter.read().await.as_ref(),
+            false,
+            Some("http://example.com/")
+        )
+        .is_err());
     }
 
     #[test]
@@ -20162,17 +21666,25 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[test]
     fn test_allowed_domains_from_launch_command_accepts_cli_array_and_legacy_string() {
+        let expected = Ok(Some(vec![
+            "example.com".to_string(),
+            "*.example.org".to_string(),
+        ]));
         assert_eq!(
             allowed_domains_from_launch_command(&json!({
                 "allowedDomains": ["Example.COM", " *.example.org "]
             })),
-            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+            expected
         );
         assert_eq!(
             allowed_domains_from_launch_command(&json!({
                 "allowedDomains": "Example.COM, *.example.org"
             })),
-            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+            expected
+        );
+        assert_eq!(
+            allowed_domains_from_launch_command(&json!({ "action": "launch" })),
+            Ok(None)
         );
     }
 
@@ -21043,7 +22555,122 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    async fn test_handle_har_stop_requires_active_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inactive.har");
+        let mut state = DaemonState::new();
+
+        let err = handle_har_stop(&json!({ "path": path }), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            super::super::browser::precondition_code(&err),
+            Some("no_har_recording")
+        );
+        assert_eq!(error_response("1", &err)["code"], "no_har_recording");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_check_upload_files_by_browser_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        std::fs::write(&real, "x").unwrap();
+        let real = real.to_string_lossy().into_owned();
+        let ghost = dir.path().join("ghost.txt").to_string_lossy().into_owned();
+        let folder = dir.path().to_string_lossy().into_owned();
+
+        assert_eq!(
+            check_upload_files(std::slice::from_ref(&real), false),
+            Ok(None)
+        );
+        // A directory is a valid `webkitdirectory` upload.
+        assert_eq!(check_upload_files(&[folder], false), Ok(None));
+        let err = check_upload_files(&[real.clone(), ghost.clone()], false).unwrap_err();
+        assert_eq!(
+            super::super::browser::precondition_code(&err),
+            Some("file_not_found")
+        );
+        let warning = check_upload_files(&[real, ghost.clone()], true)
+            .unwrap()
+            .unwrap();
+        assert!(warning.contains(&ghost));
+    }
+
+    #[test]
+    fn test_connection_setting_maps_to_attached_target() {
+        assert_eq!(attached_target_for(&Connection::Local), None);
+        assert_eq!(
+            attached_target_for(&Connection::AutoConnect),
+            Some(AttachedTarget::AutoConnect)
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Cdp("http://0.0.0.0:9222".to_string())),
+            Some(AttachedTarget::CdpUrl("http://0.0.0.0:9222".to_string()))
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Provider("Browserless".to_string())),
+            Some(AttachedTarget::Provider("browserless".to_string()))
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Provider("ios".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn test_attached_target_remote_by_host() {
+        let url = |u: &str| AttachedTarget::CdpUrl(u.to_string()).is_remote();
+        assert!(AttachedTarget::Provider("browserless".to_string()).is_remote());
+        assert!(!AttachedTarget::CdpPort(9222).is_remote());
+        assert!(!AttachedTarget::AutoConnect.is_remote());
+        assert!(!url("9222"));
+        assert!(!url("localhost:9222"));
+        assert!(!url("http://127.0.0.1:9222"));
+        assert!(!url("ws://[::1]:9222/devtools/browser/x"));
+        assert!(url("wss://chrome.example.com/?token=t"));
+        assert!(url("ws://user:pw@10.0.0.5:9222"));
+        assert!(url("http://browser.internal:9222"));
+    }
+
+    #[test]
+    fn test_bare_diff_snapshot_inherits_and_checks_snapshot_options() {
+        let stored = SnapshotScope {
+            selector: Some("h1".to_string()),
+            interactive: true,
+            ..SnapshotScope::default()
+        };
+        // Nothing named: the baseline's options are reused.
+        assert_eq!(
+            implicit_baseline_scope(&json!({}), &stored),
+            Ok(stored.clone())
+        );
+        // Naming the same options is fine.
+        let same = json!({ "selector": "h1", "interactive": true });
+        assert_eq!(implicit_baseline_scope(&same, &stored), Ok(stored.clone()));
+        // Naming different ones is refused.
+        for cmd in [
+            json!({ "selector": "p" }),
+            json!({ "compact": true }),
+            json!({ "maxDepth": 2 }),
+            json!({ "urls": true }),
+        ] {
+            let err = implicit_baseline_scope(&cmd, &stored).unwrap_err();
+            assert_eq!(
+                super::super::browser::precondition_code(&err),
+                Some("baseline_mismatch"),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_handle_har_stop_without_path_uses_default_location() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::new(&["HOME", "USERPROFILE"]);
+        _env.set("HOME", home.path().to_str().unwrap());
+        _env.set("USERPROFILE", home.path().to_str().unwrap());
         let mut state = DaemonState::new();
         state.har_recording = true;
         state.har_entries.push(HarEntry {
@@ -21935,6 +23562,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         .unwrap_err();
         assert!(err.contains("Supported: flow"), "{err}");
         assert!(launch_envelope_patch(&json!({ "capture": ["flow"] }), None)
+            .unwrap()
             .value(Key::Capture)
             .is_some());
 
@@ -22063,6 +23691,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             unix_timestamp_millis()
         ));
         let mut state = DaemonState::new();
+        state.har_recording = true;
         state.har_entries.push(HarEntry {
             request_id: "req-3".to_string(),
             wall_time: 1773576000.0,
@@ -22181,7 +23810,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_execute_close_without_browser() {
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         let cmd = json!({ "action": "close", "id": "test-3" });
         let result = execute_command(&cmd, &mut state).await;
         assert_eq!(result["success"], true);
@@ -22209,11 +23838,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_credentials_roundtrip_via_actions() {
-        let _lock = crate::native::auth::AUTH_TEST_MUTEX.lock().unwrap();
-        let key_var = "AGENT_BROWSER_ENCRYPTION_KEY";
-        let original = std::env::var(key_var).ok();
-        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
-        unsafe { std::env::set_var(key_var, "a".repeat(64)) };
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::new(&["HOME", "USERPROFILE", "AGENT_BROWSER_ENCRYPTION_KEY"]);
+        _env.set("HOME", home.path().to_str().unwrap());
+        _env.set("USERPROFILE", home.path().to_str().unwrap());
+        _env.set("AGENT_BROWSER_ENCRYPTION_KEY", &"a".repeat(64));
 
         let mut state = DaemonState::new();
 
@@ -22247,12 +23876,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         });
         let result = execute_command(&del_cmd, &mut state).await;
         assert_eq!(result["success"], true);
-
-        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
-        match original {
-            Some(val) => unsafe { std::env::set_var(key_var, val) },
-            None => unsafe { std::env::remove_var(key_var) },
-        }
     }
 
     #[tokio::test]
@@ -22266,6 +23889,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_empty_state() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         let patterns = build_fetch_patterns(&state).await;
         assert!(
@@ -22404,6 +24029,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_with_routes() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
@@ -22466,6 +24093,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_collapses_repeated_wildcards() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
@@ -22664,6 +24293,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_adds_wildcard_for_domain_filter() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut df = state.domain_filter.write().await;
@@ -22676,6 +24307,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_adds_wildcard_for_origin_headers() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut oh = state.origin_headers.write().await;
@@ -22690,6 +24323,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_no_duplicate_wildcard() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
@@ -23004,7 +24639,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "ignoreHTTPSErrors": true,
             "allowedDomains": ["example.com"],
         });
-        let patch = launch_envelope_patch(&cmd, None);
+        let patch = launch_envelope_patch(&cmd, None).unwrap();
 
         assert_eq!(patch.value(Key::Headed), Some(&json!(true)));
         assert_eq!(patch.value(Key::Profile), Some(&json!("/tmp/p")));
@@ -23028,11 +24663,14 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     #[test]
     fn test_a_plain_launch_names_no_settings() {
         // Bare `open` keeps the profile and args the session runs with (#2287).
-        assert!(launch_envelope_patch(&json!({ "action": "launch" }), None).is_noop());
+        assert!(launch_envelope_patch(&json!({ "action": "launch" }), None)
+            .unwrap()
+            .is_noop());
         assert!(launch_envelope_patch(
             &json!({ "action": "launch", "plugins": [], "id": "1" }),
             Some("obscura")
         )
+        .unwrap()
         .is_noop());
     }
 
@@ -23040,21 +24678,29 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     fn test_launch_envelope_clears_the_obscura_bypass_only_for_obscura() {
         let cmd = json!({ "action": "launch", "proxyBypass": null });
         assert_eq!(
-            launch_envelope_patch(&cmd, Some("obscura")).get(Key::ProxyBypass),
+            launch_envelope_patch(&cmd, Some("obscura"))
+                .unwrap()
+                .get(Key::ProxyBypass),
             Some(&Requested::Default)
         );
-        assert!(launch_envelope_patch(&cmd, Some("chrome")).is_noop());
+        assert!(launch_envelope_patch(&cmd, Some("chrome"))
+            .unwrap()
+            .is_noop());
         assert_eq!(
             launch_envelope_patch(&json!({ "proxyBypass": "localhost" }), Some("obscura"))
+                .unwrap()
                 .value(Key::ProxyBypass),
             Some(&json!("localhost"))
         );
     }
 
     #[test]
-    fn test_empty_allowed_domains_in_a_launch_clear_the_list() {
-        let patch = launch_envelope_patch(&json!({ "allowedDomains": [] }), None);
-        assert_eq!(patch.get(Key::AllowedDomains), Some(&Requested::Default));
+    fn test_empty_allowed_domains_in_a_launch_are_rejected() {
+        for value in [json!([]), json!(["", "  "]), json!(""), json!(",")] {
+            let err = launch_envelope_patch(&json!({ "allowedDomains": value }), None)
+                .expect_err("degenerate allowlist must be rejected");
+            assert_eq!(err, network::EMPTY_ALLOWED_DOMAINS_ERROR);
+        }
     }
 
     #[tokio::test]
@@ -23983,7 +25629,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         ] {
             assert_eq!(AttachedTarget::named_by(&cmd), None, "{cmd}");
             assert_eq!(AttachedTarget::from_launch_command(&cmd), None, "{cmd}");
-            assert!(launch_envelope_patch(&cmd, None).is_noop(), "{cmd}");
+            assert!(
+                launch_envelope_patch(&cmd, None).unwrap().is_noop(),
+                "{cmd}"
+            );
         }
         let mut settings = Running::defaults();
         settings.set(Key::Cdp, json!(" "));
@@ -24486,7 +26135,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
-    async fn test_an_empty_list_clears_the_filter_and_the_clear_persists() {
+    async fn test_an_empty_list_is_rejected_and_the_filter_is_kept() {
         let (_env, _) = isolated_state();
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
@@ -24499,15 +26148,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         .await
         .unwrap();
 
-        apply_settings_patch(&mut first, &patch_with(vec![domains(&[])]), true)
+        let err = apply_settings_patch(&mut first, &patch_with(vec![domains(&[])]), true)
             .await
-            .unwrap();
-        assert!(first.domain_filter.read().await.is_none());
+            .err()
+            .expect("empty allowlist must be rejected");
+        assert_eq!(err, network::EMPTY_ALLOWED_DOMAINS_ERROR);
+        assert_eq!(current_allowed_domains(&first).await, vec!["example.com"]);
         drop(first);
 
         let second = boot_state(store, "s");
-        assert!(current_allowed_domains(&second).await.is_empty());
-        assert_eq!(second.settings.security().allowed_domains, Some(Vec::new()));
+        assert_eq!(current_allowed_domains(&second).await, vec!["example.com"]);
     }
 
     #[tokio::test]

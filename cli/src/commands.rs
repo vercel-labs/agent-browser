@@ -359,6 +359,27 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
     Ok(headers)
 }
 
+/// Resolves a local file path argument against this process's working
+/// directory, expanding a leading `~`. The daemon runs elsewhere, so a relative
+/// path sent as-is would resolve there.
+fn absolute_path_arg(path: &str) -> String {
+    let expanded = match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', std::path::MAIN_SEPARATOR]) => {
+            match std::env::home_dir() {
+                Some(home) => match rest.trim_start_matches(['/', std::path::MAIN_SEPARATOR]) {
+                    "" => home,
+                    tail => home.join(tail),
+                },
+                None => std::path::PathBuf::from(path),
+            }
+        }
+        _ => std::path::PathBuf::from(path),
+    };
+    std::path::absolute(&expanded)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
 /// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
@@ -368,6 +389,47 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 /// Parses a batch item and rejects global flags that belong on the outer invocation.
 pub fn parse_batch_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     parse_command_with_batch_scope(args, flags, true)
+}
+
+/// Number of words that precede the operands of a command whose parser reads
+/// them directly, or `None` for commands that handle `--` themselves.
+fn operands_after(cmd: &str, rest: &[&str]) -> Option<usize> {
+    match cmd {
+        "select" | "upload" | "press" | "key" | "keydown" | "keyup" | "removeinitscript"
+        | "confirm" | "deny" => Some(0),
+        "keyboard" | "set" | "clipboard" | "auth" | "webmcp" | "plugin" | "plugins" | "dialog" => {
+            Some(1)
+        }
+        "tab" => Some(usize::from(matches!(
+            rest.first(),
+            Some(&("close" | "keep"))
+        ))),
+        _ => None,
+    }
+}
+
+/// Removes the `--` marker that precedes operands, so the values after it stay
+/// data. A lone `--` is itself the operand and is kept.
+fn drop_end_of_options<'a>(cmd: &str, mut rest: Vec<&'a str>) -> Vec<&'a str> {
+    if let Some(at) = operands_after(cmd, &rest) {
+        if rest.get(at) == Some(&"--") && rest.len() > at + 1 {
+            rest.remove(at);
+        }
+    }
+    rest
+}
+
+/// Same as [`drop_end_of_options`] for commands dispatched before parsing.
+pub fn strip_operand_marker(args: &mut Vec<String>) {
+    let Some(cmd) = args.first().cloned() else {
+        return;
+    };
+    let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+    if let Some(at) = operands_after(&cmd, &rest) {
+        if args.get(at + 1).map(String::as_str) == Some("--") && args.len() > at + 2 {
+            args.remove(at + 1);
+        }
+    }
 }
 
 fn parse_command_with_batch_scope(
@@ -694,6 +756,7 @@ fn parse_command_inner(
     reject_batch_global_flag(batch_item, &args[0])?;
     let cmd = args[0].as_str();
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+    let rest = drop_end_of_options(cmd, rest);
     let id = gen_id();
 
     if flags.cli_annotate && cmd != "screenshot" {
@@ -892,7 +955,8 @@ fn parse_command_inner(
                 context: "upload".to_string(),
                 usage: "upload <selector> <files...>",
             })?;
-            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
+            let files: Vec<String> = rest[1..].iter().map(|f| absolute_path_arg(f)).collect();
+            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": files }))
         }
         "download" => {
             const USAGE: &str = "download <selector> <path>";
@@ -2108,6 +2172,7 @@ fn parse_command_inner(
                     //   tab new [url]
                     //   tab new --label <name> [url]
                     //   tab new [url] --label <name>
+                    //   tab new [--label <name>] -- <url>
                     let mut cmd = json!({ "id": id, "action": "tab_new" });
                     let mut i = 1;
                     while i < rest.len() {
@@ -2118,6 +2183,14 @@ fn parse_command_inner(
                                     usage: "tab new --label <name> [url]",
                                 })?;
                                 cmd["label"] = json!(name);
+                                i += 2;
+                            }
+                            "--" => {
+                                if let Some(url) =
+                                    rest.get(i + 1).filter(|_| cmd.get("url").is_none())
+                                {
+                                    cmd["url"] = json!(url);
+                                }
                                 i += 2;
                             }
                             other if !other.starts_with("--") && cmd.get("url").is_none() => {
@@ -3578,7 +3651,7 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 match rest[i] {
                     "-b" | "--baseline" => {
                         if let Some(path) = rest.get(i + 1) {
-                            obj.insert("baseline".to_string(), json!(path));
+                            obj.insert("baseline".to_string(), json!(absolute_path_arg(path)));
                             i += 1;
                         } else {
                             return Err(ParseError::MissingArguments {
@@ -3600,6 +3673,12 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     }
                     "-c" | "--compact" => {
                         obj.insert("compact".to_string(), json!(true));
+                    }
+                    "-i" | "--interactive" => {
+                        obj.insert("interactive".to_string(), json!(true));
+                    }
+                    "-u" | "--urls" => {
+                        obj.insert("urls".to_string(), json!(true));
                     }
                     "-d" | "--depth" => {
                         if let Some(d) = rest.get(i + 1) {
@@ -3628,13 +3707,13 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     other if other.starts_with('-') => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unknown flag: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--interactive] [--compact] [--depth <n>] [--urls]",
                         });
                     }
                     other => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unexpected argument: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--interactive] [--compact] [--depth <n>] [--urls]",
                         });
                     }
                 }
@@ -3825,6 +3904,14 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     }
                 }
                 i += 1;
+            }
+            let obj = cmd.as_object().unwrap();
+            if obj.contains_key("fullPage") && !obj.contains_key("screenshot") {
+                return Err(ParseError::InvalidValue {
+                    message: "--full only applies to the screenshot diff; add --screenshot"
+                        .to_string(),
+                    usage: "diff url <url1> <url2> --screenshot --full",
+                });
             }
             Ok(cmd)
         }
@@ -4685,7 +4772,7 @@ fn parse_network(rest: &[&str], id: &str, batch_item: bool) -> Result<Value, Par
                         "network har stop [path]",
                         batch_item,
                     )? {
-                        cmd["path"] = json!(path);
+                        cmd["path"] = json!(absolute_path_arg(path));
                     }
                     Ok(cmd)
                 }
@@ -4888,6 +4975,59 @@ pub fn shell_words_split(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operand_marker_is_accepted_by_every_documented_command() {
+        // (command without the marker, index to insert it at)
+        let cases: &[(&[&str], usize)] = &[
+            (&["select", "#a", "v"], 1),
+            (&["upload", "#f", "/tmp/a"], 1),
+            (&["press", "Enter"], 1),
+            (&["keydown", "Shift"], 1),
+            (&["keyup", "Shift"], 1),
+            (&["keyboard", "type", "hi"], 2),
+            (&["keyboard", "inserttext", "hi"], 2),
+            (&["set", "device", "iPhone 15"], 2),
+            (&["clipboard", "write", "hi"], 2),
+            (&["auth", "show", "name"], 2),
+            (&["auth", "delete", "name"], 2),
+            (&["webmcp", "cancel", "id"], 2),
+            (&["dialog", "accept", "text"], 2),
+            (&["tab", "t1"], 1),
+            (&["tab", "close", "t1"], 2),
+            (&["tab", "keep", "live", "t1"], 2),
+            (&["tab", "new", "https://example.com"], 2),
+        ];
+        let flags = default_flags();
+        for (words, at) in cases {
+            let plain: Vec<String> = words.iter().map(|s| s.to_string()).collect();
+            let mut marked = plain.clone();
+            marked.insert(*at, "--".to_string());
+            let mut a = parse_command(&plain, &flags).unwrap();
+            let mut b = parse_command(&marked, &flags)
+                .unwrap_or_else(|e| panic!("{words:?} with marker: {e:?}"));
+            a["id"] = json!(null);
+            b["id"] = json!(null);
+            assert_eq!(a, b, "{words:?}");
+        }
+        let mut plugin: Vec<String> = ["plugin", "show", "--", "x"].map(String::from).to_vec();
+        strip_operand_marker(&mut plugin);
+        assert_eq!(plugin, ["plugin", "show", "x"]);
+        let mut add: Vec<String> = ["plugin", "add", "--", "ref"].map(String::from).to_vec();
+        strip_operand_marker(&mut add);
+        assert_eq!(add, ["plugin", "add", "ref"]);
+    }
+
+    #[test]
+    fn tab_new_marker_makes_the_url_literal() {
+        let flags = default_flags();
+        let args: Vec<String> = ["tab", "new", "--label", "a", "--", "--x"]
+            .map(String::from)
+            .to_vec();
+        let parsed = parse_command(&args, &flags).unwrap();
+        assert_eq!(parsed["url"], "--x");
+        assert_eq!(parsed["label"], "a");
+    }
 
     fn default_flags() -> Flags {
         Flags {
@@ -6333,7 +6473,7 @@ mod tests {
     fn test_network_har_stop_with_path() {
         let cmd = parse_command(&args("network har stop ./capture.har"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "har_stop");
-        assert_eq!(cmd["path"], "./capture.har");
+        assert_eq!(cmd["path"], cwd_path("capture.har"));
     }
 
     #[test]
@@ -6765,10 +6905,10 @@ mod tests {
         );
 
         let cmd = parse_command(&args("network har stop ./capture.har"), &default_flags()).unwrap();
-        assert_eq!(cmd["path"], "./capture.har");
+        assert_eq!(cmd["path"], cwd_path("capture.har"));
         let cmd =
             parse_command(&args("network har stop -- --capture.har"), &default_flags()).unwrap();
-        assert_eq!(cmd["path"], "--capture.har");
+        assert_eq!(cmd["path"], cwd_path("--capture.har"));
 
         let cmd = parse_command(
             &args("vitals http://localhost:3000/dashboard --json"),
@@ -8385,6 +8525,38 @@ mod tests {
         assert!(cmd.get("path").is_none() || cmd["path"].is_null());
     }
 
+    #[test]
+    fn test_upload_resolves_relative_paths_in_the_cli() {
+        let abs = std::env::temp_dir().join("abs.txt");
+        let abs_arg = abs.to_string_lossy().into_owned();
+        let argv = vec![
+            "upload".to_string(),
+            "#f".to_string(),
+            "./rel.txt".to_string(),
+            "sub/rel2.txt".to_string(),
+            abs_arg.clone(),
+        ];
+        let cmd = parse_command(&argv, &default_flags()).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let files: Vec<&str> = cmd["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(files[0], cwd.join("rel.txt").to_string_lossy());
+        assert_eq!(files[1], cwd.join("sub").join("rel2.txt").to_string_lossy());
+        assert_eq!(files[2], abs_arg);
+    }
+
+    fn cwd_path(rel: &str) -> String {
+        std::env::current_dir()
+            .unwrap()
+            .join(rel)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     // === Diff Tests ===
 
     #[test]
@@ -8401,7 +8573,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd["action"], "diff_snapshot");
-        assert_eq!(cmd["baseline"], "before.txt");
+        assert_eq!(cmd["baseline"], cwd_path("before.txt"));
     }
 
     #[test]
@@ -8425,7 +8597,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd["action"], "diff_snapshot");
-        assert_eq!(cmd["baseline"], "snap.txt");
+        assert_eq!(cmd["baseline"], cwd_path("snap.txt"));
         assert_eq!(cmd["selector"], ".content");
         assert_eq!(cmd["compact"], true);
         assert_eq!(cmd["maxDepth"], 2);
@@ -8527,11 +8699,55 @@ mod tests {
     #[test]
     fn test_diff_url_command_full_flag() {
         let cmd = parse_command(
-            &args("diff url https://a.com https://b.com --full"),
+            &args("diff url https://a.com https://b.com --screenshot --full"),
             &default_flags(),
         )
         .unwrap();
         assert_eq!(cmd["fullPage"], true);
+    }
+
+    #[test]
+    fn test_diff_url_full_requires_screenshot() {
+        let err = parse_command(
+            &args("diff url https://a.com https://b.com --full"),
+            &default_flags(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn test_diff_snapshot_accepts_interactive_and_urls() {
+        let cmd = parse_command(&args("diff snapshot -i -u"), &default_flags()).unwrap();
+        assert_eq!(cmd["interactive"], true);
+        assert_eq!(cmd["urls"], true);
+    }
+
+    #[test]
+    fn test_local_path_arguments_are_resolved_in_the_cli() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute_path_arg("a/b.txt"),
+            cwd.join("a").join("b.txt").to_string_lossy()
+        );
+        assert_eq!(
+            absolute_path_arg("./a.txt"),
+            cwd.join("a.txt").to_string_lossy()
+        );
+        let abs = std::env::temp_dir().join("x.txt");
+        let abs = abs.to_string_lossy();
+        assert_eq!(absolute_path_arg(&abs), abs);
+        let home = std::env::home_dir().unwrap();
+        assert_eq!(
+            absolute_path_arg("~/x.txt"),
+            home.join("x.txt").to_string_lossy()
+        );
+        assert_eq!(absolute_path_arg("~"), home.to_string_lossy());
+        // `~user` is not expanded.
+        assert_eq!(
+            absolute_path_arg("~user/x"),
+            cwd.join("~user").join("x").to_string_lossy()
+        );
     }
 
     #[test]
