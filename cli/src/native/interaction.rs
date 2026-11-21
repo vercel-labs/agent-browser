@@ -566,14 +566,20 @@ async fn focus_target(
 }
 
 /// Empties the control so the next insert replaces its content: an input is
-/// cleared, an editable region has its content selected and deleted.
+/// cleared, an editable region has its content selected and deleted. A field
+/// that turned readonly on focus is refused with its value kept.
 async fn clear_control(
     client: &CdpClient,
     session_id: &str,
     object_id: &str,
+    target: &str,
+    verb: &str,
 ) -> Result<(), String> {
     let js = r#"function() {
         /*EDITOR*/
+        if (!isEditor(this) && this.readOnly) {
+            return { refuse: 'read_only', tag: this.localName, type: this.localName === 'input' ? this.type : '' };
+        }
         if (isEditor(this)) {
             const doc = this.ownerDocument;
             const range = doc.createRange();
@@ -589,8 +595,22 @@ async fn clear_control(
         this.dispatchEvent(new Event('input', { bubbles: true }));
     }"#
     .replace("/*EDITOR*/", EDITOR_JS);
-    call_on(client, session_id, object_id, js, None).await?;
-    Ok(())
+    let result = call_on(client, session_id, object_id, js, None).await?;
+    let Some(value) = result.result.value.as_ref() else {
+        return Ok(());
+    };
+    if value.get("refuse").and_then(Value::as_str) != Some("read_only") {
+        return Ok(());
+    }
+    let field = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("");
+    let (code, reason) = refusal("read_only", verb);
+    Err(form_error(
+        code,
+        format!(
+            "Element {target} ({}) {reason}",
+            describe_target(field("tag"), field("type"))
+        ),
+    ))
 }
 
 /// Refuses `fill` or `type` on a target that cannot take the text, before
@@ -830,7 +850,14 @@ pub async fn fill(
         true,
     )
     .await?;
-    clear_control(client, &effective_session_id, &object_id).await?;
+    clear_control(
+        client,
+        &effective_session_id,
+        &object_id,
+        selector_or_ref,
+        "filled",
+    )
+    .await?;
 
     // Insert text (keyboard input dispatched at page level, use parent session_id)
     client
@@ -916,7 +943,14 @@ pub async fn type_text(
     )
     .await?;
     if clear {
-        clear_control(client, &effective_session_id, &object_id).await?;
+        clear_control(
+            client,
+            &effective_session_id,
+            &object_id,
+            selector_or_ref,
+            "cleared and typed into",
+        )
+        .await?;
     }
 
     // A field may select its content on focus; that content is replaced by

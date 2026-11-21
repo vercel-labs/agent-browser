@@ -3628,6 +3628,58 @@ async fn e2e_form_actions_survive_navigation() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A field that turns readonly when focused passes the check made before
+/// focus; clearing it must still be refused so its value is kept.
+#[tokio::test]
+#[ignore]
+async fn e2e_form_actions_keep_field_that_turns_readonly_on_focus() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body>",
+        "<input id='fi' value='KEEP' onfocus='this.readOnly = true'>",
+        "<textarea id='ft' onfocus='this.readOnly = true'>KEEP</textarea>",
+        "</body></html>"
+    );
+    let mut failures = Vec::new();
+    for (action, selector) in [
+        ("type-clear", "#fi"),
+        ("type-clear", "#ft"),
+        ("fill", "#fi"),
+        ("fill", "#ft"),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": "n", "action": "navigate", "url": html }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let cmd = if action == "fill" {
+            json!({ "id": "x", "action": "fill", "selector": selector, "value": "NEW" })
+        } else {
+            json!({ "id": "x", "action": "type", "selector": selector, "text": "NEW", "clear": true })
+        };
+        let resp = execute_command(&cmd, &mut state).await;
+        let value = execute_command(
+            &json!({ "id": "v", "action": "evaluate", "script": format!("document.querySelector('{selector}').value") }),
+            &mut state,
+        )
+        .await;
+        let value = &value["data"]["result"];
+        if resp["success"] != false || resp["code"] != "read_only" || value != "KEEP" {
+            failures.push(format!("{action} {selector}: {resp} value={value}"));
+        }
+    }
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_select_option_label_override_names() {
