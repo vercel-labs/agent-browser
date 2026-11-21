@@ -1553,6 +1553,10 @@ pub fn unknown_fields(body: &Value, shape: &Shape) -> Vec<String> {
     let Some((_, items)) = main_list(body) else {
         return Vec::new();
     };
+    // An empty result provides no evidence that a requested field is absent.
+    if items.is_empty() {
+        return Vec::new();
+    }
     shape
         .filters
         .iter()
@@ -3741,6 +3745,26 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("{{keyword}}"));
+    }
+
+    #[test]
+    fn shaping_empty_results_does_not_report_unknown_fields() {
+        let shape = Shape {
+            filters: vec![("name".to_string(), "query".to_string())],
+            fields: vec!["id".to_string(), "owner.name".to_string()],
+            limit: Some(10),
+        };
+        assert!(unknown_fields(&json!([]), &shape).is_empty());
+        assert_eq!(
+            apply_shape(json!([]), &shape),
+            json!({ "list": null, "total": 0, "matched": 0, "items": [] })
+        );
+
+        // Populated results still provide evidence that a field is misspelled.
+        assert_eq!(
+            unknown_fields(&json!([{ "name": "query", "id": 1 }]), &shape),
+            vec!["owner.name".to_string()]
+        );
     }
 
     #[test]
