@@ -102,6 +102,7 @@ const TOOL_TAB_NEW: &str = "agent_browser_tab_new";
 const TOOL_TAB_LIST: &str = "agent_browser_tab_list";
 const TOOL_TAB_SWITCH: &str = "agent_browser_tab_switch";
 const TOOL_TAB_CLOSE: &str = "agent_browser_tab_close";
+const TOOL_TAB_KEEP: &str = "agent_browser_tab_keep";
 const TOOL_WINDOW_NEW: &str = "agent_browser_window_new";
 const TOOL_FRAME_SWITCH: &str = "agent_browser_frame_switch";
 const TOOL_FRAME_MAIN: &str = "agent_browser_frame_main";
@@ -480,6 +481,7 @@ const TABS_PROFILE_TOOLS: &[&str] = &[
     TOOL_TAB_LIST,
     TOOL_TAB_SWITCH,
     TOOL_TAB_CLOSE,
+    TOOL_TAB_KEEP,
     TOOL_WINDOW_NEW,
     TOOL_FRAME_SWITCH,
     TOOL_FRAME_MAIN,
@@ -854,7 +856,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL. On macOS, installed browsers are searched in /Applications, then ~/Applications. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
+            "Launch the browser and optionally navigate to a URL. On macOS, installed browsers are searched in /Applications, then ~/Applications. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. A plugin provider that returns directPage: true connects to a page socket, so console messages, network requests, HAR recording, tracing, and profiling apply to that page. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
@@ -965,12 +967,12 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref.",
+            "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, or that a ref is from a document that is no longer loaded, take a new snapshot and use a fresh ref. A snapshot that reports the document changed while it was being captured should be taken again. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref. A capture that fails, such as a selector that matches nothing, leaves the previous refs in place while the document is unchanged.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text." },
                 "depth": { "type": "integer", "minimum": 0, "description": "Limit tree depth." },
-                "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector." },
+                "selector": { "type": "string", "description": "Scope the snapshot to every element matching a CSS selector." },
                 "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." },
                 "delta": { "type": "boolean", "default": false, "description": "Return full state once, then unchanged or bounded structural deltas. Apply changes to refs and treeChange (zero-based startLine, deleteCount, lines) to the previous tree." },
                 "full": { "type": "boolean", "default": false, "description": "Force full state while updating the delta baseline." }
@@ -1073,7 +1075,7 @@ fn tools() -> Vec<Value> {
                 "path": { "type": "string", "description": "Optional output path." },
                 "selector": { "type": "string", "description": "Optional @ref or CSS selector to capture." },
                 "fullPage": { "type": "boolean", "default": false },
-                "annotate": { "type": "boolean", "default": false, "description": "Number visible elements in the screenshot." },
+                "annotate": { "type": "boolean", "default": false, "description": "Number visible elements in the screenshot. A failed annotated screenshot keeps the previous refs." },
                 "format": { "type": "string", "enum": ["png", "jpeg"], "description": "Screenshot format." },
                 "quality": { "type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG quality." },
                 "screenshotDir": { "type": "string", "description": "Default output directory when path is omitted." },
@@ -1476,6 +1478,16 @@ fn parity_tools() -> Vec<Value> {
             &[],
         ),
         tool(
+            TOOL_TAB_KEEP,
+            "Tab keep",
+            "Set how a tab runs while it is in the background. live keeps it at full speed and makes the page report visible and focused. throttled is the browser default. frozen pauses it until you switch to it. Omit tab for the current tab, which cannot be frozen.",
+            json!({
+                "keep": { "type": "string", "enum": ["live", "throttled", "frozen"] },
+                "tab": { "type": "string", "description": "Tab id (t1), label, or CDP target id." }
+            }),
+            &["keep"],
+        ),
+        tool(
             TOOL_WINDOW_NEW,
             "Window new",
             "Open a new browser window.",
@@ -1796,7 +1808,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_BATCH,
             "Batch",
-            "Run multiple commands sequentially. Unknown commands and subcommands return errors. Set global flags on the batch invocation or MCP server. Command arguments can contain flag-like text. A batch containing only get cdp-url commands never launches a browser.",
+            "Run multiple commands sequentially. Unknown commands and subcommands return errors. Only commands that treat -- as the end of options accept it before a dash-leading literal argument inside a command array; other commands may receive -- as data. Set global flags on the batch invocation or MCP server, not inside command arrays. Closing with --all must run outside a batch. A batch containing only get cdp-url commands never launches a browser.",
             json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" }, "omitCommand": { "type": "boolean", "description": "Replace only command arrays with a stable zero-based input index. Does not make output safe for secrets: errors and response data are unchanged; type echoes typed text, and get value/eval may return input values." } }),
             &["commands"],
         ),
@@ -2202,8 +2214,9 @@ fn shared_property(key: &str) -> Value {
         }),
         "allowedDomains" => json!({
             "type": "array",
+            "minItems": 1,
             "items": { "type": "string" },
-            "description": "Restrict browser and read traffic to these domain patterns."
+            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected."
         }),
         "capture" => json!({
             "type": "array",
@@ -2511,7 +2524,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_WAIT_FOR_FUNCTION => call_wait_flag(arguments, Some("--fn"), "expression"),
         TOOL_WAIT_FOR_DOWNLOAD => call_wait_download(arguments),
         TOOL_SCREENSHOT => call_screenshot(arguments),
-        TOOL_PDF => call_one_string(arguments, "pdf", "path"),
+        TOOL_PDF => call_pdf(arguments),
         TOOL_GET_TEXT => call_get_selector(arguments, "text"),
         TOOL_GET_HTML => call_get_selector(arguments, "html"),
         TOOL_GET_VALUE => call_get_selector(arguments, "value"),
@@ -2547,9 +2560,9 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SET_MEDIA => call_set_media(arguments),
         TOOL_SET_PERMISSIONS => call_set_permissions(arguments),
         TOOL_NETWORK_ROUTE => call_network_route(arguments),
-        TOOL_NETWORK_UNROUTE => call_optional_one(arguments, &["network", "unroute"], "url"),
+        TOOL_NETWORK_UNROUTE => call_network_unroute(arguments),
         TOOL_NETWORK_REQUESTS => call_network_requests(arguments),
-        TOOL_NETWORK_REQUEST => call_one_string(arguments, "network request", "requestId"),
+        TOOL_NETWORK_REQUEST => call_network_request(arguments),
         TOOL_NETWORK_HAR_START => {
             let mut args: Vec<String> = ["network", "har", "start"]
                 .iter()
@@ -2563,7 +2576,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
             }
             call_cli_tool(arguments, args, None)
         }
-        TOOL_NETWORK_HAR_STOP => call_optional_one(arguments, &["network", "har", "stop"], "path"),
+        TOOL_NETWORK_HAR_STOP => call_har_stop(arguments),
         TOOL_STORAGE_GET => call_storage_get(arguments),
         TOOL_STORAGE_SET => call_storage_set(arguments),
         TOOL_STORAGE_CLEAR => call_storage_clear(arguments),
@@ -2575,16 +2588,17 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_TAB_LIST => call_literal(arguments, &["tab", "list"]),
         TOOL_TAB_SWITCH => call_one_string(arguments, "tab", "tab"),
         TOOL_TAB_CLOSE => call_optional_one(arguments, &["tab", "close"], "tab"),
+        TOOL_TAB_KEEP => call_cli_tool(arguments, tab_keep_command_args(arguments)?, None),
         TOOL_WINDOW_NEW => call_literal(arguments, &["window", "new"]),
-        TOOL_FRAME_SWITCH => call_one_string(arguments, "frame", "frame"),
+        TOOL_FRAME_SWITCH => call_frame_switch(arguments),
         TOOL_FRAME_MAIN => call_literal(arguments, &["frame", "main"]),
         TOOL_DIALOG_STATUS => call_literal(arguments, &["dialog", "status"]),
         TOOL_DIALOG_ACCEPT => call_optional_one(arguments, &["dialog", "accept"], "text"),
         TOOL_DIALOG_DISMISS => call_literal(arguments, &["dialog", "dismiss"]),
         TOOL_TRACE_START => call_literal(arguments, &["trace", "start"]),
-        TOOL_TRACE_STOP => call_optional_one(arguments, &["trace", "stop"], "path"),
+        TOOL_TRACE_STOP => call_debug_path(arguments, "trace", "stop"),
         TOOL_PROFILER_START => call_profiler_start(arguments),
-        TOOL_PROFILER_STOP => call_optional_one(arguments, &["profiler", "stop"], "path"),
+        TOOL_PROFILER_STOP => call_debug_path(arguments, "profiler", "stop"),
         TOOL_RECORD_START => call_record_start(arguments, "start"),
         TOOL_RECORD_STOP => call_literal(arguments, &["record", "stop"]),
         TOOL_RECORD_RESTART => call_record_start(arguments, "restart"),
@@ -2601,11 +2615,11 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_AUTH_LIST => call_literal(arguments, &["auth", "list"]),
         TOOL_AUTH_SHOW => call_one_string(arguments, "auth show", "name"),
         TOOL_AUTH_DELETE => call_one_string(arguments, "auth delete", "name"),
-        TOOL_STATE_SAVE => call_one_string(arguments, "state save", "path"),
-        TOOL_STATE_LOAD => call_one_string(arguments, "state load", "path"),
+        TOOL_STATE_SAVE => call_state_path(arguments, "save"),
+        TOOL_STATE_LOAD => call_state_path(arguments, "load"),
         TOOL_STATE_LIST => call_literal(arguments, &["state", "list"]),
         TOOL_STATE_CLEAR => call_state_clear(arguments),
-        TOOL_STATE_SHOW => call_one_string(arguments, "state show", "path"),
+        TOOL_STATE_SHOW => call_state_path(arguments, "show"),
         TOOL_STATE_CLEAN => call_state_clean(arguments),
         TOOL_STATE_RENAME => call_state_rename(arguments),
         TOOL_TAP => call_simple_selector(arguments, "tap"),
@@ -2622,7 +2636,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_REACT_SUSPENSE => call_react_suspense(arguments),
         TOOL_VITALS => call_vitals(arguments),
         TOOL_A11Y => call_a11y(arguments),
-        TOOL_PUSHSTATE => call_one_string(arguments, "pushstate", "url"),
+        TOOL_PUSHSTATE => call_pushstate(arguments),
         TOOL_REMOVE_INIT_SCRIPT => call_one_string(arguments, "removeinitscript", "id"),
         TOOL_CONFIRM => call_one_string(arguments, "confirm", "id"),
         TOOL_DENY => call_one_string(arguments, "deny", "id"),
@@ -2704,6 +2718,15 @@ fn call_cli_tool(
     command_args: Vec<String>,
     stdin_body: Option<String>,
 ) -> Result<Value, ProtocolError> {
+    call_cli_tool_at(arguments, command_args, None, stdin_body)
+}
+
+fn call_cli_tool_at(
+    arguments: &Value,
+    command_args: Vec<String>,
+    literal_start: Option<usize>,
+    stdin_body: Option<String>,
+) -> Result<Value, ProtocolError> {
     validate_arguments_object(arguments)?;
     let session = optional_string(arguments, "session")?;
     let timeout_ms = optional_timeout(arguments)?;
@@ -2720,7 +2743,7 @@ fn call_cli_tool(
                 | "plugins"
         )
     );
-    let cli_args = cli_tool_args(arguments, command_args, session.as_deref())?;
+    let cli_args = cli_tool_args_at(arguments, command_args, literal_start, session.as_deref())?;
     if uses_session {
         let flags =
             crate::flags::try_parse_flags(&cli_args).map_err(ProtocolError::invalid_params)?;
@@ -2775,9 +2798,34 @@ const MCP_EXTRA_ARGS_GLOBALS: &[&str] = &[
 /// screenshotDir, doctor's fix, chat's model).
 const MCP_TOOL_GLOBALS: &[&str] = &["--screenshot-dir", "--fix", "--model"];
 
+#[cfg(test)]
 fn cli_tool_args(
     arguments: &Value,
     command_args: Vec<String>,
+    session: Option<&str>,
+) -> Result<Vec<String>, ProtocolError> {
+    cli_tool_args_at(arguments, command_args, None, session)
+}
+
+/// Index of the `--` fill and type place before their text.
+fn fill_or_type_boundary(command_args: &[String]) -> Option<usize> {
+    if !matches!(
+        command_args.first().map(String::as_str),
+        Some("fill" | "type")
+    ) {
+        return None;
+    }
+    command_args
+        .iter()
+        .enumerate()
+        .skip(2)
+        .find_map(|(i, arg)| (arg == "--").then_some(i))
+}
+
+fn cli_tool_args_at(
+    arguments: &Value,
+    command_args: Vec<String>,
+    literal_start: Option<usize>,
     session: Option<&str>,
 ) -> Result<Vec<String>, ProtocolError> {
     let extra_args = optional_string_array(arguments, "extraArgs")?.unwrap_or_default();
@@ -2787,22 +2835,13 @@ fn cli_tool_args(
     // a selector could otherwise carry its own --allowed-domains or --session.
     let trusted: Vec<&str> = args.iter().map(|a| global_flag_name(a)).collect();
     let wait_selector_state = wait_selector_state_flag_index(&command_args);
-    let text_boundary = if matches!(
-        command_args.first().map(String::as_str),
-        Some("fill" | "type")
-    ) {
-        command_args
-            .iter()
-            .enumerate()
-            .skip(2)
-            .find_map(|(i, arg)| (arg == "--").then_some(i))
-    } else {
-        None
-    };
+    let literal_boundary = literal_start
+        .or_else(|| fill_or_type_boundary(&command_args))
+        .filter(|index| command_args.get(*index).map(String::as_str) == Some("--"));
     let tokens = command_args
         .iter()
         .enumerate()
-        .take(text_boundary.unwrap_or(command_args.len()))
+        .take(literal_boundary.unwrap_or(command_args.len()))
         .map(|(i, t)| (t, MCP_TOOL_GLOBALS, Some(i)))
         .chain(extra_args.iter().map(|t| (t, &[][..], None)));
     for (token, tool_globals, command_index) in tokens {
@@ -2831,14 +2870,14 @@ fn cli_tool_args(
             )));
         }
     }
-    if let Some(boundary) = text_boundary {
+    if let Some(boundary) = literal_boundary {
         args.extend(command_args[..boundary].iter().cloned());
         args.extend(extra_args);
         args.push(command_args[boundary].clone());
         let cleaned = crate::flags::clean_args(&args);
         if crate::flags::before_end_of_options(&cleaned).len() + 1 != cleaned.len() {
             return Err(ProtocolError::invalid_params(
-                "Tool extraArgs must preserve the text boundary",
+                "Tool extraArgs must preserve the literal boundary",
             ));
         }
         args.extend(command_args[boundary + 1..].iter().cloned());
@@ -2866,6 +2905,43 @@ fn wait_selector_state_flag_index(command_args: &[String]) -> Option<usize> {
 
 fn global_flag_name(token: &str) -> &str {
     token.split('=').next().unwrap_or(token)
+}
+
+/// CLI argv plus the index of the `--` the builder inserted before literal positionals.
+type LiteralArgs = (Vec<String>, Option<usize>);
+
+/// Any `X:` drive form, including drive-relative paths such as `C:take`.
+fn windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.get(1) == Some(&b':') && bytes.first().is_some_and(|b| b.is_ascii_alphabetic())
+}
+
+/// Prefix `./` when the CLI would read a typed screenshot path as a selector.
+/// Rooted Windows forms the CLI cannot classify are rejected, not rewritten.
+fn literal_screenshot_path(path: String) -> Result<String, ProtocolError> {
+    if crate::commands::screenshot_positional_is_path(&path) {
+        return Ok(path);
+    }
+    if cfg!(windows) && (path.starts_with('\\') || windows_drive_path(&path)) {
+        return Err(ProtocolError::invalid_params(format!(
+            "'{path}' cannot be passed as a screenshot path: pass an absolute path \
+             such as C:\\dir\\shot.png, or a path relative to the current directory"
+        )));
+    }
+    Ok(format!("./{}", path))
+}
+
+/// Options first, then an end-of-options marker when any positional starts with
+/// `-`, so the CLI parser reads typed values as data instead of flags.
+fn literal_positionals(mut options: Vec<String>, positionals: Vec<String>) -> LiteralArgs {
+    let literal_start = if positionals.iter().any(|value| value.starts_with('-')) {
+        options.push("--".to_string());
+        Some(options.len() - 1)
+    } else {
+        None
+    };
+    options.extend(positionals);
+    (options, literal_start)
 }
 
 fn command_parts(command: &str) -> Vec<String> {
@@ -2910,6 +2986,14 @@ fn call_optional_one(arguments: &Value, parts: &[&str], key: &str) -> Result<Val
     call_cli_tool(arguments, args, None)
 }
 
+/// CLI args for the tab keep tool.
+fn tab_keep_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = command_parts("tab keep");
+    args.push(required_string(arguments, "keep")?);
+    args.extend(optional_string(arguments, "tab")?.filter(|tab| !tab.is_empty()));
+    Ok(args)
+}
+
 fn call_key_command(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
     let key = required_string(arguments, "key")?;
     call_cli_tool(arguments, vec![command.to_string(), key], None)
@@ -2928,32 +3012,31 @@ fn call_keyboard(arguments: &Value, subcommand: &str) -> Result<Value, ProtocolE
 /// `--flag true|false` so an MCP caller can override env/config defaults
 /// (e.g. webgpu: false with AGENT_BROWSER_WEBGPU=1 set); an absent field
 /// sends nothing and leaves the env/config resolution to the CLI.
-fn open_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
-    let mut args = Vec::new();
+fn open_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let mut options = Vec::new();
     if let Some(headed) = optional_bool(arguments, "headed")? {
-        args.push("--headed".to_string());
-        args.push(headed.to_string());
+        options.push("--headed".to_string());
+        options.push(headed.to_string());
     }
     if let Some(webgpu) = optional_bool(arguments, "webgpu")? {
-        args.push("--webgpu".to_string());
-        args.push(webgpu.to_string());
+        options.push("--webgpu".to_string());
+        options.push(webgpu.to_string());
     }
     if let Some(webmcp) = optional_bool(arguments, "webmcp")? {
-        args.push("--no-webmcp".to_string());
-        args.push((!webmcp).to_string());
+        options.push("--no-webmcp".to_string());
+        options.push((!webmcp).to_string());
     }
-    args.push("open".to_string());
-    if let Some(url) = optional_string(arguments, "url")? {
-        if !url.is_empty() {
-            args.push(url);
-        }
-    }
-    Ok(args)
+    options.push("open".to_string());
+    let positionals: Vec<String> = optional_string(arguments, "url")?
+        .filter(|url| !url.is_empty())
+        .into_iter()
+        .collect();
+    Ok(literal_positionals(options, positionals))
 }
 
 fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
-    let args = open_args(arguments)?;
-    call_cli_tool(arguments, args, None)
+    let (args, literal_start) = open_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError> {
@@ -3123,32 +3206,41 @@ fn snapshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError
 }
 
 fn call_simple_selector(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
-    let selector = required_string(arguments, "selector")?;
-    call_cli_tool(arguments, vec![command.to_string(), selector], None)
+    let (args, literal_start) = selector_command_args(arguments, command)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
-fn click_command_args(arguments: &Value, command: &str) -> Result<Vec<String>, ProtocolError> {
+fn selector_command_args(arguments: &Value, command: &str) -> Result<LiteralArgs, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
-    let mut args = vec![command.to_string(), selector];
+    Ok(literal_positionals(
+        vec![command.to_string()],
+        vec![selector],
+    ))
+}
+
+fn click_command_args(arguments: &Value, command: &str) -> Result<LiteralArgs, ProtocolError> {
+    let selector = required_string(arguments, "selector")?;
+    let mut options = vec![command.to_string()];
     if command == "click" && optional_bool(arguments, "newTab")?.unwrap_or(false) {
-        args.push("--new-tab".to_string());
+        options.push("--new-tab".to_string());
     }
     if optional_bool(arguments, "human")?.unwrap_or(false) {
-        args.push("--human".to_string());
+        options.push("--human".to_string());
     }
     if let Some(button) = optional_string(arguments, "button")? {
-        args.push("--button".to_string());
-        args.push(button);
+        options.push("--button".to_string());
+        options.push(button);
     }
     if let Some(modifiers) = optional_string_array(arguments, "modifiers")? {
-        args.push("--modifiers".to_string());
-        args.push(modifiers.join(","));
+        options.push("--modifiers".to_string());
+        options.push(modifiers.join(","));
     }
-    Ok(args)
+    Ok(literal_positionals(options, vec![selector]))
 }
 
 fn call_click(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, click_command_args(arguments, command)?, None)
+    let (args, literal_start) = click_command_args(arguments, command)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn call_fill(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -3183,13 +3275,18 @@ fn call_press(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_drag(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = drag_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn drag_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
     let source = required_string(arguments, "source")?;
     let target = required_string(arguments, "target")?;
-    let mut args = vec!["drag".to_string(), source, target];
+    let mut options = vec!["drag".to_string()];
     if optional_bool(arguments, "human")?.unwrap_or(false) {
-        args.push("--human".to_string());
+        options.push("--human".to_string());
     }
-    call_cli_tool(arguments, args, None)
+    Ok(literal_positionals(options, vec![source, target]))
 }
 
 fn call_upload(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -3201,13 +3298,99 @@ fn call_upload(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_download(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = download_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn download_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
     let path = required_string(arguments, "path")?;
-    call_cli_tool(
-        arguments,
-        vec!["download".to_string(), selector, path],
-        None,
-    )
+    Ok(literal_positionals(
+        vec!["download".to_string()],
+        vec![selector, path],
+    ))
+}
+
+fn call_pdf(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = pdf_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn pdf_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let path = required_string(arguments, "path")?;
+    Ok(literal_positionals(vec!["pdf".to_string()], vec![path]))
+}
+
+fn call_state_path(arguments: &Value, sub: &str) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = state_path_args(arguments, sub)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn state_path_args(arguments: &Value, sub: &str) -> Result<LiteralArgs, ProtocolError> {
+    let path = required_string(arguments, "path")?;
+    Ok(literal_positionals(
+        vec!["state".to_string(), sub.to_string()],
+        vec![path],
+    ))
+}
+
+fn call_debug_path(arguments: &Value, command: &str, sub: &str) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = stop_path_args(arguments, command, sub)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn stop_path_args(
+    arguments: &Value,
+    command: &str,
+    sub: &str,
+) -> Result<LiteralArgs, ProtocolError> {
+    let positionals: Vec<String> = optional_string(arguments, "path")?
+        .filter(|path| !path.is_empty())
+        .into_iter()
+        .collect();
+    Ok(literal_positionals(
+        vec![command.to_string(), sub.to_string()],
+        positionals,
+    ))
+}
+
+fn call_frame_switch(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = frame_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn frame_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let frame = required_string(arguments, "frame")?;
+    Ok(literal_positionals(vec!["frame".to_string()], vec![frame]))
+}
+
+fn call_pushstate(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = pushstate_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn pushstate_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let url = required_string(arguments, "url")?;
+    Ok(literal_positionals(
+        vec!["pushstate".to_string()],
+        vec![url],
+    ))
+}
+
+fn call_har_stop(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = har_stop_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn har_stop_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let positionals: Vec<String> = optional_string(arguments, "path")?
+        .filter(|path| !path.is_empty())
+        .into_iter()
+        .collect();
+    Ok(literal_positionals(
+        vec!["network".to_string(), "har".to_string(), "stop".to_string()],
+        positionals,
+    ))
 }
 
 fn call_select(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -3298,45 +3481,51 @@ fn call_wait_download(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, screenshot_command_args(arguments)?, None)
+    let (args, literal_start) = screenshot_command_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
-fn screenshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
-    let mut args = Vec::new();
+fn screenshot_command_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let mut options = Vec::new();
     if optional_bool(arguments, "annotate")?.unwrap_or(false) {
-        args.push("--annotate".to_string());
+        options.push("--annotate".to_string());
     }
     if let Some(format) = optional_string(arguments, "format")? {
-        args.push("--screenshot-format".to_string());
-        args.push(format);
+        options.push("--screenshot-format".to_string());
+        options.push(format);
     }
     if let Some(quality) = optional_u64(arguments, "quality")? {
-        args.push("--screenshot-quality".to_string());
-        args.push(quality.to_string());
+        options.push("--screenshot-quality".to_string());
+        options.push(quality.to_string());
     }
     if let Some(dir) = optional_string(arguments, "screenshotDir")? {
-        args.push("--screenshot-dir".to_string());
-        args.push(dir);
+        options.push("--screenshot-dir".to_string());
+        options.push(dir);
     }
 
-    args.push("screenshot".to_string());
-    if let Some(selector) = optional_string(arguments, "selector")? {
-        args.push(selector);
-    }
-    if let Some(path) = optional_string(arguments, "path")? {
-        args.push(path);
-    }
+    options.push("screenshot".to_string());
     if optional_bool(arguments, "fullPage")?.unwrap_or(false) {
-        args.push("--full".to_string());
+        options.push("--full".to_string());
     }
     if optional_bool(arguments, "ifChanged")?.unwrap_or(false) {
-        args.push("--if-changed".to_string());
+        options.push("--if-changed".to_string());
     }
     if let Some(threshold) = optional_number_string(arguments, "threshold")? {
-        args.push("--threshold".to_string());
-        args.push(threshold);
+        options.push("--threshold".to_string());
+        options.push(threshold);
     }
-    Ok(args)
+    let mut positionals = Vec::new();
+    if let Some(selector) = optional_string(arguments, "selector")? {
+        positionals.push(selector);
+    }
+    if let Some(path) = optional_string(arguments, "path")? {
+        positionals.push(if positionals.is_empty() {
+            literal_screenshot_path(path)?
+        } else {
+            path
+        });
+    }
+    Ok(literal_positionals(options, positionals))
 }
 
 fn call_get_selector(arguments: &Value, what: &str) -> Result<Value, ProtocolError> {
@@ -3558,24 +3747,58 @@ fn set_media_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
 }
 
 fn call_network_route(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = network_route_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn network_route_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
     let url = required_string(arguments, "url")?;
-    let mut args = vec!["network".to_string(), "route".to_string(), url];
+    let mut options = vec!["network".to_string(), "route".to_string()];
     if optional_bool(arguments, "abort")?.unwrap_or(false) {
-        args.push("--abort".to_string());
+        options.push("--abort".to_string());
     }
     if let Some(body) = optional_string(arguments, "body")? {
-        args.push("--body".to_string());
-        args.push(body);
+        options.push("--body".to_string());
+        options.push(body);
     }
     if let Some(origin) = optional_string(arguments, "allowOrigin")? {
-        args.push("--allow-origin".to_string());
-        args.push(origin);
+        options.push("--allow-origin".to_string());
+        options.push(origin);
     }
     if let Some(resource_type) = optional_string(arguments, "resourceType")? {
-        args.push("--resource-type".to_string());
-        args.push(resource_type);
+        options.push("--resource-type".to_string());
+        options.push(resource_type);
     }
-    call_cli_tool(arguments, args, None)
+    Ok(literal_positionals(options, vec![url]))
+}
+
+fn call_network_unroute(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = network_unroute_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn network_unroute_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let positionals: Vec<String> = optional_string(arguments, "url")?
+        .filter(|url| !url.is_empty())
+        .into_iter()
+        .collect();
+    Ok(literal_positionals(
+        vec!["network".to_string(), "unroute".to_string()],
+        positionals,
+    ))
+}
+
+fn call_network_request(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, literal_start) = network_request_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn network_request_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let request_id = required_string(arguments, "requestId")?;
+    Ok(literal_positionals(
+        vec!["network".to_string(), "request".to_string()],
+        vec![request_id],
+    ))
 }
 
 fn call_network_requests(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -3700,32 +3923,33 @@ fn call_profiler_start(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
-fn record_command_args(arguments: &Value, action: &str) -> Result<Vec<String>, ProtocolError> {
+fn record_command_args(arguments: &Value, action: &str) -> Result<LiteralArgs, ProtocolError> {
     let path = required_string(arguments, "path")?;
-    let mut args = vec!["record".to_string(), action.to_string(), path];
-    if let Some(url) = optional_string(arguments, "url")? {
-        args.push(url);
-    }
+    let mut options = vec!["record".to_string(), action.to_string()];
     if let Some(fps) = optional_u64(arguments, "fps")? {
-        args.push("--fps".to_string());
-        args.push(fps.to_string());
+        options.push("--fps".to_string());
+        options.push(fps.to_string());
     }
     if optional_bool(arguments, "cursor")?.unwrap_or(false) {
-        args.push("--cursor".to_string());
+        options.push("--cursor".to_string());
     }
     if optional_bool(arguments, "contactSheet")?.unwrap_or(false) {
-        args.push("--contact-sheet".to_string());
+        options.push("--contact-sheet".to_string());
     }
     if let Some(threshold) = optional_number_string(arguments, "contactSheetThreshold")? {
-        args.push("--contact-sheet-threshold".to_string());
-        args.push(threshold);
+        options.push("--contact-sheet-threshold".to_string());
+        options.push(threshold);
     }
-    Ok(args)
+    let mut positionals = vec![path];
+    if let Some(url) = optional_string(arguments, "url")? {
+        positionals.push(url);
+    }
+    Ok(literal_positionals(options, positionals))
 }
 
 fn call_record_start(arguments: &Value, action: &str) -> Result<Value, ProtocolError> {
-    let args = record_command_args(arguments, action)?;
-    call_cli_tool(arguments, args, None)
+    let (args, literal_start) = record_command_args(arguments, action)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
 }
 
 fn call_clearable(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
@@ -3777,14 +4001,17 @@ fn call_auth_login(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_state_clear(arguments: &Value) -> Result<Value, ProtocolError> {
-    let mut args = vec!["state".to_string(), "clear".to_string()];
+    let (args, literal_start) = state_clear_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn state_clear_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let mut options = vec!["state".to_string(), "clear".to_string()];
     if optional_bool(arguments, "all")?.unwrap_or(false) {
-        args.push("--all".to_string());
+        options.push("--all".to_string());
     }
-    if let Some(name) = optional_string(arguments, "name")? {
-        args.push(name);
-    }
-    call_cli_tool(arguments, args, None)
+    let positionals: Vec<String> = optional_string(arguments, "name")?.into_iter().collect();
+    Ok(literal_positionals(options, positionals))
 }
 
 fn call_state_clean(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4009,14 +4236,17 @@ fn append_react_raw_json_arg(
 }
 
 fn call_vitals(arguments: &Value) -> Result<Value, ProtocolError> {
-    let mut args = vec!["vitals".to_string()];
+    let (args, literal_start) = vitals_args(arguments)?;
+    call_cli_tool_at(arguments, args, literal_start, None)
+}
+
+fn vitals_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
+    let mut options = vec!["vitals".to_string()];
     if optional_bool(arguments, "json")?.unwrap_or(false) {
-        args.push("--json".to_string());
+        options.push("--json".to_string());
     }
-    if let Some(url) = optional_string(arguments, "url")? {
-        args.push(url);
-    }
-    call_cli_tool(arguments, args, None)
+    let positionals: Vec<String> = optional_string(arguments, "url")?.into_iter().collect();
+    Ok(literal_positionals(options, positionals))
 }
 
 fn call_a11y(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4412,18 +4642,18 @@ fn append_common_global_args(
         args.push(check);
     }
     if let Some(domains) = optional_string_array(arguments, "allowedDomains")? {
-        if !domains.is_empty() {
-            if env::var_os("AGENT_BROWSER_ALLOWED_DOMAINS").is_some()
-                || crate::flags::load_config(&[])
-                    .is_ok_and(|c| c.allowed_domains.is_some_and(|d| !d.is_empty()))
-            {
-                return Err(ProtocolError::invalid_params(
-                    "allowedDomains is already set in the MCP server's environment or config",
-                ));
-            }
-            args.push("--allowed-domains".to_string());
-            args.push(domains.join(","));
+        crate::native::network::ensure_allowed_domains_not_empty(&domains)
+            .map_err(ProtocolError::invalid_params)?;
+        if env::var_os("AGENT_BROWSER_ALLOWED_DOMAINS").is_some()
+            || crate::flags::load_config(&[])
+                .is_ok_and(|c| c.allowed_domains.is_some_and(|d| !d.is_empty()))
+        {
+            return Err(ProtocolError::invalid_params(
+                "allowedDomains is already set in the MCP server's environment or config",
+            ));
         }
+        args.push("--allowed-domains".to_string());
+        args.push(domains.join(","));
     }
     if let Some(modes) = optional_string_array(arguments, "capture")? {
         if !modes.is_empty() {
@@ -4862,7 +5092,7 @@ mod tests {
     fn recording_timeline_options_use_cli_parser() {
         for operation in ["start", "restart"] {
             for fps in [1, 30, 60] {
-                let args =
+                let (args, _) =
                     record_command_args(&json!({"path": "timeline.webm", "fps": fps}), operation)
                         .unwrap();
                 let flags = crate::flags::parse_flags(&args);
@@ -4876,7 +5106,7 @@ mod tests {
     #[test]
     fn recording_cursor_uses_cli_parser() {
         for operation in ["start", "restart"] {
-            let args = record_command_args(
+            let (args, _) = record_command_args(
                 &json!({"path": "cursor.webm", "cursor": true, "fps": 60}),
                 operation,
             )
@@ -4958,7 +5188,7 @@ mod tests {
         ] {
             let mut arguments = scope.clone();
             arguments["ifChanged"] = json!(true);
-            let args = screenshot_command_args(&arguments).unwrap();
+            let (args, _) = screenshot_command_args(&arguments).unwrap();
             let flags = crate::flags::parse_flags(&args);
             let command = crate::commands::parse_command(&args, &flags).unwrap();
             assert_eq!(command["action"], "screenshot");
@@ -5111,28 +5341,32 @@ mod tests {
     #[test]
     fn open_args_forwards_explicit_booleans() {
         // Absent fields send nothing (env/config resolution stays with the CLI).
-        assert_eq!(open_args(&json!({})).unwrap(), vec!["open"]);
+        assert_eq!(open_args(&json!({})).unwrap().0, vec!["open"]);
 
         // Explicit true and false are both forwarded, so MCP callers can
         // override AGENT_BROWSER_WEBGPU/config just like `--webgpu false`.
         assert_eq!(
-            open_args(&json!({ "webgpu": false, "url": "https://example.com" })).unwrap(),
+            open_args(&json!({ "webgpu": false, "url": "https://example.com" }))
+                .unwrap()
+                .0,
             vec!["--webgpu", "false", "open", "https://example.com"]
         );
         assert_eq!(
-            open_args(&json!({ "headed": true, "webgpu": true })).unwrap(),
+            open_args(&json!({ "headed": true, "webgpu": true }))
+                .unwrap()
+                .0,
             vec!["--headed", "true", "--webgpu", "true", "open"]
         );
         assert_eq!(
-            open_args(&json!({ "headed": false })).unwrap(),
+            open_args(&json!({ "headed": false })).unwrap().0,
             vec!["--headed", "false", "open"]
         );
         assert_eq!(
-            open_args(&json!({ "webmcp": false })).unwrap(),
+            open_args(&json!({ "webmcp": false })).unwrap().0,
             vec!["--no-webmcp", "true", "open"]
         );
         assert_eq!(
-            open_args(&json!({ "webmcp": true })).unwrap(),
+            open_args(&json!({ "webmcp": true })).unwrap().0,
             vec!["--no-webmcp", "false", "open"]
         );
     }
@@ -5154,7 +5388,8 @@ mod tests {
             "headed": false,
             "url": "https://example.com"
         });
-        let args = cli_tool_args(&arguments, open_args(&arguments).unwrap(), None).unwrap();
+        let (open, literal_start) = open_args(&arguments).unwrap();
+        let args = cli_tool_args_at(&arguments, open, literal_start, None).unwrap();
         let flags = crate::flags::parse_flags(&args);
         assert!(!flags.headed);
         assert!(flags.cli_headed);
@@ -5167,7 +5402,7 @@ mod tests {
         assert_eq!(command["action"], "navigate");
         assert_eq!(command["url"], "https://example.com");
         assert_eq!(
-            open_args(&json!({"headed": true})).unwrap(),
+            open_args(&json!({"headed": true})).unwrap().0,
             ["--headed", "true", "open"]
         );
     }
@@ -5494,6 +5729,16 @@ mod tests {
     }
 
     #[test]
+    fn tab_keep_uses_canonical_cli_command() {
+        let args = tab_keep_command_args(&json!({"keep": "live", "tab": "t2"})).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let command = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(command["action"], "tab_keep");
+        assert_eq!(command["keep"], "live");
+        assert_eq!(command["tabId"], "t2");
+    }
+
+    #[test]
     fn reject_unknown_arguments_accepts_declared_and_shared_keys() {
         let definition = find_tool(TOOL_CLICK).unwrap();
         let args = json!({"selector": "@e1", "session": "s", "timeoutMs": 5});
@@ -5592,7 +5837,7 @@ mod tests {
 
     #[test]
     fn click_command_args_include_new_tab() {
-        let args = click_command_args(
+        let (args, _) = click_command_args(
             &json!({
                 "selector": "@e1",
                 "newTab": true,
@@ -5601,13 +5846,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+        assert_eq!(args, vec!["click", "--new-tab", "@e1"]);
     }
 
     #[test]
     fn click_tools_forward_button_and_modifiers_to_cli_parser() {
         for command in ["click", "dblclick"] {
-            let args = click_command_args(
+            let (args, _) = click_command_args(
                 &json!({
                     "selector": "@e1",
                     "button": "right",
@@ -5621,11 +5866,11 @@ mod tests {
                 args,
                 vec![
                     command,
-                    "@e1",
                     "--button",
                     "right",
                     "--modifiers",
-                    "control,shift"
+                    "control,shift",
+                    "@e1"
                 ]
             );
 
@@ -5702,6 +5947,462 @@ mod tests {
             let args = text_command_args(&arguments, command).unwrap();
             assert!(cli_tool_args(&arguments, args, None).is_err());
         }
+    }
+
+    #[test]
+    fn navigation_literal_dash_url_is_not_read_as_a_global_flag() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CONFIG",
+        ]);
+        guard.remove("AGENT_BROWSER_HEADED");
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_CONFIG");
+
+        let arguments = json!({ "url": "--headed" });
+        let (args, literal_start) = open_args(&arguments).unwrap();
+        assert_eq!(args, vec!["open", "--", "--headed"]);
+
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&cli);
+        assert!(!flags.cli_headed);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        assert_eq!(parsed["action"], "navigate");
+        assert!(parsed["url"].as_str().unwrap().ends_with("--headed"));
+    }
+
+    #[test]
+    fn screenshot_literal_positionals_round_trip_through_cli_parser() {
+        let arguments = json!({ "path": "--full-page.png", "fullPage": true });
+        let (args, literal_start) = screenshot_command_args(&arguments).unwrap();
+        assert_eq!(args, ["screenshot", "--full", "--", "--full-page.png"]);
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&cli);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        assert_eq!(parsed["path"], "--full-page.png");
+        assert_eq!(parsed["fullPage"], true);
+
+        let arguments = json!({ "selector": "--json", "ifChanged": true });
+        let (args, literal_start) = screenshot_command_args(&arguments).unwrap();
+        assert!(args.contains(&"--".to_string()), "{args:?}");
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&cli);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        assert_eq!(parsed["action"], "screenshot");
+        assert_eq!(parsed["selector"], "--json");
+
+        let arguments = json!({
+            "selector": "body",
+            "path": "./shot.png",
+            "fullPage": true,
+            "ifChanged": true,
+            "threshold": 0.1,
+        });
+        let (args, literal_start) = screenshot_command_args(&arguments).unwrap();
+        assert_eq!(
+            args,
+            [
+                "screenshot",
+                "--full",
+                "--if-changed",
+                "--threshold",
+                "0.1",
+                "body",
+                "./shot.png",
+            ]
+        );
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&cli);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        assert_eq!(parsed["selector"], "body");
+        assert_eq!(parsed["path"], "./shot.png");
+        assert_eq!(parsed["fullPage"], true);
+        assert_eq!(parsed["threshold"], json!(0.1));
+    }
+
+    fn screenshot_path_round_trip(arguments: &Value) -> Value {
+        let (args, literal_start) = screenshot_command_args(arguments).unwrap();
+        let cli = cli_tool_args_at(arguments, args, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&cli);
+        crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap()
+    }
+
+    #[test]
+    fn screenshot_path_shapes_round_trip_as_paths() {
+        for (path, expected) in [
+            ("shot", "./shot"),
+            ("--shot", "./--shot"),
+            (".config/shot.png", "./.config/shot.png"),
+            ("@2x/shot.png", "./@2x/shot.png"),
+            ("#shots/shot.png", "./#shots/shot.png"),
+            (".hidden.png", "./.hidden.png"),
+            ("shot.png", "shot.png"),
+            ("shots/take.png", "shots/take.png"),
+            ("/abs/take", "/abs/take"),
+            ("./rel/take", "./rel/take"),
+            ("../up/take", "../up/take"),
+        ] {
+            let arguments = json!({ "path": path });
+            let (args, _) = screenshot_command_args(&arguments).unwrap();
+            assert_eq!(args, ["screenshot", expected]);
+            let parsed = screenshot_path_round_trip(&arguments);
+            assert_eq!(parsed["path"], expected, "{path}");
+            assert!(parsed["selector"].is_null(), "{path}");
+        }
+    }
+
+    #[test]
+    fn screenshot_selector_only_arguments_stay_selectors() {
+        for selector in ["body", ".config/shot.png", "#shots/shot.png", "@e1"] {
+            let arguments = json!({ "selector": selector });
+            let parsed = screenshot_path_round_trip(&arguments);
+            assert_eq!(parsed["selector"], selector);
+            assert!(parsed["path"].is_null(), "{selector}");
+        }
+
+        let arguments = json!({ "selector": "@e1", "path": ".config/shot.png" });
+        let parsed = screenshot_path_round_trip(&arguments);
+        assert_eq!(parsed["selector"], "@e1");
+        assert_eq!(parsed["path"], ".config/shot.png");
+    }
+
+    #[test]
+    fn windows_drive_path_detection() {
+        for path in ["C:take", "C:", "C:\\temp\\shot", "C:/temp/shot", "a:b"] {
+            assert!(windows_drive_path(path), "{path}");
+        }
+        for path in [
+            "",
+            "shot",
+            "shots\\take",
+            ".\\take",
+            "/abs/take",
+            "\\\\server\\share\\x",
+        ] {
+            assert!(!windows_drive_path(path), "{path}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn screenshot_windows_paths_round_trip_as_paths() {
+        for (path, expected) in [
+            ("C:\\temp\\shot", "C:\\temp\\shot"),
+            ("C:/temp/shot", "C:/temp/shot"),
+            ("\\\\server\\share\\shot", "\\\\server\\share\\shot"),
+            ("shots\\take", "./shots\\take"),
+            (".\\take", "./.\\take"),
+        ] {
+            let arguments = json!({ "path": path });
+            let (args, _) = screenshot_command_args(&arguments).unwrap();
+            assert_eq!(args, ["screenshot", expected]);
+            let parsed = screenshot_path_round_trip(&arguments);
+            assert_eq!(parsed["path"], expected, "{path}");
+            assert!(parsed["selector"].is_null(), "{path}");
+        }
+
+        for path in ["C:take", "C:", "\\take", "\\\\server"] {
+            let arguments = json!({ "path": path });
+            assert!(screenshot_command_args(&arguments).is_err(), "{path}");
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn screenshot_posix_paths_round_trip_as_paths() {
+        for (path, expected) in [
+            ("C:\\temp\\shot", "./C:\\temp\\shot"),
+            ("\\\\server\\share\\shot", "./\\\\server\\share\\shot"),
+            ("shots\\take", "./shots\\take"),
+            ("C:take", "./C:take"),
+        ] {
+            let arguments = json!({ "path": path });
+            let (args, _) = screenshot_command_args(&arguments).unwrap();
+            assert_eq!(args, ["screenshot", expected]);
+            let parsed = screenshot_path_round_trip(&arguments);
+            assert_eq!(parsed["path"], expected, "{path}");
+            assert!(parsed["selector"].is_null(), "{path}");
+        }
+    }
+
+    #[test]
+    fn extra_args_precede_the_literal_boundary() {
+        let arguments = json!({ "path": "--full-page.png", "extraArgs": ["--engine", "chrome"] });
+        let (args, literal_start) = screenshot_command_args(&arguments).unwrap();
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        let boundary = cli.iter().position(|arg| arg == "--").unwrap();
+        let extra = cli.iter().position(|arg| arg == "--engine").unwrap();
+        assert!(extra < boundary, "{cli:?}");
+        assert_eq!(cli.last().unwrap(), "--full-page.png");
+
+        let arguments = json!({ "path": "--full-page.png", "extraArgs": ["--"] });
+        let (args, literal_start) = screenshot_command_args(&arguments).unwrap();
+        assert!(cli_tool_args_at(&arguments, args, literal_start, None).is_err());
+    }
+
+    #[test]
+    fn screenshot_dir_value_equal_to_the_marker_stays_a_flag_value() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_SCREENSHOT_DIR",
+            "AGENT_BROWSER_CONFIG",
+        ]);
+        guard.remove("AGENT_BROWSER_SCREENSHOT_DIR");
+        guard.remove("AGENT_BROWSER_CONFIG");
+
+        let arguments = json!({
+            "screenshotDir": "--",
+            "path": "--shot.png",
+            "extraArgs": ["--engine", "chrome"],
+        });
+        let (args, literal_start) = screenshot_command_args(&arguments).unwrap();
+        assert_eq!(
+            args,
+            ["--screenshot-dir", "--", "screenshot", "--", "--shot.png"]
+        );
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        assert_eq!(
+            cli,
+            [
+                "--json",
+                "--screenshot-dir",
+                "--",
+                "screenshot",
+                "--engine",
+                "chrome",
+                "--",
+                "--shot.png",
+            ]
+        );
+        let flags = crate::flags::parse_flags(&cli);
+        assert_eq!(flags.screenshot_dir.as_deref(), Some("--"));
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        assert_eq!(parsed["action"], "screenshot");
+        assert_eq!(parsed["path"], "--shot.png");
+
+        let arguments = json!({ "screenshotDir": "--", "extraArgs": ["--engine", "chrome"] });
+        let (args, literal_start) = screenshot_command_args(&arguments).unwrap();
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        assert_eq!(
+            cli,
+            [
+                "--json",
+                "--screenshot-dir",
+                "--",
+                "screenshot",
+                "--engine",
+                "chrome",
+            ]
+        );
+        assert_eq!(
+            crate::flags::parse_flags(&cli).screenshot_dir.as_deref(),
+            Some("--")
+        );
+    }
+
+    #[test]
+    fn command_local_flag_operand_equal_to_marker_is_not_a_boundary() {
+        let arguments = json!({
+            "tool": "search",
+            "frameId": "--",
+            "extraArgs": ["--engine", "chrome"],
+        });
+        let args = webmcp_invoke_args(&arguments).unwrap();
+        assert_eq!(args, ["webmcp", "invoke", "search", "--frame", "--"]);
+        let cli = cli_tool_args(&arguments, args, None).unwrap();
+        assert_eq!(
+            cli,
+            ["--json", "webmcp", "invoke", "search", "--frame", "--", "--engine", "chrome",]
+        );
+    }
+
+    #[test]
+    fn migrated_path_commands_pass_dash_prefixed_arguments_as_literal_data() {
+        fn parse(arguments: &Value, argv: LiteralArgs) -> Value {
+            let (args, literal_start) = argv;
+            let cli = cli_tool_args_at(arguments, args, literal_start, None).unwrap();
+            let flags = crate::flags::parse_flags(&cli);
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap()
+        }
+
+        let arguments = json!({ "path": "--out.pdf" });
+        let parsed = parse(&arguments, pdf_args(&arguments).unwrap());
+        assert_eq!(parsed["action"], "pdf");
+        assert_eq!(parsed["path"], "--out.pdf");
+
+        let arguments = json!({ "selector": "--dl", "path": "--dl.txt" });
+        let parsed = parse(&arguments, download_args(&arguments).unwrap());
+        assert_eq!(parsed["action"], "download");
+        assert_eq!(parsed["selector"], "--dl");
+        assert_eq!(parsed["path"], "--dl.txt");
+
+        for (sub, action) in [
+            ("save", "state_save"),
+            ("load", "state_load"),
+            ("show", "state_show"),
+        ] {
+            let arguments = json!({ "path": "--state.json" });
+            let parsed = parse(&arguments, state_path_args(&arguments, sub).unwrap());
+            assert_eq!(parsed["action"], action);
+            assert_eq!(parsed["path"], "--state.json");
+        }
+
+        let arguments = json!({ "path": "--trace.json", "extraArgs": ["--engine", "chrome"] });
+        let (args, literal_start) = stop_path_args(&arguments, "trace", "stop").unwrap();
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        assert_eq!(
+            cli,
+            [
+                "--json",
+                "trace",
+                "stop",
+                "--engine",
+                "chrome",
+                "--",
+                "--trace.json",
+            ]
+        );
+        let flags = crate::flags::parse_flags(&cli);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        assert_eq!(parsed["action"], "trace_stop");
+        assert_eq!(parsed["path"], "--trace.json");
+
+        let arguments = json!({ "path": "--prof.json" });
+        let parsed = parse(
+            &arguments,
+            stop_path_args(&arguments, "profiler", "stop").unwrap(),
+        );
+        assert_eq!(parsed["action"], "profiler_stop");
+        assert_eq!(parsed["path"], "--prof.json");
+    }
+
+    #[test]
+    fn migrated_selector_drag_and_record_args_stay_literal() {
+        fn parse(arguments: &Value, argv: LiteralArgs) -> Value {
+            let (args, literal_start) = argv;
+            let cli = cli_tool_args_at(arguments, args, literal_start, None).unwrap();
+            let flags = crate::flags::parse_flags(&cli);
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap()
+        }
+
+        let arguments = json!({ "selector": "--headed" });
+        for command in [
+            "hover",
+            "focus",
+            "check",
+            "uncheck",
+            "scrollintoview",
+            "highlight",
+            "tap",
+        ] {
+            let parsed = parse(
+                &arguments,
+                selector_command_args(&arguments, command).unwrap(),
+            );
+            assert_eq!(parsed["action"], command);
+            assert_eq!(parsed["selector"], "--headed");
+        }
+        let parsed = parse(&arguments, click_command_args(&arguments, "click").unwrap());
+        assert_eq!(parsed["action"], "click");
+        assert_eq!(parsed["selector"], "--headed");
+
+        let arguments = json!({ "source": "--src", "target": "--dst", "human": true });
+        let parsed = parse(&arguments, drag_args(&arguments).unwrap());
+        assert_eq!(parsed["action"], "drag");
+        assert_eq!(parsed["source"], "--src");
+        assert_eq!(parsed["target"], "--dst");
+        assert_eq!(parsed["inputMode"], "human");
+
+        let arguments = json!({ "path": "--take.webm", "url": "--headed", "cursor": true });
+        let parsed = parse(
+            &arguments,
+            record_command_args(&arguments, "start").unwrap(),
+        );
+        assert_eq!(parsed["action"], "recording_start");
+        assert_eq!(parsed["path"], "--take.webm");
+        assert!(parsed["url"].as_str().unwrap().ends_with("--headed"));
+        assert_eq!(parsed["cursor"], true);
+
+        let arguments = json!({ "path": "--capture.har" });
+        let parsed = parse(&arguments, har_stop_args(&arguments).unwrap());
+        assert_eq!(parsed["action"], "har_stop");
+        assert_eq!(parsed["path"], "--capture.har");
+
+        let arguments = json!({ "url": "--history" });
+        let parsed = parse(&arguments, pushstate_args(&arguments).unwrap());
+        assert_eq!(parsed["action"], "pushstate");
+        assert_eq!(parsed["url"], "--history");
+
+        let arguments = json!({ "url": "--vitals.test" });
+        let parsed = parse(&arguments, vitals_args(&arguments).unwrap());
+        assert_eq!(parsed["action"], "vitals");
+        assert_eq!(parsed["url"], "--vitals.test");
+
+        let arguments = json!({ "name": "work-2", "all": true });
+        let parsed = parse(&arguments, state_clear_args(&arguments).unwrap());
+        assert_eq!(parsed["action"], "state_clear");
+        assert_eq!(parsed["sessionName"], "work-2");
+        assert_eq!(parsed["all"], true);
+    }
+
+    #[test]
+    fn network_route_unroute_and_request_values_stay_literal() {
+        fn round_trip(arguments: &Value, argv: LiteralArgs) -> Value {
+            let (args, literal_start) = argv;
+            let cli = cli_tool_args_at(arguments, args, literal_start, None).unwrap();
+            let flags = crate::flags::parse_flags(&cli);
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap()
+        }
+
+        let arguments = json!({ "url": "--api", "abort": true });
+        let (args, literal_start) = network_route_args(&arguments).unwrap();
+        assert_eq!(args, ["network", "route", "--abort", "--", "--api"]);
+        let parsed = round_trip(&arguments, (args, literal_start));
+        assert_eq!(parsed["action"], "route");
+        assert_eq!(parsed["url"], "--api");
+        assert_eq!(parsed["abort"], true);
+
+        let arguments = json!({ "url": "--api" });
+        let (args, literal_start) = network_unroute_args(&arguments).unwrap();
+        assert_eq!(args, ["network", "unroute", "--", "--api"]);
+        let parsed = round_trip(&arguments, (args, literal_start));
+        assert_eq!(parsed["action"], "unroute");
+        assert_eq!(parsed["url"], "--api");
+
+        let arguments = json!({ "requestId": "--3" });
+        let (args, literal_start) = network_request_args(&arguments).unwrap();
+        assert_eq!(args, ["network", "request", "--", "--3"]);
+        let parsed = round_trip(&arguments, (args, literal_start));
+        assert_eq!(parsed["action"], "request_detail");
+        assert_eq!(parsed["requestId"], "--3");
+    }
+
+    #[test]
+    fn frame_switch_marker_parity_with_cli_parser() {
+        let arguments = json!({ "frame": "--frame-id" });
+        let (args, literal_start) = frame_args(&arguments).unwrap();
+        assert_eq!(args, ["frame", "--", "--frame-id"]);
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&cli);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        assert_eq!(parsed["action"], "frame");
+        assert_eq!(parsed["selector"], "--frame-id");
+
+        let arguments = json!({ "frame": "main" });
+        let (args, literal_start) = frame_args(&arguments).unwrap();
+        assert_eq!(args, ["frame", "main"]);
+        let cli = cli_tool_args_at(&arguments, args, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&cli);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags).unwrap();
+        assert_eq!(parsed["action"], "mainframe");
     }
 
     #[test]
@@ -5872,11 +6573,9 @@ mod tests {
             let error = cli_tool_args(&arguments, command, Some("app")).unwrap_err();
             assert!(error.message.contains("may not set"), "{}", error.message);
         }
-        let open = cli_tool_args(
-            &arguments,
-            open_args(&json!({ "headed": true, "url": "https://example.com" })).unwrap(),
-            Some("app"),
-        );
+        let (open_argv, literal_start) =
+            open_args(&json!({ "headed": true, "url": "https://example.com" })).unwrap();
+        let open = cli_tool_args_at(&arguments, open_argv, literal_start, Some("app"));
         assert!(open.is_ok());
         let screenshot = cli_tool_args(
             &arguments,
@@ -6007,6 +6706,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["--allowed-domains", "example.com,*.example.org"]);
+    }
+
+    #[test]
+    fn common_global_args_reject_blank_allowed_domains() {
+        let mut args = Vec::new();
+        let err =
+            append_common_global_args(&mut args, &json!({ "allowedDomains": ["", "  "] }), None)
+                .expect_err("blank allowlist must be rejected");
+        assert_eq!(
+            err.message,
+            crate::native::network::EMPTY_ALLOWED_DOMAINS_ERROR
+        );
+    }
+
+    #[test]
+    fn common_global_args_omit_allowed_domains_when_absent() {
+        let mut args = Vec::new();
+        append_common_global_args(&mut args, &json!({}), None).unwrap();
+        assert!(!args.iter().any(|arg| arg == "--allowed-domains"));
     }
 
     #[test]
@@ -6238,7 +6956,7 @@ mod tests {
     #[test]
     fn record_urls_preserve_navigation_schemes() {
         for url in ["data:text/html,hello", "about:blank", "https://example.com"] {
-            let args =
+            let (args, _) =
                 record_command_args(&json!({"path": "demo.webm", "url": url}), "start").unwrap();
             let flags = crate::flags::parse_flags(&args);
             assert_eq!(
@@ -6252,8 +6970,9 @@ mod tests {
     async fn mcp_human_click_preserves_session_mode() {
         let mut state = crate::native::actions::DaemonState::new();
         for human in [true, false] {
-            let args = click_command_args(&json!({"selector": "#target", "human": human}), "click")
-                .unwrap();
+            let (args, _) =
+                click_command_args(&json!({"selector": "#target", "human": human}), "click")
+                    .unwrap();
             let flags = crate::flags::parse_flags(&args);
             let mut command = crate::commands::parse_command(&args, &flags).unwrap();
             assert_eq!(command.get("inputMode"), human.then_some(&json!("human")));
@@ -6305,32 +7024,39 @@ mod tests {
         }
 
         assert_eq!(
-            record_command_args(&json!({ "path": "demo.webm", "fps": 60 }), "start").unwrap(),
-            vec!["record", "start", "demo.webm", "--fps", "60"]
+            record_command_args(&json!({ "path": "demo.webm", "fps": 60 }), "start")
+                .unwrap()
+                .0,
+            vec!["record", "start", "--fps", "60", "demo.webm"]
         );
         assert_eq!(
             record_command_args(
                 &json!({ "path": "take2.webm", "url": "https://example.com", "fps": 24 }),
                 "restart"
             )
-            .unwrap(),
+            .unwrap()
+            .0,
             vec![
                 "record",
                 "restart",
-                "take2.webm",
-                "https://example.com",
                 "--fps",
-                "24"
+                "24",
+                "take2.webm",
+                "https://example.com"
             ]
         );
         // Omitting fps leaves the default to the CLI parser and daemon.
         assert_eq!(
-            record_command_args(&json!({ "path": "demo.webm" }), "start").unwrap(),
+            record_command_args(&json!({ "path": "demo.webm" }), "start")
+                .unwrap()
+                .0,
             vec!["record", "start", "demo.webm"]
         );
         assert_eq!(
-            record_command_args(&json!({ "path": "demo.webm", "cursor": true }), "start").unwrap(),
-            vec!["record", "start", "demo.webm", "--cursor"]
+            record_command_args(&json!({ "path": "demo.webm", "cursor": true }), "start")
+                .unwrap()
+                .0,
+            vec!["record", "start", "--cursor", "demo.webm"]
         );
         assert_eq!(
             record_command_args(
@@ -6341,14 +7067,15 @@ mod tests {
                 }),
                 "start"
             )
-            .unwrap(),
+            .unwrap()
+            .0,
             vec![
                 "record",
                 "start",
-                "demo.webm",
                 "--contact-sheet",
                 "--contact-sheet-threshold",
-                "0.08"
+                "0.08",
+                "demo.webm"
             ]
         );
     }

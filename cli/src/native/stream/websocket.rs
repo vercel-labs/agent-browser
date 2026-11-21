@@ -14,7 +14,8 @@ use tokio_tungstenite::WebSocketStream;
 use crate::native::cdp::client::CdpClient;
 
 use super::http::handle_http_request;
-use super::{is_allowed_origin, timestamp_ms, IdleActivity, StreamFrame};
+use super::origin::is_allowed_ws_upgrade;
+use super::{timestamp_ms, IdleActivity, StreamFrame};
 
 /// Highest per-client frame rate a client may request via the `config` message.
 const MAX_CONFIGURABLE_FPS: u32 = 120;
@@ -305,7 +306,12 @@ async fn handle_ws_client(
                 .get("origin")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
-            if !is_allowed_origin(origin.as_deref()) {
+            let host = req
+                .headers()
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            if !is_allowed_ws_upgrade(origin.as_deref(), host.as_deref()) {
                 let mut reject =
                     tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(Some(
                         "Origin not allowed".to_string(),
