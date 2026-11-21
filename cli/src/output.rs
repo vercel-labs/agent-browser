@@ -717,8 +717,7 @@ pub(crate) fn format_webmcp_context(
     let mut block = records[..shown].join("\n");
     if hidden {
         block.push_str(&format!(
-            "\n[truncated: showing {shown} of {} tools. Use --max-output to adjust]",
-            records.len()
+            "\n[truncated: showing {shown} of {count} tools. Use --max-output to adjust]"
         ));
     }
     let mut lines = vec![
@@ -5794,6 +5793,40 @@ hydration: -  phases: 0  hydratedComponents: 0"
             let text = webmcp_announcement(vec![webmcp_tool("a", "A", bad)], 1, false);
             assert!(text.contains("--frame <frame-id> '<json>'"), "{bad}");
         }
+    }
+
+    #[test]
+    fn test_webmcp_counts_use_the_page_total_when_the_daemon_holds_fewer_records() {
+        // The page registers 40 tools; the daemon holds 13 records; the limit lists 1.
+        let tools: Vec<_> = (0..13)
+            .map(|i| webmcp_tool(&format!("tool{i:02}"), "d", "F1"))
+            .collect();
+        let data = json!({"webmcp": {
+            "status": "ready", "toolCount": 40, "truncated": true, "tools": tools
+        }});
+        let opts = OutputOptions {
+            max_output: Some(22),
+            ..OutputOptions::default()
+        };
+        let text = format_webmcp_context(&data, &opts).unwrap();
+        let listed = text.matches(" [frame F1]: ").count();
+        assert!(listed >= 1 && listed < 13, "{text}");
+        assert!(
+            text.starts_with(&format!(
+                "This page provides 40 WebMCP tools; {listed} {} listed below:",
+                if listed == 1 { "is" } else { "are" }
+            )),
+            "{text}"
+        );
+        let marker = text
+            .lines()
+            .find(|l| l.starts_with("[truncated: showing "))
+            .expect("marker");
+        assert!(
+            marker.starts_with(&format!("[truncated: showing {listed} of 40 tools.")),
+            "{marker}"
+        );
+        assert!(!text.contains("of 13"), "{text}");
     }
 
     #[test]
