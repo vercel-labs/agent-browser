@@ -4526,7 +4526,9 @@ scrollintoview, tap. Capture and files: screenshot, pdf, download,
 record start/restart. Inspection and state: snapshot, frame, highlight,
 console, errors, trace start/stop, profiler start/stop,
 state save/load/list/clear/show/clean, network, flow steps/list, react,
-vitals, close, inspect. Put flags before --; values after -- are positional.
+vitals, close, inspect. Operands of select, upload, press/keydown/keyup,
+keyboard, set, clipboard, auth, webmcp, dialog, tab, skills and plugin
+also follow a leading --. Put flags before --; values after -- are positional.
 Commands that accept negative numbers take them directly. Other commands
 may validate options differently.
 

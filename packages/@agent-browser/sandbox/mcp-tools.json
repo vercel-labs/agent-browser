@@ -350,14 +350,8 @@
             "type": "boolean"
           },
           "modifiers": {
-            "description": "Modifier keys held during the click.",
+            "description": "Modifier keys held during the click: alt, control, meta, shift. Aliases ctrl, cmd and command, any case, and lists such as ctrl+shift are accepted.",
             "items": {
-              "enum": [
-                "alt",
-                "control",
-                "meta",
-                "shift"
-              ],
               "type": "string"
             },
             "minItems": 1,
@@ -797,14 +791,8 @@
             "type": "boolean"
           },
           "modifiers": {
-            "description": "Modifier keys held during the click.",
+            "description": "Modifier keys held during the click: alt, control, meta, shift. Aliases ctrl, cmd and command, any case, and lists such as ctrl+shift are accepted.",
             "items": {
-              "enum": [
-                "alt",
-                "control",
-                "meta",
-                "shift"
-              ],
               "type": "string"
             },
             "minItems": 1,
