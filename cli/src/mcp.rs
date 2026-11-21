@@ -993,7 +993,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FILL,
             "Fill input",
-            "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome backend only.",
+            "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly; a color input takes any CSS color Chrome accepts and stores it as #rrggbb. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome backend only.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to fill." }

@@ -651,14 +651,20 @@ async fn precheck(
     ))
 }
 
+struct ValueSet {
+    snapped: Option<String>,
+    stored: Option<String>,
+}
+
 /// Sets date, time, color and range inputs directly: Chrome drops inserted
-/// text there. Refuses a value the input would sanitize away.
+/// text there. Refuses a value the input would sanitize away. A color input
+/// takes any CSS color Chrome parses and stores it as `#rrggbb`.
 async fn set_value_input(
     client: &CdpClient,
     session_id: &str,
     object_id: &str,
     value: &str,
-) -> Result<Option<String>, String> {
+) -> Result<ValueSet, String> {
     let js = r#"function(value) {
         /*RETARGET*/
         const type = el.type;
@@ -673,7 +679,16 @@ async fn set_value_input(
         // A range value inside its bounds is set as the browser does, snapped
         // to the step; unparsable or out-of-range values are refused.
         const number = Number(text);
-        const accepted = type === 'color' ? got === text.toLowerCase()
+        const parsesAsColor = () => {
+            const context = el.ownerDocument.createElement('canvas').getContext('2d');
+            if (!context) {
+                return CSS.supports('color', text);
+            }
+            context.fillStyle = '#010203';
+            context.fillStyle = text;
+            return context.fillStyle !== '#010203';
+        };
+        const accepted = type === 'color' ? got !== '#000000' || parsesAsColor()
             : type === 'range' ? /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(text) && number >= minimum && number <= maximum
             : got !== '' || text === '';
         if (!accepted) {
@@ -685,7 +700,7 @@ async fn set_value_input(
         if (type === 'range' && Number(el.value) !== number) {
             return { snapped: true };
         }
-        return { ok: true };
+        return type === 'color' ? { ok: true, stored: got } : { ok: true };
     }"#
     .replace("/*RETARGET*/", RETARGET_JS);
     let result = call_on(
@@ -700,12 +715,16 @@ async fn set_value_input(
     if value.get("malformed").and_then(Value::as_bool) == Some(true) {
         return Err(form_error("malformed_value", malformed_message(&value)));
     }
-    Ok(
-        (value.get("snapped").and_then(Value::as_bool) == Some(true)).then(|| {
+    Ok(ValueSet {
+        snapped: (value.get("snapped").and_then(Value::as_bool) == Some(true)).then(|| {
             "value snapped to the step: the field holds a different value than requested"
                 .to_string()
         }),
-    )
+        stored: value
+            .get("stored")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 /// The refusal for a value an input would sanitize away. The page supplies
@@ -726,7 +745,10 @@ fn malformed_message(page: &Value) -> String {
         }
     };
     let (kind, expected) = match kind {
-        "color" => ("color", "#rrggbb".to_string()),
+        "color" => (
+            "color",
+            "a CSS color such as #rrggbb, #rgb or red".to_string(),
+        ),
         "date" => ("date", "YYYY-MM-DD".to_string()),
         "time" => ("time", "HH:MM or HH:MM:SS".to_string()),
         "datetime-local" => ("datetime-local", "YYYY-MM-DDTHH:MM".to_string()),
@@ -820,9 +842,8 @@ pub async fn fill(
         .await
         .unwrap_or_else(|_| FormProbe::unknown());
     if before.value_input {
-        let snapped = match set_value_input(client, &effective_session_id, &object_id, value).await
-        {
-            Ok(snapped) => snapped,
+        let set = match set_value_input(client, &effective_session_id, &object_id, value).await {
+            Ok(set) => set,
             Err(error) if form_error_code(&error).is_some() => return Err(error),
             Err(error) => {
                 return Ok(FormOutcome {
@@ -830,12 +851,15 @@ pub async fn fill(
                 })
             }
         };
-        if snapped.is_some() {
-            return Ok(FormOutcome { warning: snapped });
+        if set.snapped.is_some() {
+            return Ok(FormOutcome {
+                warning: set.snapped,
+            });
         }
+        let expected = set.stored.as_deref().unwrap_or(value.trim());
         let read = read_after(probe_object(client, &effective_session_id, &object_id)).await;
         let warning = match &read {
-            AfterRead::Value(after) => fill_warning(after, value.trim()),
+            AfterRead::Value(after) => fill_warning(after, expected),
             other => unverified_warning(other),
         };
         return Ok(FormOutcome { warning });

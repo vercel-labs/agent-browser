@@ -2736,7 +2736,7 @@ async fn e2e_form_actions_refuse_before_acting() {
         ("fill", "#file", json!("x"), "not_editable"),
         ("fill", "#date", json!("01/15/2024"), "malformed_value"),
         ("fill", "#range", json!("150"), "malformed_value"),
-        ("fill", "#color", json!("red"), "malformed_value"),
+        ("fill", "#color", json!("#c"), "malformed_value"),
         ("type", "#dis", json!("x"), "disabled"),
         ("type-clear", "#dis", json!("x"), "disabled"),
         ("type-clear", "#ro", json!("x"), "read_only"),
@@ -3673,6 +3673,62 @@ async fn e2e_form_actions_keep_field_that_turns_readonly_on_focus() {
         let value = &value["data"]["result"];
         if resp["success"] != false || resp["code"] != "read_only" || value != "KEEP" {
             failures.push(format!("{action} {selector}: {resp} value={value}"));
+        }
+    }
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_color_accepts_every_value_chrome_accepts() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html =
+        "data:text/html,<html><body><input id='c' type='color' value='%23123456'></body></html>";
+    let mut failures = Vec::new();
+    for (value, expected) in [
+        ("#fff", Some("#ffffff")),
+        ("#ABC", Some("#aabbcc")),
+        ("red", Some("#ff0000")),
+        ("RebeccaPurple", Some("#663399")),
+        ("rgb(1, 2, 3)", Some("#010203")),
+        ("black", Some("#000000")),
+        ("#000", Some("#000000")),
+        ("#FF0000", Some("#ff0000")),
+        ("#c", None),
+        ("#ff", None),
+        ("#fffff", None),
+        ("not-a-colour", None),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": "n", "action": "navigate", "url": html }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(
+            &json!({ "id": "x", "action": "fill", "selector": "#c", "value": value }),
+            &mut state,
+        )
+        .await;
+        let held = evaluate_value(&mut state, "c.value").await;
+        let ok = match expected {
+            Some(expected) => {
+                resp["success"] == true && resp["warning"].is_null() && held == expected
+            }
+            None => {
+                resp["success"] == false && resp["code"] == "malformed_value" && held == "#123456"
+            }
+        };
+        if !ok {
+            failures.push(format!("fill {value:?}: {resp} value={held}"));
         }
     }
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
