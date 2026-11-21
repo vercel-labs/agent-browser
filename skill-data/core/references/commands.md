@@ -474,7 +474,7 @@ Clients connect to `ws://127.0.0.1:<port>` and receive `frame`, `status`, `tabs`
 
 ## WebMCP page tools
 
-Experimental. Browser responses announce brief tool summaries (names, short descriptions, origins, and frame IDs) on first discovery and when the catalog changes. Choose a relevant tool, fetch its schema, then invoke it within the user's task. Schemas and annotations are never included proactively. Omission means no update; an empty or unavailable update invalidates earlier tools. Support is enabled by default in managed Chrome; `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP` opts out. See [trust-boundaries.md](trust-boundaries.md#webmcp-tools-are-page-content) for how to treat tool metadata and results.
+Experimental. Browser responses announce a tool list (names, frame IDs, and descriptions) on first discovery and when the catalog changes. Catalogs of up to four tools show full descriptions; larger ones show up to 16 tools with descriptions shortened to 160 bytes, and the announcement says how many are listed. Choose a relevant tool, fetch its schema when the description does not show the arguments, then invoke it within the user's task. Schemas and annotations are never included proactively. Omission means no update; an empty or unavailable update invalidates earlier tools. Support is enabled by default in managed Chrome; `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP` opts out. See [trust-boundaries.md](trust-boundaries.md#webmcp-tools-are-page-content) for how to treat tool metadata and results.
 
 ```bash
 agent-browser webmcp list <tool> --frame <frame-id> --json   # One tool's schema
