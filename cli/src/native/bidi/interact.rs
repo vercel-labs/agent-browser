@@ -390,8 +390,11 @@ async fn move_mouse(
     Ok(dialog_opened)
 }
 
-/// Performs a pointer batch. With motion, the shared path moves the pointer first and the
-/// batch's own moves are dropped.
+/// Performs a pointer batch. With motion, the shared path moves the pointer first and drops the
+/// batch's own moves. Single-press gestures send one request per step so a dialog stops later
+/// steps. Multi-press gestures (`dblclick`) share one request because Firefox resets its click
+/// count between `input.performActions` calls; WebDriver BiDi cannot cancel an in-flight chain,
+/// so with `--no-auto-dialog` any press queued after a dialog opens runs once the dialog closes.
 async fn perform_pointer(
     ff: &FirefoxSession,
     state: PointerState<'_>,
@@ -419,8 +422,6 @@ async fn perform_pointer(
     };
     if let Some(source) = mouse_source {
         let steps = source["actions"].as_array().cloned().unwrap_or_default();
-        // Each step is its own request so a dialog stops the rest, but Firefox resets its click
-        // count per request, so the presses of a multi-press gesture share one request.
         let multi = steps.iter().filter(|s| s["type"] == "pointerDown").count() > 1;
         let pressing = |s: &Value| multi && s["type"] != "pointerMove";
         for batch in steps.chunk_by(|a, b| pressing(a) && pressing(b)) {
