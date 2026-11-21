@@ -203,6 +203,16 @@ pub const RENDERS_INIT: &str = r#"
   if (!hook || window.__AB_RENDERS_ACTIVE__) return;
 
   const MAX_COMPONENTS = 200;
+  // React fiber flag set when the fiber ran its render function in this
+  // commit. React DevTools reads the same flag to decide whether a fiber
+  // rendered.
+  const PERFORMED_WORK = 1;
+  // React 16 stores effect flags in `effectTag`; React 17 renamed the field
+  // to `flags`. The bit values did not change, so read whichever field the
+  // running React provides.
+  function fiberFlags(fiber) {
+    return typeof fiber.flags === "number" ? fiber.flags : fiber.effectTag || 0;
+  }
   const data = {};
   const fps = { frames: [], last: 0, rafId: 0 };
 
@@ -331,7 +341,7 @@ pub const RENDERS_INIT: &str = r#"
     if (!fiber.alternate) return true;
     let child = fiber.child;
     while (child) {
-      if (typeof child.type === "string" && (child.flags & 6) > 0) return true;
+      if (typeof child.type === "string" && (fiberFlags(child) & 6) > 0) return true;
       child = child.sibling;
     }
     return false;
@@ -340,12 +350,21 @@ pub const RENDERS_INIT: &str = r#"
   function walkFiber(fiber) {
     if (!fiber) return;
     const tag = fiber.tag;
+    const alt = fiber.alternate;
     if (tag === 0 || tag === 1 || tag === 2 || tag === 11 || tag === 15) {
+      // A fiber counts as rendered only when it actually ran in this
+      // commit. React DevTools uses the same rule (didFiberRender): for
+      // components that run user code, the PerformedWork flag tells a real
+      // render from a bailout. The old check (any flag set, or props/state
+      // differing from a stale alternate) re-counted fibers React bailed
+      // out on: flags from an earlier render stay on them, and a fiber
+      // that never updated since mount has no alternate at all, so it was
+      // counted as a fresh mount on every commit.
       const didRender =
-        fiber.alternate === null ||
-        fiber.flags > 0 ||
-        fiber.memoizedProps !== (fiber.alternate && fiber.alternate.memoizedProps) ||
-        fiber.memoizedState !== (fiber.alternate && fiber.alternate.memoizedState);
+        alt === null ||
+        (tag === 2
+          ? fiber.child !== alt.child || (fiberFlags(fiber) & PERFORMED_WORK) !== 0
+          : (fiberFlags(fiber) & PERFORMED_WORK) !== 0);
       if (didRender) {
         const name = getName(fiber);
         if (name) {
@@ -377,7 +396,17 @@ pub const RENDERS_INIT: &str = r#"
         }
       }
     }
-    walkFiber(fiber.child);
+    // Descend only into subtrees that can contain a newly rendered fiber.
+    // When a fiber bailed out, React leaves its child pointer untouched,
+    // so an unchanged child pointer means nothing below rendered; walking
+    // in anyway would re-count fibers whose flags are stale from an
+    // earlier render (or that never got an alternate) on every commit.
+    // This mirrors React DevTools, which only descends when
+    // nextFiber.child !== prevFiber.child. On mount there is no alternate
+    // yet, so the whole tree is walked.
+    if (!alt || fiber.child !== alt.child) {
+      walkFiber(fiber.child);
+    }
     walkFiber(fiber.sibling);
   }
 })()
@@ -838,5 +867,38 @@ mod tests {
         assert!(PICK_REACT_RENDERER.contains("getFiberRoots"));
         assert!(PICK_REACT_RENDERER.contains("firstWithRoots"));
         assert!(PICK_REACT_RENDERER.contains("firstAny"));
+    }
+
+    /// The renders profiler must count only fibers that actually ran in the
+    /// commit, like React DevTools (didFiberRender): the PerformedWork flag
+    /// distinguishes a real render from a bailout, and subtrees are
+    /// descended into only when their child pointer changed. Counting on
+    /// any flag being set, or on props/state differing from a stale
+    /// alternate, re-counts bailed-out fibers on every commit (stale flags
+    /// survive, and fibers never updated since mount have no alternate).
+    /// On React 16 the flags live in `effectTag` instead of `flags`, so the
+    /// profiler reads whichever field the running React provides.
+    #[test]
+    fn renders_profiler_counts_only_fibers_that_rendered() {
+        assert!(
+            RENDERS_INIT.contains("const PERFORMED_WORK = 1;"),
+            "RENDERS_INIT must define the PerformedWork flag value"
+        );
+        assert!(
+            RENDERS_INIT.contains("(fiberFlags(fiber) & PERFORMED_WORK) !== 0"),
+            "RENDERS_INIT must gate counting on the PerformedWork flag"
+        );
+        assert!(
+            RENDERS_INIT.contains("fiber.effectTag"),
+            "RENDERS_INIT must read effectTag for React 16 fibers"
+        );
+        assert!(
+            RENDERS_INIT.contains("fiber.child !== alt.child"),
+            "RENDERS_INIT must descend only when the child pointer changed"
+        );
+        assert!(
+            !RENDERS_INIT.contains("fiber.flags > 0"),
+            "RENDERS_INIT must not count a fiber for any flag being set"
+        );
     }
 }
