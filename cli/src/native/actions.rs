@@ -356,6 +356,30 @@ impl AttachedTarget {
             .filter(|target| !matches!(target, Self::Provider(p) if p == "ios" || p == "safari"))
     }
 
+    /// Whether the browser runs on another machine than the daemon, so it
+    /// reads local file paths on its own host.
+    fn is_remote(&self) -> bool {
+        match self {
+            Self::Provider(_) => true,
+            Self::CdpPort(_) | Self::AutoConnect => false,
+            Self::CdpUrl(url) => {
+                let authority = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+                let authority = authority.split(['/', '?']).next().unwrap_or("");
+                let authority = authority.rsplit('@').next().unwrap_or("");
+                let host = match authority.strip_prefix('[') {
+                    Some(v6) => v6.split(']').next().unwrap_or(""),
+                    None => authority.split(':').next().unwrap_or(""),
+                };
+                let is_port = !host.is_empty() && host.bytes().all(|b| b.is_ascii_digit());
+                !(is_port
+                    || host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback()))
+            }
+        }
+    }
+
     fn insert_into(&self, cmd: &mut serde_json::Map<String, Value>) {
         let (key, value) = match self {
             Self::CdpUrl(url) => ("cdpUrl", json!(url)),
@@ -631,6 +655,9 @@ pub struct DaemonState {
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
     snapshot_revisions: HashMap<String, SnapshotRevision>,
+    /// The last snapshot of each open tab, keyed by page session id; the implicit
+    /// baseline of `diff snapshot`.
+    last_snapshots: HashMap<String, LastSnapshot>,
     screenshot_observations: HashMap<(String, String), ScreenshotObservation>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
@@ -730,6 +757,9 @@ pub struct DaemonState {
     /// the daemon finishes replacing the tab, so a retry of the same request
     /// gets the report instead of running on the blank replacement tab.
     pub undelivered_wedge: Option<(String, WedgeReport)>,
+    /// Warning set by a handler for the response of the current command.
+    /// Drained once when the response is assembled; never read from `data`.
+    pending_action_warning: Option<String>,
     /// A mouse button left logically down because a dialog opened between
     /// mousePressed and mouseReleased; released when the dialog is resolved.
     pub pending_pointer_release: Option<super::interaction::PendingRelease>,
@@ -794,6 +824,29 @@ fn default_idle_shutdown_is_blocked(
 }
 
 impl DaemonState {
+    #[cfg(test)]
+    pub(super) fn tracked_snapshot_tabs(&self) -> usize {
+        self.last_snapshots.len()
+    }
+
+    /// Keeps `snapshot` as its tab's baseline and drops those of closed tabs.
+    fn remember_snapshot(&mut self, snapshot: LastSnapshot) {
+        if let Some(browser) = self.browser.as_ref() {
+            self.last_snapshots
+                .retain(|session, _| browser.has_page_session(session));
+        }
+        self.last_snapshots
+            .insert(snapshot.session_id.clone(), snapshot);
+    }
+
+    /// Queue a warning for the current command's response.
+    fn push_action_warning(&mut self, warning: &str) {
+        self.pending_action_warning = Some(match self.pending_action_warning.take() {
+            Some(existing) => format!("{}\n{}", existing, warning),
+            None => warning.to_string(),
+        });
+    }
+
     /// The client received the `page_wedged` response to request `id`, so it
     /// is not replayed. A newer report from another request stays pending.
     pub fn wedge_report_delivered(&mut self, id: &str) {
@@ -841,6 +894,7 @@ impl DaemonState {
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
+            last_snapshots: HashMap::new(),
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
                 // A stored empty list predates rejection and restores as no
@@ -914,6 +968,7 @@ impl DaemonState {
             input_mode: "instant".to_string(),
             pending_dialog: None,
             undelivered_wedge: None,
+            pending_action_warning: None,
             pending_pointer_release: None,
             stream_client: None,
             stream_server: None,
@@ -3122,6 +3177,7 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
 }
 
 async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
+    state.pending_action_warning = None;
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
@@ -3256,7 +3312,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
     let mut lifecycle_relaunched_browser = false;
-    let mut launch_warning: Option<String> = None;
     // The flow is read once per command: policy, confirmation and the run all
     // see the same file.
     let mut run_flow = match load_run_flow(cmd, action, state) {
@@ -3418,13 +3473,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             )
             .await;
             let launched = match launched {
-                Ok(extras) => {
-                    launch_warning = extras
-                        .get(SESSION_SETUP_WARNING)
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    Box::pin(start_flow_capture(state)).await
-                }
+                Ok(_) => Box::pin(start_flow_capture(state)).await,
                 Err(e) => Err(e),
             };
             if let Err(e) = launched {
@@ -3792,14 +3841,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     };
     attach_tab_gone_data(&mut resp, state);
     attach_flow_stop(&mut resp, state);
-    if let Some(warning) = resp
-        .get_mut("data")
-        .and_then(Value::as_object_mut)
-        .and_then(|data| data.remove("postActionWarning"))
-        .and_then(|w| w.as_str().map(str::to_string))
-    {
-        append_warning(&mut resp, &warning);
-    }
+    attach_action_warning(&mut resp, state);
     if resp.get("success").and_then(Value::as_bool) == Some(false) {
         attach_settings_outcome(&mut resp, &settings_outcome);
     }
@@ -3825,10 +3867,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 err, hint
             ),
         );
-    }
-    hoist_session_setup_warning(&mut resp);
-    if let Some(warning) = launch_warning {
-        append_warning(&mut resp, &warning);
     }
     inject_lifecycle(
         &mut resp,
@@ -4621,6 +4659,13 @@ fn may_replace_wedged_tab(state: &DaemonState) -> bool {
     })
 }
 
+/// Move the handler-set warning into the response. `data` is never consulted.
+fn attach_action_warning(resp: &mut Value, state: &mut DaemonState) {
+    if let Some(warning) = state.pending_action_warning.take() {
+        append_warning(resp, &warning);
+    }
+}
+
 /// Add to the response's warning instead of replacing one already set.
 fn append_warning(resp: &mut Value, warning: &str) {
     let merged = match resp.get("warning").and_then(Value::as_str) {
@@ -4884,6 +4929,31 @@ async fn auto_launch(
 /// `strict_state` is set when the command named a `--state` file: a file that
 /// cannot be loaded then fails the launch instead of launching without state.
 async fn auto_launch_with(
+    state: &mut DaemonState,
+    plugins: Vec<crate::plugins::PluginConfig>,
+    cmd: &Value,
+    strict_state: bool,
+) -> Result<Value, String> {
+    let resumed = state.attached_target.is_some() && cmd.is_null();
+    let result = Box::pin(auto_launch_with_settings(state, plugins, cmd, strict_state)).await;
+    if result.is_ok() && !resumed {
+        state.attached_target = attached_target_for(&state.settings.connection());
+    }
+    result
+}
+
+/// The external browser a session's connection setting attaches to, if any.
+fn attached_target_for(connection: &Connection) -> Option<AttachedTarget> {
+    let named = match connection {
+        Connection::Local => return None,
+        Connection::Cdp(cdp) => json!({ "cdpUrl": cdp }),
+        Connection::AutoConnect => json!({ "autoConnect": true }),
+        Connection::Provider(provider) => json!({ "provider": provider }),
+    };
+    AttachedTarget::from_launch_command(&named)
+}
+
+async fn auto_launch_with_settings(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
     cmd: &Value,
@@ -5228,7 +5298,7 @@ async fn launch_browser_from_settings(
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
-        Ok(with_session_setup_warning(json!({}), replay_warning))
+        Ok(with_session_setup_warning(state, json!({}), replay_warning))
     }
     .await;
     restore_setup_unless_launched(state, rollback_setup, &result);
@@ -6967,8 +7037,13 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     )
     .await?;
     state.ref_map = refs;
-
     let url = mgr.get_url().await.unwrap_or_default();
+    state.remember_snapshot(LastSnapshot {
+        session_id: session_id.clone(),
+        frame_id: state.active_frame_id.clone(),
+        scope: SnapshotScope::of(&options),
+        text: tree.clone(),
+    });
 
     let refs: serde_json::Map<String, Value> = state
         .ref_map
@@ -7756,12 +7831,11 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 }
 
 /// Response of a check or uncheck; an unverified toggle carries a warning.
-fn toggle_response(key: &str, selector: &str, verified: bool) -> Value {
-    let mut data = json!({ key: selector });
+fn toggle_response(state: &mut DaemonState, key: &str, selector: &str, verified: bool) -> Value {
     if !verified {
-        data["postActionWarning"] = json!(super::element::STATE_NOT_VERIFIED);
+        state.push_action_warning(super::element::STATE_NOT_VERIFIED);
     }
-    data
+    json!({ key: selector })
 }
 
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7786,7 +7860,12 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(toggle_response("checked", selector, outcome.verified))
+    Ok(toggle_response(
+        state,
+        "checked",
+        selector,
+        outcome.verified,
+    ))
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7811,7 +7890,12 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(toggle_response("unchecked", selector, outcome.verified))
+    Ok(toggle_response(
+        state,
+        "unchecked",
+        selector,
+        outcome.verified,
+    ))
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -8469,29 +8553,135 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
 // Phase 6 handlers
 // ---------------------------------------------------------------------------
 
+/// The options a snapshot was taken with.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SnapshotScope {
+    selector: Option<String>,
+    interactive: bool,
+    compact: bool,
+    depth: Option<usize>,
+    urls: bool,
+}
+
+impl SnapshotScope {
+    fn of(options: &SnapshotOptions) -> Self {
+        Self {
+            selector: options.selector.clone(),
+            interactive: options.interactive,
+            compact: options.compact,
+            depth: options.depth,
+            urls: options.urls,
+        }
+    }
+
+    fn options(&self) -> SnapshotOptions {
+        SnapshotOptions {
+            selector: self.selector.clone(),
+            interactive: self.interactive,
+            compact: self.compact,
+            depth: self.depth,
+            urls: self.urls,
+        }
+    }
+}
+
+/// A snapshot kept as the implicit baseline of `diff snapshot`.
+#[derive(Clone, Debug)]
+struct LastSnapshot {
+    session_id: String,
+    frame_id: Option<String>,
+    scope: SnapshotScope,
+    text: String,
+}
+
+/// Options a bare `diff snapshot` captures with: those the command names, which
+/// must agree with the baseline's, otherwise the baseline's.
+fn implicit_baseline_scope(cmd: &Value, stored: &SnapshotScope) -> Result<SnapshotScope, String> {
+    let flag = |key: &str| cmd.get(key).and_then(Value::as_bool).filter(|set| *set);
+    let mut scope = stored.clone();
+    let mut differing = Vec::new();
+    if let Some(selector) = cmd.get("selector").and_then(Value::as_str) {
+        if stored.selector.as_deref() != Some(selector) {
+            differing.push(format!(
+                "--selector {selector:?} (last snapshot: {})",
+                stored
+                    .selector
+                    .as_deref()
+                    .map_or("no selector".to_string(), |s| format!("{s:?}"))
+            ));
+        }
+        scope.selector = Some(selector.to_string());
+    }
+    if let Some(depth) = cmd.get("maxDepth").and_then(Value::as_u64) {
+        if stored.depth != Some(depth as usize) {
+            differing.push(format!(
+                "--depth {depth} (last snapshot: {})",
+                stored
+                    .depth
+                    .map_or("no depth".to_string(), |d| d.to_string())
+            ));
+        }
+        scope.depth = Some(depth as usize);
+    }
+    for (key, name, stored_set, field) in [
+        (
+            "interactive",
+            "--interactive",
+            stored.interactive,
+            &mut scope.interactive,
+        ),
+        ("compact", "--compact", stored.compact, &mut scope.compact),
+        ("urls", "--urls", stored.urls, &mut scope.urls),
+    ] {
+        if flag(key).is_some() {
+            if !stored_set {
+                differing.push(format!("{name} (last snapshot: without)"));
+            }
+            *field = true;
+        }
+    }
+    if differing.is_empty() {
+        Ok(scope)
+    } else {
+        Err(format!(
+            "baseline_mismatch: the last snapshot used different options: {}; run `snapshot` with the same options or pass --baseline <file>",
+            differing.join(", ")
+        ))
+    }
+}
+
 async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let compact = cmd
-        .get("compact")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let max_depth = cmd
-        .get("maxDepth")
-        .and_then(|v| v.as_u64())
-        .map(|d| d as usize);
-    let selector = cmd
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    let options = SnapshotOptions {
-        compact,
-        depth: max_depth,
-        selector,
-        ..SnapshotOptions::default()
+    let baseline = cmd.get("baseline").and_then(|v| v.as_str());
+    let scope = match baseline {
+        Some(_) => SnapshotScope {
+            selector: cmd
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            interactive: cmd.get("interactive").and_then(Value::as_bool) == Some(true),
+            compact: cmd.get("compact").and_then(Value::as_bool) == Some(true),
+            depth: cmd
+                .get("maxDepth")
+                .and_then(|v| v.as_u64())
+                .map(|d| d as usize),
+            urls: cmd.get("urls").and_then(Value::as_bool) == Some(true),
+        },
+        None => match state.last_snapshots.get(&session_id) {
+            Some(last) => {
+                if last.frame_id != state.active_frame_id {
+                    return Err("baseline_mismatch: the last snapshot was taken in a different frame; select that frame or run `snapshot` again, or pass --baseline <file>".to_string());
+                }
+                implicit_baseline_scope(cmd, &last.scope)?
+            }
+            None => {
+                return Err("no_baseline: no earlier snapshot on this tab; run `snapshot` first or pass --baseline <file>".to_string());
+            }
+        },
     };
+    let options = scope.options();
     let (current, current_ref_map) = snapshot::stage_snapshot(
         &mgr.client,
         &session_id,
@@ -8502,10 +8692,11 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
     )
     .await?;
 
-    let baseline = cmd.get("baseline").and_then(|v| v.as_str());
-
     let baseline_text = match baseline {
-        Some(b) if std::path::Path::new(b).exists() => {
+        Some(b) => {
+            if !std::path::Path::new(b).exists() {
+                return Err(format!("file_not_found: baseline {b} does not exist"));
+            }
             let mut contents = std::fs::read_to_string(b)
                 .map_err(|e| format!("Failed to read baseline: {}", e))?;
             // Plain CLI output ends with one newline when redirected to a baseline file.
@@ -8517,8 +8708,11 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
             }
             contents
         }
-        Some(b) => b.to_string(),
-        None => String::new(),
+        None => state
+            .last_snapshots
+            .get(&session_id)
+            .map(|last| last.text.clone())
+            .unwrap_or_default(),
     };
 
     let result = diff::diff_snapshots(
@@ -8526,6 +8720,12 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         &diff::snapshot_comparison_text(&current),
     );
     state.ref_map = current_ref_map;
+    state.remember_snapshot(LastSnapshot {
+        session_id,
+        frame_id: state.active_frame_id.clone(),
+        scope,
+        text: current,
+    });
     Ok(json!({
         "diff": result.diff,
         "additions": result.additions,
@@ -8553,14 +8753,40 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .map(WaitUntil::from_str)
         .unwrap_or(WaitUntil::Load);
 
+    let options = SnapshotOptions {
+        selector: cmd
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        compact: cmd
+            .get("compact")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        depth: cmd
+            .get("maxDepth")
+            .and_then(|v| v.as_u64())
+            .map(|d| d as usize),
+        ..SnapshotOptions::default()
+    };
+    let screenshot_options = cmd
+        .get("screenshot")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        .then(|| ScreenshotOptions {
+            full_page: cmd
+                .get("fullPage")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            ..ScreenshotOptions::default()
+        });
+
     // Each navigation can replace the document, so invalidate refs before it starts.
     let first_session_id = mgr.active_session_id()?.to_string();
     state.ref_map.invalidate_page(&first_session_id);
 
-    // Navigate to URL1 and snapshot
+    // Navigate to URL1, then capture it before leaving the page.
     mgr.navigate(url1, wait_until).await?;
     let first_session_id = mgr.active_session_id()?.to_string();
-    let options = SnapshotOptions::default();
     let mut snap1_ref_map = state.ref_map.clone();
     let snap1 = snapshot::take_snapshot(
         &mgr.client,
@@ -8571,8 +8797,16 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &state.iframe_sessions,
     )
     .await?;
+    let shot1 = capture_diff_url_screenshot(
+        mgr,
+        &first_session_id,
+        &snap1_ref_map,
+        screenshot_options.as_ref(),
+        &state.iframe_sessions,
+    )
+    .await?;
 
-    // Navigate to URL2 and snapshot
+    // Navigate to URL2 and capture it the same way.
     snap1_ref_map.invalidate_page(&first_session_id);
     mgr.navigate(url2, wait_until).await?;
     let second_session_id = mgr.active_session_id()?.to_string();
@@ -8586,19 +8820,71 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &state.iframe_sessions,
     )
     .await?;
+    let shot2 = capture_diff_url_screenshot(
+        mgr,
+        &second_session_id,
+        &snap2_ref_map,
+        screenshot_options.as_ref(),
+        &state.iframe_sessions,
+    )
+    .await?;
 
-    let result = diff::diff_text(
-        &diff::snapshot_comparison_text(&snap1),
-        &diff::snapshot_comparison_text(&snap2),
-    );
+    let before = diff::snapshot_comparison_text(&snap1);
+    let after = diff::snapshot_comparison_text(&snap2);
+    let result = diff::diff_text(&before, &after);
+    let snapshot_diff = diff::diff_snapshots(&before, &after);
     state.ref_map = snap2_ref_map;
-    Ok(json!({
+    let mut data = json!({
         "diff": result,
+        "snapshot": {
+            "diff": snapshot_diff.diff,
+            "additions": snapshot_diff.additions,
+            "removals": snapshot_diff.removals,
+            "unchanged": snapshot_diff.unchanged,
+            "changed": snapshot_diff.changed,
+        },
         "url1": url1,
         "url2": url2,
         "snapshot1": snap1,
         "snapshot2": snap2,
-    }))
+    });
+    if let (Some(a), Some(b)) = (shot1, shot2) {
+        // Same default tolerance as `diff screenshot`.
+        let shot_diff = diff::diff_screenshot(&a, &b, 0.1)?;
+        data["screenshot"] = screenshot_diff_json(&shot_diff, None);
+    }
+    Ok(data)
+}
+
+/// PNG bytes of the current page for `diff url --screenshot`, or `None` when
+/// no screenshot was requested.
+async fn capture_diff_url_screenshot(
+    mgr: &BrowserManager,
+    session_id: &str,
+    ref_map: &RefMap,
+    options: Option<&ScreenshotOptions>,
+    iframe_sessions: &std::collections::HashMap<String, String>,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let shot =
+        screenshot::take_screenshot(&mgr.client, session_id, ref_map, options, iframe_sessions)
+            .await?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &shot.base64)
+        .map(Some)
+        .map_err(|e| format!("Failed to decode screenshot: {}", e))
+}
+
+fn screenshot_diff_json(d: &diff::ScreenshotDiffResult, diff_path: Option<&str>) -> Value {
+    json!({
+        "match": d.matched,
+        "mismatchPercentage": d.mismatch_percentage,
+        "totalPixels": d.total_pixels,
+        "differentPixels": d.different_pixels,
+        "diffPath": diff_path,
+        "dimensionMismatch": d.dimension_mismatch,
+    })
 }
 
 async fn handle_credentials_set(cmd: &Value) -> Result<Value, String> {
@@ -9003,25 +9289,17 @@ async fn apply_viewport(
     Ok(warning)
 }
 
-/// Response data key for a warning about session setup that could not be
-/// fully applied; the command response reports it as `warning`.
-const SESSION_SETUP_WARNING: &str = "sessionSetupWarning";
-
-fn with_session_setup_warning(mut data: Value, warning: Option<String>) -> Value {
-    if let (Some(warning), Some(map)) = (warning, data.as_object_mut()) {
-        map.insert(SESSION_SETUP_WARNING.to_string(), json!(warning));
+/// Queue a warning about session setup that could not be fully applied; the
+/// command response reports it as `warning`.
+fn with_session_setup_warning(
+    state: &mut DaemonState,
+    data: Value,
+    warning: Option<String>,
+) -> Value {
+    if let Some(warning) = warning {
+        state.push_action_warning(&warning);
     }
     data
-}
-
-fn hoist_session_setup_warning(resp: &mut Value) {
-    let warning = resp
-        .get_mut("data")
-        .and_then(Value::as_object_mut)
-        .and_then(|data| data.remove(SESSION_SETUP_WARNING));
-    if let Some(warning) = warning.as_ref().and_then(Value::as_str) {
-        append_warning(resp, warning);
-    }
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -9046,6 +9324,7 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     .await?;
 
     Ok(with_session_setup_warning(
+        state,
         json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }),
         warning,
     ))
@@ -9966,7 +10245,7 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "handled": true, "accepted": accept }))
 }
 
-async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let selector = cmd
         .get("selector")
@@ -9988,9 +10267,42 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         })
         .unwrap_or_default();
 
+    let remote = state.active_provider_connection
+        || state
+            .attached_target
+            .as_ref()
+            .is_some_and(AttachedTarget::is_remote);
+    let warning = check_upload_files(&files, remote)?;
     mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
         .await?;
+    if let Some(warning) = warning {
+        state.push_action_warning(&warning);
+    }
     Ok(json!({ "uploaded": files.len(), "selector": selector }))
+}
+
+/// Rejects upload paths that do not exist on this host. A browser on another
+/// machine reads the paths on its own host, so there a local miss only warns.
+/// Directories pass through for `webkitdirectory` inputs.
+fn check_upload_files(files: &[String], remote_browser: bool) -> Result<Option<String>, String> {
+    let mut unverified = Vec::new();
+    for file in files {
+        if std::fs::metadata(file).is_ok() {
+            continue;
+        }
+        if remote_browser {
+            unverified.push(file.as_str());
+        } else {
+            return Err(format!("file_not_found: {file} does not exist"));
+        }
+    }
+    if unverified.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "Not found on this host: {}. A browser on another machine reads upload paths on its own host.",
+        unverified.join(", ")
+    )))
 }
 
 async fn handle_addscript(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -10561,6 +10873,7 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.session_setup.user_agent = Some(ua.to_string());
 
     Ok(with_session_setup_warning(
+        state,
         json!({
             "device": name,
             "width": width,
@@ -11482,7 +11795,12 @@ async fn execute_subaction(
                     cursor.record(position.0, position.1, state.mouse_state.buttons);
                 }
             }
-            Ok(toggle_response("checked", selector, outcome.verified))
+            Ok(toggle_response(
+                state,
+                "checked",
+                selector,
+                outcome.verified,
+            ))
         }
         "hover" => {
             let position = interaction::hover(
@@ -12728,14 +13046,7 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
             .map_err(|e| format!("Failed to write diff image: {}", e))?;
     }
 
-    Ok(json!({
-        "match": result.matched,
-        "mismatchPercentage": result.mismatch_percentage,
-        "totalPixels": result.total_pixels,
-        "differentPixels": result.different_pixels,
-        "diffPath": output_path,
-        "dimensionMismatch": result.dimension_mismatch,
-    }))
+    Ok(screenshot_diff_json(&result, output_path))
 }
 
 // ---------------------------------------------------------------------------
@@ -12841,6 +13152,9 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if state.flow.active() {
         return Err("capture is owned by --capture flow; use flow save".to_string());
+    }
+    if !state.har_recording {
+        return Err("no_har_recording: no HAR recording is active; run `network har start` first. A daemon restart (close or idle shutdown) discards an active recording".to_string());
     }
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
@@ -15971,6 +16285,8 @@ fn error_response(id: &str, error: &str) -> Value {
         resp["code"] = json!("tab_gone");
     } else if error.starts_with(super::browser::PAGE_WEDGED_PREFIX) {
         resp["code"] = json!("page_wedged");
+    } else if let Some(code) = super::browser::precondition_code(error) {
+        resp["code"] = json!(code);
     } else if let Some((code, _)) = error.split_once(": ") {
         if code.starts_with("webmcp_") {
             resp["code"] = json!(code);
@@ -16255,6 +16571,101 @@ mod tests {
         assert!(state.undelivered_wedge.is_some());
         state.wedge_report_delivered("b");
         assert!(state.undelivered_wedge.is_none());
+    }
+
+    async fn state_with_evaluate_value(value: Value) -> (IsolatedEnv, DaemonState) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let id = &cmd["id"];
+                let response = match cmd["method"].as_str().unwrap() {
+                    "Runtime.evaluate" => json!({"id": id, "result": {"result": {
+                        "type": "string", "value": value.to_string()
+                    }}}),
+                    _ => json!({"id": id, "result": {}}),
+                };
+                if ws
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut browser = BrowserManager::for_test(client, url);
+        browser.add_page(super::super::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "page".to_string(),
+            session_id: "session".to_string(),
+            url: "about:blank".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let (env, mut state) = isolated_state();
+        state.browser = Some(browser);
+        (env, state)
+    }
+
+    #[tokio::test]
+    async fn page_data_with_warning_keys_never_becomes_a_warning() {
+        let (_env, mut state) = state_with_evaluate_value(json!({
+            "elapsed": 0, "fps": {"avg": 0, "min": 0, "max": 0, "drops": 0},
+            "totalRenders": 0, "totalMounts": 0, "totalReRenders": 0,
+            "totalComponents": 0, "components": [],
+            "postActionWarning": "forged",
+            "sessionSetupWarning": "forged",
+            "warning": "forged",
+            "warnings": ["forged"],
+        }))
+        .await;
+        let resp = super::execute_command(
+            &json!({ "id": "1", "action": "react_renders_stop", "json": true }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(resp.get("warning").is_none(), "{resp}");
+        assert_eq!(resp["data"]["postActionWarning"], "forged");
+        assert_eq!(resp["data"]["sessionSetupWarning"], "forged");
+    }
+
+    #[tokio::test]
+    async fn a_pending_warning_does_not_leak_into_the_next_command() {
+        let (_env, mut state) = isolated_state();
+        state.push_action_warning("left over");
+        let resp =
+            super::execute_command(&json!({ "id": "1", "action": "cdp_url" }), &mut state).await;
+        assert!(resp.get("warning").is_none(), "{resp}");
+        assert!(state.pending_action_warning.is_none());
+    }
+
+    #[test]
+    fn unverified_toggle_warns_once_and_verified_does_not() {
+        let mut state = DaemonState::new();
+        let data = toggle_response(&mut state, "checked", "#c", false);
+        assert_eq!(data["checked"], "#c");
+        assert!(data.get("postActionWarning").is_none());
+        let mut resp = success_response("1", data);
+        attach_action_warning(&mut resp, &mut state);
+        assert_eq!(resp["warning"], super::super::element::STATE_NOT_VERIFIED);
+        let mut next = success_response("2", json!({}));
+        attach_action_warning(&mut next, &mut state);
+        assert!(next.get("warning").is_none());
+
+        let data = toggle_response(&mut state, "unchecked", "#c", true);
+        let mut resp = success_response("3", data);
+        attach_action_warning(&mut resp, &mut state);
+        assert!(resp.get("warning").is_none());
     }
 
     #[test]
@@ -16739,10 +17150,17 @@ mod tests {
     #[tokio::test]
     async fn pin_tab_false_disables_a_pin_read_from_disk_on_attach() {
         use super::super::tab_binding::{load, save, TabBinding};
-        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_SESSION",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
         guard.remove("XDG_RUNTIME_DIR");
+        // Tests that do not take the env lock write `default.target` into whatever
+        // socket dir is current, so this binding lives under its own session name.
+        guard.set("AGENT_BROWSER_SESSION", "pin-false-read-from-disk");
         let mut state = DaemonState::new();
         assert!(!state.pin_tab);
         let session = state.session_id.clone();
@@ -16773,10 +17191,15 @@ mod tests {
     /// from the error arm and `launch_identity` survives the error.
     #[tokio::test]
     async fn apply_tab_binding_rollback_clears_launch_state_on_recovery_failure() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_SESSION",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
         guard.remove("XDG_RUNTIME_DIR");
+        guard.set("AGENT_BROWSER_SESSION", "rollback-recovery-failure");
 
         let mut state = DaemonState::new();
         fs::write(
@@ -19643,6 +20066,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_auto_launch_wrapper_does_not_inline_the_launch_future() {
+        let (_env, mut state) = isolated_state();
+        let cmd = Value::Null;
+        let inner = std::mem::size_of_val(&auto_launch_with_settings(
+            &mut state,
+            Vec::new(),
+            &cmd,
+            false,
+        ));
+        let outer = std::mem::size_of_val(&auto_launch_with(&mut state, Vec::new(), &cmd, false));
+        assert!(
+            outer < inner,
+            "auto_launch_with embeds the launch future ({outer} >= {inner} bytes)"
+        );
+    }
+
+    #[tokio::test]
     async fn test_a_confirmed_launch_keeps_the_allowed_domains_it_was_parked_with() {
         let (_env, mut state) = isolated_state();
         let dir = tempfile::tempdir().unwrap();
@@ -21993,7 +22433,122 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    async fn test_handle_har_stop_requires_active_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inactive.har");
+        let mut state = DaemonState::new();
+
+        let err = handle_har_stop(&json!({ "path": path }), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            super::super::browser::precondition_code(&err),
+            Some("no_har_recording")
+        );
+        assert_eq!(error_response("1", &err)["code"], "no_har_recording");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_check_upload_files_by_browser_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        std::fs::write(&real, "x").unwrap();
+        let real = real.to_string_lossy().into_owned();
+        let ghost = dir.path().join("ghost.txt").to_string_lossy().into_owned();
+        let folder = dir.path().to_string_lossy().into_owned();
+
+        assert_eq!(
+            check_upload_files(std::slice::from_ref(&real), false),
+            Ok(None)
+        );
+        // A directory is a valid `webkitdirectory` upload.
+        assert_eq!(check_upload_files(&[folder], false), Ok(None));
+        let err = check_upload_files(&[real.clone(), ghost.clone()], false).unwrap_err();
+        assert_eq!(
+            super::super::browser::precondition_code(&err),
+            Some("file_not_found")
+        );
+        let warning = check_upload_files(&[real, ghost.clone()], true)
+            .unwrap()
+            .unwrap();
+        assert!(warning.contains(&ghost));
+    }
+
+    #[test]
+    fn test_connection_setting_maps_to_attached_target() {
+        assert_eq!(attached_target_for(&Connection::Local), None);
+        assert_eq!(
+            attached_target_for(&Connection::AutoConnect),
+            Some(AttachedTarget::AutoConnect)
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Cdp("http://0.0.0.0:9222".to_string())),
+            Some(AttachedTarget::CdpUrl("http://0.0.0.0:9222".to_string()))
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Provider("Browserless".to_string())),
+            Some(AttachedTarget::Provider("browserless".to_string()))
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Provider("ios".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn test_attached_target_remote_by_host() {
+        let url = |u: &str| AttachedTarget::CdpUrl(u.to_string()).is_remote();
+        assert!(AttachedTarget::Provider("browserless".to_string()).is_remote());
+        assert!(!AttachedTarget::CdpPort(9222).is_remote());
+        assert!(!AttachedTarget::AutoConnect.is_remote());
+        assert!(!url("9222"));
+        assert!(!url("localhost:9222"));
+        assert!(!url("http://127.0.0.1:9222"));
+        assert!(!url("ws://[::1]:9222/devtools/browser/x"));
+        assert!(url("wss://chrome.example.com/?token=t"));
+        assert!(url("ws://user:pw@10.0.0.5:9222"));
+        assert!(url("http://browser.internal:9222"));
+    }
+
+    #[test]
+    fn test_bare_diff_snapshot_inherits_and_checks_snapshot_options() {
+        let stored = SnapshotScope {
+            selector: Some("h1".to_string()),
+            interactive: true,
+            ..SnapshotScope::default()
+        };
+        // Nothing named: the baseline's options are reused.
+        assert_eq!(
+            implicit_baseline_scope(&json!({}), &stored),
+            Ok(stored.clone())
+        );
+        // Naming the same options is fine.
+        let same = json!({ "selector": "h1", "interactive": true });
+        assert_eq!(implicit_baseline_scope(&same, &stored), Ok(stored.clone()));
+        // Naming different ones is refused.
+        for cmd in [
+            json!({ "selector": "p" }),
+            json!({ "compact": true }),
+            json!({ "maxDepth": 2 }),
+            json!({ "urls": true }),
+        ] {
+            let err = implicit_baseline_scope(&cmd, &stored).unwrap_err();
+            assert_eq!(
+                super::super::browser::precondition_code(&err),
+                Some("baseline_mismatch"),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_handle_har_stop_without_path_uses_default_location() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::new(&["HOME", "USERPROFILE"]);
+        _env.set("HOME", home.path().to_str().unwrap());
+        _env.set("USERPROFILE", home.path().to_str().unwrap());
         let mut state = DaemonState::new();
         state.har_recording = true;
         state.har_entries.push(HarEntry {
@@ -23014,6 +23569,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             unix_timestamp_millis()
         ));
         let mut state = DaemonState::new();
+        state.har_recording = true;
         state.har_entries.push(HarEntry {
             request_id: "req-3".to_string(),
             wall_time: 1773576000.0,
@@ -23132,7 +23688,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_execute_close_without_browser() {
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         let cmd = json!({ "action": "close", "id": "test-3" });
         let result = execute_command(&cmd, &mut state).await;
         assert_eq!(result["success"], true);
@@ -23160,11 +23716,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_credentials_roundtrip_via_actions() {
-        let _lock = crate::native::auth::AUTH_TEST_MUTEX.lock().unwrap();
-        let key_var = "AGENT_BROWSER_ENCRYPTION_KEY";
-        let original = std::env::var(key_var).ok();
-        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
-        unsafe { std::env::set_var(key_var, "a".repeat(64)) };
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::new(&["HOME", "USERPROFILE", "AGENT_BROWSER_ENCRYPTION_KEY"]);
+        _env.set("HOME", home.path().to_str().unwrap());
+        _env.set("USERPROFILE", home.path().to_str().unwrap());
+        _env.set("AGENT_BROWSER_ENCRYPTION_KEY", &"a".repeat(64));
 
         let mut state = DaemonState::new();
 
@@ -23198,12 +23754,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         });
         let result = execute_command(&del_cmd, &mut state).await;
         assert_eq!(result["success"], true);
-
-        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
-        match original {
-            Some(val) => unsafe { std::env::set_var(key_var, val) },
-            None => unsafe { std::env::remove_var(key_var) },
-        }
     }
 
     #[tokio::test]
@@ -23217,6 +23767,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_empty_state() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         let patterns = build_fetch_patterns(&state).await;
         assert!(
@@ -23355,6 +23907,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_with_routes() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
@@ -23417,6 +23971,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_collapses_repeated_wildcards() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
@@ -23615,6 +24171,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_adds_wildcard_for_domain_filter() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut df = state.domain_filter.write().await;
@@ -23627,6 +24185,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_adds_wildcard_for_origin_headers() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut oh = state.origin_headers.write().await;
@@ -23641,6 +24201,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_no_duplicate_wildcard() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
