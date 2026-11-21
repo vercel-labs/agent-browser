@@ -6308,7 +6308,10 @@ mod tests {
         let arguments = json!({ "path": "--capture.har" });
         let parsed = parse(&arguments, har_stop_args(&arguments).unwrap());
         assert_eq!(parsed["action"], "har_stop");
-        assert!(parsed["path"].as_str().unwrap().ends_with("/--capture.har"));
+        assert_eq!(
+            std::path::Path::new(parsed["path"].as_str().unwrap()).file_name(),
+            Some(std::ffi::OsStr::new("--capture.har"))
+        );
 
         let arguments = json!({ "url": "--history" });
         let parsed = parse(&arguments, pushstate_args(&arguments).unwrap());

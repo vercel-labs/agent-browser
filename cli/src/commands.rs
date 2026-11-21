@@ -8324,7 +8324,7 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(files[0], cwd.join("rel.txt").to_string_lossy());
-        assert_eq!(files[1], cwd.join("sub/rel2.txt").to_string_lossy());
+        assert_eq!(files[1], cwd.join("sub").join("rel2.txt").to_string_lossy());
         assert_eq!(files[2], abs_arg);
     }
 
@@ -8507,13 +8507,15 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(
             absolute_path_arg("a/b.txt"),
-            cwd.join("a/b.txt").to_string_lossy()
+            cwd.join("a").join("b.txt").to_string_lossy()
         );
         assert_eq!(
             absolute_path_arg("./a.txt"),
             cwd.join("a.txt").to_string_lossy()
         );
-        assert_eq!(absolute_path_arg("/tmp/x.txt"), "/tmp/x.txt");
+        let abs = std::env::temp_dir().join("x.txt");
+        let abs = abs.to_string_lossy();
+        assert_eq!(absolute_path_arg(&abs), abs);
         let home = std::env::home_dir().unwrap();
         assert_eq!(
             absolute_path_arg("~/x.txt"),
@@ -8523,7 +8525,7 @@ mod tests {
         // `~user` is not expanded.
         assert_eq!(
             absolute_path_arg("~user/x"),
-            cwd.join("~user/x").to_string_lossy()
+            cwd.join("~user").join("x").to_string_lossy()
         );
     }
 
