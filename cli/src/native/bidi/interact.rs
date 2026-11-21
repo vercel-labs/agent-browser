@@ -592,7 +592,7 @@ pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 }
 
 /// Decodes the click the way Chrome does, then presses the requested button the requested number
-/// of times. Modifier keys are refused: nothing here holds them yet.
+/// of times while holding any requested modifier keys.
 async fn click_with(
     cmd: &Value,
     state: &mut DaemonState,
@@ -607,16 +607,22 @@ async fn click_with(
     let ClickPlan::Pointer(spec) = plan else {
         return click_new_tab(selector, state).await;
     };
-    if spec.modifiers != Modifiers::default() {
-        return Err("--modifiers is not supported with --engine firefox".to_string());
-    }
     let target = resolve_target(state, selector).await?;
+    let top_context = {
+        let ff = session(state)?;
+        ff.contexts
+            .tab_of(&target.context)
+            .unwrap_or_else(|| ff.contexts.active_tab())
+            .to_string()
+    };
+    let keys = spec.modifiers.key_names();
     let actions = pointer_click(
         &Origin::Element(target.shared_id.clone()),
-        spec.button.name(),
+        spec.button,
         u32::from(spec.count),
     );
-    Ok(act_pointer(
+    hold_modifiers(state, &target.context, &keys, "keyDown").await?;
+    let outcome = act_pointer(
         state,
         cmd,
         &target,
@@ -625,8 +631,44 @@ async fn click_with(
         actions,
         json!({ "clicked": selector }),
     )
-    .await?
-    .value)
+    .await;
+    let released = release_modifiers(state, &target.context, &top_context, &keys).await;
+    let outcome = outcome?;
+    released?;
+    Ok(outcome.value)
+}
+
+/// Presses or releases the modifier keys for one gesture so they stay held across it.
+async fn hold_modifiers(
+    state: &mut DaemonState,
+    context: &str,
+    keys: &[&str],
+    event_type: &str,
+) -> Result<(), String> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
+    perform_actions(ff, context, modifier_actions(event_type, keys)).await?;
+    Ok(())
+}
+
+/// Releases held modifier keys, falling back to the owning top-level tab if the click removed its
+/// containing iframe.
+async fn release_modifiers(
+    state: &mut DaemonState,
+    target_context: &str,
+    top_context: &str,
+    keys: &[&str],
+) -> Result<(), String> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let first = hold_modifiers(state, target_context, keys, "keyUp").await;
+    if first.is_ok() || top_context == target_context {
+        return first;
+    }
+    hold_modifiers(state, top_context, keys, "keyUp").await
 }
 
 /// Opens the target link in a new tab, returning Chrome's `{clicked, newTab, url}` shape.
@@ -1979,11 +2021,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clicks_refuse_modifier_keys() {
+    async fn modified_click_releases_modifiers_on_parent_tab_when_iframe_is_removed() {
+        use crate::native::bidi::session::tests::{fake_session_with_replies, FakeReply};
+
+        let key_up_contexts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = key_up_contexts.clone();
+        let (mut ff, _tx, _calls) = fake_session_with_replies(move |request| {
+            let params = &request["params"];
+            match request["method"].as_str() {
+                Some("browsingContext.getTree") => FakeReply::Result(json!({
+                    "contexts": [{ "context": "ctx-tab", "children": [{ "context": "ctx-iframe" }] }]
+                })),
+                Some("browsingContext.locateNodes") => FakeReply::Result(json!({
+                    "nodes": [{ "sharedId": "frame" }]
+                })),
+                Some("script.callFunction")
+                    if params["functionDeclaration"] == FRAME_ORIGIN_JS =>
+                {
+                    FakeReply::Result(frame_origin_reply((0.0, 0.0)))
+                }
+                Some("script.callFunction") if params["this"]["sharedId"] == "frame" => {
+                    FakeReply::Result(located(None))
+                }
+                Some("script.callFunction") if params.get("this").is_none() => {
+                    FakeReply::Result(json!({
+                        "type": "success",
+                        "result": { "type": "node", "sharedId": "iframe-btn" }
+                    }))
+                }
+                Some("script.callFunction") => FakeReply::Result(json!({
+                    "type": "success",
+                    "result": {
+                        "type": "object",
+                        "value": [
+                            ["x", { "type": "number", "value": 10 }],
+                            ["y", { "type": "number", "value": 12 }],
+                        ]
+                    }
+                })),
+                Some("input.performActions") => {
+                    let context = request["params"]["context"].as_str().unwrap_or("");
+                    let is_key_up = request["params"]["actions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|src| src["actions"].as_array().into_iter().flatten())
+                        .any(|step| step["type"] == "keyUp");
+                    if is_key_up {
+                        recorded.lock().unwrap().push(context.to_string());
+                        if context == "ctx-iframe" {
+                            return FakeReply::Error {
+                                error: "no such frame".into(),
+                                message: "frame was removed".into(),
+                            };
+                        }
+                    }
+                    FakeReply::Result(json!({}))
+                }
+                _ => FakeReply::Result(json!({})),
+            }
+        })
+        .await;
+        ff.contexts = super::super::contexts::Contexts::from_tree(&json!({
+            "contexts": [{
+                "context": "ctx-tab",
+                "url": "https://example.test/",
+                "children": [{
+                    "context": "ctx-iframe",
+                    "url": "https://example.test/frame",
+                    "children": []
+                }]
+            }]
+        }))
+        .unwrap();
+        ff.contexts.activate("ctx-iframe");
         let mut state = DaemonState::new();
-        let held = json!({"selector": "#a", "modifiers": 2});
-        let refused = "--modifiers is not supported with --engine firefox";
-        assert_eq!(click(&held, &mut state).await.unwrap_err(), refused);
-        assert_eq!(dblclick(&held, &mut state).await.unwrap_err(), refused);
+        state.firefox = Some(ff);
+
+        let result = click(
+            &json!({ "selector": "#close-iframe", "modifiers": 8 }),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, json!({ "clicked": "#close-iframe" }));
+        assert_eq!(
+            *key_up_contexts.lock().unwrap(),
+            vec!["ctx-iframe", "ctx-tab"]
+        );
     }
 }

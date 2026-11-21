@@ -22,6 +22,7 @@ use crate::native::element::{
 use crate::native::interaction::{
     CLEAR_INPUT_JS, CLEAR_VALUE_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
 };
+use crate::native::pointer::MouseButton;
 
 const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
     let el = useActive ? ((this && this.ownerDocument) || document).activeElement : this;
@@ -469,7 +470,11 @@ async fn set_checked(
                 &control,
                 selector,
                 PointerAction::Check,
-                pointer_click(&Origin::Element(control.shared_id.clone()), "left", 1),
+                pointer_click(
+                    &Origin::Element(control.shared_id.clone()),
+                    MouseButton::Left,
+                    1,
+                ),
                 json!({}),
             )
             .await?;
