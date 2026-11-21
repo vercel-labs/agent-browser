@@ -4533,7 +4533,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
 /// Parse network interception, request inspection, and HAR recording commands.
 fn parse_network(rest: &[&str], id: &str, batch_item: bool) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests", "request", "har"];
+    const VALID: &[&str] = &["route", "unroute", "requests", "request", "har", "wait"];
 
     match rest.first().copied() {
         Some("route") => {
@@ -4786,13 +4786,97 @@ fn parse_network(rest: &[&str], id: &str, batch_item: bool) -> Result<Value, Par
                 }),
             }
         }
+        Some("wait") => {
+            const USAGE: &str =
+                "network wait <url-pattern> [--status <code>] [--method <method>] [--timeout <ms>]";
+            const FLAGS: &[FlagSpec] = &[
+                FlagSpec {
+                    name: "--status",
+                    aliases: &[],
+                    takes_value: true,
+                },
+                FlagSpec {
+                    name: "--method",
+                    aliases: &[],
+                    takes_value: true,
+                },
+                FlagSpec {
+                    name: "--timeout",
+                    aliases: &[],
+                    takes_value: true,
+                },
+            ];
+            let mut url_pattern = None;
+            let mut status = None;
+            let mut method = None;
+            let mut timeout = None;
+            let mut scanner = ArgScanner::new(
+                &rest[1..],
+                FLAGS,
+                "network wait",
+                USAGE,
+                batch_item,
+                DashPolicy::Reject,
+            );
+            while let Some(arg) = scanner.next()? {
+                match arg {
+                    ScannedArg::ValueFlag {
+                        name: "--status",
+                        value,
+                    } => {
+                        status =
+                            Some(value.parse::<u16>().map_err(|_| ParseError::InvalidValue {
+                                message: format!("Invalid status code: {}", value),
+                                usage: USAGE,
+                            })?);
+                    }
+                    ScannedArg::ValueFlag {
+                        name: "--method",
+                        value,
+                    } => method = Some(value.to_uppercase()),
+                    ScannedArg::ValueFlag {
+                        name: "--timeout",
+                        value,
+                    } => {
+                        timeout =
+                            Some(value.parse::<u64>().map_err(|_| ParseError::InvalidValue {
+                                message: format!("Invalid timeout value: {}", value),
+                                usage: USAGE,
+                            })?);
+                    }
+                    ScannedArg::Data(value) => {
+                        if url_pattern.is_none() {
+                            url_pattern = Some(value);
+                        }
+                    }
+                    ScannedArg::BoolFlag(name) | ScannedArg::ValueFlag { name, .. } => {
+                        unreachable!("network wait flag {name} has no handler")
+                    }
+                }
+            }
+            let url_pattern = url_pattern.ok_or_else(|| ParseError::MissingArguments {
+                context: "network wait".to_string(),
+                usage: USAGE,
+            })?;
+            let mut cmd = json!({ "id": id, "action": "network_wait", "urlPattern": url_pattern });
+            if let Some(code) = status {
+                cmd["status"] = json!(code);
+            }
+            if let Some(m) = method {
+                cmd["method"] = json!(m);
+            }
+            if let Some(t) = timeout {
+                cmd["timeout"] = json!(t);
+            }
+            Ok(cmd)
+        }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
             valid_options: VALID,
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
-            usage: "network <route|unroute|requests|request|har> [args...]",
+            usage: "network <route|unroute|requests|request|har|wait> [args...]",
         }),
     }
 }
@@ -6451,6 +6535,39 @@ mod tests {
     fn test_network_request_detail_requires_id() {
         let result = parse_command(&args("network request"), &default_flags());
         assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    #[test]
+    fn test_network_wait_with_filters() {
+        let cmd = parse_command(
+            &args("network wait /api/data --method post --status 201 --timeout 5000"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "network_wait");
+        assert_eq!(cmd["urlPattern"], "/api/data");
+        assert_eq!(cmd["method"], "POST");
+        assert_eq!(cmd["status"], 201);
+        assert_eq!(cmd["timeout"], 5000);
+    }
+
+    #[test]
+    fn test_network_wait_requires_pattern() {
+        let result = parse_command(&args("network wait --status 200"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    #[test]
+    fn test_network_wait_rejects_bad_values_and_unknown_flags() {
+        let result = parse_command(&args("network wait /api --status ok"), &default_flags());
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+        let err = parse_command(&args("network wait /api --bogus"), &default_flags())
+            .unwrap_err()
+            .format();
+        assert!(
+            err.contains("unknown flag '--bogus' for network wait"),
+            "{err}"
+        );
     }
 
     // === Screenshot ===
