@@ -12748,6 +12748,99 @@ async fn e2e_recording_mobile_emulation_uses_device_pixel_ratio() {
     assert_success(&resp);
 }
 
+/// Click a button at a known spot before, during, and after a recording under
+/// `emulation`, and return where each `pointerdown` landed.
+async fn recorded_click_hits(emulation: Value) -> Vec<Value> {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await,
+    );
+    assert_success(&execute_command(&emulation, &mut state).await);
+    assert_success(
+        &execute_command(
+            &json!({
+                "action": "navigate",
+                "url": "data:text/html,<meta name=viewport content='width=device-width,initial-scale=1'><button id=b style='position:absolute;left:250px;top:700px;width:120px;height:60px'>Target</button><script>window.hits=[];addEventListener('pointerdown',e=>hits.push({x:e.clientX,y:e.clientY,target:e.target.id||e.target.tagName}))</script>",
+            }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let click = json!({ "action": "click", "selector": "#b" });
+    assert_success(&execute_command(&click, &mut state).await);
+
+    let rec_path = std::env::temp_dir().join(format!(
+        "ab-e2e-rec-click-scale-{}-{}.webm",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    assert_success(
+        &execute_command(
+            &json!({ "action": "recording_start", "path": rec_path.to_string_lossy() }),
+            &mut state,
+        )
+        .await,
+    );
+    // Let the screencast deliver frames, and switch to screenshots on an
+    // emulated scale, before clicking.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    assert_success(&execute_command(&click, &mut state).await);
+    assert_success(&execute_command(&json!({ "action": "recording_stop" }), &mut state).await);
+    assert_success(&execute_command(&click, &mut state).await);
+
+    let resp = execute_command(
+        &json!({ "action": "evaluate", "script": "JSON.stringify(window.hits)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let hits: Vec<Value> =
+        serde_json::from_str(get_data(&resp)["result"].as_str().unwrap()).unwrap();
+
+    let _ = std::fs::remove_file(&rec_path);
+    assert_success(&execute_command(&json!({ "action": "close" }), &mut state).await);
+    hits
+}
+
+fn assert_clicks_hit_button(hits: &[Value]) {
+    assert_eq!(hits.len(), 3, "before, during, and after: {hits:?}");
+    for (hit, phase) in hits.iter().zip(["before", "during", "after"]) {
+        assert_eq!(
+            (hit["x"].as_f64(), hit["y"].as_f64(), hit["target"].as_str()),
+            (Some(310.0), Some(730.0), Some("b")),
+            "click {phase} the recording missed the button: {hits:?}"
+        );
+    }
+}
+
+/// Recording an emulated device scale must leave input in CSS pixels: clicks
+/// during and after the take land where they did before it (#2694).
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_keeps_clicks_on_target_at_mobile_device_scale() {
+    let hits = recorded_click_hits(json!({ "action": "device", "name": "iPhone 14" })).await;
+    assert_clicks_hit_button(&hits);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_keeps_clicks_on_target_at_emulated_scale() {
+    let hits = recorded_click_hits(json!({
+        "action": "viewport", "width": 390, "height": 844, "deviceScaleFactor": 2.0
+    }))
+    .await;
+    assert_clicks_hit_button(&hits);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_keeps_clicks_on_target_at_unit_scale() {
+    let hits =
+        recorded_click_hits(json!({ "action": "viewport", "width": 390, "height": 844 })).await;
+    assert_clicks_hit_button(&hits);
+}
+
 /// Verify that an output path without an extension is rejected before the
 /// recording context exists: no new tab, no file, nothing to stop.
 #[tokio::test]

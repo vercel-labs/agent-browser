@@ -1849,21 +1849,25 @@ async fn collect_frames(
     Ok(Collected::Done)
 }
 
-/// Screenshots requested at once while capturing at full density: Chrome
-/// renders them one after another, and overlapping requests hide the round
-/// trip, which roughly doubles the rate at a 2x scale.
-const SCREENSHOTS_IN_FLIGHT: usize = 3;
+/// Screenshots requested at once while capturing at full density.
+///
+/// Chrome's `Page.captureScreenshot` temporarily mutates device emulation while
+/// capturing an emulated scale and restores it on completion. Overlapping two
+/// requests on the same session lets the second save the first's temporary
+/// state and restore it permanently, leaving subsequent input coordinates
+/// divided by `deviceScaleFactor`. Keep at most one request in flight.
+const SCREENSHOTS_IN_FLIGHT: usize = 1;
 /// A screenshot that takes longer than this is dropped, as one can during a
 /// navigation; the encoder repeats the previous frame meanwhile.
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Capture the page with `Page.captureScreenshot`, which renders at the page's
-/// device scale, emulated or not, at up to `fps` frames a second with a few
-/// requests in flight. Slower pages capture fewer frames, and the encoder
-/// repeats the latest one to keep the video's rate. Screenshots go through the
-/// page's own session, which holds its emulation: the recorder's session
-/// would render at the window's real scale. `events` is still the recorder's,
-/// for when the page closes.
+/// device scale, emulated or not, at up to `fps` frames a second with one
+/// request in flight at a time. Slower pages capture fewer frames, and the
+/// encoder repeats the latest one to keep the video's rate. Screenshots go
+/// through the page's own session, which holds its emulation: the recorder's
+/// session would render at the window's real scale. `events` is still the
+/// recorder's, for when the page closes.
 #[allow(clippy::too_many_arguments)]
 async fn collect_screenshots(
     client: &CdpClient,
@@ -1904,7 +1908,14 @@ async fn collect_screenshots(
 
     loop {
         tokio::select! {
-            _ = &mut *cancel_rx => break,
+            _ = &mut *cancel_rx => {
+                // Let an in-flight screenshot finish so Chrome restores any
+                // emulated device scale before `record stop` returns.
+                if !pending.is_empty() {
+                    let _ = tokio::time::timeout(TEARDOWN_TIMEOUT, pending.next()).await;
+                }
+                break;
+            }
             event = events.recv() => {
                 match event {
                     Some(event) if event.method == "Inspector.detached" => break,
