@@ -139,6 +139,7 @@ async fn e2e_empty_table_cell_refs_resolve() {
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "click_probe" => include_str!("test_fixtures/click_probe.html"),
         "wheel_probe" => include_str!("test_fixtures/wheel_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
@@ -2145,6 +2146,351 @@ async fn e2e_screenshot() {
 // Form interaction: fill, type, select, check
 // ---------------------------------------------------------------------------
 
+// Regression for #1105: `select` on a custom ARIA combobox (div-based, options
+// hidden until opened) must open it and click the matching option, and must
+// error (not silently succeed) on a value that does not exist.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="false" aria-controls="lb">Choose</div>
+<ul role="listbox" id="lb" style="display:none">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="banana">Banana</li>
+</ul>
+<output id="result">none</output>
+<select id="native"><option value="">--</option><option value="x">Xylophone</option><option value="y">Yak</option></select>
+<script>
+var cb=document.getElementById('cb'),lb=document.getElementById('lb'),r=document.getElementById('result');
+function setOpen(open){lb.style.display=open?'block':'none';cb.setAttribute('aria-expanded',String(open));}
+cb.addEventListener('click',function(){setOpen(lb.style.display==='none');});
+lb.querySelectorAll('[role=option]').forEach(function(o){o.addEventListener('click',function(){cb.textContent=o.textContent;r.textContent=o.getAttribute('data-value');setOpen(false);});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple");
+
+    // Already-open combobox must not be toggled shut before matching.
+    let resp = execute_command(&eval("5", "document.getElementById('cb').click(); document.getElementById('cb').getAttribute('aria-expanded')"), &mut state).await;
+    assert_eq!(get_data(&resp)["result"], "true");
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "select", "selector": "#cb", "values": ["Banana"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("7", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "banana");
+
+    // Unknown option errors and lists what is available.
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "select", "selector": "#cb", "values": ["Dragonfruit"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    assert!(
+        serde_json::to_string(&resp)
+            .unwrap_or_default()
+            .contains("Available options"),
+        "error should list options: {resp}"
+    );
+
+    // Native <select> path is unchanged.
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "select", "selector": "#native", "values": ["Yak"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("10", "document.getElementById('native').value"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "y");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// A combobox whose popup mounts a tick after aria-controls is set must wait for
+// that popup, not pick up options from another listbox that is already visible.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_async_popup() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<ul role="listbox" id="sidebar">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="pro">Pro</li>
+</ul>
+<div role="combobox" id="cb" tabindex="0" aria-expanded="false">Choose</div>
+<div id="host"></div>
+<output id="result">none</output>
+<output id="sidebar-clicks">0</output>
+<script>
+var cb=document.getElementById('cb'),host=document.getElementById('host'),r=document.getElementById('result'),sc=document.getElementById('sidebar-clicks');
+document.querySelectorAll('#sidebar [role=option]').forEach(function(o){o.addEventListener('click',function(){sc.textContent=String(Number(sc.textContent)+1);});});
+function close(){host.innerHTML='';cb.setAttribute('aria-expanded','false');}
+function open(){
+  cb.setAttribute('aria-controls','popup');
+  setTimeout(function(){
+    host.innerHTML='<ul role="listbox" id="popup"><li role="option" data-value="apple">Apple</li><li role="option" data-value="banana">Banana</li></ul>';
+    host.querySelectorAll('[role=option]').forEach(function(o){o.addEventListener('click',function(){r.textContent=o.getAttribute('data-value');close();});});
+    cb.setAttribute('aria-expanded','true');
+  },0);
+}
+cb.addEventListener('click',function(){if(cb.getAttribute('aria-expanded')==='true'){close();}else{open();}});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('result').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple");
+    let resp = execute_command(
+        &eval("5", "document.getElementById('sidebar-clicks').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        get_data(&resp)["result"],
+        "0",
+        "the widget's option must be clicked, not the sidebar's"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// An option whose accessible name comes from aria-labelledby must match that
+// name, even when its text content also carries an indicator and a description.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_labelled_option() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="true" aria-controls="popup">Choose</div>
+<ul role="listbox" id="popup">
+<li role="option" data-value="apple">Apple</li>
+<li role="option" data-value="car" aria-labelledby="car-label"><span aria-hidden="true">new</span><span id="car-label">Car</span><span class="hint"> compact, +$500</span></li>
+</ul>
+<output id="result">none</output>
+<script>
+var r=document.getElementById('result');
+document.querySelectorAll('#popup [role=option]').forEach(function(o){o.addEventListener('click',function(){r.textContent=o.getAttribute('data-value');});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Car"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('result').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "car");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// A matched option that is aria-disabled must fail the command instead of
+// clicking a dead target and reporting success.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_combobox_disabled_option() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<div role="combobox" id="cb" tabindex="0" aria-expanded="true" aria-controls="popup">Choose</div>
+<ul role="listbox" id="popup">
+<li role="option" data-value="basic">Basic</li>
+<li role="option" data-value="pro" aria-disabled="true">Pro</li>
+</ul>
+<output id="result">none</output>
+<script>
+var r=document.getElementById('result');
+document.querySelectorAll('#popup [role=option]').forEach(function(o){o.addEventListener('click',function(){if(o.getAttribute('aria-disabled')==='true')return;r.textContent=o.getAttribute('data-value');});});
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#cb", "values": ["Pro"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "disabled option must fail: {resp}");
+    let error = resp["error"].as_str().unwrap_or_default().to_string();
+    assert!(
+        error.contains("disabled"),
+        "error should name the disabled option: {error}"
+    );
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('result').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "none");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// Selecting an option that is already selected in a multi-select listbox is a
+// no-op; the click toggles, so without the guard the option would be cleared.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_aria_listbox_multiselect() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<ul role="listbox" id="multi" aria-multiselectable="true">
+<li role="option" data-value="apple" aria-selected="true">Apple</li>
+<li role="option" data-value="banana" aria-selected="false">Banana</li>
+</ul>
+<output id="state"></output>
+<script>
+var s=document.getElementById('state'),options=document.querySelectorAll('#multi [role=option]');
+function render(){s.textContent=Array.prototype.map.call(options,function(o){return o.getAttribute('data-value')+'='+o.getAttribute('aria-selected');}).join(',');}
+options.forEach(function(o){o.addEventListener('click',function(){o.setAttribute('aria-selected',o.getAttribute('aria-selected')==='true'?'false':'true');render();});});
+render();
+</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let eval = |id: &'static str, script: &'static str| json!({ "id": id, "action": "evaluate", "script": script });
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#multi", "values": ["Apple"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("4", "document.getElementById('state').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        get_data(&resp)["result"],
+        "apple=true,banana=false",
+        "an already selected option must stay selected"
+    );
+
+    // Selecting a different option still toggles it on.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "select", "selector": "#multi", "values": ["Banana"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &eval("6", "document.getElementById('state').textContent"),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "apple=true,banana=true");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_form_interaction() {
@@ -2828,6 +3174,148 @@ async fn e2e_tabs() {
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+/// A live tab keeps its timers running behind another tab, and goes back to
+/// the browser's throttling when asked.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_live() {
+    let mut state = DaemonState::new();
+    let ticker = "data:text/html,<script>var ticks=0;setInterval(()=>ticks++,100)</script>";
+    let mut run = async |action: &str, mut cmd: Value| {
+        cmd["id"] = json!(action);
+        cmd["action"] = json!(action);
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_success(&resp);
+        resp
+    };
+    run("launch", json!({ "headless": true })).await;
+    run("navigate", json!({ "url": ticker })).await;
+
+    let resp = run("tab_keep", json!({ "keep": "live" })).await;
+    assert_eq!(get_data(&resp)["tabId"], "t1");
+    run("evaluate", json!({ "script": "ticks = 0" })).await;
+    run("tab_new", json!({})).await;
+    let resp = run("tab_list", json!({})).await;
+    assert_eq!(get_data(&resp)["tabs"][0]["keep"], "live");
+    assert_eq!(get_data(&resp)["tabs"][1]["keep"], "throttled");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    run("tab_switch", json!({ "tabId": "t1" })).await;
+    let resp = run("evaluate", json!({ "script": "ticks" })).await;
+    let ticks = get_data(&resp)["result"].as_f64().unwrap_or_default();
+    assert!(
+        ticks >= 20.0,
+        "a live tab ticks about 30 times in 3s, got {ticks}"
+    );
+
+    run("tab_keep", json!({ "keep": "throttled" })).await;
+    let resp = run("tab_list", json!({})).await;
+    assert_eq!(get_data(&resp)["tabs"][0]["keep"], "throttled");
+    run("close", json!({})).await;
+}
+
+/// A page that records the longest gap between two 100 ms ticks.
+const GAP_PAGE: &str = "data:text/html,<script>var ticks=0,gap=0,last=performance.now();setInterval(()=>{var n=performance.now();gap=Math.max(gap,n-last);last=n;ticks++},100)</script>";
+
+/// The active tab cannot be frozen. A frozen tab stops, and the daemon
+/// unfreezes it when closing a popup makes it the active tab while Chrome
+/// shows the opener.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_frozen() {
+    let mut state = DaemonState::new();
+    let mut run = async |action: &str, mut cmd: Value| {
+        cmd["id"] = json!(action);
+        cmd["action"] = json!(action);
+        execute_command(&cmd, &mut state).await
+    };
+    let ok = |resp: Value| {
+        assert_success(&resp);
+        resp
+    };
+    ok(run("launch", json!({ "headless": true })).await);
+    ok(run("navigate", json!({ "url": "data:text/html,<p>opener</p>" })).await);
+    ok(run("tab_new", json!({ "url": GAP_PAGE })).await);
+    let resp = run("tab_keep", json!({ "keep": "frozen" })).await;
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(error.contains("Cannot freeze the active tab"), "{resp}");
+
+    ok(run("tab_switch", json!({ "tabId": "t1" })).await);
+    ok(run(
+        "evaluate",
+        json!({ "script": "window.open('about:blank'), 0" }),
+    )
+    .await);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ok(run("tab_keep", json!({ "keep": "frozen", "tabId": "t2" })).await);
+    let resp = ok(run("tab_list", json!({})).await);
+    assert_eq!(get_data(&resp)["tabs"][1]["keep"], "frozen");
+    assert_eq!(get_data(&resp)["tabs"][2]["active"], true, "{resp}");
+
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    ok(run("tab_close", json!({})).await);
+    let script = "new Promise(r => setTimeout(() => r([gap, document.visibilityState]), 50))";
+    let resp = ok(run("evaluate", json!({ "script": script })).await);
+    let result = &get_data(&resp)["result"];
+    assert!(result[0].as_f64().unwrap_or_default() >= 2000.0, "{resp}");
+    assert_eq!(result[1], "hidden", "Chrome should still show the opener");
+    let resp = ok(run("tab_list", json!({})).await);
+    assert_eq!(get_data(&resp)["tabs"][1]["keep"], "throttled");
+    ok(run("close", json!({})).await);
+}
+
+/// A session attached to a running browser unfreezes the tabs it froze when
+/// it closes, because a frozen page stays frozen after the session disconnects.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_keep_frozen_ends_with_an_attached_session() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let mut session = attach_pinned_session(&guard, "e2e-keep-frozen", &ws_url, GAP_PAGE).await;
+    let mut run = async |action: &str, mut cmd: Value| {
+        cmd["id"] = json!(action);
+        cmd["action"] = json!(action);
+        let resp = execute_command(&cmd, &mut session).await;
+        assert_success(&resp);
+        resp
+    };
+    let resp = run("tab_list", json!({})).await;
+    let tabs = get_data(&resp)["tabs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let ticker = tabs
+        .iter()
+        .find(|tab| tab["active"] == true)
+        .expect("an active tab");
+    let ticker = ticker["targetId"].as_str().unwrap_or_default().to_string();
+    run("tab_new", json!({})).await;
+    run("tab_keep", json!({ "keep": "frozen", "tabId": ticker })).await;
+    run("close", json!({})).await;
+
+    assert_success(&execute_command(&json!({ "id": "1", "action": "tab_list" }), &mut host).await);
+    let browser = host.browser.as_ref().expect("host browser");
+    let pages = browser.pages_list();
+    let page = pages
+        .iter()
+        .find(|page| page.target_id == ticker)
+        .expect("the tab left behind");
+    let mut ticks = Vec::new();
+    for _ in 0..2 {
+        let params = json!({ "expression": "ticks", "returnByValue": true });
+        let result =
+            browser
+                .client
+                .send_command("Runtime.evaluate", Some(params), Some(&page.session_id));
+        ticks.push(result.await.expect("the tab should answer")["result"]["value"].as_f64());
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    }
+    assert!(
+        ticks[1] > ticks[0],
+        "the tab should tick again after the session closed: {ticks:?}"
+    );
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut host).await);
 }
 
 #[tokio::test]
@@ -3686,6 +4174,180 @@ async fn e2e_viewport_scale_factor() {
 // ---------------------------------------------------------------------------
 // Viewport and emulation
 // ---------------------------------------------------------------------------
+
+/// Runtime session settings survive an implicit relaunch and reach the new
+/// browser's page, and a window-sizing launch argument drops the viewport.
+#[tokio::test]
+#[ignore]
+async fn e2e_relaunch_keeps_session_setup() {
+    let mut state = DaemonState::new();
+    let run = |id: &str, cmd: Value| {
+        let mut cmd = cmd;
+        cmd["id"] = json!(id);
+        cmd
+    };
+
+    let resp = execute_command(
+        &run("1", json!({ "action": "launch", "headless": true })),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    for cmd in [
+        json!({ "action": "device", "name": "iPhone 14" }),
+        json!({ "action": "timezone", "timezoneId": "Asia/Tokyo" }),
+    ] {
+        let resp = execute_command(&run("2", cmd), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // A launch setting that is not part of the session setup relaunches.
+    let resp = execute_command(
+        &run(
+            "3",
+            json!({ "action": "launch", "headless": true, "allowFileAccess": true }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["relaunchedBrowser"], true);
+
+    let resp = execute_command(
+        &run(
+            "4",
+            json!({ "action": "navigate", "url": "data:text/html,<h1>x</h1>" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &run(
+            "5",
+            json!({
+                "action": "evaluate",
+                "script": "[innerWidth, navigator.maxTouchPoints, 'ontouchstart' in window, /iPhone/.test(navigator.userAgent), Intl.DateTimeFormat().resolvedOptions().timeZone]",
+            }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!([980, 5, true, true, "Asia/Tokyo"])
+    );
+
+    // Explicit window sizing in the launch arguments wins over the viewport.
+    let resp = execute_command(
+        &run(
+            "6",
+            json!({ "action": "launch", "headless": true, "args": ["--window-size=1100,700"] }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.session_setup.viewport, None);
+    assert_eq!(state.session_setup.timezone.as_deref(), Some("Asia/Tokyo"));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// An attached browser starts without the session setup of the browser it
+/// replaces.
+#[tokio::test]
+#[ignore]
+async fn e2e_attach_starts_without_the_local_session_setup() {
+    let mut external = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut external,
+    )
+    .await;
+    assert_success(&resp);
+    let port: u64 = external
+        .browser
+        .as_ref()
+        .unwrap()
+        .chrome_host_port()
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "device", "name": "iPhone 14" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.session_setup.viewport.is_some());
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "launch", "cdpPort": port }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.session_setup.viewport.is_none());
+    assert!(state.session_setup.user_agent.is_none());
+
+    let resp = execute_command(&json!({ "id": "98", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut external).await;
+    assert_success(&resp);
+}
+
+/// A relaunch that fails after the browser started keeps the previous session
+/// setup, including a viewport the relaunch's window sizing would have dropped.
+#[tokio::test]
+#[ignore]
+async fn e2e_failed_relaunch_keeps_the_remembered_viewport() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 800, "height": 600 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let before = format!("{:?}", state.session_setup);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "launch",
+            "headless": true,
+            "args": ["--window-size=1100,700"],
+            "storageState": "/nonexistent/state.json",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+
+    assert_eq!(format!("{:?}", state.session_setup), before);
+    assert!(state.session_setup.viewport.is_some());
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
 
 #[tokio::test]
 #[ignore]
@@ -5813,6 +6475,534 @@ async fn e2e_diff_snapshot() {
     assert_success(&resp);
 }
 
+const RELOADED_WITH_FRAME: &str = "document.title === 'A2' \
+    && document.getElementById('f').contentDocument?.readyState === 'complete'";
+
+const REF_FIXTURE_ROUTES: &[(&str, &str)] = &[
+    (
+        "/a.html",
+        "<script>sessionStorage.n = (+sessionStorage.n || 0) + 1; document.title = 'A' + sessionStorage.n;</script>\
+         <button onclick=\"location.href='/b.html'\">Continue</button>\
+         <button onclick=\"history.pushState({}, '', '#p')\">Push</button>\
+         <button onclick=\"location.reload()\">Reload</button>\
+         <input id='field' aria-label='Field'>\
+         <iframe id='f' src='/fa.html'></iframe>",
+    ),
+    (
+        "/b.html",
+        "<title>B</title><button onclick=\"document.title='B-CLICKED'\">Continue</button>",
+    ),
+    (
+        "/fa.html",
+        "<title>FA</title><button onclick=\"location.href='/fb.html'\">Next</button>\
+         <button onclick=\"parent.document.title='FA-OK'\">Act</button>",
+    ),
+    (
+        "/fb.html",
+        "<title>FB</title><button onclick=\"parent.document.title='FB-DANGER'\">Act</button>",
+    ),
+    (
+        "/b2.html",
+        "<title>B2</title><button onclick=\"document.title='B2-CLICKED'\">Continue</button>",
+    ),
+    // The element reports itself disconnected while the page navigates, so
+    // resolution falls back to a role/name query on the new document.
+    (
+        "/trap-fallback.html",
+        "<title>T</title><button id='b'>Continue</button>\
+         <script>window.arm = () => {\
+           const b = document.getElementById('b'); let fired = 0;\
+           Object.defineProperty(b, 'isConnected', { get() {\
+             if (!fired) { fired = 1; location.href = '/b2.html';\
+               const t = performance.now(); while (performance.now() - t < 400); return false; }\
+             return true; } });\
+         };</script>",
+    ),
+    // Resolution succeeds on the element, but the page navigates while its
+    // click point is computed.
+    (
+        "/trap-point.html",
+        "<title>T</title><button id='b'>Continue</button>\
+         <script>window.arm = () => {\
+           const b = document.getElementById('b');\
+           b.scrollIntoViewIfNeeded = () => { location.href = '/b2.html'; };\
+           let n = 0; const orig = b.getBoundingClientRect.bind(b);\
+           b.getBoundingClientRect = () => { const r = orig(); n++; return new DOMRect(r.x + n, r.y, r.width, r.height); };\
+           window.setTimeout = () => 0; window.requestAnimationFrame = () => 0;\
+         };</script>",
+    ),
+    // A filter-style checkbox whose change navigates away.
+    (
+        "/filter.html",
+        "<title>Filter</title><label><input type='checkbox' id='f' \
+         onchange=\"location.href = '/b2.html'\"> Only open</label>",
+    ),
+    (
+        "/spin.html",
+        "<title>Spin</title><button>Go</button>\
+         <script>for (let i = 0; i < 3000; i++) {\
+           const b = document.createElement('button'); b.textContent = 'B' + i;\
+           document.body.appendChild(b); }\
+         setTimeout(() => location.reload(), 40);</script>",
+    ),
+    // Cross-site iframe: `localhost` and `127.0.0.1` are different sites.
+    (
+        "/x.html",
+        "<title>X</title><iframe id='f'></iframe>\
+         <script>onmessage = (e) => { document.title = e.data; };\
+         f.src = 'http://localhost:' + location.port + '/xa.html';</script>",
+    ),
+    (
+        "/xa.html",
+        "<button onclick=\"location.href='/xb.html'\">Next</button>\
+         <button onclick=\"parent.postMessage('XA-OK', '*')\">Act</button>\
+         <script>parent.postMessage('xa-loaded', '*');</script>",
+    ),
+    (
+        "/xb.html",
+        "<button onclick=\"parent.postMessage('XB-DANGER', '*')\">Act</button>\
+         <script>parent.postMessage('xb-loaded', '*');</script>",
+    ),
+];
+
+async fn ref_fixture_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // One task per connection: the browser opens idle ones.
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                let n = stream.read(&mut request).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&request[..n]);
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let body = REF_FIXTURE_ROUTES
+                    .iter()
+                    .find(|(route, _)| *route == path)
+                    .map_or("", |(_, html)| *html);
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (url, server)
+}
+
+async fn ref_cmd(state: &mut DaemonState, command: Value) -> Value {
+    execute_command(&command, state).await
+}
+
+fn snapshot_ref(resp: &Value, label: &str) -> String {
+    let snapshot = get_data(resp)["snapshot"].as_str().unwrap();
+    let line = snapshot
+        .lines()
+        .find(|line| line.contains(label))
+        .unwrap_or_else(|| panic!("no {label} in {snapshot}"));
+    let start = line.find("ref=").unwrap() + 4;
+    let id: String = line[start..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    format!("@{id}")
+}
+
+async fn ref_fixture_open(state: &mut DaemonState, url: &str) -> Value {
+    assert_success(
+        &ref_cmd(
+            state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/a.html") }),
+        )
+        .await,
+    );
+    ref_cmd(state, json!({ "id": "s", "action": "snapshot" })).await
+}
+
+async fn ref_click(state: &mut DaemonState, reference: &str) -> Value {
+    ref_cmd(
+        state,
+        json!({ "id": "c", "action": "click", "selector": reference }),
+    )
+    .await
+}
+
+async fn ref_wait_until(state: &mut DaemonState, expression: &str) {
+    assert_success(
+        &ref_cmd(
+            state,
+            json!({ "id": "w", "action": "wait", "function": expression }),
+        )
+        .await,
+    );
+}
+
+async fn ref_title(state: &mut DaemonState) -> String {
+    let resp = ref_cmd(state, json!({ "id": "t", "action": "title" })).await;
+    get_data(&resp)["title"].as_str().unwrap().to_string()
+}
+
+fn assert_previous_page(resp: &Value) {
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("no longer loaded"),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_fails_after_click_triggered_navigation() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    let snap = ref_fixture_open(&mut state, &url).await;
+    let cont = snapshot_ref(&snap, "\"Continue\"");
+    let push = snapshot_ref(&snap, "\"Push\"");
+
+    // A same-document change keeps refs usable.
+    assert_success(&ref_click(&mut state, &push).await);
+    assert_success(&ref_click(&mut state, &push).await);
+
+    // The click replaces the document. Every ref consumer must refuse the old
+    // ref instead of acting on /b.html's button of the same name.
+    assert_success(&ref_click(&mut state, &cont).await);
+    ref_wait_until(&mut state, "document.title === 'B'").await;
+    assert_previous_page(&ref_click(&mut state, &cont).await);
+    assert_previous_page(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "g", "action": "gettext", "selector": cont }),
+        )
+        .await,
+    );
+    assert_previous_page(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "h", "action": "hover", "selector": cont }),
+        )
+        .await,
+    );
+    assert_previous_page(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "d", "action": "drag", "source": cont, "target": push }),
+        )
+        .await,
+    );
+    assert_eq!(ref_title(&mut state).await, "B");
+
+    // A fresh snapshot of the new document works.
+    let snap = ref_cmd(&mut state, json!({ "id": "s2", "action": "snapshot" })).await;
+    assert_success(&ref_click(&mut state, &snapshot_ref(&snap, "\"Continue\"")).await);
+    assert_eq!(ref_title(&mut state).await, "B-CLICKED");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_find_after_navigation_following_a_snapshot() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    let snap = ref_fixture_open(&mut state, &url).await;
+    let cont = snapshot_ref(&snap, "\"Continue\"");
+    assert_success(&ref_click(&mut state, &cont).await);
+    ref_wait_until(&mut state, "document.title === 'B'").await;
+
+    // `find` makes its own ref for the current document; the snapshot refs of
+    // the previous page must not affect it.
+    let resp = ref_cmd(
+        &mut state,
+        json!({ "id": "f", "action": "getbyrole", "role": "button", "name": "Continue", "subaction": "click" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(ref_title(&mut state).await, "B-CLICKED");
+    // The old snapshot ref still fails.
+    assert_previous_page(&ref_click(&mut state, &cont).await);
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_fails_after_cross_site_iframe_navigation() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/x.html") }),
+        )
+        .await,
+    );
+    ref_wait_until(&mut state, "document.title === 'xa-loaded'").await;
+    let snap = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    assert!(
+        !state.iframe_sessions.is_empty(),
+        "the iframe must be out of process: {snap}"
+    );
+    let next = snapshot_ref(&snap, "\"Next\"");
+    let act = snapshot_ref(&snap, "\"Act\"");
+
+    assert_success(&ref_click(&mut state, &next).await);
+    ref_wait_until(&mut state, "document.title === 'xb-loaded'").await;
+    assert_previous_page(&ref_click(&mut state, &act).await);
+    assert_eq!(ref_title(&mut state).await, "xb-loaded");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+async fn ref_fails_when_the_page_navigates_during_resolution(
+    route: &str,
+    command: fn(&str) -> Value,
+) {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}{route}") }),
+        )
+        .await,
+    );
+    let snap = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    let cont = snapshot_ref(&snap, "\"Continue\"");
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "a", "action": "evaluate", "script": "window.arm(); 1" }),
+        )
+        .await,
+    );
+
+    // The navigation lands while the ref resolves: the click must fail with
+    // the stale-ref error and never reach /b2.html's button.
+    assert_previous_page(&ref_cmd(&mut state, command(&cont)).await);
+    ref_wait_until(&mut state, "document.title === 'B2'").await;
+    assert_eq!(ref_title(&mut state).await, "B2");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_fails_when_fallback_would_query_the_new_document() {
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-fallback.html",
+        |r| json!({ "id": "c", "action": "click", "selector": r }),
+    )
+    .await;
+}
+
+// The object-based resolver serves reads and writes, not only clicks.
+#[tokio::test]
+#[ignore]
+async fn e2e_gettext_ref_fails_when_fallback_would_query_the_new_document() {
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-fallback.html",
+        |r| json!({ "id": "g", "action": "gettext", "selector": r }),
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_ref_fails_when_fallback_would_query_the_new_document() {
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-fallback.html",
+        |r| json!({ "id": "f", "action": "fill", "selector": r, "value": "x" }),
+    )
+    .await;
+}
+
+// A large page that reloads every 40 ms never keeps one document for the length
+// of a snapshot, so the snapshot is refused instead of returning refs.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_is_refused_while_the_document_keeps_changing() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/spin.html") }),
+        )
+        .await,
+    );
+    let resp = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("document changed while the snapshot"),
+        "{resp}"
+    );
+    assert!(state.ref_map.entries_sorted().is_empty());
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_reports_navigation_during_click_point_resolution() {
+    ref_fails_when_the_page_navigates_during_resolution(
+        "/trap-point.html",
+        |r| json!({ "id": "c", "action": "click", "selector": r }),
+    )
+    .await;
+}
+
+// The toggle is read back after the click; a page the click navigated away
+// from must not turn a successful `check` into a failure.
+#[tokio::test]
+#[ignore]
+async fn e2e_check_succeeds_when_the_change_navigates() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "l", "action": "launch", "headless": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "n", "action": "navigate", "url": format!("{url}/filter.html") }),
+        )
+        .await,
+    );
+    let snap = ref_cmd(&mut state, json!({ "id": "s", "action": "snapshot" })).await;
+    let checkbox = snapshot_ref(&snap, "checkbox");
+    let resp = ref_cmd(
+        &mut state,
+        json!({ "id": "c", "action": "check", "selector": checkbox }),
+    )
+    .await;
+    assert_success(&resp);
+    ref_wait_until(&mut state, "document.title === 'B2'").await;
+    assert_eq!(ref_title(&mut state).await, "B2");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_refs_after_undriven_reload() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    let snap = ref_fixture_open(&mut state, &url).await;
+    let reload = snapshot_ref(&snap, "\"Reload\"");
+    let iframe = snapshot_ref(&snap, "Iframe");
+    assert_success(&ref_click(&mut state, &reload).await);
+    ref_wait_until(&mut state, RELOADED_WITH_FRAME).await;
+
+    // `frame @ref` names the iframe of the replaced document.
+    assert_previous_page(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "fo", "action": "frame", "selector": iframe }),
+        )
+        .await,
+    );
+
+    // "e1" is text for these commands, not a ref.
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "f", "action": "fill", "selector": "#field", "value": "e1" }),
+        )
+        .await,
+    );
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "ty", "action": "type", "selector": "#field", "text": "e2" }),
+        )
+        .await,
+    );
+    let resp = ref_cmd(
+        &mut state,
+        json!({ "id": "v", "action": "evaluate", "script": "document.getElementById('field').value" }),
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "e1e2");
+
+    // A snapshot of only the iframe records just the frame's document.
+    assert_success(
+        &ref_cmd(
+            &mut state,
+            json!({ "id": "fr", "action": "frame", "selector": "#f" }),
+        )
+        .await,
+    );
+    let snap = ref_cmd(&mut state, json!({ "id": "s2", "action": "snapshot" })).await;
+    assert_success(&ref_click(&mut state, &snapshot_ref(&snap, "\"Act\"")).await);
+    ref_wait_until(&mut state, "document.title === 'FA-OK'").await;
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_fails_after_iframe_navigation() {
+    let (url, server) = ref_fixture_server().await;
+    let mut state = DaemonState::new();
+    let snap = ref_fixture_open(&mut state, &url).await;
+    let next = snapshot_ref(&snap, "\"Next\"");
+    let act = snapshot_ref(&snap, "\"Act\"");
+
+    // The iframe navigates; the main document keeps its loader.
+    assert_success(&ref_click(&mut state, &next).await);
+    ref_wait_until(
+        &mut state,
+        "document.getElementById('f').contentDocument.title === 'FB'",
+    )
+    .await;
+    assert_previous_page(&ref_click(&mut state, &act).await);
+    assert_eq!(ref_title(&mut state).await, "A1");
+
+    assert_success(&ref_cmd(&mut state, json!({ "id": "x", "action": "close" })).await);
+    server.abort();
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_diff_url_aligns_refs_after_snapshot() {
@@ -6244,9 +7434,35 @@ async fn e2e_click_rejects_unreachable_elements() {
                 <button id="fieldset-disabled" onclick="document.getElementById('result').textContent = 'fieldset'">Fieldset</button>
             </fieldset>
             <button id="ok" onclick="document.getElementById('result').textContent = 'clicked'">Ok</button>
+            <button id="straddle" style="position:absolute;top:calc(100vh - 10px)" onclick="document.getElementById('result').textContent = 'straddle'">Straddle</button>
+            <button id="moving" style="position:absolute;top:2500px" onclick="document.getElementById('result').textContent = 'moving'">Moving</button>
+            <div style="position:absolute;top:400px;height:120px;width:200px;overflow:auto">
+                <div style="height:300px"></div>
+                <button id="clipped" onclick="document.getElementById('result').textContent = 'clipped'">Clipped</button>
+            </div>
+            <iframe id="scaled" style="position:absolute;top:400px;left:300px;width:400px;height:300px;transform:scale(0.5);transform-origin:0 0"></iframe>
+            <iframe id="padded" style="position:absolute;top:600px;left:450px;width:200px;height:150px;border:0;padding:14px"></iframe>
+            <iframe id="padded-scaled" style="position:absolute;top:800px;left:450px;width:220px;height:180px;border:solid red;border-width:8px 12px 16px 10px;padding:14px 28px 22px 18px;box-sizing:border-box;transform:scale(0.5);transform-origin:0 0"></iframe>
+            <div id="pad-cover" style="position:absolute;left:464px;top:644px;width:16px;height:16px;background:rgba(0,0,0,0.5)"></div>
+            <iframe id="zero-content" style="position:absolute;top:600px;left:720px;width:40px;height:40px;border:0;padding:20px;box-sizing:border-box"></iframe>
+            <button id="outside-parent" style="position:absolute;left:120px;top:600px;width:120px;height:50px" onclick="document.getElementById('result').textContent = 'parent'">Parent</button>
+            <iframe id="wild" style="position:absolute;left:200px;top:600px;width:200px;height:150px;border:0"></iframe>
             <label><input id="hidden-check" type="checkbox" style="display:none"> Accept</label>
             <svg width="300" height="100"><line id="flat-line" x1="20" y1="50" x2="280" y2="50" stroke="black" stroke-width="8" onclick="document.getElementById('result').textContent = 'line'"/></svg>
             <div id="result">idle</div>
+            <script>
+                let moved = false;
+                addEventListener('scroll', () => {
+                    if (moved || window.scrollY < 1000) return;
+                    moved = true;
+                    requestAnimationFrame(() => { document.getElementById('moving').style.top = '2700px'; });
+                });
+                document.getElementById('scaled').srcdoc = "<button id='inner' style='margin:100px' onclick=\"document.getElementById('r').textContent='scaled'\">Inner</button><div id='r'>idle</div>";
+                document.getElementById('padded').srcdoc = "<body style='margin:0'><button id='inner-padded' style='position:absolute;left:0;top:0;width:12px;height:12px;padding:0;border:0' onclick=\"parent.document.getElementById('result').textContent='padded-clicked'\">Padded</button><button id='inner-covered' style='position:absolute;left:2px;top:32px;width:12px;height:12px;padding:0;border:0' onclick=\"parent.document.getElementById('result').textContent='covered-clicked'\">Covered</button></body>";
+                document.getElementById('padded-scaled').srcdoc = "<body style='margin:0'><button id='inner-padded-scaled' style='position:absolute;left:0;top:0;width:16px;height:16px;padding:0;border:0' onclick=\"parent.document.getElementById('result').textContent='padded-scaled-clicked'\">Scaled</button></body>";
+                document.getElementById('zero-content').srcdoc = "<body style='margin:0'><button id='inner-zero' style='width:12px;height:12px'>Zero</button></body>";
+                document.getElementById('wild').srcdoc = "<button id='out' style='position:fixed;left:-100px;top:10px' onclick=\"parent.document.getElementById('result').textContent='child'\">Out</button>";
+            </script>
         </body>
         </html>
     "#;
@@ -6314,6 +7530,32 @@ async fn e2e_click_rejects_unreachable_elements() {
     }
     assert_eq!(result_text(&mut state).await, "idle");
 
+    for (selector, expected) in [("#straddle", "straddle"), ("#moving", "moving")] {
+        let resp = execute_command(
+            &json!({ "id": "6a", "action": "click", "selector": selector }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(result_text(&mut state).await, expected, "{selector}");
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "6c", "action": "click", "selector": "#clipped" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "clipped");
+
+    let resp = execute_command(
+        &json!({ "id": "6b", "action": "click", "selector": format!("@{}", find_ref("Straddle")) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "straddle");
+
     let resp = execute_command(
         &json!({ "id": "7", "action": "click", "selector": "#ok" }),
         &mut state,
@@ -6358,6 +7600,132 @@ async fn e2e_click_rejects_unreachable_elements() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["checked"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "12", "action": "frame", "selector": "#scaled" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "13", "action": "click", "selector": "#inner" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14", "action": "gettext", "selector": "#r" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "scaled");
+
+    let resp = execute_command(
+        &json!({ "id": "14a", "action": "frame", "selector": "#padded" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14b", "action": "click", "selector": "#inner-padded" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14c", "action": "click", "selector": "#inner-covered" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "covered padded target must fail: {resp}"
+    );
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("covered by <div#pad-cover>"),
+        "{resp}"
+    );
+    let resp = execute_command(&json!({ "id": "14d", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "padded-clicked");
+
+    let resp = execute_command(
+        &json!({ "id": "14e", "action": "frame", "selector": "#padded-scaled" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14f", "action": "click", "selector": "#inner-padded-scaled" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "14g", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "padded-scaled-clicked");
+
+    let resp = execute_command(
+        &json!({ "id": "14h", "action": "frame", "selector": "#zero-content" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "14i", "action": "click", "selector": "#inner-zero" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "zero-content target must be outside viewport: {resp}"
+    );
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside the viewport"),
+        "{resp}"
+    );
+    let resp = execute_command(&json!({ "id": "14j", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "15", "action": "frame", "selector": "#wild" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snap = execute_command(&json!({ "id": "16", "action": "snapshot" }), &mut state).await;
+    assert_success(&snap);
+    let out_ref = get_data(&snap)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["name"] == "Out")
+        .unwrap()
+        .0
+        .clone();
+    let resp = execute_command(
+        &json!({ "id": "17", "action": "click", "selector": format!("@{out_ref}") }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "a ref outside its frame must not reach the parent page: {resp}"
+    );
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside the viewport"),
+        "{resp}"
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -7194,6 +8562,90 @@ async fn e2e_snapshot_cursor_interactive() {
     assert_success(&resp);
 }
 
+/// Interactive snapshots hint ambiguously named or empty controls after the ref brackets.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_hints_ambiguous_controls() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r##"<!doctype html><title>Hints</title>
+<a href="/cart"><img src="/img/cart.png"></a>
+<ul><li>Blue mug
+<button><svg width="16" height="16"><use href="#icon-trash"/></svg></button>
+<button><i class="fa fa-heart"></i></button>
+<button id="edit-btn"><img src="/img/pencil.png"></button>
+</li></ul>
+<input type="email" name="login-email" placeholder="Email">
+<label>Email <input type="email" name="newsletter-email"></label>
+<button>Save</button>
+<ul><li>Invoice 1 <div onclick="void 0">Edit</div></li><li>Invoice 2 <div onclick="void 0">Edit</div></li></ul>
+<div onclick="void 0">Archive</div>"##;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    for hint in [
+        r#"hint="img:cart""#,
+        r#"hint="icon:icon-trash; in:Blue mug""#,
+        r#"hint="icon:fa-heart; in:Blue mug""#,
+        r#"hint="img:pencil; id:edit-btn; in:Blue mug""#,
+        r#"hint="name:login-email""#,
+        r#"hint="name:newsletter-email""#,
+        r#"hint="in:Invoice 1""#,
+        r#"hint="in:Invoice 2""#,
+    ] {
+        assert!(
+            snapshot.contains(hint),
+            "Expected snapshot to contain {}:\n{}",
+            hint,
+            snapshot,
+        );
+    }
+
+    for unique in ["button \"Save\"", "generic \"Archive\""] {
+        let line = snapshot
+            .lines()
+            .find(|line| line.contains(unique))
+            .expect("uniquely named control should be in the snapshot");
+        assert!(
+            !line.contains("hint="),
+            "Uniquely named control should not get a hint:\n{}",
+            snapshot,
+        );
+    }
+
+    for line in snapshot.lines().filter(|line| line.contains("hint=")) {
+        assert!(
+            line.contains("] hint="),
+            "Hint should follow the closed ref brackets:\n{}",
+            snapshot,
+        );
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// A full-page screenshot with a real device scale factor of 2 (not the
 /// emulated one, which already reports CSS pixels) must be the page size
 /// times two, with the page filling it, not twice that with the page in the
@@ -7524,6 +8976,432 @@ async fn e2e_snapshot_selector_includes_shadow_root() {
         "Snapshot should not contain content outside the selector: {}",
         snapshot
     );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+fn snapshot_line_has_ref(snapshot: &str, label: &str) -> bool {
+    snapshot
+        .lines()
+        .find(|l| l.contains(label))
+        .is_some_and(|l| l.contains("ref=e"))
+}
+
+/// Native tags the AX pass leaves unreferenced (summary, a control with a
+/// non-interactive explicit role) and clickables inside open shadow roots get
+/// refs, and the scan does not touch the DOM.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_scan_covers_native_and_shadow_elements() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<details><summary>Advanced</summary><p>Body</p></details>\
+        <button type='button' role='menu' tabindex='0' style='cursor:pointer'>Menu button</button>\
+        <a href='x' role='menu' tabindex='0' style='cursor:pointer'>Menu link</a>\
+        <button type='button' style='cursor:pointer'>Plain button</button>\
+        <details role='group' style='cursor:pointer'><summary>Grouped</summary></details>\
+        <input type='color' aria-label='Pick colour'>\
+        <my-el></my-el><script>\
+        customElements.define('my-el', class extends HTMLElement { constructor() { \
+        super(); this.attachShadow({ mode: 'open' }).innerHTML = \
+        '<div onclick=\"void 0\" style=\"cursor:pointer\">Shadow clickable</div>'; } });\
+        window.__mutations = 0;\
+        new MutationObserver(function(r) { window.__mutations += r.length; })\
+        .observe(document, { attributes: true, childList: true, subtree: true });</script>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    for label in [
+        "Advanced",
+        "Menu button",
+        "Menu link",
+        "Plain button",
+        "Shadow clickable",
+        "Grouped",
+        "Pick colour",
+    ] {
+        assert!(
+            snapshot_line_has_ref(snapshot, label),
+            "Expected {label:?} to get a ref:\n{snapshot}"
+        );
+    }
+    // One ref per control: no extra refs for the details container or others.
+    let ref_count = snapshot.lines().filter(|l| l.contains("ref=e")).count();
+    assert_eq!(ref_count, 7, "unexpected ref count:\n{snapshot}");
+
+    // Natively interactive elements are ref'd by the AX pass and carry no
+    // cursor-interactive hints.
+    let plain = snapshot
+        .lines()
+        .find(|l| l.contains("Plain button"))
+        .unwrap();
+    assert!(!plain.contains("clickable"), "{plain}");
+
+    // Let queued mutation records flush, then check the scan left the DOM alone.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_evaluate(&mut state, "4", "window.__mutations", json!(0)).await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Children of a shadow root that only inherit cursor:pointer from their host,
+/// and a clickable body, get no extra refs.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_scan_ignores_inherited_pointer_and_body() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<body onclick='void 0'>\
+        <host-ptr style='cursor:pointer;display:block'></host-ptr>\
+        <host-slot><span>Slotted text</span></host-slot>\
+        <button>Real button</button><script>\
+        customElements.define('host-ptr', class extends HTMLElement { constructor() { \
+        super(); this.attachShadow({ mode: 'open' }).innerHTML = \
+        '<div>Inherited pointer inner</div>'; } });\
+        customElements.define('host-slot', class extends HTMLElement { constructor() { \
+        super(); this.attachShadow({ mode: 'open' }).innerHTML = \
+        '<div style=\"cursor:pointer\"><slot></slot></div>'; } });\
+        </script></body>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    assert!(
+        !snapshot.contains("Inherited pointer inner"),
+        "shadow child inheriting the host pointer got a ref:\n{snapshot}"
+    );
+    assert!(
+        !snapshot.contains("Slotted text"),
+        "slotted child inheriting the slot pointer got a ref:\n{snapshot}"
+    );
+    assert!(snapshot_line_has_ref(snapshot, "Real button"), "{snapshot}");
+    let ref_count = snapshot.lines().filter(|l| l.contains("ref=e")).count();
+    // The pointer host and the button; nothing from the host's shadow or slot.
+    assert_eq!(ref_count, 2, "unexpected ref count:\n{snapshot}");
+    // The body onclick must not turn the whole page into a clickable ref.
+    let page_wide = snapshot
+        .lines()
+        .filter(|l| l.contains("onclick") && !l.contains("Real button"))
+        .count();
+    assert_eq!(page_wide, 0, "body got a ref:\n{snapshot}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// A link without href that wraps a control is covered by the control's ref.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_scan_skips_hrefless_link_wrapping_control() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<a style='cursor:pointer;display:block'>\
+        <button>Wrapped</button></a><a style='cursor:pointer;display:block'>Bare anchor</a>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    let refs = snapshot.lines().filter(|l| l.contains("ref=e")).count();
+    assert_eq!(
+        refs, 2,
+        "expected the button and the bare anchor:\n{snapshot}"
+    );
+    assert!(snapshot_line_has_ref(snapshot, "Bare anchor"), "{snapshot}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// A link without href is only skipped for a wrapped control that is visible.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_scan_keeps_link_wrapping_hidden_control() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let a = "<a style='cursor:pointer;display:block'>";
+    let html = format!(
+        "data:text/html,{a}<span>Display none</span><input type='checkbox' style='display:none'></a>\
+        {a}<span>Visibility hidden</span><input type='checkbox' style='visibility:hidden'></a>\
+        {a}<span>Aria hidden</span><input type='checkbox' aria-hidden='true'></a>\
+        {a}<button>Visible control</button></a>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    for label in ["Display none", "Visibility hidden", "Aria hidden"] {
+        assert!(
+            snapshot_line_has_ref(snapshot, label),
+            "Expected the link around the hidden control {label:?} to get a ref:\n{snapshot}"
+        );
+    }
+    let refs = snapshot.lines().filter(|l| l.contains("ref=e")).count();
+    assert_eq!(refs, 4, "three links and the visible button:\n{snapshot}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// A link wrapping a `display:contents` control is covered by that control.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_scan_skips_link_wrapping_display_contents_control() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<a style='cursor:pointer;display:block'><span>Wrapper</span>\
+        <button style='display:contents'>Contents button</button></a>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    let refs = snapshot.lines().filter(|l| l.contains("ref=e")).count();
+    assert_eq!(refs, 1, "only the button gets a ref:\n{snapshot}");
+    assert!(
+        snapshot_line_has_ref(snapshot, "Contents button"),
+        "{snapshot}"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `snapshot -s` lists matches in page order, whatever the AX tree order is.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_lists_matches_in_page_order() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<div><div><div class='k'><button>K1</button></div></div></div>\
+        <div class='k'><button>K2</button></div>\
+        <ul><li class='k'><button>K3</button></li></ul>\
+        <div class='k'><button>K4</button></div>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": ".k" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    let order: Vec<&str> = ["K1", "K2", "K3", "K4"]
+        .into_iter()
+        .filter(|l| snapshot.contains(l))
+        .collect();
+    assert_eq!(order.len(), 4, "{snapshot}");
+    let pos = |l: &str| snapshot.find(l).unwrap();
+    assert!(
+        pos("K1") < pos("K2") && pos("K2") < pos("K3") && pos("K3") < pos("K4"),
+        "matches out of page order:\n{snapshot}"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// The `snapshot -s` match list leaves out matches nested in another match.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_matches_skip_nested() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<div class='n'><div class='n'><div class='n'>\
+        <button>Deep</button></div></div></div><div class='n'><button>Sibling</button></div>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let script = format!(
+        "{}.length",
+        super::snapshot::outermost_matches_expression(".n")
+    );
+    assert_evaluate(&mut state, "3", &script, json!(2)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "snapshot", "selector": ".n" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(snapshot_line_has_ref(snapshot, "Deep"), "{snapshot}");
+    assert!(snapshot_line_has_ref(snapshot, "Sibling"), "{snapshot}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `snapshot -s` scopes to every element the selector matches.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_scopes_to_all_matches() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<div class='item'><button>First</button></div>\
+        <div class='item'><button>Second</button></div>\
+        <div class='item'><button>Third</button></div>\
+        <button>Outside</button>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": ".item" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    for label in ["First", "Second", "Third"] {
+        assert!(
+            snapshot_line_has_ref(snapshot, label),
+            "Expected {label:?} in the scoped snapshot:\n{snapshot}"
+        );
+    }
+    assert!(!snapshot.contains("Outside"), "{snapshot}");
+
+    // A hidden first match does not fail the snapshot.
+    let html = "data:text/html,<div class='drop' style='display:none'>\
+        <button>Closed</button></div><div class='drop'><button>Open</button></div>";
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "snapshot", "selector": ".drop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(snapshot_line_has_ref(snapshot, "Open"), "{snapshot}");
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "snapshot", "selector": ".missing" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{}", resp);
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -10430,6 +12308,383 @@ async fn e2e_upload_with_css_selector() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_rejects_unmet_preconditions() {
+    let mut state = DaemonState::new();
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("upload_probe") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let missing = std::env::temp_dir().join(format!("ab-upload-ghost-{}.txt", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "upload", "selector": "#fileInput", "files": [missing.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(resp["code"], "file_not_found", "{resp}");
+
+    let real = std::env::temp_dir().join(format!("ab-upload-real-{}.txt", std::process::id()));
+    std::fs::write(&real, "test").unwrap();
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "upload", "selector": "#result", "files": [real.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(resp["code"], "not_file_input", "{resp}");
+
+    let _ = std::fs::remove_file(&real);
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_diff_snapshot_without_baseline_uses_last_snapshot() {
+    let mut state = DaemonState::new();
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("snapshot_diff_probe") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let resp = execute_command(&json!({ "id": "3", "action": "diff_snapshot" }), &mut state).await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(resp["code"], "no_baseline", "{resp}");
+
+    assert_success(&execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await);
+    let resp = execute_command(&json!({ "id": "5", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+    assert_eq!(get_data(&resp)["additions"], 0);
+
+    assert_success(
+        &execute_command(
+            &json!({
+                "id": "6",
+                "action": "evaluate",
+                "script": "document.querySelector('#primary-action').textContent = 'Updated action'"
+            }),
+            &mut state,
+        )
+        .await,
+    );
+    let resp = execute_command(&json!({ "id": "7", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], true, "{resp}");
+
+    // The diff itself becomes the next baseline.
+    let resp = execute_command(&json!({ "id": "8", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_bare_diff_snapshot_is_kept_per_tab() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Tab A</h1>" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await);
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "tab_new", "url": "data:text/html,<h1>Tab B</h1>" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "5", "action": "snapshot" }), &mut state).await);
+    assert_eq!(state.tracked_snapshot_tabs(), 2);
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "tab_switch", "tabId": "t1" }),
+            &mut state,
+        )
+        .await,
+    );
+    let resp = execute_command(&json!({ "id": "7", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+
+    // Closing a tab drops its baseline at the next snapshot.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "8", "action": "tab_close", "tabId": "t2" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "9", "action": "snapshot" }), &mut state).await);
+    assert_eq!(state.tracked_snapshot_tabs(), 1);
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_diff_url_reports_snapshot_and_screenshot_diffs() {
+    let mut state = DaemonState::new();
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let url_a = "data:text/html,<h1>Page A</h1><button>Alpha</button>";
+    let url_b = "data:text/html,<h1>Page B</h1><button>Alpha</button><button>Beta</button>";
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "diff_url", "url1": url_a, "url2": url_b }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["snapshot"]["changed"], true, "{resp}");
+    assert!(data["snapshot"]["diff"].as_str().unwrap().contains("Beta"));
+    assert!(data.get("screenshot").is_none(), "{resp}");
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "diff_url", "url1": url_a, "url2": url_b, "screenshot": true, "fullPage": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let shot = &get_data(&resp)["screenshot"];
+    assert!(shot["totalPixels"].as_u64().unwrap() > 0, "{resp}");
+
+    // --selector scopes both snapshots.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "diff_url", "url1": url_a, "url2": url_b, "selector": "h1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let diff = get_data(&resp)["snapshot"]["diff"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!diff.contains("Beta"), "{diff}");
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_attaches_content_and_directories() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let page = "data:text/html,<input type=file id=f><input type=file id=d webkitdirectory>";
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": page }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("real.txt");
+    std::fs::write(&file, "hello world\n").unwrap();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "upload", "selector": "#f", "files": [file.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.querySelector('#f').files[0].size" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], 12, "{resp}");
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "upload", "selector": "#d", "files": [dir.path().to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "wait", "function": "document.querySelector('#d').files.length === 1", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "document.querySelector('#d').files.length" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], 1, "{resp}");
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+/// A session whose `--cdp` setting names a non-local browser treats it as
+/// remote: a path missing on this host only warns.
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_over_cdp_setting_treats_non_local_browser_as_remote() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let ws_url = ws_url.replacen("127.0.0.1", "0.0.0.0", 1);
+    assert!(ws_url.contains("0.0.0.0"), "{ws_url}");
+
+    guard.set("AGENT_BROWSER_SESSION", "e2e-upload-cdp-client");
+    let mut state = DaemonState::new();
+    let page = "data:text/html,<input type=file id=f>";
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "navigate",
+            "url": page,
+            "settings": { "cdp": ws_url }
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let missing =
+        std::env::temp_dir().join(format!("ab-upload-cdp-ghost-{}.txt", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "upload", "selector": "#f", "files": [missing.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_ne!(resp["code"], "file_not_found", "{resp}");
+    assert!(resp["warning"].is_string(), "{resp}");
+
+    let _ = execute_command(&json!({ "id": "98", "action": "close" }), &mut state).await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut host).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_bare_diff_snapshot_reuses_snapshot_options_and_frame() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("snapshot_diff_probe") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let mut n = 10;
+    let mut run = |cmd: Value| {
+        n += 1;
+        let mut cmd = cmd;
+        cmd["id"] = json!(n.to_string());
+        cmd
+    };
+    for snapshot in [
+        json!({ "action": "snapshot", "interactive": true }),
+        json!({ "action": "snapshot", "selector": "#target" }),
+        json!({ "action": "snapshot", "compact": true, "maxDepth": 1 }),
+    ] {
+        assert_success(&execute_command(&run(snapshot), &mut state).await);
+        let resp = execute_command(&run(json!({ "action": "diff_snapshot" })), &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+    }
+
+    // An option the baseline lacks is refused instead of diffing mismatched trees.
+    let resp = execute_command(
+        &run(json!({ "action": "diff_snapshot", "selector": "#primary-action" })),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["code"], "baseline_mismatch", "{resp}");
+
+    // A missing baseline file is an error, not a literal baseline.
+    let resp = execute_command(
+        &run(json!({ "action": "diff_snapshot", "baseline": "/nonexistent/baseline.txt" })),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["code"], "file_not_found", "{resp}");
+
+    // Frame: a snapshot taken inside a frame is the baseline only for that frame.
+    assert_success(
+        &execute_command(
+            &run(json!({ "action": "navigate", "url": "data:text/html,<iframe id='child' srcdoc='<button>Inner</button>'></iframe>" })),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &run(json!({ "action": "frame", "selector": "#child" })),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&run(json!({ "action": "snapshot" })), &mut state).await);
+    let resp = execute_command(&run(json!({ "action": "diff_snapshot" })), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+    assert_success(&execute_command(&run(json!({ "action": "mainframe" })), &mut state).await);
+    let resp = execute_command(&run(json!({ "action": "diff_snapshot" })), &mut state).await;
+    assert_eq!(resp["code"], "baseline_mismatch", "{resp}");
+
+    assert_success(&execute_command(&run(json!({ "action": "close" })), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Recording: default records the current active page
 // ---------------------------------------------------------------------------
@@ -10719,6 +12974,151 @@ async fn e2e_recording_honors_requested_fps() {
         (duration - frames as f64 / FPS as f64).abs() < 0.03,
         "{frames} frames at {FPS} fps should match duration {duration}"
     );
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Verify that a page whose device scale is emulated records at that scale:
+/// Chrome's screencast captures at the window's real scale, so the recorder
+/// switches to full-density screenshots, and every frame keeps the detail.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_emulated_scale_captures_full_density() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 640, "height": 400, "deviceScaleFactor": 2.0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Something always moving, so the screencast sends frames to compare.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "navigate",
+            "url": "data:text/html,<style>@keyframes s{to{transform:rotate(360deg)}}div{width:80px;height:80px;background:%230a72ef;animation:s 1s linear infinite}</style><h1>Density</h1><div></div>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-density-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["capture"], "screenshots", "{data}");
+    assert_eq!(data["deviceScaleFactor"], 2.0);
+    assert!(
+        data.get("warning").is_none(),
+        "frames should be full density: {data}"
+    );
+    let captured = data["capturedFrames"].as_u64().unwrap();
+    assert!(
+        captured >= 10,
+        "an animated page should keep capturing frames, got {captured}"
+    );
+
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&rec_path)
+        .output()
+        .expect("ffprobe should inspect the recording");
+    assert!(probe.status.success());
+    assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "1280,800");
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Verify that a mobile-emulated page without a viewport meta tag reports its
+/// real device scale: its layout viewport is wider than its screen, so the
+/// scale comes from `devicePixelRatio`, not the first frame's width.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_mobile_emulation_uses_device_pixel_ratio() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": "data:text/html,<style>@keyframes s{to{transform:rotate(360deg)}}div{width:80px;height:80px;background:%230a72ef;animation:s 1s linear infinite}</style><h1>No viewport meta</h1><div></div>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "device", "name": "iPhone 14" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-mobile-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["capture"], "screenshots", "{data}");
+    assert_eq!(data["deviceScaleFactor"], 3.0, "{data}");
 
     let _ = std::fs::remove_file(&rec_path);
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
@@ -13373,6 +15773,547 @@ async fn e2e_recording_cursor_uses_page_coordinates_for_oopif() {
     );
 }
 
+struct CrossOriginClickFixture {
+    parent_url: String,
+    child_clicks: Arc<AtomicUsize>,
+    forged_clicks: Arc<AtomicUsize>,
+    parent_server: tokio::task::JoinHandle<()>,
+    child_server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for CrossOriginClickFixture {
+    fn drop(&mut self) {
+        self.parent_server.abort();
+        self.child_server.abort();
+    }
+}
+
+/// A parent page with a same-origin frame and an embedded frame on another
+/// port. Different ports are different origins, but 127.0.0.1 stays one site,
+/// so Chrome keeps the second frame in the parent process and gives it no CDP
+/// session of its own.
+async fn cross_origin_click_fixture() -> CrossOriginClickFixture {
+    let child_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let child_port = child_listener.local_addr().unwrap().port();
+    let child_clicks = Arc::new(AtomicUsize::new(0));
+    let forged_clicks = Arc::new(AtomicUsize::new(0));
+    let child_hits = child_clicks.clone();
+    let forged_hits = forged_clicks.clone();
+    let child_server = tokio::spawn(async move {
+        let plain = r#"<!doctype html><html lang="en"><head><title>Child</title>
+<style>body { margin: 0 } #child-target { position: absolute; left: 16px; top: 16px; width: 200px; height: 80px }</style>
+</head><body><button id="child-target" onclick="window.childClicks = (window.childClicks || 0) + 1; navigator.sendBeacon('/clicked')">Child action</button></body></html>"#;
+        let forged = r#"<!doctype html><html lang="en"><head><title>Forged child</title>
+<style>body { margin: 0 } #child-target { position: absolute; left: 16px; top: 16px; width: 200px; height: 80px }</style>
+</head><body><button id="child-target" onclick="window.childClicks = (window.childClicks || 0) + 1; navigator.sendBeacon('/forged-clicked')">Forged action</button>
+<script>
+  const nativeStyle = window.getComputedStyle.bind(window);
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const fakeTop = {
+    innerWidth: w,
+    innerHeight: h,
+    frameElement: null,
+    document: document,
+    getComputedStyle: () => ({ borderLeftWidth: '0', borderTopWidth: '0', paddingLeft: '0', paddingTop: '0', paddingRight: '0', paddingBottom: '0' }),
+  };
+  const fakeFrame = {
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: w, height: h }),
+    offsetWidth: w,
+    offsetHeight: h,
+    clientWidth: w,
+    clientHeight: h,
+    ownerDocument: { defaultView: fakeTop },
+  };
+  Object.defineProperty(document, 'defaultView', {
+    value: { innerWidth: w, innerHeight: h, frameElement: fakeFrame, parent: fakeTop, getComputedStyle: nativeStyle },
+  });
+</script>
+</body></html>"#;
+        loop {
+            let (mut stream, _) = child_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&request[..read]);
+            let response = if request_line.starts_with("POST /forged-clicked") {
+                forged_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else if request_line.starts_with("POST /clicked") {
+                child_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else {
+                let body = if request_line.starts_with("GET /forge") {
+                    forged
+                } else {
+                    plain
+                };
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let parent_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let parent_port = parent_listener.local_addr().unwrap().port();
+    let parent_url = format!("http://127.0.0.1:{parent_port}/");
+    let parent_body = format!(
+        r#"<!doctype html><html lang="en"><head><title>Parent</title>
+<style>body {{ margin: 0 }} #parent-target {{ position: absolute; left: 16px; top: 16px; width: 240px; height: 120px }} iframe {{ position: absolute; border: 0 }} #frame {{ left: 320px; top: 260px; width: 400px; height: 300px }} #forged {{ left: 760px; top: 236px; width: 320px; height: 300px }}</style>
+</head><body>
+<button id="parent-target" onclick="window.parentClicks = (window.parentClicks || 0) + 1">Parent control</button>
+<iframe id="frame" title="Payment" src="http://127.0.0.1:{child_port}/"></iframe>
+<iframe id="forged" title="Forged" src="http://127.0.0.1:{child_port}/forge"></iframe>
+<div style="height: 2000px"></div>
+</body></html>"#
+    );
+    let parent_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = parent_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                parent_body.len(),
+                parent_body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    CrossOriginClickFixture {
+        parent_url,
+        child_clicks,
+        forged_clicks,
+        parent_server,
+        child_server,
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_ref_in_cross_origin_frame_lands_in_frame() {
+    let fixture = cross_origin_click_fixture().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "action": "navigate", "url": fixture.parent_url }),
+            &mut state,
+        )
+        .await,
+    );
+    let snapshot = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+    assert_success(&snapshot);
+    assert!(
+        state.iframe_sessions.is_empty(),
+        "the fixture must keep the cross-origin frame in the parent process: {:?}",
+        state.iframe_sessions
+    );
+    let reference = |name: &str| {
+        get_data(&snapshot)["refs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, entry)| entry["name"] == name)
+            .map(|(reference, _)| reference.clone())
+            .unwrap_or_else(|| panic!("ref '{}' must be in the snapshot", name))
+    };
+
+    // A scrolled page must still place the point in the frame: input and box
+    // geometry are viewport-relative while the hit test reads document
+    // coordinates.
+    assert_success(
+        &execute_command(
+            &json!({ "action": "evaluate", "script": "window.scrollTo(0, 200); 'ok'" }),
+            &mut state,
+        )
+        .await,
+    );
+    let click = execute_command(
+        &json!({ "action": "click", "selector": format!("@{}", reference("Child action")) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&click);
+    let parent_clicks = execute_command(
+        &json!({ "action": "evaluate", "script": "window.parentClicks || 0" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&parent_clicks);
+    assert_eq!(
+        get_data(&parent_clicks)["result"],
+        json!(0),
+        "the click landed on the parent control: {}",
+        serde_json::to_string(&click).unwrap_or_default()
+    );
+    let mut child_clicks = 0;
+    for _ in 0..50 {
+        child_clicks = fixture.child_clicks.load(Ordering::SeqCst);
+        if child_clicks == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        child_clicks, 1,
+        "the click must land on the ref inside the cross-origin frame: {click}"
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "action": "evaluate", "script": "window.scrollTo(0, 0); 'ok'" }),
+            &mut state,
+        )
+        .await,
+    );
+    let forged = execute_command(
+        &json!({ "action": "click", "selector": format!("@{}", reference("Forged action")) }),
+        &mut state,
+    )
+    .await;
+    let parent_clicks = execute_command(
+        &json!({ "action": "evaluate", "script": "window.parentClicks || 0" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&parent_clicks);
+    assert_eq!(
+        get_data(&parent_clicks)["result"],
+        json!(0),
+        "a forged frame walk landed on the parent control: {}",
+        serde_json::to_string(&forged).unwrap_or_default()
+    );
+    if forged["success"].as_bool() == Some(true) {
+        let mut forged_clicks = 0;
+        for _ in 0..50 {
+            forged_clicks = fixture.forged_clicks.load(Ordering::SeqCst);
+            if forged_clicks == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            forged_clicks, 1,
+            "a successful click must land inside the forged frame: {forged}"
+        );
+    } else {
+        assert!(
+            forged["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("would land outside its frame"),
+            "{forged}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_ref_on_iframe_nested_in_frame_stays_in_frame() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/");
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.starts_with("GET /inner ") {
+                    r#"<!doctype html><html lang="en"><head><title>Inner</title>
+<style>body { margin: 0; height: 180px } #deep { position: absolute; left: 40px; top: 40px; width: 160px; height: 60px }</style>
+</head><body onclick="top.frameClicks.inner++"><button id="deep" onclick="top.frameClicks.deep++">Deep action</button></body></html>"#
+                } else if request.starts_with("GET /frame ") {
+                    r#"<!doctype html><html lang="en"><head><title>Frame</title>
+<style>body { margin: 0 } iframe { position: absolute; border: 0 } #inner { left: 30px; top: 60px; width: 300px; height: 180px }</style>
+</head><body onclick="top.frameClicks.outer++"><iframe id="inner" title="Inner widget" src="/inner"></iframe></body></html>"#
+                } else {
+                    r#"<!doctype html><html lang="en"><head><title>Nested frames</title>
+<script>window.frameClicks = { outer: 0, inner: 0, deep: 0 };</script>
+<style>body { margin: 0 } iframe { position: absolute; border: 0 } #outer { left: 20px; top: 40px; width: 500px; height: 320px }</style>
+</head><body><iframe id="outer" title="Outer widget" src="/frame"></iframe></body></html>"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({"action": "launch", "headless": true}), &mut state).await,
+    );
+    assert_success(&execute_command(&json!({"action": "navigate", "url": url}), &mut state).await);
+    let snapshot = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let reference = |name: &str| {
+        get_data(&snapshot)["refs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, entry)| entry["name"] == name)
+            .map(|(reference, _)| reference.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "ref '{}' must be in the snapshot: {}",
+                    name,
+                    serde_json::to_string(&get_data(&snapshot)["refs"]).unwrap_or_default()
+                )
+            })
+    };
+    let inner = format!("@{}", reference("Inner widget"));
+    let outer = format!("@{}", reference("Outer widget"));
+
+    let hover = execute_command(&json!({"action": "hover", "selector": inner}), &mut state).await;
+    assert_success(&hover);
+
+    let click = execute_command(&json!({"action": "click", "selector": inner}), &mut state).await;
+    assert_success(&click);
+    let clicks = execute_command(
+        &json!({"action": "evaluate", "script": "JSON.stringify(window.frameClicks)"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&clicks);
+    assert_eq!(
+        get_data(&clicks)["result"],
+        json!("{\"outer\":0,\"inner\":1,\"deep\":1}"),
+        "a ref on the nested iframe must reach the frame it embeds: {click}"
+    );
+
+    let click = execute_command(&json!({"action": "click", "selector": outer}), &mut state).await;
+    assert_eq!(
+        click["success"], false,
+        "a ref whose press point falls into a frame it does not own must be refused: {click}"
+    );
+    assert!(
+        click["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not embed"),
+        "unexpected error for a foreign nested frame: {click}"
+    );
+    let clicks = execute_command(
+        &json!({"action": "evaluate", "script": "JSON.stringify(window.frameClicks)"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&clicks);
+    assert_eq!(
+        get_data(&clicks)["result"],
+        json!("{\"outer\":0,\"inner\":1,\"deep\":1}"),
+        "a refused press must not reach any frame: {click}"
+    );
+
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_ref_refuses_a_frame_covering_the_pressed_point() {
+    let victim_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let victim_port = victim_listener.local_addr().unwrap().port();
+    let victim_clicks = Arc::new(AtomicUsize::new(0));
+    let victim_hits = victim_clicks.clone();
+    let victim_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = victim_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&request[..read]);
+            let response = if request_line.starts_with("POST /victim-clicked") {
+                victim_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else {
+                let body = r#"<!doctype html><html lang="en"><head><title>Statements</title>
+</head><body><button id="pay" style="position:absolute;inset:0;width:100%;height:100%" onclick="navigator.sendBeacon('/victim-clicked')">Pay invoice</button></body></html>"#;
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let page_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let page_port = page_listener.local_addr().unwrap().port();
+    let page_url = format!("http://127.0.0.1:{page_port}/");
+    let link_clicks = Arc::new(AtomicUsize::new(0));
+    let plain_clicks = Arc::new(AtomicUsize::new(0));
+    let link_hits = link_clicks.clone();
+    let plain_hits = plain_clicks.clone();
+    let page_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = page_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&request[..read]);
+            let response = if request_line.starts_with("POST /link-clicked") {
+                link_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else if request_line.starts_with("POST /plain-clicked") {
+                plain_hits.fetch_add(1, Ordering::SeqCst);
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            } else {
+                let body = if request_line.starts_with("GET /frame ") {
+                    format!(
+                        r##"<!doctype html><html lang="en"><head><title>Frame</title>
+<style>body {{ margin: 0; font: 20px/200px sans-serif }}
+#victim {{ position: absolute; border: 0; left: -9999px; top: -9999px; width: 120px; height: 60px }}
+</style></head><body>
+<div style="position: absolute; left: 20px; top: 0; width: 200px">
+<a id="link" aria-label="Approve payment" href="#" onclick="navigator.sendBeacon('/link-clicked'); return false">Approve the payment authorization for this</a>
+</div>
+<div style="position: absolute; left: 20px; top: 400px; width: 200px">
+<a id="plain" aria-label="Plain link" href="#" onclick="navigator.sendBeacon('/plain-clicked'); return false">Plain link</a>
+</div>
+<iframe id="victim" title="Statements" src="http://127.0.0.1:{victim_port}/"></iframe>
+<script>
+  const link = document.getElementById('link');
+  const widest = [...link.getClientRects()].reduce((a, b) => (a.width * a.height >= b.width * b.height ? a : b));
+  const victim = document.getElementById('victim');
+  victim.style.left = (widest.left + widest.width / 2 - 60) + 'px';
+  victim.style.top = (widest.top + widest.height / 2 - 30) + 'px';
+</script>
+</body></html>"##
+                    )
+                } else {
+                    r#"<!doctype html><html lang="en"><head><title>Attacker</title>
+<style>body { margin: 0 }
+#frame { position: absolute; left: 0; top: 0; width: 600px; height: 240px; border: 0 }
+#covered { position: absolute; left: 20px; top: 320px }
+#cover { position: absolute; left: 0; top: 300px; width: 240px; height: 70px; z-index: 5; background: rgba(0,0,0,0.05) }
+</style></head><body>
+<iframe id="frame" title="Attacker frame" src="/frame"></iframe>
+<button id="covered">Covered action</button>
+<div id="cover"></div>
+</body></html>"#
+                        .to_string()
+                };
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({"action": "launch", "headless": true}), &mut state).await,
+    );
+    assert_success(
+        &execute_command(&json!({"action": "navigate", "url": page_url}), &mut state).await,
+    );
+    let snapshot = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let reference = |name: &str| {
+        get_data(&snapshot)["refs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, entry)| entry["name"] == name)
+            .map(|(reference, _)| reference.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "ref '{}' must be in the snapshot: {}",
+                    name,
+                    serde_json::to_string(&get_data(&snapshot)["refs"]).unwrap_or_default()
+                )
+            })
+    };
+
+    let click = execute_command(
+        &json!({"action": "click", "selector": format!("@{}", reference("Approve payment"))}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        click["success"], false,
+        "a frame covering the pressed point must refuse the click: {click}"
+    );
+    assert!(
+        click["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not embed"),
+        "unexpected error for a frame covering the pressed point: {click}"
+    );
+
+    let click = execute_command(
+        &json!({"action": "click", "selector": format!("@{}", reference("Covered action"))}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        click["success"], false,
+        "a covered ref must be refused: {click}"
+    );
+    assert!(
+        click["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("covered by <div#cover>"),
+        "unexpected covered-ref error: {click}"
+    );
+
+    let click = execute_command(
+        &json!({"action": "click", "selector": format!("@{}", reference("Plain link"))}),
+        &mut state,
+    )
+    .await;
+    assert_success(&click);
+
+    for _ in 0..50 {
+        if link_clicks.load(Ordering::SeqCst) == 0
+            && plain_clicks.load(Ordering::SeqCst) == 1
+            && victim_clicks.load(Ordering::SeqCst) == 0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        victim_clicks.load(Ordering::SeqCst),
+        0,
+        "a refused ref click must never reach the framed victim control"
+    );
+    assert_eq!(
+        link_clicks.load(Ordering::SeqCst),
+        0,
+        "the covered multiline link must not be activated"
+    );
+    assert_eq!(
+        plain_clicks.load(Ordering::SeqCst),
+        1,
+        "a link ref with nothing over its press point must still be clicked"
+    );
+
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+    page_server.abort();
+    victim_server.abort();
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
@@ -13883,7 +16824,7 @@ async fn attach_pinned_session(
             "id": format!("{}-launch", session),
             "action": "launch",
             "cdpUrl": ws_url,
-            "pinTab": true
+            "settings": { "pin-tab": true }
         }),
         &mut state,
     )
@@ -14147,6 +17088,44 @@ async fn e2e_tab_new_still_activates_under_auto_attach() {
 
     let resp = execute_command(&json!({ "id": "host-99", "action": "close" }), &mut host).await;
     assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_pin_tab_setting_off_releases_the_manager_pin() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let url_a = "data:text/html,release-session-a";
+    let url_b = "data:text/html,release-session-b";
+    let mut state_a = attach_pinned_session(&guard, "e2e-release-a", &ws_url, url_a).await;
+    let binding_a = load_binding("e2e-release-a", "session A binding should persist");
+    let mut state_b = attach_pinned_session(&guard, "e2e-release-b", &ws_url, url_b).await;
+
+    let resp = execute_command(
+        &json!({ "id": "b-close-a", "action": "tab_close", "tabId": binding_a.target_id }),
+        &mut state_b,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Turning the pin off must reach the browser manager: a pinned manager
+    // with a gone tab answers tab_gone to every command.
+    let resp = execute_command(
+        &json!({ "id": "a-url", "action": "url", "settings": { "pin-tab": false } }),
+        &mut state_a,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(!state_a.pin_tab);
+    assert!(
+        !load_binding("e2e-release-a", "binding should remain").pinned,
+        "the binding must be unpinned"
+    );
+
+    let _ = execute_command(&json!({ "id": "a-close", "action": "close" }), &mut state_a).await;
+    let _ = execute_command(&json!({ "id": "b-close", "action": "close" }), &mut state_b).await;
+    let _ = execute_command(&json!({ "id": "h-close", "action": "close" }), &mut host).await;
 }
 
 #[tokio::test]
@@ -14519,6 +17498,160 @@ async fn e2e_find_role_document_matches_root() {
     assert_success(&resp);
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+async fn click_probe_reset_log(state: &mut DaemonState) {
+    let resp = execute_command(
+        &json!({ "id": "click-probe-reset", "action": "evaluate", "script": "window.__log = []; 0" }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+}
+
+async fn click_probe_read_log(state: &mut DaemonState) -> Vec<String> {
+    let resp = execute_command(
+        &json!({ "id": "click-probe-read", "action": "evaluate", "script": "window.__log" }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("click log is not an array: {}", resp))
+        .iter()
+        .filter_map(|entry| entry.as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_buttons_modifiers_and_double_click() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": native_test_fixture_url("click_probe")}),
+            &mut state,
+        )
+        .await,
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "click", "selector": "#target", "button": "right"}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry.starts_with("contextmenu:b2")),
+        "right click should open a context menu: {:?}",
+        log
+    );
+    assert!(
+        !log.iter().any(|entry| entry.starts_with("click:")),
+        "right click should not fire a click event: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "4", "action": "click", "selector": "#target", "button": "middle"}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry.starts_with("auxclick:b1")),
+        "middle click should fire auxclick: {:?}",
+        log
+    );
+    assert!(
+        !log.iter().any(|entry| entry.starts_with("click:")),
+        "middle click should not fire a click event: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "5", "action": "click", "selector": "#target", "modifiers": 12}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry == "click:b0:d1:c0s1a0m1"),
+        "meta+shift click should report both modifiers: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "6", "action": "dblclick", "selector": "#target"}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    let double_click_events: Vec<&String> = log
+        .iter()
+        .filter(|entry| entry.starts_with("click:") || entry.starts_with("dblclick:"))
+        .collect();
+    assert_eq!(
+        double_click_events,
+        [
+            "click:b0:d1:c0s0a0m0",
+            "click:b0:d2:c0s0a0m0",
+            "dblclick:b0:d2:c0s0a0m0",
+        ],
+        "double click event sequence: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    assert_success(
+        &execute_command(
+            &json!({"id": "7", "action": "dblclick", "selector": "#target", "button": "middle", "modifiers": 8}),
+            &mut state,
+        )
+        .await,
+    );
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.iter().any(|entry| entry == "auxclick:b1:d2:c0s1a0m0"),
+        "shift middle double click should reach the page: {:?}",
+        log
+    );
+
+    click_probe_reset_log(&mut state).await;
+    let resp = execute_command(
+        &json!({"id": "8", "action": "click", "selector": "#target", "button": "bogus"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "bogus button must fail: {}", resp);
+    let log = click_probe_read_log(&mut state).await;
+    assert!(
+        log.is_empty(),
+        "failed click must not reach the page: {:?}",
+        log
+    );
+
+    assert_success(&execute_command(&json!({"id": "99", "action": "close"}), &mut state).await);
 }
 
 #[tokio::test]
