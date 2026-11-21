@@ -10,6 +10,8 @@ use super::{
 };
 use crate::native::actions::{HarEntry, FIND_ACTIONS};
 use crate::native::element::RefMap;
+use crate::native::interaction::shifted_char;
+use crate::native::pointer::Modifiers;
 
 /// Values `--capture` accepts.
 pub const CAPTURE_MODES: &[&str] = &["flow"];
@@ -76,6 +78,8 @@ pub struct FlowRecorder {
     key_buffer: String,
     /// The last entry of `secrets` is the current `key_buffer`.
     key_active: bool,
+    /// The daemon's held modifier bitmask when the current command began.
+    pub(super) held_modifiers: i32,
     /// A typed step saved as a param before its field could be read.
     pub(super) needs_traits: Option<u64>,
     /// Sequence number the command being executed was recorded under.
@@ -119,6 +123,7 @@ impl FlowRecorder {
 
     /// Record a command and return its step number, or note that a command
     /// that is not recorded has started so its requests belong to no step.
+    /// `held_modifiers` is the modifier bitmask the daemon holds from `keydown`.
     pub fn begin(
         &mut self,
         action: &str,
@@ -126,7 +131,9 @@ impl FlowRecorder {
         refs: &RefMap,
         from_url: Option<String>,
         traits: Option<&FieldTraits>,
+        held_modifiers: i32,
     ) -> Option<u64> {
+        self.held_modifiers = held_modifiers;
         if self.records(action) {
             let stable = stable_command(action, cmd, refs);
             self.begin_command(action, &stable, from_url, traits)
@@ -370,6 +377,12 @@ impl FlowRecorder {
         }
     }
 
+    /// Keys typed so far into the focused secret field.
+    #[cfg(test)]
+    pub(crate) fn key_buffer(&self) -> &str {
+        &self.key_buffer
+    }
+
     pub(super) fn finish_command(&mut self, seq: u64, ok: bool, url: Option<String>) {
         if let Some(m) = self.meta.get_mut(&seq) {
             m.ok = ok;
@@ -595,6 +608,11 @@ impl FlowRecorder {
     /// the step and joined to the keys before it, so a request carrying the
     /// whole value is dropped at save.
     fn record_key(&mut self, action: &str, cmd: &mut Value, traits: Option<&FieldTraits>) {
+        // Holding or releasing a modifier types nothing. The daemon tracks
+        // which modifiers are held, once the command has succeeded.
+        if action != "press" && cmd["key"].as_str().and_then(Modifiers::bit).is_some() {
+            return;
+        }
         if !traits.is_some_and(FieldTraits::looks_secret) {
             self.reset_keys();
             return;
@@ -610,15 +628,21 @@ impl FlowRecorder {
             (parts.iter().map(|m| m.to_ascii_lowercase()).collect(), last)
         };
         // Only a bare key or Shift plus a key adds a character.
-        let plain = mods.iter().all(|m| m == "shift");
+        let held = self.held_modifiers;
+        let plain = mods.iter().all(|m| m == "shift") && held & !8 == 0;
         let has = |names: &[&str]| mods.iter().any(|m| names.contains(&m.as_str()));
-        let paste = (has(&["control", "ctrl", "meta", "command", "cmd"])
+        let shift = has(&["shift"]) || held & 8 != 0;
+        let paste = ((has(&["control", "ctrl", "meta", "command", "cmd"]) || held & (2 | 4) != 0)
             && last.eq_ignore_ascii_case("v"))
-            || (has(&["shift"]) && last.eq_ignore_ascii_case("insert"));
+            || (shift && last.eq_ignore_ascii_case("insert"));
         if plain && last.chars().count() == 1 {
             if action != "keyup" {
                 let mut buffer = self.key_buffer.clone();
-                buffer.push_str(&last);
+                // Shift types the shifted character, as `press` does.
+                match shift.then(|| shifted_char(&last)).flatten() {
+                    Some(shifted) => buffer.push(shifted),
+                    None => buffer.push_str(&last),
+                }
                 self.set_key_buffer(buffer);
             }
             cmd["key"] = json!(REDACTED);

@@ -4568,6 +4568,80 @@ async fn e2e_press_dispatches_single_keystroke() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_press_applies_shift_alt_and_held_modifiers() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true, "args": ["--no-sandbox"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<input id=f><script>window.log=[];",
+        "addEventListener('keydown',e=>log.push(e.key+' shift='+e.shiftKey+' alt='+e.altKey),true)",
+        "</script>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "focus", "selector": "#f" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for (i, cmd) in [
+        json!({ "action": "press", "key": "Shift+l" }),
+        json!({ "action": "press", "key": "Shift+1" }),
+        json!({ "action": "press", "key": "Alt+l" }),
+        json!({ "action": "keydown", "key": "Shift" }),
+        json!({ "action": "press", "key": "l" }),
+        json!({ "action": "keyup", "key": "Shift" }),
+        json!({ "action": "press", "key": "l" }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut cmd = cmd;
+        cmd["id"] = json!(format!("key-{i}"));
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_success(&resp);
+    }
+
+    assert_evaluate(
+        &mut state,
+        "log",
+        "log",
+        json!([
+            "L shift=true alt=false",
+            "! shift=true alt=false",
+            "l shift=false alt=true",
+            "Shift shift=false alt=false",
+            "L shift=true alt=false",
+            "l shift=false alt=false",
+        ]),
+    )
+    .await;
+    assert_evaluate(
+        &mut state,
+        "value",
+        "document.getElementById('f').value",
+        json!("L!Ll"),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Raw mouse regressions
 // ---------------------------------------------------------------------------

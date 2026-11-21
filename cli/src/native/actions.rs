@@ -748,6 +748,8 @@ pub struct DaemonState {
     /// so they never block the agent.
     dialog_handler_task: Option<tokio::task::JoinHandle<()>>,
     pub mouse_state: MouseState,
+    /// CDP modifier bitmask held by `keydown` and not yet released by `keyup`.
+    pub held_key_modifiers: i32,
     /// Session-wide pointer behavior, configured by `--input-mode`.
     pub input_mode: String,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
@@ -965,6 +967,7 @@ impl DaemonState {
             fetch_handler_task: None,
             dialog_handler_task: None,
             mouse_state: MouseState::default(),
+            held_key_modifiers: 0,
             input_mode: "instant".to_string(),
             pending_dialog: None,
             undelivered_wedge: None,
@@ -1018,6 +1021,7 @@ impl DaemonState {
 
     fn reset_input_state(&mut self) {
         self.mouse_state = MouseState::default();
+        self.held_key_modifiers = 0;
     }
 
     /// Create state with an optional stream client slot and server instance
@@ -2971,11 +2975,23 @@ async fn record_flow_step(action: &str, cmd: &Value, state: &mut DaemonState) {
             None => None,
         };
         let traits = flow_field_traits(action, cmd, state).await;
-        state
-            .flow
-            .begin(action, cmd, &state.ref_map, from_url, traits.as_ref());
+        state.flow.begin(
+            action,
+            cmd,
+            &state.ref_map,
+            from_url,
+            traits.as_ref(),
+            state.held_key_modifiers,
+        );
     } else {
-        state.flow.begin(action, cmd, &state.ref_map, None, None);
+        state.flow.begin(
+            action,
+            cmd,
+            &state.ref_map,
+            None,
+            None,
+            state.held_key_modifiers,
+        );
     }
 }
 
@@ -7697,6 +7713,12 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     // Parse modifier+key chords like "Control+a", "Shift+Enter", "Control+Shift+a"
     let (actual_key, modifiers) = parse_key_chord(key);
+    // Modifiers held with `keydown` apply until the matching `keyup`.
+    let held = state.held_key_modifiers;
+    let modifiers = match (modifiers, held) {
+        (None, 0) => None,
+        (chord, held) => Some(chord.unwrap_or(0) | held),
+    };
 
     interaction::press_key_with_modifiers(&mgr.client, &session_id, &actual_key, modifiers).await?;
     Ok(json!({ "pressed": key }))
@@ -15848,7 +15870,7 @@ async fn handle_input_touch(cmd: &Value, state: &DaemonState) -> Result<Value, S
     Ok(json!({ "dispatched": event_type }))
 }
 
-async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let key = cmd
@@ -15863,10 +15885,13 @@ async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
             Some(&session_id),
         )
         .await?;
+    if let Some(bit) = Modifiers::bit(key) {
+        state.held_key_modifiers |= bit;
+    }
     Ok(json!({ "keydown": key }))
 }
 
-async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_keyup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let key = cmd
@@ -15881,6 +15906,9 @@ async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String>
             Some(&session_id),
         )
         .await?;
+    if let Some(bit) = Modifiers::bit(key) {
+        state.held_key_modifiers &= !bit;
+    }
     Ok(json!({ "keyup": key }))
 }
 
@@ -21292,6 +21320,33 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
+    fn a_relaunch_releases_shift_for_keys_recorded_into_a_secret_field() {
+        let secret = crate::native::flow::FieldTraits::from_value(&json!({ "type": "password" }));
+        let press = |state: &mut DaemonState, key: &str| {
+            let held = state.held_key_modifiers;
+            state.flow.begin(
+                "press",
+                &json!({ "action": "press", "key": key }),
+                &RefMap::new(),
+                None,
+                Some(&secret),
+                held,
+            );
+        };
+        let mut state = DaemonState::new();
+        state.flow.begin_capture(None);
+        // `keydown Shift` succeeded.
+        state.held_key_modifiers = 8;
+        press(&mut state, "a");
+        assert_eq!(state.flow.key_buffer(), "A");
+        // A launch or relaunch resets the input state.
+        state.reset_input_state();
+        assert_eq!(state.held_key_modifiers, 0);
+        press(&mut state, "b");
+        assert_eq!(state.flow.key_buffer(), "Ab");
+    }
+
+    #[test]
     fn test_launch_options_from_env_defaults() {
         let guard = EnvGuard::new(&[
             "AGENT_BROWSER_HEADED",
@@ -22840,6 +22895,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             &RefMap::new(),
             None,
             None,
+            0,
         );
         let resp =
             execute_command(&json!({ "id": "s", "action": "session_info" }), &mut state).await;
@@ -23467,6 +23523,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 &RefMap::new(),
                 None,
                 None,
+                0,
             )
             .unwrap();
         state.flow.tag(

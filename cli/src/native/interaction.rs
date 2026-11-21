@@ -340,16 +340,7 @@ pub async fn press_key_with_modifiers(
     key: &str,
     modifiers: Option<i32>,
 ) -> Result<(), String> {
-    let (key_name, code, key_code) = named_key_info(key);
-
-    // Suppress text insertion when Control (2) or Meta (4) modifiers are active,
-    // since these are command chords (e.g. Ctrl+A = select-all), not text input.
-    let has_command_modifier = modifiers.is_some_and(|m| m & (2 | 4) != 0);
-    let text = if has_command_modifier {
-        None
-    } else {
-        key_text(&key_name)
-    };
+    let (key_name, code, key_code, text) = modified_key_info(key, modifiers);
 
     client
         .send_command_typed::<_, Value>(
@@ -1347,6 +1338,67 @@ fn key_text(key_name: &str) -> Option<String> {
     }
 }
 
+/// Resolve the `(key, code, windowsVirtualKeyCode, text)` sent for `key`
+/// pressed with the CDP `modifiers` bitmask, as a US keyboard would.
+///
+/// Shift (8) turns a single printable key into its shifted form (`l` -> `L`,
+/// `1` -> `!`). Alt (1), Control (2) and Meta (4) suppress text, matching
+/// Playwright and Puppeteer: those chords are commands, not text input.
+fn modified_key_info(key: &str, modifiers: Option<i32>) -> (String, String, i32, Option<String>) {
+    let (mut key_name, code, key_code) = named_key_info(key);
+    let mask = modifiers.unwrap_or(0);
+    if mask & 8 != 0 {
+        if let Some(shifted) = shifted_char(&key_name) {
+            key_name = shifted.to_string();
+        }
+    }
+    let text = if mask & (1 | 2 | 4) != 0 {
+        None
+    } else {
+        key_text(&key_name)
+    };
+    (key_name, code, key_code, text)
+}
+
+/// The character Shift produces for a single key on a US keyboard layout.
+pub(crate) fn shifted_char(key_name: &str) -> Option<char> {
+    let mut chars = key_name.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    if ch.is_ascii_lowercase() {
+        return Some(ch.to_ascii_uppercase());
+    }
+    const PAIRS: &[(char, char)] = &[
+        ('1', '!'),
+        ('2', '@'),
+        ('3', '#'),
+        ('4', '$'),
+        ('5', '%'),
+        ('6', '^'),
+        ('7', '&'),
+        ('8', '*'),
+        ('9', '('),
+        ('0', ')'),
+        ('`', '~'),
+        ('-', '_'),
+        ('=', '+'),
+        ('[', '{'),
+        (']', '}'),
+        ('\\', '|'),
+        (';', ':'),
+        ('\'', '"'),
+        (',', '<'),
+        ('.', '>'),
+        ('/', '?'),
+    ];
+    PAIRS
+        .iter()
+        .find(|(plain, _)| *plain == ch)
+        .map(|(_, shifted)| *shifted)
+}
+
 fn named_key_info(key: &str) -> (String, String, i32) {
     match key.to_lowercase().as_str() {
         "enter" | "return" => ("Enter".to_string(), "Enter".to_string(), 13),
@@ -1473,6 +1525,33 @@ mod tests {
             );
             assert_eq!(key, ch.to_string());
         }
+    }
+
+    #[test]
+    fn modified_key_info_applies_shift_and_drops_text_for_alt() {
+        let check = |key: &str, modifiers: Option<i32>, want: (&str, &str, i32, Option<&str>)| {
+            let (want_key, want_code, want_vk, want_text) = want;
+            assert_eq!(
+                modified_key_info(key, modifiers),
+                (
+                    want_key.to_string(),
+                    want_code.to_string(),
+                    want_vk,
+                    want_text.map(String::from)
+                ),
+                "press {key} with modifiers {modifiers:?}"
+            );
+        };
+        check("l", None, ("l", "KeyL", 76, Some("l")));
+        check("l", Some(8), ("L", "KeyL", 76, Some("L")));
+        check("1", Some(8), ("!", "Digit1", 49, Some("!")));
+        check("/", Some(8), ("?", "Slash", 191, Some("?")));
+        check("L", Some(8), ("L", "KeyL", 76, Some("L")));
+        check("Enter", Some(8), ("Enter", "Enter", 13, Some("\r")));
+        check("l", Some(1), ("l", "KeyL", 76, None));
+        check("l", Some(1 | 8), ("L", "KeyL", 76, None));
+        check("a", Some(2), ("a", "KeyA", 65, None));
+        check("a", Some(4), ("a", "KeyA", 65, None));
     }
 
     #[test]
