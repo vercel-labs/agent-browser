@@ -1276,6 +1276,18 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
 /// It fails open when the engine lacks an API it needs.
 const ACTIONABILITY_JS: &str = r#"(el, inView) => {
     try {
+        // Content in a collapsed <details> or a hidden="until-found" section
+        // keeps a box but is not rendered, so a click there hits an ancestor.
+        if (el.checkVisibility && !el.checkVisibility()) {
+            const closed = el.closest('details:not([open])');
+            const summary = closed ? closed.querySelector(':scope > summary') : null;
+            if (closed && !(summary && summary.contains(el))) {
+                const label = summary ? summary.textContent.trim().slice(0, 40) : '';
+                return 'inside a collapsed <details>' + (label ? ' (click its summary "' + label + '" first)' : '');
+            }
+            if (el.closest('[hidden="until-found"]')) return 'hidden until found (reveal its hidden="until-found" section first)';
+            return 'not visible';
+        }
         const rect = el.getBoundingClientRect();
         if ((rect.width <= 0 && rect.height <= 0) || ['hidden', 'collapse'].includes(el.ownerDocument.defaultView.getComputedStyle(el).visibility)) return 'not visible';
         if (el.disabled || el.matches(':disabled')) return 'disabled';
