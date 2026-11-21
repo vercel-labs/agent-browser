@@ -5,6 +5,7 @@ import { useAtomValue } from "jotai/react";
 import { activeSessionNameAtom } from "@/store/sessions";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { cn } from "@/lib/utils";
+import { createLatestRequest } from "@/lib/latest-request";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -86,44 +87,53 @@ export function NetworkPanel() {
   const harInputRef = useRef<HTMLInputElement>(null);
   const lastSessionRef = useRef(sessionName);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const listRequests = useRef(createLatestRequest());
+  const detailRequests = useRef(createLatestRequest());
 
   const doFetch = useCallback(async (showSpinner: boolean) => {
-    if (!sessionName) return;
-    if (showSpinner) setLoading(true);
-    try {
-      const args = sessionArgs(sessionName, "network", "requests");
-      if (typeFilter !== "all") {
-        const filter = TYPE_FILTERS.find((f) => f.key === typeFilter);
-        if (filter?.cliType) {
-          args.push("--type", filter.cliType);
-        }
-      }
-      const res = await execCommand(args);
-      if (res.success && res.stdout) {
-        try {
-          const parsed = JSON.parse(res.stdout);
-          const data = parsed.data ?? parsed;
-          setRequests(data.requests ?? []);
-        } catch {
-          setRequests([]);
-        }
-      }
-    } finally {
-      if (showSpinner) setLoading(false);
+    if (!sessionName) {
+      setLoading(false);
+      return;
     }
+    if (showSpinner) setLoading(true);
+    const args = sessionArgs(sessionName, "network", "requests");
+    if (typeFilter !== "all") {
+      const filter = TYPE_FILTERS.find((entry) => entry.key === typeFilter);
+      if (filter?.cliType) args.push("--type", filter.cliType);
+    }
+    await listRequests.current.run(
+      () => execCommand(args),
+      (res) => {
+        if (res.success && res.stdout) {
+          try {
+            const parsed = JSON.parse(res.stdout);
+            const data = parsed.data ?? parsed;
+            setRequests(data.requests ?? []);
+          } catch {
+            setRequests([]);
+          }
+        }
+      },
+      () => setLoading(false),
+    );
   }, [sessionName, typeFilter]);
 
   const fetchRequests = useCallback(() => doFetch(true), [doFetch]);
 
   useEffect(() => {
-    if (sessionName && sessionName !== lastSessionRef.current) {
+    if (sessionName !== lastSessionRef.current) {
       lastSessionRef.current = sessionName;
       setRequests([]);
       setExpanded(null);
       setDetail(null);
       setHarRecording(false);
     }
-    doFetch(true);
+    setDetailLoading(false);
+    void doFetch(true);
+    return () => {
+      listRequests.current.invalidate();
+      detailRequests.current.invalidate();
+    };
   }, [sessionName, typeFilter, doFetch]);
 
   useEffect(() => {
@@ -144,34 +154,44 @@ export function NetworkPanel() {
 
   const handleClear = useCallback(async () => {
     if (!sessionName) return;
-    await execCommand(sessionArgs(sessionName, "network", "requests", "--clear"));
-    setRequests([]);
-    setExpanded(null);
-    setDetail(null);
+    detailRequests.current.invalidate();
+    setDetailLoading(false);
+    await listRequests.current.run(
+      () => execCommand(sessionArgs(sessionName, "network", "requests", "--clear")),
+      () => {
+        setRequests([]);
+        setExpanded(null);
+        setDetail(null);
+      },
+      () => setLoading(false),
+    );
   }, [sessionName]);
 
   const handleExpand = useCallback(async (requestId: string) => {
+    detailRequests.current.invalidate();
     if (expanded === requestId) {
       setExpanded(null);
       setDetail(null);
+      setDetailLoading(false);
       return;
     }
     setExpanded(requestId);
     setDetail(null);
     setDetailLoading(true);
-    try {
-      const res = await execCommand(sessionArgs(sessionName, "network", "request", requestId));
-      if (res.success && res.stdout) {
-        try {
-          const parsed = JSON.parse(res.stdout);
-          setDetail(parsed.data ?? parsed);
-        } catch {
-          setDetail(null);
+    await detailRequests.current.run(
+      () => execCommand(sessionArgs(sessionName, "network", "request", requestId)),
+      (res) => {
+        if (res.success && res.stdout) {
+          try {
+            const parsed = JSON.parse(res.stdout);
+            setDetail(parsed.data ?? parsed);
+          } catch {
+            setDetail(null);
+          }
         }
-      }
-    } finally {
-      setDetailLoading(false);
-    }
+      },
+      () => setDetailLoading(false),
+    );
   }, [expanded, sessionName]);
 
   const handleHarStart = useCallback(async () => {
@@ -196,6 +216,8 @@ export function NetworkPanel() {
             key={f.key}
             type="button"
             onClick={() => {
+              detailRequests.current.invalidate();
+              setDetailLoading(false);
               setTypeFilter(f.key);
               setExpanded(null);
               setDetail(null);
