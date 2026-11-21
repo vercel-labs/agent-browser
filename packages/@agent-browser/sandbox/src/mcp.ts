@@ -73,6 +73,17 @@ export async function connectAgentBrowserMcp(
   const pending = new Map<number, Pending>();
   let nextId = 0;
   let closed: Error | undefined;
+  let writing = Promise.resolve();
+
+  // Keep queued requests outside the stream so cancellation can remove them
+  // before they reach stdin. An in-flight write cannot be withdrawn.
+  const write = (line: Uint8Array, active: () => boolean = () => closed === undefined) => {
+    const next = writing.then(async () => {
+      if (active()) await writer.write(line);
+    });
+    writing = next.catch(() => undefined);
+    return next;
+  };
 
   const failAll = (error: Error) => {
     closed ??= error;
@@ -143,7 +154,7 @@ export async function connectAgentBrowserMcp(
       );
     }
     requestOptions.signal?.addEventListener("abort", onAbort, { once: true });
-    writer.write(line).catch((error: unknown) => fail(toError(error)));
+    write(line, () => pending.has(id)).catch((error: unknown) => fail(toError(error)));
     return promise;
   }
 
@@ -164,8 +175,7 @@ export async function connectAgentBrowserMcp(
     throw error;
   }
   // Later writes queue behind this one, so it needs no await.
-  writer
-    .write(encode({ method: "notifications/initialized" }))
+  write(encode({ method: "notifications/initialized" }))
     .catch((error: unknown) => failAll(toError(error)));
 
   return {
@@ -176,6 +186,7 @@ export async function connectAgentBrowserMcp(
     async close() {
       failAll(new Error("agent-browser mcp client is closed."));
       const closing = (async () => {
+        await writing;
         await writer.close();
         const exit = await process.wait();
         await reading.catch(() => undefined);
