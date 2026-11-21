@@ -3569,20 +3569,24 @@ fn call_select(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool_at(arguments, args, literal_start, None).map(mcp_by_advice)
 }
 
+/// `select -- <selector> [--by <mode>] -- <values...>`: the selector and the
+/// values are data, and `--by` sits after the selector where the parser reads it.
 fn select_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
-    let mut options = vec!["select".to_string()];
-    let mut positionals = vec![required_string(arguments, "selector")?];
-    positionals.extend(required_string_array(arguments, "values")?);
+    let selector = required_string(arguments, "selector")?;
+    let values = required_string_array(arguments, "values")?;
+    let mut args = vec!["select".to_string(), "--".to_string(), selector];
     if let Some(by) = optional_string(arguments, "by")? {
         if by != "value" && by != "label" {
             return Err(ProtocolError::invalid_params(
                 "by must be 'value' or 'label'".to_string(),
             ));
         }
-        options.push("--by".to_string());
-        options.push(by);
+        args.push("--by".to_string());
+        args.push(by);
     }
-    Ok(literal_positionals(options, positionals))
+    args.push("--".to_string());
+    args.extend(values);
+    Ok((args, Some(1)))
 }
 
 /// The CLI advice names the `--by` flag; over MCP it is the `by` field.
@@ -6203,6 +6207,28 @@ mod tests {
             parsed["values"],
             json!(["--session", "other", "--namespace", "ns", "x"])
         );
+    }
+
+    #[test]
+    fn select_by_applies_and_keeps_selector_and_values_literal() {
+        for (selector, values) in [
+            ("#s", json!(["Blue"])),
+            ("-x", json!(["--by", "value", "--session", "other"])),
+        ] {
+            let arguments = json!({ "selector": selector, "values": values, "by": "label" });
+            let (args, start) = select_args(&arguments).unwrap();
+            let (cli, parsed) = parse_mcp_cli(&arguments, args, start);
+            assert_ne!(crate::flags::parse_flags(&cli).session, "other");
+            assert_eq!(parsed["action"], "select", "{cli:?}");
+            assert_eq!(parsed["selector"], selector, "{cli:?}");
+            assert_eq!(parsed["by"], "label", "{cli:?}");
+            let got = if parsed["values"].is_array() {
+                parsed["values"].clone()
+            } else {
+                json!([parsed["values"]])
+            };
+            assert_eq!(got, values, "{cli:?}");
+        }
     }
 
     #[test]
