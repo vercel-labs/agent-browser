@@ -19170,6 +19170,58 @@ mod tests {
         assert_eq!(lifecycle["launched"], false, "{resp}");
     }
 
+    /// A command that never launches still applies the restore unit as a
+    /// whole: key, save policy and checks switch together.
+    #[tokio::test]
+    async fn test_a_non_launching_command_applies_the_whole_restore_unit() {
+        let (_env, mut state) = restore_session("old-key");
+        assert!(!command_launches_browser(&json!({ "action": "read" })));
+
+        execute_command(
+            &json!({
+                "id": "read-new-key",
+                "action": "read",
+                "settings": {
+                    "restore-key": "new-key",
+                    "restore-save": "never",
+                    "restore-check-text": "Dashboard"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(state.session_name.as_deref(), Some("new-key"));
+        assert_eq!(state.settings.restore().key.as_deref(), Some("new-key"));
+        assert_eq!(state.restore_save, "never");
+        assert_eq!(state.restore_check_text.as_deref(), Some("Dashboard"));
+    }
+
+    /// The same key with a new save policy and checks changes them in place on
+    /// a non-launching command.
+    #[tokio::test]
+    async fn test_a_non_launching_command_updates_policy_for_the_same_key() {
+        let (_env, mut state) = restore_session("old-key");
+
+        execute_command(
+            &json!({
+                "id": "read-same-key",
+                "action": "read",
+                "settings": {
+                    "restore-key": "old-key",
+                    "restore-save": "never",
+                    "restore-check-url": "**/home"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
+        assert_eq!(state.restore_save, "never");
+        assert_eq!(state.restore_check_url.as_deref(), Some("**/home"));
+    }
+
     fn policy_file(dir: &tempfile::TempDir, body: &str) -> ActionPolicy {
         let path = dir.path().join("policy.json");
         std::fs::write(&path, body).unwrap();
