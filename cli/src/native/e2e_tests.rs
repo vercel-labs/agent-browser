@@ -17211,6 +17211,97 @@ async fn e2e_pin_tab_gone_error_and_recovery() {
     assert_success(&resp);
 }
 
+/// A pinned session that launched its own Chrome must enter tab_gone when its
+/// bound tab is closed from outside the session, the same way a CDP-attached
+/// pinned session does: reads fail instead of reading a neighboring tab, and a
+/// ref-less `tab_close` fails instead of closing a tab the session never owned
+/// (#2620). Force-red: drop the pin sync after `BrowserManager::launch` in
+/// `launch_browser_with_options` and `url` returns the other tab's URL.
+#[tokio::test]
+#[ignore]
+async fn e2e_pin_tab_gone_in_launched_browser() {
+    let (guard, _dir) = binding_test_env();
+    guard.set("AGENT_BROWSER_SESSION", "e2e-launch-pin");
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "pinTab": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let ours = "data:text/html,launched-ours";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": ours }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let binding = load_binding("e2e-launch-pin", "launched session binding should persist");
+    let resp = execute_command(&json!({ "id": "3", "action": "cdp_url" }), &mut state).await;
+    assert_success(&resp);
+    let ws_url = get_data(&resp)["cdpUrl"]
+        .as_str()
+        .expect("cdpUrl should be a string")
+        .to_string();
+
+    // Another client on the same Chrome opens its own tab and closes ours.
+    guard.set("AGENT_BROWSER_SESSION", "e2e-launch-pin-other");
+    let mut other = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "o1", "action": "launch", "cdpUrl": ws_url }),
+        &mut other,
+    )
+    .await;
+    assert_success(&resp);
+    let theirs = "data:text/html,launched-theirs";
+    let resp = execute_command(
+        &json!({ "id": "o2", "action": "tab_new", "url": theirs }),
+        &mut other,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "o3", "action": "tab_close", "tabId": binding.target_id }),
+        &mut other,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    guard.set("AGENT_BROWSER_SESSION", "e2e-launch-pin");
+    let resp = current_url(&mut state, "4").await;
+    assert_eq!(
+        resp["code"],
+        "tab_gone",
+        "url must fail with tab_gone instead of reading another tab, got: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    assert_eq!(resp["data"]["targetId"], binding.target_id);
+
+    let resp = execute_command(&json!({ "id": "5", "action": "tab_close" }), &mut state).await;
+    assert_eq!(
+        resp["code"],
+        "tab_gone",
+        "ref-less tab_close must fail with tab_gone, got: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+
+    // The other client's tab is still open.
+    guard.set("AGENT_BROWSER_SESSION", "e2e-launch-pin-other");
+    let resp = current_url(&mut other, "o4").await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], theirs);
+
+    guard.set("AGENT_BROWSER_SESSION", "e2e-launch-pin");
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
 /// A multiselect locator miss must surface the anchored "No element found"
 /// guidance, not a raw "Evaluation error: ...". Guards the handler wiring end to
 /// end: a unit test of the mapping alone stays green if the handler stops routing

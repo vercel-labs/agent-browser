@@ -4061,6 +4061,19 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
     Ok(established)
 }
 
+/// Carry the session's pin-tab setting into a local Chrome this session
+/// launched itself. The CDP attach paths do this in
+/// `apply_tab_binding_on_attach`; without it the new manager keeps its default
+/// `pin_tab = false`, so closing the pinned tab from outside silently retargets
+/// the next command at another tab instead of entering `tab_gone` (#2620).
+/// A fresh browser has no tab to re-bind, so this binds its active tab.
+fn sync_pin_tab_to_launched_browser(state: &mut DaemonState) {
+    let pin = state.pin_tab;
+    if let Some(ref mut mgr) = state.browser {
+        mgr.set_pin_tab(pin);
+    }
+}
+
 /// Run `apply_tab_binding_on_attach`, but tear the connection down on failure.
 /// The attach paths set `state.browser` before calling this; without the
 /// rollback a binding-recovery error would leave a live but un-recovered
@@ -5281,6 +5294,7 @@ async fn launch_browser_from_settings(
     state.touch_sessions.clear();
     state.reset_input_state();
     state.browser = Some(mgr);
+    sync_pin_tab_to_launched_browser(state);
     state.launch_identity = Some(state.settings.launch_identity());
     state.effective_ca_cert = effective_ca_cert;
     state.subscribe_to_browser_events();
