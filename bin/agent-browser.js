@@ -15,7 +15,7 @@ import { accessSync, chmodSync, constants } from 'fs';
 import { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
-import { findNativeBinary, nativeTarget } from '../scripts/native.js';
+import { emptyNativeBinaries, findNativeBinary, nativeTarget } from '../scripts/native.js';
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -31,7 +31,13 @@ async function main() {
 
   if (!binaryPath) {
     console.error(`Error: No binary found for ${platform()}-${arch()}`);
-    console.error(`Expected the ${target.packageName} package to be installed.`);
+    const empty = emptyNativeBinaries(packageRoot, target);
+    if (empty.length > 0) {
+      console.error(`The binary is empty (0 bytes): ${empty.join(', ')}`);
+      console.error('The install is incomplete.');
+    } else {
+      console.error(`Expected the ${target.packageName} package to be installed.`);
+    }
     console.error('');
     console.error('Reinstall agent-browser with optional dependencies enabled,');
     console.error('or run "npm run build:native" to build for your platform.');

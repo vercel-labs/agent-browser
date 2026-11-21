@@ -5,7 +5,7 @@
  * subprocesses because the launcher imports it on every wrapped invocation.
  */
 
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
 import { createRequire } from 'module';
 import { dirname, join } from 'path';
 import { platform, arch } from 'os';
@@ -80,13 +80,41 @@ export function nativeTarget(os = platform(), cpuArch = arch(), libc = os === 'l
   }
 }
 
+// A zero-byte file is a leftover of a failed download, never a runnable binary.
+function isUsableFile(path) {
+  try {
+    return statSync(path).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+// Returns the platform package binary path whether or not it exists, or null.
+function platformPackageBinaryPath(packageRoot, target) {
+  try {
+    const require = createRequire(join(packageRoot, 'package.json'));
+    const manifest = require.resolve(`${target.packageName}/package.json`);
+    return join(dirname(manifest), 'bin', target.file);
+  } catch {
+    return null;
+  }
+}
+
+// Returns existing zero-byte candidates, so callers can name them.
+export function emptyNativeBinaries(packageRoot, target) {
+  const paths = target.candidates.map((name) => join(packageRoot, 'bin', name));
+  const packaged = platformPackageBinaryPath(packageRoot, target);
+  if (packaged) paths.push(packaged);
+  return paths.filter((path) => existsSync(path) && !isUsableFile(path));
+}
+
 // Returns the binary inside the installed platform package, or null.
 export function platformPackageBinary(packageRoot, target) {
   try {
     const require = createRequire(join(packageRoot, 'package.json'));
     const manifest = require.resolve(`${target.packageName}/package.json`);
     const binary = join(dirname(manifest), 'bin', target.file);
-    return existsSync(binary) ? binary : null;
+    return isUsableFile(binary) ? binary : null;
   } catch {
     return null;
   }
@@ -96,7 +124,7 @@ export function platformPackageBinary(packageRoot, target) {
 export function findNativeBinary(packageRoot, target) {
   for (const name of target.candidates) {
     const binary = join(packageRoot, 'bin', name);
-    if (existsSync(binary)) return binary;
+    if (isUsableFile(binary)) return binary;
   }
   return platformPackageBinary(packageRoot, target);
 }

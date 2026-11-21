@@ -199,7 +199,8 @@ test('first run through a bin symlink relinks it to the native binary', { skip: 
   // The link now targets a copy inside this package's own bin directory, so
   // package managers still recognize and remove it on uninstall.
   const linkedBinary = join(await realpath(packageRoot), 'bin', target.binaryName);
-  assert.equal(await readlink(entry), linkedBinary);
+  assert.equal(await readlink(entry), join('..', 'lib', 'node_modules', 'agent-browser', 'bin', target.binaryName));
+  assert.equal(await realpath(entry), linkedBinary);
 
   const second = spawnSync(entry, ['snapshot'], { encoding: 'utf8' });
   assert.equal(second.status, 0, second.stderr);

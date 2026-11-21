@@ -18,7 +18,7 @@ mod seed;
 mod spec;
 mod store;
 
-pub use patch::{Patch, Requested};
+pub use patch::{effective_targets, Patch, Requested};
 pub use plan::Change;
 pub use proxy::parse_proxy;
 #[cfg(test)]
