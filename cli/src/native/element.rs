@@ -1141,7 +1141,9 @@ pub(crate) fn build_count_elements_js(selector: &str) -> String {
 /// on el": shadow-including ancestors/descendants in either direction, and
 /// label/control association (custom checkboxes hide the input under a styled
 /// sibling inside the same label).
-pub(crate) const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
+/// Returns a CSS-like description of the element blocking `(x, y)` for `el`, or `null` if clear.
+/// When `rejectInteractiveDescendant` is true, an interactive control strictly inside `el` also blocks.
+pub(crate) const BLOCKER_AT_JS: &str = r#"(doc, el, x, y, rejectInteractiveDescendant) => {
     // Descend from the given document through same-origin iframes so a point
     // over a frame resolves to the element inside it, in that frame's space.
     let d = doc, lx = x, ly = y;
@@ -1180,13 +1182,41 @@ pub(crate) const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
         hit = d.elementFromPoint(lx, ly);
     }
     if (!hit || hit === el) return null;
+    const interactiveSel = 'button, a[href], area[href], input, select, textarea, summary, details, iframe, embed, object, [role], [onclick], [tabindex]:not([tabindex="-1"]), [contenteditable=""], [contenteditable="true"]';
+    const isInteractive = (n) => !!n && ((n.matches && n.matches(interactiveSel)) || typeof n.onclick === 'function');
     const up = (n) => n.parentNode || n.host || (n.getRootNode && n.getRootNode().host) || null;
-    for (let n = hit; n; n = up(n)) { if (n === el) return null; }
+    for (let n = hit; n; n = up(n)) {
+        if (n === el) {
+            if (rejectInteractiveDescendant) {
+                let interactiveHit = null;
+                for (let cur = hit; cur && cur !== el; cur = up(cur)) {
+                    if (isInteractive(cur)) {
+                        interactiveHit = cur;
+                        break;
+                    }
+                }
+                if (interactiveHit) {
+                    hit = interactiveHit;
+                    break;
+                }
+            }
+            return null;
+        }
+    }
     for (let n = el; n; n = up(n)) { if (n === hit) return null; }
     const hitLabel = hit.closest ? hit.closest('label') : null;
-    if (hitLabel && (hitLabel.control === el || hitLabel.contains(el))) return null;
+    let hitInteractiveInsideLabel = false;
+    if (hitLabel) {
+        for (let cur = hit; cur && cur !== hitLabel; cur = up(cur)) {
+            if (isInteractive(cur)) {
+                hitInteractiveInsideLabel = true;
+                break;
+            }
+        }
+    }
+    if (!hitInteractiveInsideLabel && hitLabel && (hitLabel.control === el || hitLabel.contains(el))) return null;
     const elLabel = el.closest ? el.closest('label') : null;
-    if (elLabel && elLabel.contains(hit)) return null;
+    if (!hitInteractiveInsideLabel && elLabel && elLabel.contains(hit)) return null;
     let desc = hit.tagName.toLowerCase();
     if (hit.id) desc += '#' + hit.id;
     else if (typeof hit.className === 'string' && hit.className.trim())
@@ -1561,49 +1591,234 @@ pub async fn is_element_enabled(
         .unwrap_or(true))
 }
 
-/// Returns the checked state of a native checkbox/radio, checkable ARIA widget,
-/// associated label, or single-checkbox wrapper, or `null` for any other element.
-pub(crate) const ELEMENT_CHECKED_JS: &str = r#"function() {
-    var el = this;
+macro_rules! check_control_fn_js {
+    () => {
+        r#"(function(el) {
+    if (!el) return null;
     var tag = el.tagName && el.tagName.toUpperCase();
     if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
-        return el.checked;
+        return el;
     }
     var rawRole = el.getAttribute && el.getAttribute('role');
     var role = rawRole ? rawRole.trim().toLowerCase() : '';
     var alwaysCheckableRoles = ['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'];
     if (role && alwaysCheckableRoles.indexOf(role) !== -1) {
-        return el.getAttribute('aria-checked') === 'true';
+        return el;
     }
     if ((role === 'option' || role === 'treeitem') && el.hasAttribute && el.hasAttribute('aria-checked')) {
-        return el.getAttribute('aria-checked') === 'true';
+        return el;
     }
-    var nonCheckableTags = ['BUTTON', 'A', 'SELECT', 'TEXTAREA', 'INPUT', 'SUMMARY'];
+    var nonCheckableTags = ['BUTTON', 'A', 'AREA', 'SELECT', 'TEXTAREA', 'INPUT', 'SUMMARY', 'DETAILS', 'IFRAME', 'EMBED', 'OBJECT'];
     var nonCheckableRoles = ['button', 'link', 'textbox', 'combobox', 'listbox', 'menuitem', 'searchbox', 'slider', 'spinbutton', 'tab'];
     if ((tag && nonCheckableTags.indexOf(tag) !== -1) || (role && nonCheckableRoles.indexOf(role) !== -1)) {
         return null;
     }
+    var interactiveSel = 'button, a[href], area[href], input, select, textarea, summary, details, iframe, embed, object, [role], [onclick], [tabindex]:not([tabindex="-1"]), [contenteditable=""], [contenteditable="true"]';
+    var isInteractive = function(n) { return !!n && ((n.matches && n.matches(interactiveSel)) || typeof n.onclick === 'function'); };
     var label = tag === 'LABEL' ? el : (el.closest && el.closest('label'));
     if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
-        var interactive = el.closest && el.closest('button, a[href], select, textarea, summary, [role="button"], [role="link"]');
-        if (interactive && label.contains(interactive)) {
-            return null;
+        for (var cur = el; cur && cur !== label; cur = cur.parentElement) {
+            if (isInteractive(cur)) return null;
         }
         var ctrl = label.control;
         if (ctrl.tagName && ctrl.tagName.toUpperCase() === 'INPUT' && (ctrl.type === 'checkbox' || ctrl.type === 'radio')) {
-            return ctrl.checked;
+            return ctrl;
         }
         return null;
     }
     var inputs = el.querySelectorAll && el.querySelectorAll('input[type="checkbox"], input[type="radio"]');
     if (inputs && inputs.length === 1) {
-        var otherInteractive = el.querySelector('button, a[href], input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), select, textarea, summary, [role="button"], [role="link"]');
-        if (!otherInteractive) {
-            return inputs[0].checked;
+        var otherInteractiveSel = 'button, a[href], area[href], input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), select, textarea, summary, details, iframe, embed, object, [role], [onclick], [tabindex]:not([tabindex="-1"]), [contenteditable=""], [contenteditable="true"]';
+        if (!el.querySelector(otherInteractiveSel)) {
+            var all = el.querySelectorAll('*');
+            for (var i = 0; i < all.length; i++) {
+                if (all[i] !== inputs[0] && typeof all[i].onclick === 'function') {
+                    return null;
+                }
+            }
+            return inputs[0];
         }
     }
     return null;
-}"#;
+})"#
+    };
+}
+
+const CHECK_CONTROL_FN_JS: &str = check_control_fn_js!();
+
+/// Resolves `this` to its canonical checkable control element, or `null` if not checkable.
+pub(crate) const ELEMENT_CHECK_CONTROL_JS: &str =
+    concat!("function() { return ", check_control_fn_js!(), "(this); }");
+
+/// Returns whether a resolved checkable control is checked, whether it is a native input,
+/// and whether it has a visible pointer-interactive box, or `null` if it is not checkable.
+pub(crate) fn element_check_probe_js() -> String {
+    format!(
+        r#"function() {{
+            var ctrl = ({CHECK_CONTROL_FN_JS})(this);
+            if (!ctrl) return null;
+            var isNative = !!(ctrl.tagName && ctrl.tagName.toUpperCase() === 'INPUT' && (ctrl.type === 'checkbox' || ctrl.type === 'radio'));
+            var checked = isNative ? !!ctrl.checked : ctrl.getAttribute('aria-checked') === 'true';
+            var r = ctrl.getClientRects && ctrl.getClientRects()[0];
+            var s = getComputedStyle(ctrl);
+            var clickable = !!(r && r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && parseFloat(s.opacity) > 0 && s.pointerEvents !== 'none');
+            return {{ checked: checked, native: isNative, clickable: clickable }};
+        }}"#
+    )
+}
+
+/// Clicks only the verified canonical checkable control returned by `CHECK_CONTROL_FN_JS`.
+pub(crate) fn click_checkbox_js() -> String {
+    format!(
+        r#"function() {{
+            var ctrl = ({CHECK_CONTROL_FN_JS})(this);
+            if (ctrl) ctrl.click();
+        }}"#
+    )
+}
+
+/// Returns the checked state of a checkable element via `CHECK_CONTROL_FN_JS`, or `null`
+/// for any non-checkable element.
+pub(crate) const ELEMENT_CHECKED_JS: &str = concat!(
+    "function() { var ctrl = ",
+    check_control_fn_js!(),
+    "(this); if (!ctrl) return null; var tag = ctrl.tagName && ctrl.tagName.toUpperCase(); return tag === 'INPUT' ? !!ctrl.checked : ctrl.getAttribute('aria-checked') === 'true'; }"
+);
+
+/// Observation of a resolved checkable control used to choose the single `CheckPlan` state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckProbe {
+    pub checked: bool,
+    pub native: bool,
+    pub clickable: bool,
+    pub blocker: Option<String>,
+}
+
+/// Explicit state machine for `check` and `uncheck`, decided once before any input runs.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CheckPlan<T> {
+    /// Target is not checkable, hidden without native fallback, or blocked by another control.
+    Reject(String),
+    /// Control already has the desired checked state; perform no input.
+    AlreadySet,
+    /// Visible, unobstructed canonical control that receives pointer input.
+    Pointer(T),
+    /// Hidden or pointer-transparent native checkbox/radio toggled via direct DOM `.click()`.
+    DomClick(T),
+}
+
+/// Decides the exact `CheckPlan` state from one probe result so neither Chrome nor Firefox
+/// can fall through to clicking a label, wrapper, or unrelated interactive descendant.
+pub(crate) fn decide_check_plan<T>(
+    selector: &str,
+    want_checked: bool,
+    probe: Option<CheckProbe>,
+    target: T,
+) -> CheckPlan<T> {
+    let Some(probe) = probe else {
+        return CheckPlan::Reject(not_checkable_error(selector));
+    };
+    if probe.checked == want_checked {
+        return CheckPlan::AlreadySet;
+    }
+    if !probe.clickable {
+        return if probe.native {
+            CheckPlan::DomClick(target)
+        } else {
+            CheckPlan::Reject(not_actionable_error(selector, "not visible"))
+        };
+    }
+    if let Some(blocker) = probe.blocker {
+        return CheckPlan::Reject(intercepted_error(selector, &blocker));
+    }
+    CheckPlan::Pointer(target)
+}
+
+/// Evaluates `CHECK_CONTROL_FN_JS`, click geometry, and check-mode hit-testing on Chrome and
+/// returns the explicit `CheckPlan` for `toggle`.
+pub(crate) async fn plan_chrome_check(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+    want_checked: bool,
+) -> Result<CheckPlan<(f64, f64, String)>, String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    let js = format!(
+        r#"async function() {{
+            const ctrl = ({CHECK_CONTROL_FN_JS})(this);
+            if (!ctrl) return null;
+            const isNative = !!(ctrl.tagName && ctrl.tagName.toUpperCase() === 'INPUT' && (ctrl.type === 'checkbox' || ctrl.type === 'radio'));
+            const checked = isNative ? !!ctrl.checked : ctrl.getAttribute('aria-checked') === 'true';
+            const r = ctrl.getClientRects && ctrl.getClientRects()[0];
+            const s = getComputedStyle(ctrl);
+            const clickable = !!(r && r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && parseFloat(s.opacity) > 0 && s.pointerEvents !== 'none');
+            if (!clickable) {{
+                return {{ checked: checked, native: isNative, clickable: false, blocker: null, x: null, y: null }};
+            }}
+            const clickPoint = {CLICK_POINT_JS};
+            const doc = ctrl.ownerDocument || document;
+            const point = await clickPoint(ctrl, doc);
+            const blockerAt = {BLOCKER_AT_JS};
+            const topDoc = (point.view && point.view.document) || doc;
+            const blocker = blockerAt(doc, ctrl, point.lx, point.ly, true) || blockerAt(topDoc, ctrl, point.x, point.y, true);
+            return {{ checked: checked, native: isNative, clickable: true, blocker: blocker, x: point.x, y: point.y }};
+        }}"#
+    );
+
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: js,
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(true),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    let val = result.result.value.unwrap_or(Value::Null);
+    if val.is_null() {
+        return Ok(decide_check_plan(
+            selector_or_ref,
+            want_checked,
+            None,
+            (0.0, 0.0, effective_session_id),
+        ));
+    }
+    let probe = CheckProbe {
+        checked: val.get("checked").and_then(Value::as_bool).unwrap_or(false),
+        native: val.get("native").and_then(Value::as_bool).unwrap_or(false),
+        clickable: val
+            .get("clickable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        blocker: val.get("blocker").and_then(Value::as_str).map(String::from),
+    };
+    let coords = (
+        val.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+        val.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+        effective_session_id,
+    );
+    Ok(decide_check_plan(
+        selector_or_ref,
+        want_checked,
+        Some(probe),
+        coords,
+    ))
+}
 
 /// Formats the error when `check` or `uncheck` targets a non-checkable element.
 pub(crate) fn not_checkable_error(target: &str) -> String {
@@ -2101,6 +2316,84 @@ mod tests {
         assert_eq!(
             read_after_action(async { Err::<bool, _>("Element not found: @e1".to_string()) }).await,
             Err("Element not found: @e1".to_string())
+        );
+    }
+
+    #[test]
+    fn check_plan_state_machine_covers_every_transition() {
+        assert!(matches!(
+            decide_check_plan("#btn", true, None, "ctrl"),
+            CheckPlan::Reject(ref e) if e.contains("not a checkbox")
+        ));
+        assert_eq!(
+            decide_check_plan(
+                "#cb",
+                true,
+                Some(CheckProbe {
+                    checked: true,
+                    native: true,
+                    clickable: true,
+                    blocker: None,
+                }),
+                "ctrl",
+            ),
+            CheckPlan::AlreadySet
+        );
+        assert_eq!(
+            decide_check_plan(
+                "#hidden",
+                true,
+                Some(CheckProbe {
+                    checked: false,
+                    native: true,
+                    clickable: false,
+                    blocker: None,
+                }),
+                "ctrl",
+            ),
+            CheckPlan::DomClick("ctrl")
+        );
+        assert!(matches!(
+            decide_check_plan(
+                "#hidden-aria",
+                true,
+                Some(CheckProbe {
+                    checked: false,
+                    native: false,
+                    clickable: false,
+                    blocker: None,
+                }),
+                "ctrl",
+            ),
+            CheckPlan::Reject(ref e) if e.contains("not visible")
+        ));
+        assert!(matches!(
+            decide_check_plan(
+                "#covered",
+                true,
+                Some(CheckProbe {
+                    checked: false,
+                    native: true,
+                    clickable: true,
+                    blocker: Some("button#danger".to_string()),
+                }),
+                "ctrl",
+            ),
+            CheckPlan::Reject(ref e) if e.contains("covered by <button#danger>")
+        ));
+        assert_eq!(
+            decide_check_plan(
+                "#cb",
+                true,
+                Some(CheckProbe {
+                    checked: false,
+                    native: true,
+                    clickable: true,
+                    blocker: None,
+                }),
+                "ctrl",
+            ),
+            CheckPlan::Pointer("ctrl")
         );
     }
 

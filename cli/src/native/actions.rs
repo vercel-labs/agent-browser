@@ -195,25 +195,7 @@ impl RouteEntry {
     }
 }
 
-#[derive(Clone, serde::Serialize)]
-pub struct TrackedRequest {
-    pub url: String,
-    pub method: String,
-    pub headers: Value,
-    pub timestamp: u64,
-    #[serde(rename = "resourceType")]
-    pub resource_type: String,
-    #[serde(rename = "requestId")]
-    pub request_id: String,
-    #[serde(rename = "postData", skip_serializing_if = "Option::is_none")]
-    pub post_data: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<i64>,
-    #[serde(rename = "responseHeaders", skip_serializing_if = "Option::is_none")]
-    pub response_headers: Option<Value>,
-    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
-}
+pub use super::network::{RequestTracker, TrackedRequest};
 
 pub struct FetchPausedRequest {
     pub request_id: String,
@@ -709,7 +691,7 @@ pub struct DaemonState {
     pub confirm_actions: Option<ConfirmActions>,
     pub inspect_server: Option<InspectServer>,
     pub routes: Arc<RwLock<Vec<RouteEntry>>>,
-    pub tracked_requests: Vec<TrackedRequest>,
+    pub tracked_requests: RequestTracker,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
     /// Cross-origin iframe frame_id → dedicated CDP session_id.
@@ -813,6 +795,39 @@ fn default_idle_shutdown_is_blocked(
     browser_blocks_shutdown: bool,
 ) -> bool {
     is_webdriver || (!provider_owned && browser_blocks_shutdown)
+}
+
+/// Records a HAR entry into `entries` while enforcing `HAR_MAX_ENTRIES`, URL/header size caps,
+/// and the shared request/response body byte budget.
+fn record_har_entry_into(
+    entries: &mut Vec<HarEntry>,
+    body_total_bytes: &mut usize,
+    mut entry: HarEntry,
+) -> bool {
+    if entries.len() >= network::HAR_MAX_ENTRIES {
+        return false;
+    }
+    entry.url = network::clip(&entry.url, network::MAX_REQUEST_URL_BYTES);
+    entry.method = network::clip(&entry.method, network::MAX_REQUEST_LABEL_BYTES);
+    entry.resource_type = network::clip(&entry.resource_type, network::MAX_REQUEST_LABEL_BYTES);
+    entry.request_headers = network::clip_header_pairs(
+        entry
+            .request_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str())),
+        network::MAX_REQUEST_HEADERS_BYTES,
+    );
+    if let Some(body) = entry.post_data.take() {
+        if !body.is_empty()
+            && body.len() <= HAR_MAX_BODY_BYTES
+            && *body_total_bytes + body.len() <= HAR_MAX_TOTAL_BODY_BYTES
+        {
+            *body_total_bytes += body.len();
+            entry.post_data = Some(body);
+        }
+    }
+    entries.push(entry);
+    true
 }
 
 impl DaemonState {
@@ -932,7 +947,7 @@ impl DaemonState {
                 .and_then(ConfirmActions::parse),
             inspect_server: None,
             routes: Arc::new(RwLock::new(Vec::new())),
-            tracked_requests: Vec::new(),
+            tracked_requests: RequestTracker::new(),
             request_tracking: false,
             active_frame_id: None,
             iframe_sessions: HashMap::new(),
@@ -1447,6 +1462,74 @@ impl DaemonState {
         }
         let drained = self.drain_cdp_events();
         self.apply_drained_events(drained).await
+    }
+
+    /// Records a HAR entry while enforcing `HAR_MAX_ENTRIES`, URL/header size caps, and the
+    /// shared request/response body byte budget.
+    pub(crate) fn record_har_entry(&mut self, entry: HarEntry) -> bool {
+        record_har_entry_into(&mut self.har_entries, &mut self.har_body_total_bytes, entry)
+    }
+
+    /// Returns whether the latest HAR entry for `request_id` still wants its request body within budget.
+    pub(crate) fn har_needs_post_data(&self, request_id: &str) -> bool {
+        self.har_recording
+            && self.har_body_total_bytes < HAR_MAX_TOTAL_BODY_BYTES
+            && self
+                .har_entries
+                .iter()
+                .rev()
+                .find(|e| e.request_id == request_id)
+                .is_some_and(|e| {
+                    e.post_data.is_none() && e.request_body_size <= HAR_MAX_BODY_BYTES as i64
+                })
+    }
+
+    /// Embeds a request body onto the latest HAR entry for `request_id` if within body budgets.
+    pub(crate) fn attach_har_post_data(&mut self, request_id: &str, body: String) -> bool {
+        if body.is_empty()
+            || body.len() > HAR_MAX_BODY_BYTES
+            || self.har_body_total_bytes + body.len() > HAR_MAX_TOTAL_BODY_BYTES
+        {
+            return false;
+        }
+        if let Some(entry) = self
+            .har_entries
+            .iter_mut()
+            .rev()
+            .find(|e| e.request_id == request_id && e.post_data.is_none())
+        {
+            self.har_body_total_bytes += body.len();
+            entry.post_data = Some(body);
+            return true;
+        }
+        false
+    }
+
+    /// Embeds a response body onto the latest HAR entry for `request_id` if within body budgets.
+    pub(crate) fn attach_har_response_body(
+        &mut self,
+        request_id: &str,
+        body: String,
+        base64: bool,
+    ) -> bool {
+        if body.is_empty()
+            || body.len() > HAR_MAX_BODY_BYTES
+            || self.har_body_total_bytes + body.len() > HAR_MAX_TOTAL_BODY_BYTES
+        {
+            return false;
+        }
+        if let Some(entry) = self
+            .har_entries
+            .iter_mut()
+            .rev()
+            .find(|e| e.request_id == request_id && e.response_body.is_none())
+        {
+            self.har_body_total_bytes += body.len();
+            entry.response_body = Some(body);
+            entry.response_body_base64 = base64;
+            return true;
+        }
+        false
     }
 
     async fn refresh_active_iframe_sessions(&mut self) {
@@ -2259,70 +2342,65 @@ impl DaemonState {
                                                 .or(Some(0.0));
                                         }
                                     }
-                                    self.har_entries.push(HarEntry {
-                                        request_id: request_id.clone(),
-                                        wall_time,
-                                        method: method.clone(),
-                                        url: url.clone(),
-                                        request_headers,
-                                        post_data,
-                                        request_body_size,
-                                        resource_type,
-                                        status: None,
-                                        status_text: String::new(),
-                                        http_version: "HTTP/1.1".to_string(),
-                                        response_headers: Vec::new(),
-                                        mime_type: String::new(),
-                                        redirect_url: String::new(),
-                                        response_body_size: -1,
-                                        cdp_timing: None,
-                                        loading_finished_timestamp: None,
-                                        response_started_timestamp: None,
-                                        response_completed_timestamp: None,
-                                        response_body: None,
-                                        response_body_base64: false,
-                                        remote_addr: None,
-                                    });
-                                    self.flow.tag(&request_id, wall_time);
+                                    if record_har_entry_into(
+                                        &mut self.har_entries,
+                                        &mut self.har_body_total_bytes,
+                                        HarEntry {
+                                            request_id: request_id.clone(),
+                                            wall_time,
+                                            method: method.clone(),
+                                            url: url.clone(),
+                                            request_headers,
+                                            post_data,
+                                            request_body_size,
+                                            resource_type,
+                                            status: None,
+                                            status_text: String::new(),
+                                            http_version: "HTTP/1.1".to_string(),
+                                            response_headers: Vec::new(),
+                                            mime_type: String::new(),
+                                            redirect_url: String::new(),
+                                            response_body_size: -1,
+                                            cdp_timing: None,
+                                            loading_finished_timestamp: None,
+                                            response_started_timestamp: None,
+                                            response_completed_timestamp: None,
+                                            response_body: None,
+                                            response_body_base64: false,
+                                            remote_addr: None,
+                                        },
+                                    ) {
+                                        self.flow.tag(&request_id, wall_time);
+                                    }
                                 }
                                 if self.request_tracking {
                                     if let Some(redirect) = event.params.get("redirectResponse") {
-                                        if let Some(prev) = self
-                                            .tracked_requests
-                                            .iter_mut()
-                                            .rev()
-                                            .find(|e| e.request_id == request_id)
-                                        {
-                                            tracked_fill_response(prev, redirect);
-                                        }
+                                        tracked_fill_response(
+                                            &mut self.tracked_requests,
+                                            &request_id,
+                                            redirect,
+                                        );
                                     }
                                     let headers =
-                                        request.get("headers").cloned().unwrap_or(json!({}));
+                                        network::clip_cdp_header_object(request.get("headers"));
                                     let resource_type = event
                                         .params
                                         .get("type")
                                         .and_then(|v| v.as_str())
-                                        .unwrap_or("Other")
-                                        .to_string();
+                                        .unwrap_or("Other");
                                     let timestamp = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_millis() as u64)
                                         .unwrap_or(0);
-                                    self.tracked_requests.push(TrackedRequest {
-                                        url,
-                                        method,
+                                    self.tracked_requests.record_request(
+                                        &request_id,
+                                        &url,
+                                        &method,
                                         headers,
                                         timestamp,
                                         resource_type,
-                                        request_id,
-                                        post_data: request
-                                            .get("postData")
-                                            .and_then(|v| v.as_str())
-                                            .map(String::from),
-                                        status: None,
-                                        response_headers: None,
-                                        mime_type: None,
-                                    });
+                                        request.get("postData").and_then(|v| v.as_str()),
+                                    );
                                 }
                             }
                         }
@@ -2336,34 +2414,35 @@ impl DaemonState {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
                                 if self.har_recording {
-                                    self.har_progress
-                                        .insert(request_id.to_string(), std::time::Instant::now());
                                     if let Some(entry) = self
                                         .har_entries
                                         .iter_mut()
                                         .rev()
                                         .find(|e| e.request_id == request_id)
                                     {
+                                        self.har_progress.insert(
+                                            request_id.to_string(),
+                                            std::time::Instant::now(),
+                                        );
                                         har_fill_response(entry, response);
                                     }
                                 }
                                 if self.request_tracking {
-                                    if let Some(entry) = self
-                                        .tracked_requests
-                                        .iter_mut()
-                                        .rev()
-                                        .find(|e| e.request_id == request_id)
-                                    {
-                                        tracked_fill_response(entry, response);
-                                    }
+                                    tracked_fill_response(
+                                        &mut self.tracked_requests,
+                                        request_id,
+                                        response,
+                                    );
                                 }
                             }
                         }
                         "Network.dataReceived" if self.har_recording => {
                             if let Some(id) = event.params.get("requestId").and_then(|v| v.as_str())
                             {
-                                self.har_progress
-                                    .insert(id.to_string(), std::time::Instant::now());
+                                if self.har_entries.iter().rev().any(|e| e.request_id == id) {
+                                    self.har_progress
+                                        .insert(id.to_string(), std::time::Instant::now());
+                                }
                             }
                         }
                         "Network.loadingFinished" if self.har_recording => {
@@ -13834,7 +13913,10 @@ impl super::flow::Browser for FlowWiring<'_> {
             let keep = self.mark.min(self.state.har_entries.len());
             let dropped: usize = self.state.har_entries[keep..]
                 .iter()
-                .map(|e| e.response_body.as_ref().map_or(0, |b| b.len()))
+                .map(|e| {
+                    e.response_body.as_ref().map_or(0, |b| b.len())
+                        + e.post_data.as_ref().map_or(0, |b| b.len())
+                })
                 .sum();
             self.state.har_entries.truncate(keep);
             self.state.har_body_total_bytes =
@@ -14029,17 +14111,10 @@ fn har_entry_to_json(e: &HarEntry) -> Value {
     })
 }
 
-/// Convert a CDP headers object (`{ "Name": "value", ... }`) into a flat
+/// Convert a CDP headers object (`{ "Name": "value", ... }`) into a bounded flat
 /// `Vec<(name, value)>` preserving insertion order.
 fn har_extract_headers(headers_val: Option<&Value>) -> Vec<(String, String)> {
-    headers_val
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
+    network::clip_cdp_headers(headers_val)
 }
 
 /// Whether a MIME type is text-like enough to embed as HAR `content.text`
@@ -14105,29 +14180,33 @@ fn har_parse_request_cookies(cookie_header: &str) -> Vec<Value> {
 
 /// Copies a CDP `Response` (from `responseReceived` or a `redirectResponse`)
 /// onto its tracked request.
-fn tracked_fill_response(entry: &mut TrackedRequest, response: &Value) {
-    entry.status = response.get("status").and_then(|v| v.as_i64());
-    entry.mime_type = response
-        .get("mimeType")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    entry.response_headers = response.get("headers").cloned();
+fn tracked_fill_response(tracker: &mut RequestTracker, request_id: &str, response: &Value) {
+    let status = response.get("status").and_then(|v| v.as_i64());
+    let mime_type = response.get("mimeType").and_then(|v| v.as_str());
+    let headers = response
+        .get("headers")
+        .map(|h| network::clip_cdp_header_object(Some(h)));
+    tracker.attach_response(request_id, status, mime_type, headers);
 }
 
 /// Copies a CDP `Response` (from `responseReceived` or a `redirectResponse`)
 /// onto its HAR entry.
 fn har_fill_response(entry: &mut HarEntry, response: &Value) {
     entry.status = response.get("status").and_then(|v| v.as_i64());
-    entry.status_text = response
-        .get("statusText")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    entry.mime_type = response
-        .get("mimeType")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    entry.status_text = network::clip(
+        response
+            .get("statusText")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        network::MAX_REQUEST_LABEL_BYTES,
+    );
+    entry.mime_type = network::clip(
+        response
+            .get("mimeType")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        network::MAX_REQUEST_LABEL_BYTES,
+    );
     entry.http_version = response
         .get("protocol")
         .and_then(|v| v.as_str())
@@ -14138,7 +14217,7 @@ fn har_fill_response(entry: &mut HarEntry, response: &Value) {
         .response_headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("location"))
-        .map(|(_, v)| v.clone())
+        .map(|(_, v)| network::clip(v, network::MAX_REQUEST_URL_BYTES))
         .unwrap_or_default();
     entry.response_body_size = response
         .get("encodedDataLength")

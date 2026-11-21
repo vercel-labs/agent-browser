@@ -33,6 +33,34 @@ const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptClosed",
 ];
 
+/// Desired BiDi data collector scope for a Firefox session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DataCollectorMode {
+    Off,
+    RequestsOnly,
+    HarAndRequests,
+}
+
+/// Active BiDi data collector state owned by a `FirefoxSession`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) enum DataCollectorState {
+    #[default]
+    Off,
+    Active {
+        id: String,
+        mode: DataCollectorMode,
+    },
+}
+
+impl DataCollectorState {
+    pub(super) fn mode(&self) -> DataCollectorMode {
+        match self {
+            Self::Off => DataCollectorMode::Off,
+            Self::Active { mode, .. } => *mode,
+        }
+    }
+}
+
 /// One launched Firefox. Dropping it kills the process tree and deletes the profile.
 pub struct FirefoxSession {
     process: Option<FirefoxProcess>,
@@ -56,7 +84,7 @@ pub struct FirefoxSession {
     pub permissions: Arc<tokio::sync::Mutex<permissions::Grants>>,
     /// Launch download directory, restored after `download` redirects it.
     pub download_dir: Option<String>,
-    pub(super) data_collector: Option<String>,
+    pub(super) data_collector: DataCollectorState,
     events: Events,
     pub net: NetContext,
     /// True once the single global network intercept is installed; it is never installed twice.
@@ -250,7 +278,7 @@ impl FirefoxSession {
             emulation,
             permissions,
             download_dir: options.download_path.clone(),
-            data_collector: None,
+            data_collector: DataCollectorState::Off,
             events,
             net,
             intercepting: false,
@@ -852,7 +880,7 @@ pub(crate) mod tests {
             emulation: Arc::default(),
             permissions: Arc::default(),
             download_dir: None,
-            data_collector: None,
+            data_collector: DataCollectorState::Off,
             visited_origins: HashSet::new(),
             events,
             net: NetContext::default(),
@@ -981,7 +1009,7 @@ pub(crate) mod tests {
             emulation: Arc::default(),
             permissions: Arc::default(),
             download_dir: None,
-            data_collector: None,
+            data_collector: DataCollectorState::Off,
             events,
             visited_origins: HashSet::new(),
             net: NetContext::default(),

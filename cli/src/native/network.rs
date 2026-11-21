@@ -646,8 +646,23 @@ const MAX_ENTRY_URL_BYTES: usize = 8 * 1024;
 /// Most bytes the console messages, and separately the page errors, may hold together.
 const MAX_RETAINED_BYTES: usize = 8 * 1024 * 1024;
 
+/// Most tracked network requests kept in memory at once.
+pub(crate) const MAX_TRACKED_REQUESTS: usize = 1000;
+/// Most aggregate bytes tracked network requests may hold together.
+pub(crate) const MAX_TRACKED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+/// Longest URL or redirect target kept per recorded request or HAR entry.
+pub(crate) const MAX_REQUEST_URL_BYTES: usize = 8 * 1024;
+/// Most aggregate bytes one request or response header map may keep.
+pub(crate) const MAX_REQUEST_HEADERS_BYTES: usize = 16 * 1024;
+/// Most request-body bytes kept on one tracked request.
+pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
+/// Longest short metadata label (method, MIME type, status text, resource type, request ID).
+pub(crate) const MAX_REQUEST_LABEL_BYTES: usize = 256;
+/// Most entries retained in one HAR recording session.
+pub(crate) const HAR_MAX_ENTRIES: usize = 5000;
+
 /// A copy of `text` of at most `limit` bytes, cut on a character boundary and marked as cut.
-fn clip(text: &str, limit: usize) -> String {
+pub(crate) fn clip(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_string();
     }
@@ -656,6 +671,381 @@ fn clip(text: &str, limit: usize) -> String {
         end -= 1;
     }
     format!("{}...[truncated {} bytes]", &text[..end], text.len() - end)
+}
+
+/// Clips a string to at most `limit` UTF-8 bytes without adding a suffix.
+fn clip_raw(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// Copies header `(name, value)` pairs up to `limit` aggregate bytes, stopping before
+/// allocating past the budget.
+pub(crate) fn clip_header_pairs<'a>(
+    pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+    limit: usize,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut left = limit;
+    for (name, value) in pairs {
+        if left == 0 {
+            break;
+        }
+        let overhead = std::mem::size_of::<(String, String)>();
+        if left <= overhead {
+            break;
+        }
+        left -= overhead;
+        let clipped_name = clip_raw(name, left.min(MAX_REQUEST_LABEL_BYTES));
+        left = left.saturating_sub(clipped_name.len());
+        let clipped_value = if value.len() <= left {
+            value.to_string()
+        } else {
+            let v = clip_raw(value, left);
+            left = 0;
+            v
+        };
+        left = left.saturating_sub(clipped_value.len());
+        out.push((clipped_name, clipped_value));
+    }
+    out
+}
+
+/// Extracts a bounded `(name, value)` list from a BiDi headers array.
+pub(crate) fn clip_bidi_headers(headers: &Value) -> Vec<(String, String)> {
+    let pairs = headers.as_array().into_iter().flatten().filter_map(|h| {
+        Some((
+            h["name"].as_str()?,
+            h["value"]["value"].as_str().unwrap_or(""),
+        ))
+    });
+    clip_header_pairs(pairs, MAX_REQUEST_HEADERS_BYTES)
+}
+
+/// Extracts a bounded JSON object map from a BiDi headers array.
+pub(crate) fn clip_bidi_header_object(headers: &Value) -> Value {
+    pairs_to_header_object(clip_bidi_headers(headers))
+}
+
+/// Extracts a bounded `(name, value)` list from a CDP headers JSON object.
+pub(crate) fn clip_cdp_headers(headers: Option<&Value>) -> Vec<(String, String)> {
+    let Some(map) = headers.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut left = MAX_REQUEST_HEADERS_BYTES;
+    for (name, raw_val) in map {
+        let overhead = std::mem::size_of::<(String, String)>();
+        if left <= overhead {
+            break;
+        }
+        left -= overhead;
+        let clipped_name = clip_raw(name, left.min(MAX_REQUEST_LABEL_BYTES));
+        left = left.saturating_sub(clipped_name.len());
+        let owned_val;
+        let val_str = match raw_val.as_str() {
+            Some(s) => s,
+            None => {
+                owned_val = raw_val.to_string();
+                owned_val.as_str()
+            }
+        };
+        let clipped_value = if val_str.len() <= left {
+            val_str.to_string()
+        } else {
+            let v = clip_raw(val_str, left);
+            left = 0;
+            v
+        };
+        left = left.saturating_sub(clipped_value.len());
+        out.push((clipped_name, clipped_value));
+    }
+    out
+}
+
+/// Extracts a bounded JSON object map from a CDP headers JSON object.
+pub(crate) fn clip_cdp_header_object(headers: Option<&Value>) -> Value {
+    pairs_to_header_object(clip_cdp_headers(headers))
+}
+
+fn pairs_to_header_object(pairs: Vec<(String, String)>) -> Value {
+    Value::Object(
+        pairs
+            .into_iter()
+            .map(|(k, v)| (k, Value::String(v)))
+            .collect(),
+    )
+}
+
+/// Decodes a BiDi `network.getData` payload within `max_bytes` before allocating the full
+/// body. When `truncate` is false, payloads exceeding `max_bytes` return `None`; when true,
+/// only the bounded prefix is decoded and marked as truncated.
+pub(crate) fn decode_bidi_body_bounded(
+    raw: &str,
+    is_base64: bool,
+    max_bytes: usize,
+    truncate: bool,
+) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+    if !is_base64 {
+        if !truncate && raw.len() > max_bytes {
+            return None;
+        }
+        return Some(clip(raw, max_bytes));
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let estimated_decoded = (trimmed.len() / 4).saturating_mul(3);
+    if !truncate && estimated_decoded > max_bytes {
+        return None;
+    }
+    use base64::Engine;
+    let engine = &base64::engine::general_purpose::STANDARD;
+    let max_encoded_prefix = ((max_bytes / 3) + 1).saturating_mul(4);
+    let was_sliced = truncate && trimmed.len() > max_encoded_prefix;
+    let slice = if was_sliced {
+        &trimmed[..max_encoded_prefix]
+    } else {
+        trimmed
+    };
+    let mut bytes = engine.decode(slice).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    if !truncate && bytes.len() > max_bytes {
+        return None;
+    }
+    if was_sliced {
+        let mut valid_len = bytes.len().min(max_bytes);
+        while valid_len > 0 && std::str::from_utf8(&bytes[..valid_len]).is_err() {
+            if bytes.len().min(max_bytes) - valid_len >= 3 {
+                return None;
+            }
+            valid_len -= 1;
+        }
+        bytes.truncate(valid_len);
+        let prefix = String::from_utf8(bytes).ok()?;
+        let omitted = estimated_decoded.saturating_sub(prefix.len());
+        return Some(format!("{prefix}...[truncated {omitted} bytes]"));
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    if text.is_empty() {
+        return None;
+    }
+    Some(if truncate {
+        clip(&text, max_bytes)
+    } else {
+        text
+    })
+}
+
+/// One network request recorded for `network requests` and `network request`.
+#[derive(Clone, serde::Serialize)]
+pub struct TrackedRequest {
+    pub url: String,
+    pub method: String,
+    pub headers: Value,
+    pub timestamp: u64,
+    #[serde(rename = "resourceType")]
+    pub resource_type: String,
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    #[serde(rename = "postData", skip_serializing_if = "Option::is_none")]
+    pub post_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<i64>,
+    #[serde(rename = "responseHeaders", skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<Value>,
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+fn header_value_bytes(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| {
+                std::mem::size_of::<String>()
+                    + std::mem::size_of::<Value>()
+                    + k.len()
+                    + v.as_str().map_or(0, str::len)
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn tracked_request_weight(entry: &TrackedRequest) -> usize {
+    std::mem::size_of::<TrackedRequest>()
+        + entry.url.len()
+        + entry.method.len()
+        + entry.resource_type.len()
+        + entry.request_id.len()
+        + entry.post_data.as_ref().map_or(0, String::len)
+        + entry.mime_type.as_ref().map_or(0, String::len)
+        + header_value_bytes(&entry.headers)
+        + entry
+            .response_headers
+            .as_ref()
+            .map_or(0, header_value_bytes)
+}
+
+/// Network request history kept in arrival order under fixed entry-count and aggregate byte
+/// caps. Every insert and response/body update recalculates retained bytes and evicts the
+/// oldest entries first.
+pub struct RequestTracker {
+    entries: Vec<TrackedRequest>,
+    weights: Vec<usize>,
+    total: usize,
+}
+
+impl Default for RequestTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RequestTracker {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            weights: Vec::new(),
+            total: 0,
+        }
+    }
+
+    pub fn entries(&self) -> &[TrackedRequest] {
+        &self.entries
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, TrackedRequest> {
+        self.entries.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[cfg(test)]
+    pub fn retained_bytes(&self) -> usize {
+        self.total
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.weights.clear();
+        self.total = 0;
+    }
+
+    /// Records a new network request after clipping URL, labels, headers, and optional POST data.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_request(
+        &mut self,
+        request_id: &str,
+        url: &str,
+        method: &str,
+        headers: Value,
+        timestamp: u64,
+        resource_type: &str,
+        post_data: Option<&str>,
+    ) {
+        let entry = TrackedRequest {
+            url: clip(url, MAX_REQUEST_URL_BYTES),
+            method: clip_raw(method, MAX_REQUEST_LABEL_BYTES),
+            headers: clip_cdp_header_object(Some(&headers)),
+            timestamp,
+            resource_type: clip_raw(resource_type, MAX_REQUEST_LABEL_BYTES),
+            request_id: clip_raw(request_id, MAX_REQUEST_LABEL_BYTES),
+            post_data: post_data
+                .filter(|body| !body.is_empty())
+                .map(|body| clip(body, MAX_REQUEST_BODY_BYTES)),
+            status: None,
+            response_headers: None,
+            mime_type: None,
+        };
+        let weight = tracked_request_weight(&entry);
+        self.entries.push(entry);
+        self.weights.push(weight);
+        self.total += weight;
+        self.evict(Some(self.entries.len() - 1));
+    }
+
+    /// Attaches response metadata and bounded response headers to the latest entry for `request_id`.
+    pub fn attach_response(
+        &mut self,
+        request_id: &str,
+        status: Option<i64>,
+        mime_type: Option<&str>,
+        response_headers: Option<Value>,
+    ) {
+        let id = clip_raw(request_id, MAX_REQUEST_LABEL_BYTES);
+        let Some(idx) = self.entries.iter().rposition(|e| e.request_id == id) else {
+            return;
+        };
+        let entry = &mut self.entries[idx];
+        entry.status = status;
+        entry.mime_type = mime_type.map(|m| clip_raw(m, MAX_REQUEST_LABEL_BYTES));
+        entry.response_headers = response_headers.map(|h| clip_cdp_header_object(Some(&h)));
+        self.reweigh(idx);
+    }
+
+    /// Returns whether the latest entry for `request_id` still has no recorded request body.
+    pub fn needs_post_data(&self, request_id: &str) -> bool {
+        let id = clip_raw(request_id, MAX_REQUEST_LABEL_BYTES);
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.request_id == id)
+            .is_some_and(|e| e.post_data.is_none())
+    }
+
+    /// Attaches a clipped request body to the latest entry for `request_id` and enforces memory caps.
+    pub fn attach_post_data(&mut self, request_id: &str, post_data: &str) {
+        if post_data.is_empty() {
+            return;
+        }
+        let id = clip_raw(request_id, MAX_REQUEST_LABEL_BYTES);
+        let Some(idx) = self.entries.iter().rposition(|e| e.request_id == id) else {
+            return;
+        };
+        self.entries[idx].post_data = Some(clip(post_data, MAX_REQUEST_BODY_BYTES));
+        self.reweigh(idx);
+    }
+
+    fn reweigh(&mut self, idx: usize) {
+        let next_weight = tracked_request_weight(&self.entries[idx]);
+        let prev_weight = self.weights[idx];
+        self.weights[idx] = next_weight;
+        self.total = self.total.saturating_sub(prev_weight) + next_weight;
+        self.evict(Some(idx));
+    }
+
+    fn evict(&mut self, mut keep_idx: Option<usize>) {
+        while self.entries.len() > MAX_TRACKED_REQUESTS
+            || (self.total > MAX_TRACKED_REQUEST_BYTES && self.entries.len() > 1)
+        {
+            if keep_idx == Some(0) {
+                break;
+            }
+            self.entries.remove(0);
+            self.total = self.total.saturating_sub(self.weights.remove(0));
+            keep_idx = keep_idx.map(|i| i.saturating_sub(1));
+        }
+    }
 }
 
 /// Takes `bytes` from `left`, or `None` when that much is no longer available.
@@ -1131,6 +1521,101 @@ mod tests {
     fn test_format_arg_string() {
         let arg = json!({"type": "string", "value": "hello"});
         assert_eq!(format_console_arg(&arg), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn request_tracker_clips_fields_and_evicts_oldest_under_count_and_byte_caps() {
+        let mut tracker = RequestTracker::new();
+        let huge_url = format!(
+            "https://example.test/{}",
+            "a".repeat(MAX_REQUEST_URL_BYTES * 3)
+        );
+        let huge_headers = json!({
+            "X-Big": "h".repeat(MAX_REQUEST_HEADERS_BYTES * 3),
+            "X-After": "ignored"
+        });
+        let huge_body = "b".repeat(MAX_REQUEST_BODY_BYTES * 3);
+
+        tracker.record_request(
+            "r0",
+            &huge_url,
+            "POST",
+            huge_headers,
+            1,
+            "Fetch",
+            Some(&huge_body),
+        );
+        let first = &tracker.entries()[0];
+        assert!(first.url.contains("...[truncated "), "{}", first.url);
+        assert!(first.url.len() <= MAX_REQUEST_URL_BYTES + 64);
+        assert!(
+            header_value_bytes(&first.headers) <= MAX_REQUEST_HEADERS_BYTES + 256,
+            "{}",
+            header_value_bytes(&first.headers)
+        );
+        let body = first.post_data.as_deref().unwrap();
+        assert!(body.contains("...[truncated "));
+        assert!(body.len() <= MAX_REQUEST_BODY_BYTES + 64);
+
+        for i in 1..=200 {
+            let id = format!("big-{i}");
+            tracker.record_request(
+                &id,
+                "https://example.test/",
+                "POST",
+                json!({}),
+                i as u64,
+                "Fetch",
+                None,
+            );
+            tracker.attach_post_data(&id, &huge_body);
+            assert!(
+                tracker.retained_bytes() <= MAX_TRACKED_REQUEST_BYTES,
+                "retained {} > {}",
+                tracker.retained_bytes(),
+                MAX_TRACKED_REQUEST_BYTES
+            );
+        }
+        assert!(tracker.len() < 200);
+        assert_eq!(tracker.entries().last().unwrap().request_id, "big-200");
+
+        tracker.clear();
+        for i in 0..(MAX_TRACKED_REQUESTS + 25) {
+            tracker.record_request(
+                &format!("c-{i}"),
+                "https://example.test/small",
+                "GET",
+                json!({}),
+                i as u64,
+                "XHR",
+                None,
+            );
+        }
+        assert_eq!(tracker.len(), MAX_TRACKED_REQUESTS);
+        assert_eq!(tracker.entries()[0].request_id, "c-25");
+        assert_eq!(
+            tracker.entries().last().unwrap().request_id,
+            format!("c-{}", MAX_TRACKED_REQUESTS + 24)
+        );
+    }
+
+    #[test]
+    fn decode_bidi_body_bounded_handles_plain_and_base64_limits() {
+        use base64::Engine;
+        let plain = "x".repeat(200);
+        assert_eq!(decode_bidi_body_bounded(&plain, false, 64, false), None);
+        let clipped = decode_bidi_body_bounded(&plain, false, 64, true).unwrap();
+        assert!(clipped.starts_with(&"x".repeat(64)));
+        assert!(clipped.contains("...[truncated 136 bytes]"));
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode("y".repeat(300));
+        assert_eq!(decode_bidi_body_bounded(&encoded, true, 64, false), None);
+        let clipped_b64 = decode_bidi_body_bounded(&encoded, true, 64, true).unwrap();
+        assert!(clipped_b64.starts_with(&"y".repeat(64)));
+        assert!(clipped_b64.contains("...[truncated "));
+
+        let binary = base64::engine::general_purpose::STANDARD.encode([0xff_u8, 0xfe, 0x00, 0x80]);
+        assert_eq!(decode_bidi_body_bounded(&binary, true, 64, true), None);
     }
 
     #[test]
