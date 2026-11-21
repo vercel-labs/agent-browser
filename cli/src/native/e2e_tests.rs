@@ -3243,6 +3243,81 @@ async fn e2e_form_actions_clear_editable_in_same_origin_iframe() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// An input or textarea inside an editable ancestor is a text control: `fill`
+/// and `type` use its value, the editor's own text is left alone, and the
+/// read-back reports no false warning.
+#[tokio::test]
+#[ignore]
+async fn e2e_form_actions_text_control_inside_editable_ancestor() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body>",
+        "<div id='ed' contenteditable>keep<input id='i' value='old'><textarea id='t'>old</textarea></div>",
+        "<div id='ce' contenteditable>old</div></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut failures = Vec::new();
+    for (id, selector) in [("i", "#i"), ("t", "#t")] {
+        for (label, cmd, expected) in [
+            (
+                "fill",
+                json!({ "id": "x", "action": "fill", "selector": selector, "value": "new" }),
+                "new",
+            ),
+            (
+                "type --clear",
+                json!({ "id": "x", "action": "type", "selector": selector, "text": "again", "clear": true }),
+                "again",
+            ),
+            (
+                "type",
+                json!({ "id": "x", "action": "type", "selector": selector, "text": "+" }),
+                "again+",
+            ),
+        ] {
+            let resp = execute_command(&cmd, &mut state).await;
+            let got = evaluate_value(&mut state, &format!("{id}.value")).await;
+            if resp["success"] != true
+                || got != json!(expected)
+                || resp["warning"].as_str().is_some()
+            {
+                failures.push(format!("{label} {selector}: {resp} -> {got}"));
+            }
+        }
+    }
+    let survived = evaluate_value(
+        &mut state,
+        "JSON.stringify([!!document.getElementById('t'), !!document.getElementById('i'), [...ed.childNodes].filter(n => n.nodeType === 3).map(n => n.data).join('')])",
+    )
+    .await;
+    if survived != json!("[true,true,\"keep\"]") {
+        failures.push(format!("editor content changed: {survived}"));
+    }
+    let resp = execute_command(
+        &json!({ "id": "x", "action": "fill", "selector": "#ce", "value": "new" }),
+        &mut state,
+    )
+    .await;
+    let got = evaluate_value(&mut state, "ce.innerText").await;
+    if resp["success"] != true || got != json!("new") {
+        failures.push(format!("fill #ce: {resp} -> {got}"));
+    }
+    let _ = execute_command(&json!({ "id": "z", "action": "close" }), &mut state).await;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A label stands for its control in every step; elements that can never take
 /// text are refused; typing reports a field that holds other than typed; and no
 /// message carries a string the page controls.

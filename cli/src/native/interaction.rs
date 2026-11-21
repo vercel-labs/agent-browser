@@ -155,13 +155,30 @@ pub fn form_error(code: &str, message: impl std::fmt::Display) -> String {
     format!("{code}: {message}")
 }
 
+/// An input or textarea is a text control, found by tag first: it inherits
+/// `isContentEditable` from an editable ancestor but uses its value. Only
+/// another element with `isContentEditable` is an editor.
+macro_rules! editor_js {
+    () => {
+        r#"
+        const isTextControl = (n) => n.localName === 'input' || n.localName === 'textarea';
+        const isEditor = (n) => !isTextControl(n) && !!n.isContentEditable;
+"#
+    };
+}
+
+const EDITOR_JS: &str = editor_js!();
+
 /// A label stands for its control, and a part of a date or time input (what a
 /// snapshot ref points at) stands for the input.
-const RETARGET_JS: &str = r#"
+const RETARGET_JS: &str = concat!(
+    editor_js!(),
+    r#"
         const host = this.getRootNode && this.getRootNode().host;
-        const el = this.localName === 'label' && this.control && !this.isContentEditable ? this.control
+        const el = this.localName === 'label' && this.control && !isEditor(this) ? this.control
             : host && host.localName === 'input' ? host : this;
-"#;
+"#
+);
 
 /// Decides from the target's own properties whether `fill` or `type` may act.
 /// The page only answers with a refusal kind; the message is built in Rust
@@ -183,7 +200,7 @@ const PRECHECK_JS: &str = r#"function(mode) {
             file: 'plain', hidden: 'plain', image: 'plain', button: 'plain', submit: 'plain', reset: 'plain',
         };
         const valueTypes = ['color', 'date', 'time', 'datetime-local', 'month', 'week', 'range'];
-        let kind = Object.hasOwn(neverText, tag) && !el.isContentEditable ? neverText[tag] : null;
+        let kind = Object.hasOwn(neverText, tag) && !isEditor(el) ? neverText[tag] : null;
         if (kind === null && tag === 'input' && Object.hasOwn(neverTextInput, type)) kind = neverTextInput[type];
         if (kind === null && mode !== 'fill' && tag === 'input' && valueTypes.includes(type)) kind = 'fill';
         if (kind !== null) return fail(kind);
@@ -224,7 +241,7 @@ const PROBE_JS: &str = r#"function() {
         }
         const boxRole = box && (roleOf(box) || box.type);
         let value = null;
-        if (el.isContentEditable) value = el.innerText;
+        if (isEditor(el)) value = el.innerText;
         else if (tag === 'input' || tag === 'textarea') value = el.type === 'password' ? '' : el.value;
         let selected = 0;
         try {
@@ -235,7 +252,7 @@ const PROBE_JS: &str = r#"function() {
             valueInput: tag === 'input' && ['color', 'date', 'time', 'datetime-local', 'month', 'week', 'range'].includes(type),
             password: type === 'password',
             maxLength: (tag === 'textarea' || (tag === 'input' && ['text', 'search', 'url', 'tel', 'email', 'password'].includes(type))) && typeof el.maxLength === 'number' ? el.maxLength : -1,
-            contentEditable: !!el.isContentEditable,
+            contentEditable: isEditor(el),
             value,
             selected,
             disabled: el.matches(':disabled'),
@@ -556,7 +573,8 @@ async fn clear_control(
     object_id: &str,
 ) -> Result<(), String> {
     let js = r#"function() {
-        if (this.isContentEditable) {
+        /*EDITOR*/
+        if (isEditor(this)) {
             const doc = this.ownerDocument;
             const range = doc.createRange();
             range.selectNodeContents(this);
@@ -569,8 +587,9 @@ async fn clear_control(
         this.select && this.select();
         this.value = '';
         this.dispatchEvent(new Event('input', { bubbles: true }));
-    }"#;
-    call_on(client, session_id, object_id, js.to_string(), None).await?;
+    }"#
+    .replace("/*EDITOR*/", EDITOR_JS);
+    call_on(client, session_id, object_id, js, None).await?;
     Ok(())
 }
 
