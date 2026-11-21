@@ -1968,13 +1968,12 @@ fn main() {
 
     let restore_key = restore_key_from_flags(&flags);
 
-    // Parse proxy URL to separate server from credentials for the daemon.
-    let (proxy_server, proxy_username, proxy_password) = if let Some(ref proxy_str) = flags.proxy {
-        let parsed = parse_proxy(proxy_str);
-        (Some(parsed.server), parsed.username, parsed.password)
-    } else {
-        (None, None, None)
-    };
+    // The daemon's environment carries only the proxy server; the credential
+    // rides in the settings patch over the session socket.
+    let proxy_server = flags
+        .proxy
+        .as_deref()
+        .map(|proxy_str| parse_proxy(proxy_str).server);
     let plugin_registry_json =
         serde_json::to_string(&flags.plugins).unwrap_or_else(|_| "[]".to_string());
     let daemon_opts = DaemonOptions {
@@ -1988,8 +1987,6 @@ fn main() {
         user_agent: flags.user_agent.as_deref(),
         proxy: proxy_server.as_deref(),
         proxy_bypass: flags.proxy_bypass.as_deref(),
-        proxy_username: proxy_username.as_deref(),
-        proxy_password: proxy_password.as_deref(),
         ignore_https_errors: flags.ignore_https_errors,
         allow_file_access: flags.allow_file_access,
         hide_scrollbars: flags.hide_scrollbars,

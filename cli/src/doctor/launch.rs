@@ -61,8 +61,6 @@ pub(super) fn check(checks: &mut Vec<Check>, opts: &DoctorOptions) {
         user_agent: None,
         proxy: None,
         proxy_bypass: None,
-        proxy_username: None,
-        proxy_password: None,
         ignore_https_errors: false,
         allow_file_access: false,
         hide_scrollbars: true,
