@@ -3,7 +3,8 @@
   "version": "0.43.0",
   "description": "The darwin-x64 native binary for agent-browser",
   "files": [
-    "bin/agent-browser"
+    "bin/agent-browser",
+    "bin/agent-browser-pip-darwin"
   ],
   "os": [
     "darwin"

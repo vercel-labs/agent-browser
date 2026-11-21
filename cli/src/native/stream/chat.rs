@@ -1086,6 +1086,7 @@ mod tests {
             "doctor",
             "install",
             "mcp",
+            "pip",
             "plugin",
             "plugins",
             "profiles",

@@ -169,6 +169,83 @@ fn explicit_dashboard_start_accepts_mcp_style_arguments() {
 }
 
 #[test]
+fn dashboard_start_publishes_a_ready_record() {
+    let tmp = TempDir::new().unwrap();
+    let _cleanup = DashboardCleanup(&tmp);
+    let port = unused_loopback_port();
+    let port_arg = port.to_string();
+
+    let started = run_dashboard(&tmp, &["dashboard", "start", "--port", &port_arg, "--json"]);
+    assert!(
+        started.status.success(),
+        "dashboard start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let payload = json_output(&started);
+    let ready_path = socket_dir(&tmp).join("dashboard.ready");
+    let ready: Value = serde_json::from_slice(&std::fs::read(&ready_path).unwrap()).unwrap();
+    assert_eq!(ready["port"], port);
+    assert_eq!(ready["pid"], payload["data"]["pid"]);
+    let pid: u32 = std::fs::read_to_string(socket_dir(&tmp).join("dashboard.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(ready["pid"], pid);
+    assert!(ready["token"]
+        .as_str()
+        .is_some_and(|token| token.len() == 64));
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(&ready_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn dashboard_start_fails_when_another_process_holds_the_port() {
+    let tmp = TempDir::new().unwrap();
+    let _cleanup = DashboardCleanup(&tmp);
+    // Another local user can bind the dashboard port before the server does.
+    let squatter = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = squatter.local_addr().unwrap().port().to_string();
+
+    let started = run_dashboard(&tmp, &["dashboard", "start", "--port", &port, "--json"]);
+
+    assert!(
+        !started.status.success(),
+        "startup reported success for a port it does not own"
+    );
+    let payload = json_output(&started);
+    assert_eq!(payload["success"], false);
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("port")));
+    assert!(!socket_dir(&tmp).join("dashboard.pid").exists());
+    assert!(!socket_dir(&tmp).join("dashboard.config").exists());
+    assert!(!socket_dir(&tmp).join("dashboard.ready").exists());
+}
+
+#[test]
+fn dashboard_start_fails_when_another_process_holds_ipv6_loopback() {
+    // No IPv6 means nothing can answer on ::1, so there is nothing to squat.
+    let Ok(squatter) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let _cleanup = DashboardCleanup(&tmp);
+    let port = squatter.local_addr().unwrap().port().to_string();
+
+    let started = run_dashboard(&tmp, &["dashboard", "start", "--port", &port, "--json"]);
+
+    assert!(
+        !started.status.success(),
+        "startup reported success for a port it does not own on ::1"
+    );
+    assert!(!socket_dir(&tmp).join("dashboard.ready").exists());
+}
+
+#[test]
 fn dashboard_listens_on_and_authorizes_ipv6_loopback() {
     // Some minimal CI/container kernels disable IPv6 entirely. In that case
     // the production server deliberately remains available on IPv4 only.

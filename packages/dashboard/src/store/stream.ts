@@ -6,6 +6,8 @@ import { useSetAtom } from "jotai/react";
 import type {
   ActivityEvent,
   ConsoleEntry,
+  FrameMessage,
+  PointerMessage,
   StreamMessage,
   TabInfo,
 } from "@/types";
@@ -30,6 +32,8 @@ export const consoleLogsAtom = atom<ConsoleEntry[]>([]);
 export const streamTabsAtom = atom<TabInfo[]>([]);
 export const streamEngineAtom = atom("");
 export const wsRefAtom = atom<WebSocket | null>(null);
+export const pointerAtom = atom<PointerMessage | null>(null);
+export const frameMetadataAtom = atom<FrameMessage["metadata"] | null>(null);
 
 // ---------------------------------------------------------------------------
 // Derived atoms
@@ -86,6 +90,8 @@ export function useStreamSync(port: number) {
   const setTabs = useSetAtom(streamTabsAtom);
   const setEngine = useSetAtom(streamEngineAtom);
   const setWsRef = useSetAtom(wsRefAtom);
+  const setPointer = useSetAtom(pointerAtom);
+  const setFrameMetadata = useSetAtom(frameMetadataAtom);
   const setTabCache = useSetAtom(tabCacheAtom);
   const setEngineCache = useSetAtom(engineCacheAtom);
 
@@ -125,11 +131,14 @@ export function useStreamSync(port: number) {
     setWsRef(ws);
 
     ws.onopen = () => {
+      if (wsRef.current !== ws) return;
       retryCountRef.current = 0;
       setConnected(true);
     };
 
+    // A socket replaced by a port change must not reconnect or write state.
     ws.onclose = () => {
+      if (wsRef.current !== ws) return;
       setConnected(false);
       const delay = Math.min(2000 * 2 ** retryCountRef.current, 30000);
       retryCountRef.current++;
@@ -141,6 +150,7 @@ export function useStreamSync(port: number) {
     };
 
     ws.onmessage = (event) => {
+      if (wsRef.current !== ws) return;
       let msg: StreamMessage;
       try {
         msg = JSON.parse(event.data);
@@ -151,6 +161,7 @@ export function useStreamSync(port: number) {
       switch (msg.type) {
         case "frame":
           setFrame(msg.data);
+          setFrameMetadata(msg.metadata);
           break;
 
         case "status":
@@ -214,17 +225,23 @@ export function useStreamSync(port: number) {
           );
           break;
 
+        case "pointer":
+          setPointer(msg);
+          break;
+
         case "error":
           break;
       }
     };
-  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache]);
+  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache, setPointer, setFrameMetadata]);
 
   useEffect(() => {
     connect();
     return () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      wsRef.current?.close();
+      const ws = wsRef.current;
+      wsRef.current = null;
+      ws?.close();
       setWsRef(null);
     };
   }, [connect, setWsRef]);
