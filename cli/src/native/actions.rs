@@ -22435,7 +22435,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_handle_har_stop_without_path_uses_default_location() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::new(&["HOME", "USERPROFILE"]);
+        _env.set("HOME", home.path().to_str().unwrap());
+        _env.set("USERPROFILE", home.path().to_str().unwrap());
         let mut state = DaemonState::new();
         state.har_recording = true;
         state.har_entries.push(HarEntry {
@@ -23602,11 +23607,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_credentials_roundtrip_via_actions() {
-        let _lock = crate::native::auth::AUTH_TEST_MUTEX.lock().unwrap();
-        let key_var = "AGENT_BROWSER_ENCRYPTION_KEY";
-        let original = std::env::var(key_var).ok();
-        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
-        unsafe { std::env::set_var(key_var, "a".repeat(64)) };
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::new(&["HOME", "USERPROFILE", "AGENT_BROWSER_ENCRYPTION_KEY"]);
+        _env.set("HOME", home.path().to_str().unwrap());
+        _env.set("USERPROFILE", home.path().to_str().unwrap());
+        _env.set("AGENT_BROWSER_ENCRYPTION_KEY", &"a".repeat(64));
 
         let mut state = DaemonState::new();
 
@@ -23640,12 +23645,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         });
         let result = execute_command(&del_cmd, &mut state).await;
         assert_eq!(result["success"], true);
-
-        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
-        match original {
-            Some(val) => unsafe { std::env::set_var(key_var, val) },
-            None => unsafe { std::env::remove_var(key_var) },
-        }
     }
 
     #[tokio::test]
